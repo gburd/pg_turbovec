@@ -56,3 +56,34 @@ LIMIT  3;
 SELECT current_setting('turbovec.bit_width_default');
 
 ROLLBACK;
+
+-- ===================================================================
+-- Phase 2: turbovec.knn() function-driven ANN
+-- ===================================================================
+
+BEGIN;
+CREATE EXTENSION IF NOT EXISTS pg_turbovec;
+SET search_path = public, turbovec;
+
+CREATE TEMP TABLE knn_items (
+    id  bigint PRIMARY KEY,
+    emb tvector
+);
+INSERT INTO knn_items VALUES
+  (1, '[1, 0, 0, 0, 0, 0, 0, 0]'::tvector),
+  (2, '[0.9, 0.1, 0, 0, 0, 0, 0, 0]'::tvector),
+  (3, '[0, 1, 0, 0, 0, 0, 0, 0]'::tvector),
+  (4, '[-1, 0, 0, 0, 0, 0, 0, 0]'::tvector);
+
+-- Top-3 most similar to e1.
+SELECT id, score
+FROM   turbovec.knn(
+         'knn_items'::regclass,
+         'id', 'emb',
+         '[1, 0, 0, 0, 0, 0, 0, 0]'::tvector,
+         3)
+ORDER  BY score DESC;
+-- expected: id=1 first (self), then 2 and 3 in either order (depending
+-- on TurboQuant residual)
+
+ROLLBACK;

@@ -20,8 +20,10 @@
 use pgrx::prelude::*;
 
 pub mod aggregate;
+pub mod cast;
 pub mod distance;
 pub mod guc;
+pub mod normalize;
 pub mod tvector;
 
 pgrx::pg_module_magic!();
@@ -124,6 +126,43 @@ mod tests {
         assert!(s.contains("3"));
         assert!(s.contains("4"));
         assert!(s.contains("5"));
+    }
+
+    #[pg_test]
+    fn array_casts() {
+        let v: Option<String> = Spi::get_one(
+            "SELECT (ARRAY[1,2,3]::real[])::turbovec.tvector::text",
+        )
+        .unwrap();
+        assert!(v.unwrap().contains('1'));
+
+        let v: Option<String> = Spi::get_one(
+            "SELECT '[1.5, 2.5, 3.5]'::turbovec.tvector::real[]::text",
+        )
+        .unwrap();
+        let s = v.unwrap();
+        assert!(s.contains("1.5") && s.contains("2.5") && s.contains("3.5"));
+    }
+
+    #[pg_test]
+    fn normalize_unit_norm() {
+        let n: Option<f64> = Spi::get_one(
+            "SELECT turbovec.vector_norm(turbovec.tvector_normalize('[3, 4]'::turbovec.tvector))",
+        )
+        .unwrap();
+        assert!((n.unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn turbovec_self_score_smoke() {
+        let s: Option<f64> = Spi::get_one(
+            "SELECT turbovec.turbovec_self_score(\
+               turbovec.tvector_normalize('[1,0,0,0,0,0,0,0]'::turbovec.tvector), 4)",
+        )
+        .unwrap();
+        let v = s.unwrap();
+        assert!(v.is_finite(), "score not finite: {}", v);
+        assert!(v > 0.5, "turbovec self-score should be high, got {}", v);
     }
 }
 

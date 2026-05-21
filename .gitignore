@@ -1,0 +1,25 @@
+# Rust / Cargo
+/target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# pgrx
+/pg_turbovec-*/
+*.so
+*.dylib
+*.bc
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Local-only files
+.local-gitignore

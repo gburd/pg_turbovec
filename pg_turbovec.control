@@ -1,0 +1,7 @@
+comment = 'Vector index for PostgreSQL backed by the TurboQuant quantizer (turbovec)'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_turbovec'
+relocatable = false
+superuser = false
+trusted = true
+schema = 'turbovec'

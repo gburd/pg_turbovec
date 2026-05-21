@@ -4,7 +4,59 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] — Unreleased
+## [0.3.0] — Unreleased
+
+### Added — Phase 3: kernels module, benches, CI, docs
+
+- **`src/kernels.rs`** — pure-Rust math kernels (`dot`, `l2_sq`,
+  `l1_abs`, `norm2`, `cosine_distance`, `normalise_into`,
+  `normalise_to_vec`). Distance and normalisation code in
+  `distance.rs` / `normalize.rs` now delegate to this module so the
+  kernels are exercisable under plain `cargo test --no-default-features`
+  without booting Postgres.
+- **`tvector_random_unit(integer)`** — random unit-norm `tvector`,
+  for benchmarking and recall scaffolding.
+- **`benches/distance.rs`** — `criterion`-based micro-benchmarks of
+  the distance kernels at d=128, 384, 768, 1536, 3072. Runs via
+  `cargo bench --bench distance --no-default-features`.
+- **Codeberg Woodpecker CI** (`.woodpecker/ci.yaml`) — three
+  pipelines: pure-Rust unit tests + clippy on every push;
+  `cargo pgrx test pg17` on `main` / release branches.
+- **`docs/USAGE.md`** — cookbook with install, exact search, ANN
+  via `turbovec.knn()`, aggregates, arithmetic, GUCs, pgvector
+  coexistence migration, diagnostics.
+- **`docs/RECALL.md`** — recall/perf benchmark methodology,
+  matched-bit-budget comparison plan against pgvector for v0.4.
+- **Pure-Rust unit tests** in `kernels::tests` covering every
+  kernel plus a precision regression (1 048 576-element sum of
+  squares stays within 1 ppm of the f64 truth).
+
+### Changed
+
+- `Cargo.toml` adds `rand = "0.8"`, `criterion = "0.5"` (dev),
+  declares `[[bench]] name = "distance"`.
+- `pg_turbovec.control` `default_version` bumped to `0.3.0`.
+
+## [0.2.0] — Unreleased
+
+### Added — Phase 2: function-driven ANN
+
+- **`turbovec.knn(rel regclass, id_col text, vec_col text, query
+  tvector, k int, bit_width int default 4)`** — function-driven
+  ANN backed by `turbovec::IdMapIndex`. Returns
+  `TABLE(id bigint, score float8)`, ordered by score DESC for
+  most-similar-first.
+- Optional unit-normalisation via `turbovec.normalize_on_insert`
+  GUC; constraints `k > 0`, `bit_width ∈ {2,3,4}`, `dim % 8 == 0`.
+- `migrations/002_pg_turbovec_v0.2.0.sql` reference mirror.
+- `#[pg_test]` cases for `knn_returns_nearest_first` and
+  `knn_rejects_bad_k`.
+
+### Removed
+
+- `src/phase2_knn.rs` scaffold — promoted to mounted `src/knn.rs`.
+
+
 
 ### Added — Phase 1: type, operators, functions, aggregates
 
@@ -68,4 +120,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.3.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.3.0
+[0.2.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.2.0
 [0.1.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.1.0

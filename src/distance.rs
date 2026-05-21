@@ -1,8 +1,11 @@
 //! Distance functions and operators for `tvector`.
 //!
 //! All distance functions are immutable and parallel-safe. Operators
-//! are wired up via `#[pg_operator]` so they appear in `pg_operator`
+//! are wired up via `extension_sql!` so they appear in `pg_operator`
 //! and become available for `ORDER BY embedding <#> $1` style queries.
+//!
+//! Math kernels live in `crate::kernels` (no Postgres dependency,
+//! exercised by `cargo test` directly).
 //!
 //! | Operator | Postgres semantics                | Function           |
 //! |----------|-----------------------------------|--------------------|
@@ -16,51 +19,8 @@
 
 use pgrx::prelude::*;
 
+use crate::kernels;
 use crate::tvector::Tvector;
-
-// ---------------------------------------------------------------------
-// Core scalar implementations (operate on raw &[f32], no Postgres deps).
-// ---------------------------------------------------------------------
-
-#[inline]
-fn dot(a: &[f32], b: &[f32]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc: f64 = 0.0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc += f64::from(*x) * f64::from(*y);
-    }
-    acc
-}
-
-#[inline]
-fn l2_sq(a: &[f32], b: &[f32]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc: f64 = 0.0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        let d = f64::from(*x) - f64::from(*y);
-        acc += d * d;
-    }
-    acc
-}
-
-#[inline]
-fn l1_abs(a: &[f32], b: &[f32]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc: f64 = 0.0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc += (f64::from(*x) - f64::from(*y)).abs();
-    }
-    acc
-}
-
-#[inline]
-fn norm2(a: &[f32]) -> f64 {
-    let mut acc: f64 = 0.0;
-    for x in a.iter() {
-        acc += f64::from(*x) * f64::from(*x);
-    }
-    acc
-}
 
 // ---------------------------------------------------------------------
 // SQL-callable distance functions (mirrors pgvector's named functions).
@@ -70,7 +30,7 @@ fn norm2(a: &[f32]) -> f64 {
 #[pg_extern(immutable, parallel_safe)]
 fn l2_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<->");
-    l2_sq(a.as_slice(), b.as_slice()).sqrt()
+    kernels::l2_sq(a.as_slice(), b.as_slice()).sqrt()
 }
 
 /// Squared Euclidean distance — useful when you only need order, not
@@ -78,14 +38,14 @@ fn l2_distance(a: Tvector, b: Tvector) -> f64 {
 #[pg_extern(immutable, parallel_safe)]
 fn l2_squared_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "l2_squared_distance");
-    l2_sq(a.as_slice(), b.as_slice())
+    kernels::l2_sq(a.as_slice(), b.as_slice())
 }
 
 /// Inner (dot) product.
 #[pg_extern(immutable, parallel_safe)]
 fn inner_product(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "inner_product");
-    dot(a.as_slice(), b.as_slice())
+    kernels::dot(a.as_slice(), b.as_slice())
 }
 
 /// Negative inner product — used by the `<#>` operator and by the
@@ -94,7 +54,7 @@ fn inner_product(a: Tvector, b: Tvector) -> f64 {
 #[pg_extern(immutable, parallel_safe)]
 fn negative_inner_product(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<#>");
-    -dot(a.as_slice(), b.as_slice())
+    -kernels::dot(a.as_slice(), b.as_slice())
 }
 
 /// Cosine distance: `1 - cos θ` where `cos θ = dot(a, b) / (||a|| * ||b||)`.
@@ -102,22 +62,14 @@ fn negative_inner_product(a: Tvector, b: Tvector) -> f64 {
 #[pg_extern(immutable, parallel_safe)]
 fn cosine_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<=>");
-    let na = norm2(a.as_slice());
-    let nb = norm2(b.as_slice());
-    if na == 0.0 || nb == 0.0 {
-        return f64::NAN;
-    }
-    let cos = dot(a.as_slice(), b.as_slice()) / (na.sqrt() * nb.sqrt());
-    // Numerical clipping: dot/sqrt(na*nb) can drift ±epsilon outside [-1, 1].
-    let cos = cos.clamp(-1.0, 1.0);
-    1.0 - cos
+    kernels::cosine_distance(a.as_slice(), b.as_slice())
 }
 
 /// Taxicab (L1) distance.
 #[pg_extern(immutable, parallel_safe)]
 fn l1_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<+>");
-    l1_abs(a.as_slice(), b.as_slice())
+    kernels::l1_abs(a.as_slice(), b.as_slice())
 }
 
 /// Number of dimensions in a `tvector`.
@@ -129,7 +81,7 @@ fn vector_dims(v: Tvector) -> i32 {
 /// Euclidean (L2) norm of a `tvector`.
 #[pg_extern(immutable, parallel_safe)]
 fn vector_norm(v: Tvector) -> f64 {
-    norm2(v.as_slice()).sqrt()
+    kernels::norm2(v.as_slice()).sqrt()
 }
 
 /// Element-wise sum of two equal-dimension `tvector`s.

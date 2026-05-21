@@ -23,6 +23,7 @@ pub mod aggregate;
 pub mod cast;
 pub mod distance;
 pub mod guc;
+pub mod kernels;
 pub mod knn;
 pub mod normalize;
 pub mod tvector;

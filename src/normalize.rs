@@ -1,28 +1,22 @@
 //! Unit-norm normalisation helpers and direct turbovec round-trip
 //! probes used by tests.
+//!
+//! Math kernels live in `crate::kernels`.
 
 use pgrx::prelude::*;
 
+use crate::kernels;
 use crate::tvector::Tvector;
 
 /// L2-normalise a `tvector` to unit length. Required by the TurboQuant
-/// kernel; for v0.1 we expose it as a SQL function so users can pre-
-/// normalise vectors in pipelines that don't run through the index.
+/// kernel; we expose it as a SQL function so users can pre-normalise
+/// vectors in pipelines that don't run through the index.
 ///
 /// Returns the input unchanged when the L2 norm is zero (avoids
 /// producing NaNs).
 #[pg_extern(immutable, parallel_safe)]
 pub fn tvector_normalize(v: Tvector) -> Tvector {
-    let mut acc: f64 = 0.0;
-    for x in v.as_slice() {
-        acc += f64::from(*x) * f64::from(*x);
-    }
-    if acc == 0.0 {
-        return v;
-    }
-    let n = acc.sqrt() as f32;
-    let data: Vec<f32> = v.data.iter().map(|x| *x / n).collect();
-    Tvector::from_vec(data)
+    Tvector::from_vec(kernels::normalise_to_vec(v.as_slice()))
 }
 
 /// Diagnostic: encode a `tvector` through the turbovec quantiser and
@@ -63,3 +57,35 @@ pub fn turbovec_self_score(v: Tvector, bit_width: i32) -> f64 {
     }
     f64::from(scores[0])
 }
+
+/// Build a random unit-norm `tvector` of dimension `dim`. Useful for
+/// benchmarks and recall tests; deliberately *not* deterministic
+/// across calls (we want different vectors each invocation).
+///
+/// `dim` must be in `1..=16000`. Distribution is i.i.d. standard
+/// normal followed by L2 normalisation — the canonical "uniform on
+/// the sphere" sampling.
+#[pg_extern(volatile, parallel_safe)]
+pub fn tvector_random_unit(dim: i32) -> Tvector {
+    use rand::Rng;
+
+    if dim <= 0 || dim as usize > crate::tvector::MAX_DIM {
+        error!(
+            "tvector_random_unit: dim must be in 1..={} (got {})",
+            crate::tvector::MAX_DIM,
+            dim
+        );
+    }
+    let mut rng = rand::thread_rng();
+    let raw: Vec<f32> = (0..dim)
+        .map(|_| {
+            // Box-Muller via rng's standard_normal would need rand_distr;
+            // a uniform [-1, 1) is good enough for benchmarking and avoids
+            // the extra dependency.
+            let u: f32 = rng.gen_range(-1.0_f32..1.0_f32);
+            u
+        })
+        .collect();
+    Tvector::from_vec(kernels::normalise_to_vec(&raw))
+}
+

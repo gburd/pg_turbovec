@@ -1,0 +1,62 @@
+[package]
+name = "pg_turbovec"
+description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.0"
+authors = ["Greg Burd <greg@burd.me>"]
+license = "Apache-2.0"
+repository = "https://codeberg.org/gregburd/pg_turbovec"
+readme = "README.md"
+keywords = ["postgresql", "pgrx", "vector", "ann", "quantization"]
+categories = ["database"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_pg_turbovec"
+path = "./src/bin/pgrx_embed.rs"
+
+[features]
+default = ["pg17"]
+pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.18.0"
+turbovec = "0.5"
+once_cell = "1.20"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+pgrx-tests = "=0.18.0"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+missing_safety_doc = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+unsafe_derive_deserialize = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"

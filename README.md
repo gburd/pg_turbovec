@@ -68,7 +68,7 @@ phased roadmap, and risks.
 
 ```bash
 # Install cargo-pgrx (one-time setup).
-cargo install --locked cargo-pgrx --version 0.18.0
+cargo install --locked cargo-pgrx --version 0.17.0
 cargo pgrx init
 
 # Build and install the extension into the dev cluster.

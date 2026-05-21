@@ -23,6 +23,7 @@ pub mod aggregate;
 pub mod cast;
 pub mod distance;
 pub mod guc;
+pub mod knn;
 pub mod normalize;
 pub mod tvector;
 
@@ -163,6 +164,46 @@ mod tests {
         let v = s.unwrap();
         assert!(v.is_finite(), "score not finite: {}", v);
         assert!(v > 0.5, "turbovec self-score should be high, got {}", v);
+    }
+
+    #[pg_test]
+    fn knn_returns_nearest_first() {
+        Spi::run(
+            "CREATE TEMP TABLE pgtv_items (\
+                 id  bigint PRIMARY KEY, \
+                 emb turbovec.tvector)",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO pgtv_items VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0.9,0.1,0,0,0,0,0,0]'), \
+                 (3, '[0,1,0,0,0,0,0,0]'), \
+                 (4, '[-1,0,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+
+        let first: Option<i64> = Spi::get_one(
+            "SELECT id FROM turbovec.knn(\
+                 'pgtv_items'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 3) \
+             ORDER BY score DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(first, Some(1));
+    }
+
+    #[pg_test]
+    fn knn_rejects_bad_k() {
+        Spi::run("CREATE TEMP TABLE pgtv_empty (id bigint, emb turbovec.tvector)").unwrap();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM turbovec.knn(\
+                     'pgtv_empty'::regclass, 'id', 'emb', \
+                     '[1,2,3,4,5,6,7,8]'::turbovec.tvector, 0)",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for k=0");
     }
 }
 

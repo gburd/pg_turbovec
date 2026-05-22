@@ -4,7 +4,46 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.0.0-rc.1] — Unreleased
+## [1.0.0-rc.2] — Unreleased
+
+### Phase 18 — fix munmap_chunk() abort on forced index scan
+
+The forced-index-scan path (`SET enable_seqscan = off; SELECT ...
+ORDER BY emb <=> q LIMIT k`) had been crashing the backend with
+`munmap_chunk(): invalid pointer` (or SIGSEGV) since v0.4. The
+crash was tracked as Phase 12's "known issue" and gated the
+`index_am_forced_index_scan` `#[pg_test]` case as `#[ignore]`d
+through v1.0.0-rc.1.
+
+**Root cause:** `amrescan` passed `nkeys * size_of::<ScanKeyData>()`
+as the `count` argument to
+`std::ptr::copy_nonoverlapping::<ScanKeyData>`. Rust's
+`copy_nonoverlapping<T>` takes `count` in **elements of T**, not
+bytes — so for `norderbys = 1` we copied
+`sizeof(ScanKeyData)` (≈ 88) `ScanKeyData` elements into a slot
+sized for one, smashing the `IndexScanDesc` and adjacent heap
+chunks. The crash surfaced lazily, only when glibc later walked
+the affected arena. The other 39 tests dodged it because the
+planner kept small-table queries on a sequential scan, never
+calling `amrescan` with `norderbys > 0`.
+
+**Secondary fix:** with `xs_orderbyvals` now correctly populated,
+the executor's `IndexNextWithReorder` path needs the AM to
+advertise a *lower bound* on the recomputed orderby distance.
+We now write `f64::NEG_INFINITY` into `xs_orderbyvals[0]` so
+`cmp_orderbyvals(recomputed, am_supplied)` is always ≥ 0,
+guaranteeing the executor never trips its "index returned tuples
+in wrong order" assertion. Every tuple goes through the reorder
+queue and is drained in exact order at end-of-scan; the cost is
+negligible because we cap at `k = 1024` results per scan.
+
+### Tests
+
+- 40/40 `#[pg_test]` cases pass with `experimental_index_am`,
+  including the previously-`#[ignore]`d
+  `index_am_forced_index_scan`.
+
+## [1.0.0-rc.1] — 2025
 
 ### Phase 17 — release-candidate prep
 
@@ -874,6 +913,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[1.0.0-rc.2]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v1.0.0-rc.1
 [0.16.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.16.0
 [0.15.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.15.0

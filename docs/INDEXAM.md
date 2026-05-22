@@ -153,56 +153,87 @@ suite is:
 - pgrx-pg-sys `pg17.rs` — search for `IndexAmRoutine` and the
   `am*_function` typedefs to see the exact ABI.
 
-## Phase 12 known issue: forced-index-scan crashes the backend
+## Phase 18: forced-index-scan crash, fixed
 
-The `experimental_index_am` build now passes 37/37 `#[pg_test]` cases
-**when the planner picks the index naturally** (i.e. on small/medium
-tables where `enable_seqscan = on` keeps it on a sequential scan).
-The one case marked `#[ignore]` — `index_am_forced_index_scan` —
-sets `enable_seqscan = off` to force the index path and
-reproducibly crashes the backend with:
+For the entire v0.4..v1.0.0-rc.1 run, the `index_am_forced_index_scan`
+test case (`SET enable_seqscan = off; SELECT ... ORDER BY emb <=> q
+LIMIT k`) reliably aborted the backend with:
 
 ```
 munmap_chunk(): invalid pointer
 ... server process (PID …) was terminated by signal 6: Aborted
 ```
 
-The crash happens in glibc's `free()` somewhere between when our
-`amgettuple` returns and the executor projects the row, regardless
-of whether we project the distance or just the `id`. Removing every
-write to `xs_orderbyvals` / `xs_orderbynulls` does not help, nor
-does `Box::leak`-ing the deserialised `IdMapIndex`.
+We chased a long list of red herrings — `xs_orderbyvals` allocation,
+`Box::leak` lifetime tweaks, `xs_recheckorderby = true/false`,
+allocator mismatches, etc. The actual bug was a one-liner in
+`src/index/scan.rs::amrescan`:
 
-### Hypothesis
+```rust
+// BUG (v0.4 .. v1.0.0-rc.1):
+std::ptr::copy_nonoverlapping(
+    orderbys,
+    (*scan).orderByData,
+    (norderbys as usize) * std::mem::size_of::<pg_sys::ScanKeyData>(), // wrong unit
+);
+```
 
-The problem is most likely an **allocator mismatch between turbovec
-and the executor's memory contexts**. `turbovec` (and its transitive
-deps `faer`, `openblas-src`) use the global Rust allocator
-(`jemalloc` or `glibc malloc` depending on platform). The executor's
-recheck-orderby path may free memory it did not allocate, or our
-`amgettuple` may leak something into the wrong context.
+`std::ptr::copy_nonoverlapping::<T>(src, dst, count)` takes `count`
+in **elements of T**, not bytes. We were therefore copying
+`norderbys * sizeof(ScanKeyData)` `ScanKeyData` *elements* into a
+slot sized for `norderbys` — a buffer overrun of roughly
+`sizeof(ScanKeyData)` × the requested size. That smashed the
+`IndexScanDesc` and adjacent heap chunks; the actual `free()` that
+tripped glibc's `munmap_chunk()` happened much later, when the scan
+context was torn down and an unrelated chunk's metadata got walked.
 
-### Workarounds for users
+The other 39 tests never tripped it because the planner kept
+small-table ORDER BY queries on a sequential scan and `amrescan`
+was never called with `norderbys > 0`. Forcing the index via
+`enable_seqscan = off` was the only way to reach the buggy
+codepath.
 
-- **Default-plan queries work.** As long as `enable_seqscan` is on
-  (the default) and the table is small enough that the planner
-  prefers a sequential scan, ORDER-BY queries are fine.
-- **For larger corpora**, use the function-driven `turbovec.knn()`
-  instead of the index. Same SIMD kernel, no executor-recheck path:
+### Fix
+
+```rust
+std::ptr::copy_nonoverlapping(orderbys, (*scan).orderByData, norderbys as usize);
+std::ptr::copy_nonoverlapping(keys,     (*scan).keyData,     nkeys     as usize);
+```
+
+Once the corruption was gone, the next layer of the executor
+turned out to need real values in `xs_orderbyvals[0]`. The
+reorder-queue path in `IndexNextWithReorder` (PG 16
+`nodeIndexscan.c`) compares the AM's claimed distance against the
+recomputed exact distance and `elog(ERROR, "index returned tuples
+in wrong order")` if the recompute is *less than* what the AM
+claimed. Setting `xs_orderbynulls[0] = true` makes the comparator
+return -1 and trips that error.
+
+We therefore write `f64::NEG_INFINITY` into `xs_orderbyvals[0]`
+on every `amgettuple` — a universal lower bound that's safe for
+cosine, inner-product and any future distance metric. Every tuple
+goes through the reorder queue and is drained in exact order at
+end-of-scan; we cap at `k = 1024` results per scan, so the queue
+overhead is negligible.
+
+### Lessons
+
+1. **Buffer overruns in `copy_nonoverlapping` are silent until
+   they're loud.** The crash was nowhere near the actual write;
+   it was wherever glibc next touched the smashed arena chunk.
+2. **`amcanorderbyop = true` requires monotone-or-lower-bound
+   `xs_orderbyvals`.** NULLs are not safe under `cmp_orderbyvals`.
+3. **Default-plan queries hide forced-plan bugs.** Always include
+   one `enable_seqscan = off` test case per orderby AM.
+
+### Workarounds (no longer needed; kept for the historical record)
+
+- v0.4..v1.0.0-rc.1 users who hit the crash were advised to use
+  the function-driven `turbovec.knn()` API instead. That still
+  works identically; the index AM is now also safe.
 
       SELECT k.id, k.score
       FROM   turbovec.knn('docs'::regclass, 'id', 'embedding', $1, 10) k;
-
-### Phase 13 plan
-
-- Reach into PG's executor via gdb to identify the exact `free()`
-  call site.
-- Likely fix: implement a `turbovec_orderby_distance(...)` SQL
-  function returning `float8` directly from u64 ids stored in the
-  index, sidestepping the recheck path entirely.
-- Or: switch our `amcanorderbyop` to false and expose the AM as
-  `amcanorder = true` over a Btree-style strategy on the score —
-  costlier but simpler.
 
 ## Phase 14+ roadmap
 

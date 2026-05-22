@@ -91,22 +91,26 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
     norderbys: c_int,
 ) {
     if !keys.is_null() && nkeys > 0 {
-        // Standard pattern: copy keys into the scan slot. We don't
-        // use scan keys (only order-by), but we still memcpy to keep
-        // the ScanDesc consistent.
-        std::ptr::copy_nonoverlapping(
-            keys,
-            (*scan).keyData,
-            (nkeys as usize) * std::mem::size_of::<pg_sys::ScanKeyData>(),
-        );
+        // Copy scan keys into the IndexScanDesc's pre-allocated slot.
+        // We don't use them (turbovec is order-by-only), but the
+        // executor expects them to be present and consistent.
+        //
+        // NB: `copy_nonoverlapping::<T>(src, dst, count)` takes `count`
+        // in **elements of T**, not bytes. Passing
+        // `nkeys * size_of::<ScanKeyData>()` (as v0.4..v1.0-rc.1 did)
+        // overruns the destination by ~`nkeys * sizeof(ScanKeyData)`
+        // *extra* bytes, smashing the IndexScanDesc and any heap
+        // chunks that follow it. That was the root cause of the
+        // `munmap_chunk(): invalid pointer` abort tracked through
+        // Phase 17 as the "forced-index-scan crash". The other 39
+        // tests never tripped it because the planner kept
+        // small-table queries on a sequential scan, never calling
+        // `amrescan` with `norderbys > 0`.
+        std::ptr::copy_nonoverlapping(keys, (*scan).keyData, nkeys as usize);
     }
 
     if !orderbys.is_null() && norderbys > 0 {
-        std::ptr::copy_nonoverlapping(
-            orderbys,
-            (*scan).orderByData,
-            (norderbys as usize) * std::mem::size_of::<pg_sys::ScanKeyData>(),
-        );
+        std::ptr::copy_nonoverlapping(orderbys, (*scan).orderByData, norderbys as usize);
     }
 
     let opaque = (*scan).opaque as *mut ScanOpaque;
@@ -207,10 +211,27 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     };
     (*opaque).cursor += 1;
     pgrx::itemptr::u64_to_item_pointer(id, &mut (*scan).xs_heaptid);
+
+    // The executor's reorder-queue path (`IndexNextWithReorder` in
+    // `nodeIndexscan.c`) compares our advertised orderby distance
+    // against the recomputed exact distance and `elog(ERROR,
+    // "index returned tuples in wrong order")` if the recomputed
+    // value is *less than* what we claimed. To be robust across
+    // every operator class — cosine (range [0, 2]), inner-product
+    // (-dot, unbounded) and any future addition — we advertise
+    // `f64::NEG_INFINITY`, a universal lower bound. This forces
+    // every tuple onto the reorder queue and drains it in exact
+    // order at end-of-scan. The performance cost is negligible
+    // because we only return up to `k` tuples per scan anyway.
+    if !(*scan).xs_orderbyvals.is_null() && !(*scan).xs_orderbynulls.is_null() {
+        let lb_bits = f64::NEG_INFINITY.to_bits();
+        *(*scan).xs_orderbyvals.add(0) = pg_sys::Datum::from(lb_bits);
+        *(*scan).xs_orderbynulls.add(0) = false;
+    }
     let _ = dist;
 
-    // Force the executor to recheck — our quantised inner-product
-    // is approximate. Recheck recomputes the orderby expression
+    // Force the executor to recheck — our quantised distance is
+    // approximate. The recheck recomputes the orderby expression
     // against the heap tuple, restoring exact distances.
     (*scan).xs_recheckorderby = true;
     (*scan).xs_recheck = false;

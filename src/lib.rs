@@ -22,6 +22,7 @@ use pgrx::prelude::*;
 pub mod aggregate;
 pub mod cast;
 pub mod distance;
+pub mod extras;
 pub mod guc;
 
 #[cfg(feature = "experimental_index_am")]
@@ -209,6 +210,68 @@ mod tests {
             )
         });
         assert!(bad.is_err(), "expected ERROR for k=0");
+    }
+
+    #[pg_test]
+    fn subvector_basic() {
+        let s: Option<String> = Spi::get_one(
+            "SELECT turbovec.subvector('[10,20,30,40]'::turbovec.tvector, 2, 2)::text",
+        )
+        .unwrap();
+        let txt = s.unwrap();
+        assert!(txt.contains("20") && txt.contains("30"));
+        assert!(!txt.contains("10") && !txt.contains("40"));
+    }
+
+    #[pg_test]
+    fn subvector_out_of_bounds() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT turbovec.subvector('[1,2,3]'::turbovec.tvector, 2, 5)::text",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for out-of-bounds");
+    }
+
+    #[pg_test]
+    fn jsonb_round_trip() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT '[1, 2.5, -3]'::turbovec.tvector::jsonb::turbovec.tvector::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains("1") && s.contains("2.5") && s.contains("-3"));
+    }
+
+    #[pg_test]
+    fn check_dim_passes_and_fails() {
+        let ok: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(\
+                turbovec.tvector_check_dim('[1,2,3]'::turbovec.tvector, 3))",
+        )
+        .unwrap();
+        assert_eq!(ok, Some(3));
+
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i32>(
+                "SELECT turbovec.vector_dims(\
+                    turbovec.tvector_check_dim('[1,2,3]'::turbovec.tvector, 4))",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for dim mismatch");
+    }
+
+    #[pg_test]
+    fn zeros_helper() {
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(turbovec.tvector_zeros(8))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(8));
+        let n: Option<f64> =
+            Spi::get_one("SELECT turbovec.vector_norm(turbovec.tvector_zeros(8))")
+                .unwrap();
+        assert_eq!(n, Some(0.0));
     }
 }
 

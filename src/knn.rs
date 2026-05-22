@@ -32,6 +32,7 @@
 use pgrx::prelude::*;
 use turbovec::IdMapIndex;
 
+use crate::cache::{self, CacheKey};
 use crate::guc;
 use crate::tvector::Tvector;
 
@@ -62,14 +63,50 @@ fn knn(
         );
     }
 
+    let normalise = guc::NORMALIZE_ON_INSERT.get();
+
+    // Cache lookup: key by (rel, vec_col_attnum, bit_width, dim).
+    // We do not key on id_col because the cache stores u64
+    // ids — a different id_col would change the id semantics, but
+    // we don't currently track which column produced the ids. Phase
+    // 9 will hash the id_col into the key for safety.
+    let attnum = attnum_for(rel, vec_col);
+    let key = CacheKey {
+        rel_oid: rel,
+        attnum,
+        bit_width: bit_width as u8,
+        dim: query.dim() as u32,
+    };
+    let relfile = cache::current_relfilenode(rel);
+    let n_rows = relation_row_count(rel);
+
+    let q_buf: Vec<f32> = if normalise {
+        let mut out = vec![0.0_f32; query.dim()];
+        crate::kernels::normalise_into(&mut out, query.as_slice());
+        out
+    } else {
+        query.as_slice().to_vec()
+    };
+
+    if let Some(idx_arc) = cache::lookup(key, relfile, n_rows) {
+        let take = (k as usize).min(idx_arc.len()).max(0);
+        if take == 0 {
+            return TableIterator::new(Vec::<(i64, f64)>::new());
+        }
+        let (scores, hit_ids) = idx_arc.search(&q_buf, take);
+        let result: Vec<(i64, f64)> = hit_ids
+            .iter()
+            .zip(scores.iter())
+            .map(|(id, s)| (*id as i64, f64::from(*s)))
+            .collect();
+        return TableIterator::new(result);
+    }
+
+    // Cache miss: walk the heap via SPI, build the IdMapIndex, cache it.
     let rows = collect_via_spi(rel, id_col, vec_col, query.dim());
     if rows.is_empty() {
         return TableIterator::new(Vec::<(i64, f64)>::new());
     }
-
-    // Optionally L2-normalise to match TurboQuant's unit-norm
-    // assumption. Controlled by `turbovec.normalize_on_insert`.
-    let normalise = guc::NORMALIZE_ON_INSERT.get();
 
     let mut idx = IdMapIndex::new(query.dim(), bit_width as usize);
     let mut flat: Vec<f32> = Vec::with_capacity(rows.len() * query.dim());
@@ -85,16 +122,14 @@ fn knn(
     idx.add_with_ids(&flat, &ids)
         .unwrap_or_else(|e| error!("turbovec.knn: add_with_ids failed: {:?}", e));
 
-    let q_buf: Vec<f32> = if normalise {
-        let mut out = Vec::with_capacity(query.dim());
-        push_normalised(&mut out, query.as_slice());
-        out
-    } else {
-        query.as_slice().to_vec()
-    };
+    // Approximate bytes: packed_codes (dim*bit_width/8 per vec)
+    // plus 4-byte scale, plus a 64-byte id-map overhead heuristic.
+    let bytes_per_vec = (query.dim() * bit_width as usize) / 8 + 4 + 64;
+    let total_bytes = bytes_per_vec * rows.len();
+    let idx_arc = cache::insert(key, idx, total_bytes, relfile, n_rows);
 
-    let take = (k as usize).min(rows.len());
-    let (scores, hit_ids) = idx.search(&q_buf, take);
+    let take = (k as usize).min(rows.len()).max(0);
+    let (scores, hit_ids) = idx_arc.search(&q_buf, take);
 
     let result: Vec<(i64, f64)> = hit_ids
         .iter()
@@ -103,6 +138,38 @@ fn knn(
         .collect();
 
     TableIterator::new(result)
+}
+
+/// Resolve the heap attribute number for a column name. Returns 1
+/// (a valid attnum) if the lookup fails — the cache will simply
+/// see a different effective key and miss.
+fn attnum_for(rel: pg_sys::Oid, col: &str) -> i16 {
+    let v: Option<i32> = Spi::get_one_with_args(
+        "SELECT attnum::int4 FROM pg_attribute \
+         WHERE attrelid = $1 AND attname = $2 AND NOT attisdropped",
+        &[rel.into(), col.into()],
+    )
+    .ok()
+    .flatten();
+    v.unwrap_or(1) as i16
+}
+
+/// Cheap row count for cache invalidation. Returns -1 on failure so
+/// the cache miss path runs.
+fn relation_row_count(rel: pg_sys::Oid) -> i64 {
+    let qualified: Option<String> = Spi::get_one_with_args(
+        "SELECT format('%I.%I', n.nspname, c.relname) \
+         FROM   pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE  c.oid = $1",
+        &[rel.into()],
+    )
+    .ok()
+    .flatten();
+    let Some(qualified) = qualified else {
+        return -1;
+    };
+    let sql = format!("SELECT count(*)::int8 FROM {qualified}");
+    Spi::get_one::<i64>(&sql).ok().flatten().unwrap_or(-1)
 }
 
 /// Append a unit-normalised copy of `src` to `dst`. If `src` is the

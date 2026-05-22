@@ -4,6 +4,59 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — Unreleased
+
+### Phase 8 — backend-local cache for `turbovec.knn()`
+
+`turbovec.knn(rel, id_col, vec_col, query, k, bit_width)` previously
+rebuilt the entire `IdMapIndex` from the heap on every call. v0.8
+introduces a backend-local cache keyed by
+`(rel_oid, attnum, bit_width, dim)`:
+
+- **First call** in a backend pays the build cost as before
+  (heap scan via SPI, `IdMapIndex::add_with_ids`).
+- **Subsequent calls** with the same key, on a relation whose
+  `pg_class.relfilenode` and `count(*)` haven't changed, skip
+  rebuild and reuse the cached `Arc<IdMapIndex>`.
+- **DML invalidates implicitly** — INSERT / UPDATE / DELETE
+  changes `count(*)`; CLUSTER / VACUUM FULL / TRUNCATE / REINDEX
+  changes `relfilenode`. Either mismatch forces a rebuild on the
+  next lookup.
+- **LRU eviction** keeps total cache bytes within
+  `turbovec.cache_size_mb` (default 256 MiB; setting to 0
+  disables caching entirely).
+
+### Source
+
+- `src/cache.rs` (NEW, 175 lines)
+  - `CacheKey { rel_oid, attnum, bit_width, dim }`.
+  - `Entry { index: Arc<IdMapIndex>, bytes, relfilenode, n_rows,
+    seq }`.
+  - Public API: `lookup`, `insert`, `invalidate`,
+    `current_relfilenode`, `len`.
+  - LRU enforcement against `turbovec.cache_size_mb`.
+- `src/knn.rs` rewired:
+  - On entry, computes the cache key and `lookup`s. Hit fast-paths
+    straight to `IdMapIndex::search` on the cached `Arc`.
+  - Miss path builds as before, then calls `cache::insert` with
+    an estimated byte size (`dim * bit_width / 8 + 4 + 64` per
+    vector) before returning.
+- `src/lib.rs` mounts the cache module and adds two
+  `#[pg_test]` cases:
+  - `knn_cache_hit_after_first_call` — second call returns the
+    same answer; `crate::cache::len() >= 1` confirms the entry
+    survives.
+  - `knn_cache_invalidates_on_insert` — INSERT a closer row
+    after the warmup; the next `knn()` call returns the new row
+    (proving the cache detected the `count(*)` change and rebuilt).
+
+### Verified
+
+```
+cargo pgrx test pg16                                  -> 29 ok / 0 failed
+cargo pgrx test pg16 --features experimental_index_am -> 34 ok / 0 failed
+```
+
 ## [0.7.0] — Unreleased
 
 ### Phase 7 — hardened index AM, four new end-to-end tests, real bug fixes
@@ -391,6 +444,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.8.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.8.0
 [0.7.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.7.0
 [0.6.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.6.0
 [0.5.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.5.0

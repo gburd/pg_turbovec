@@ -82,6 +82,33 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
     };
 
     if let Err(e) = state.index.add_with_ids(&buf, &[id]) {
+        // CREATE INDEX CONCURRENTLY runs ambuild + validate; the
+        // validate pass calls aminsert for in-snapshot rows, some
+        // of which ambuild already inserted. Treat
+        // IdAlreadyPresent as "replace": remove the existing slot
+        // and re-add. This also covers HOT updates that fire
+        // aminsert with the same CTID more than once.
+        let msg = format!("{:?}", e);
+        if msg.contains("IdAlreadyPresent") {
+            state.index.remove(id);
+            if let Err(e2) = state.index.add_with_ids(&buf, &[id]) {
+                error!(
+                    "turbovec aminsert: re-add after remove failed: {:?}",
+                    e2
+                );
+            }
+            // n_vectors stays the same since we replaced.
+            state.version += 1;
+            persist::save(
+                indexrelid,
+                state.bit_width,
+                state.dim,
+                state.n_vectors,
+                &state.index,
+                state.version,
+            );
+            return true;
+        }
         error!("turbovec aminsert: add_with_ids failed: {:?}", e);
     }
     state.n_vectors += 1;

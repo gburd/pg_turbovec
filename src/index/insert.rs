@@ -65,6 +65,7 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
             n_vectors: 0,
             index: IdMapIndex::new(dim, bit_width as usize),
             version: 1,
+            live_ids: Vec::new(),
         }
     });
 
@@ -82,22 +83,18 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
     };
 
     if let Err(e) = state.index.add_with_ids(&buf, &[id]) {
-        // CREATE INDEX CONCURRENTLY runs ambuild + validate; the
-        // validate pass calls aminsert for in-snapshot rows, some
-        // of which ambuild already inserted. Treat
-        // IdAlreadyPresent as "replace": remove the existing slot
-        // and re-add. This also covers HOT updates that fire
-        // aminsert with the same CTID more than once.
         let msg = format!("{:?}", e);
         if msg.contains("IdAlreadyPresent") {
             state.index.remove(id);
+            // live_ids already contains this id (CIC-validate or
+            // HOT-update path) — don't push it again. n_vectors
+            // unchanged.
             if let Err(e2) = state.index.add_with_ids(&buf, &[id]) {
                 error!(
                     "turbovec aminsert: re-add after remove failed: {:?}",
                     e2
                 );
             }
-            // n_vectors stays the same since we replaced.
             state.version += 1;
             persist::save(
                 indexrelid,
@@ -106,11 +103,13 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
                 state.n_vectors,
                 &state.index,
                 state.version,
+                &state.live_ids,
             );
             return true;
         }
         error!("turbovec aminsert: add_with_ids failed: {:?}", e);
     }
+    state.live_ids.push(id);
     state.n_vectors += 1;
     state.version += 1;
 
@@ -121,6 +120,7 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
         state.n_vectors,
         &state.index,
         state.version,
+        &state.live_ids,
     );
 
     true

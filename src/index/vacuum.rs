@@ -1,9 +1,12 @@
 //! `ambulkdelete` / `amvacuumcleanup`.
 //!
-//! v0.4 supports incremental delete via SPI: load the index, call
-//! `IdMapIndex::remove(id)` for every dead heap TID the callback
-//! reports, write back. Batching delete events into a single
-//! write-back is a Phase 5 concern.
+//! `ambulkdelete` walks every live id in the index and asks the
+//! provided callback whether the underlying heap tuple is dead. If
+//! it is, we drop the id from the IdMapIndex and from the
+//! `live_ids` side-list. The whole thing is persisted at the end of
+//! the call.
+//!
+//! v0.15: actual removal (was a no-op stub in v0.4..v0.14).
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
@@ -33,24 +36,54 @@ pub(crate) unsafe extern "C-unwind" fn ambulkdelete(
         return stats;
     };
 
-    // Walk every id currently in the index and ask the callback
-    // whether the underlying heap row is dead. v0.4 has no efficient
-    // way to enumerate live ids inside `IdMapIndex` without a public
-    // accessor — Phase 5 should add one upstream. For now we
-    // pessimistically skip ambulkdelete and rely on the next
-    // `ambuild` (REINDEX) to compact.
-    let _ = (callback, callback_state);
+    let Some(cb) = callback else {
+        // No callback supplied (cleanup pass without dead
+        // tuples) — nothing to remove. Still persist a fresh
+        // updated_at so VACUUM stats reflect the visit.
+        persist::save(
+            indexrelid,
+            state.bit_width,
+            state.dim,
+            state.n_vectors,
+            &state.index,
+            state.version,
+            &state.live_ids,
+        );
+        (*stats).num_index_tuples = state.n_vectors as f64;
+        return stats;
+    };
 
-    // Persist unchanged so updated_at refreshes (helps debugging).
+    let mut dead_count: i64 = 0;
+    let mut survivors: Vec<u64> = Vec::with_capacity(state.live_ids.len());
+
+    for id in &state.live_ids {
+        let mut tid = pg_sys::ItemPointerData::default();
+        pgrx::itemptr::u64_to_item_pointer(*id, &mut tid);
+        let is_dead = (cb)(&mut tid as *mut _, callback_state);
+        if is_dead {
+            state.index.remove(*id);
+            dead_count += 1;
+        } else {
+            survivors.push(*id);
+        }
+    }
+
+    state.live_ids = survivors;
+    state.n_vectors = state.live_ids.len() as i64;
+    state.version += 1;
+
     persist::save(
         indexrelid,
         state.bit_width,
         state.dim,
         state.n_vectors,
-        &mut state.index,
+        &state.index,
         state.version,
+        &state.live_ids,
     );
+
     (*stats).num_index_tuples = state.n_vectors as f64;
+    (*stats).tuples_removed += dead_count as f64;
     stats
 }
 

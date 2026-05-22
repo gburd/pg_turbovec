@@ -178,12 +178,30 @@ extension_sql!(
         n_vectors   int8 NOT NULL,
         payload     bytea NOT NULL,
         version     int4 NOT NULL,
+        live_ids    bytea NOT NULL DEFAULT ''::bytea,
         updated_at  timestamptz NOT NULL DEFAULT now()
     );
+    -- Live u64 ids in little-endian; one row per index.
+    -- Backwards-compat: existing v0.x rows that lack this column
+    -- get an empty bytea, which means ambulkdelete falls back to
+    -- a no-op (same behaviour as v0.4..v0.14).
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'turbovec'
+              AND table_name = 'am_storage'
+              AND column_name = 'live_ids'
+        ) THEN
+            ALTER TABLE turbovec.am_storage
+                ADD COLUMN live_ids bytea NOT NULL DEFAULT ''::bytea;
+        END IF;
+    END$$;
     -- payload can be very large; force out-of-line uncompressed
     -- storage so we never accidentally PGLZ-compress turbovec's
     -- already-quantised bytes.
     ALTER TABLE turbovec.am_storage ALTER COLUMN payload SET STORAGE EXTERNAL;
+    ALTER TABLE turbovec.am_storage ALTER COLUMN live_ids SET STORAGE EXTERNAL;
 
     -- Register the access method.
     CREATE ACCESS METHOD turbovec

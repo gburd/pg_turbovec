@@ -644,18 +644,18 @@ mod tests {
     /// and verifies the executor's order-by-op machinery works
     /// end-to-end.
     ///
-    /// **Currently disabled**: the forced-index-scan path crashes
-    /// the backend with `munmap_chunk(): invalid pointer` after
-    /// the first amgettuple returns, somewhere in the executor's
-    /// recheck-orderby memory management. See
-    /// `docs/INDEXAM.md` § "Phase 12 known issues". Default-plan
-    /// queries (which the planner still routes to seqscan for
-    /// small/medium tables) work; the cosine recheck path needs an
-    /// allocator-level investigation that we will pick up in
-    /// Phase 13.
+    /// Phase 18 fix: `amrescan` was passing
+    /// `nkeys * size_of::<ScanKeyData>()` as the *count* argument to
+    /// `std::ptr::copy_nonoverlapping::<ScanKeyData>` — but that
+    /// argument is the number of **elements**, not bytes. The
+    /// resulting buffer overrun smashed the `IndexScanDesc` and
+    /// adjacent heap chunks, surfacing as
+    /// `munmap_chunk(): invalid pointer` the next time glibc walked
+    /// the affected arena. The other 39 tests never took the index
+    /// path (default `enable_seqscan = on` keeps small tables on a
+    /// seqscan), which is why this was the only crashing case.
     #[cfg(feature = "experimental_index_am")]
     #[pg_test]
-    #[ignore = "forced index path triggers munmap_chunk() abort; tracking in Phase 13"]
     fn index_am_forced_index_scan() {
         use_turbovec();
         Spi::run("CREATE TABLE t_force (id bigint PRIMARY KEY, emb tvector)")

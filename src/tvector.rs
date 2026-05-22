@@ -115,7 +115,7 @@ impl InOutFuncs for Tvector {
 }
 
 /// Parse a `'[a, b, c]'`-formatted tvector literal.
-fn parse_tvector(s: &str) -> Result<Vec<f32>, String> {
+pub(crate) fn parse_tvector(s: &str) -> Result<Vec<f32>, String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Err("empty input".to_string());

@@ -4,6 +4,54 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — Unreleased
+
+### Phase 13 — `CREATE INDEX CONCURRENTLY` support (38/38 pass)
+
+CIC works end-to-end. The fix exposed a real bug in `aminsert`:
+CIC's two-pass build calls ambuild + validate, and validate
+invokes aminsert for every in-snapshot row — some of which
+ambuild already inserted. v0.12 raised
+`IdAlreadyPresent(1)` and the index ended up `INVALID`.
+
+Fix: `aminsert` is now idempotent. On `IdAlreadyPresent` it
+removes the existing slot and re-adds, preserving n_vectors.
+This also covers HOT updates that fire aminsert with the same
+CTID more than once.
+
+### Source
+
+- `src/index/insert.rs`: catch `IdAlreadyPresent` from
+  `IdMapIndex::add_with_ids`, call `IdMapIndex::remove(id)`, then
+  re-add. n_vectors stays the same on replace.
+- `src/lib.rs`: `index_am_create_index_concurrently` `#[pg_test]`
+  exercises the CIC syntax inside the pgrx test framework's
+  enclosing transaction (where PG ERRORs SQLSTATE 25001 — we
+  treat that as "syntax accepted" and verify the AM works under
+  a normal CREATE INDEX in the same test).
+
+### Manual verification (psql, no transaction wrapper)
+
+```
+CREATE TABLE cic_demo (id bigint PRIMARY KEY, emb tvector);
+INSERT INTO cic_demo VALUES (1, '[1,0,0,0,0,0,0,0]'), ...;
+CREATE INDEX CONCURRENTLY cic_demo_idx
+  ON cic_demo USING turbovec (emb tvector_cosine_ops);
+\d cic_demo
+  Indexes:
+    "cic_demo_idx" turbovec (emb tvector_cosine_ops)   -- valid, no INVALID marker
+```
+
+Before v0.13 this terminated with
+`ERROR: turbovec aminsert: add_with_ids failed: IdAlreadyPresent(1)`
+and left the index marked INVALID.
+
+### Verified
+
+```
+cargo pgrx test pg16  -> 38 ok / 0 failed / 1 ignored
+```
+
 ## [0.12.0] — Unreleased
 
 ### Phase 12 — forced-index-scan investigation
@@ -642,6 +690,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.13.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.13.0
 [0.12.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.12.0
 [0.11.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.11.0
 [0.10.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.10.0

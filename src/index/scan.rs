@@ -49,7 +49,6 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
     // PostgreSQL leaves xs_orderbyvals / xs_orderbynulls null when
     // RelationGetIndexScan returns; AMs that advertise
     // `amcanorderbyop = true` must allocate them themselves.
-    // Failing to do so SIGSEGVs the executor on the first row.
     if norderbys > 0 {
         (*scan).xs_orderbyvals = pg_sys::palloc0(
             std::mem::size_of::<pg_sys::Datum>() * (norderbys as usize),
@@ -57,7 +56,6 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         (*scan).xs_orderbynulls = pg_sys::palloc0(
             std::mem::size_of::<bool>() * (norderbys as usize),
         ) as *mut bool;
-        // Mark all order-by slots NULL until amgettuple fills them.
         for i in 0..(norderbys as usize) {
             *(*scan).xs_orderbynulls.add(i) = true;
         }

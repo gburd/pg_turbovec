@@ -203,3 +203,71 @@ recheck-orderby path may free memory it did not allocate, or our
 - Or: switch our `amcanorderbyop` to false and expose the AM as
   `amcanorder = true` over a Btree-style strategy on the score —
   costlier but simpler.
+
+## Phase 14+ roadmap
+
+### CREATE INDEX CONCURRENTLY support (Phase 14)
+
+Postgres lets users build indexes without blocking writes via
+`CREATE INDEX CONCURRENTLY`. The AM contract is that `ambuild` is
+called twice:
+
+1. First pass with a snapshot taken at the start, while writers
+   continue. The result must include every row visible at that
+   snapshot.
+2. Second pass under a stricter snapshot, validating that no row
+   inserted by writers between the two passes was missed. (PG's
+   built-in machinery does the diff via `validate_index`.)
+
+For our side-table-persisted AM, the requirements are:
+
+- `ambuild` must be **idempotent**: running it twice over the same
+  heap state must produce the same `am_storage` row. Our current
+  implementation uses `INSERT ... ON CONFLICT (indexrelid) DO
+  UPDATE`, so this is already true.
+- `ambuild` must respect the snapshot it is given. We currently
+  walk the heap via `index_build_range_scan`, which uses the
+  scan's snapshot — already correct.
+- We need `amcanorderbyop = true` (we have it) and we should
+  *not* set `ampredlocks` (we don't).
+- `aminsert` for in-flight inserts during the build window must
+  arrive at the right `indexrelid`. PG drives this; nothing for us
+  to add.
+
+**Status:** untested. Phase 14 deliverable is
+
+```rust
+#[pg_test]
+fn cic_concurrent_with_writes() {
+    // Spawn a bgworker / background INSERT loop, kick off
+    // CREATE INDEX CONCURRENTLY in the test, verify the final
+    // index reflects every row including those inserted during
+    // the build.
+}
+```
+
+Also need to advertise CIC support in `IndexAmRoutine` — PG
+automatically allows CIC when `amcanorder = false` and
+`amclusterable = false`, both of which we have. So the SQL surface
+should Just Work; the test is the deliverable.
+
+### Other Phase 14+ items
+
+- **Binary-compatible `tvector` varlena layout** — replace the
+  v0.x CBOR-derived storage with the pgvector-compatible
+  `[i32 vl_len_, i16 dim, i16 unused, f32[dim]]` layout. Adds
+  zero-copy casts to/from `pgvector.vector` when both extensions
+  are installed and reduces storage overhead by ~10–15%. Pure
+  data-layout change; does not need pgrx index AM expertise.
+- **Parallel `ambuild`** via
+  `index_build_range_scan(parallel = true)` and a shared
+  `BuildState`. Material wins on multi-million-row builds.
+- **Recall benchmark harness** — `benches/recall.rs` driving a
+  pgrx cluster: load glove-200, openai-1536, openai-3072; build
+  both pg_turbovec and pgvector hnsw indexes; compare R@k and p99
+  latency at matched bit budgets. Output JSON to
+  `benches/results/`.
+- **HNSW-on-TurboQuant** — research: replace the flat IVF-like
+  IdMapIndex with an HNSW graph whose nodes hold TurboQuant codes.
+  Hierarchical structure for sub-millisecond k-NN at the cost of
+  build time.

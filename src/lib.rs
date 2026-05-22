@@ -146,6 +146,64 @@ mod tests {
     }
 
     #[pg_test]
+    fn to_tvector_text_form() {
+        // Single-arg: parse text → tvector. Equivalent to ::tvector.
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(turbovec.to_tvector('[1, 2, 3]'))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(3));
+
+        // Three-arg: with explicit dim check that passes.
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(turbovec.to_tvector('[1, 2, 3]', 3, false))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(3));
+
+        // dim = 0 means "no check".
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(turbovec.to_tvector('[1, 2, 3, 4]', 0, false))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(4));
+    }
+
+    #[pg_test]
+    fn to_tvector_dim_mismatch_errors() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i32>(
+                "SELECT turbovec.vector_dims(turbovec.to_tvector('[1, 2, 3]', 5, false))",
+            )
+        });
+        assert!(
+            bad.is_err(),
+            "to_tvector should reject dim mismatch"
+        );
+    }
+
+    #[pg_test]
+    fn array_to_tvector_with_dim_check() {
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(\
+                 turbovec.array_to_tvector(ARRAY[1, 2, 3, 4]::real[], 4, false))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(4));
+
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i32>(
+                "SELECT turbovec.vector_dims(\
+                     turbovec.array_to_tvector(ARRAY[1, 2, 3]::real[], 5, false))",
+            )
+        });
+        assert!(
+            bad.is_err(),
+            "array_to_tvector should reject dim mismatch"
+        );
+    }
+
+    #[pg_test]
     fn normalize_unit_norm() {
         let n: Option<f64> = Spi::get_one(
             "SELECT turbovec.vector_norm(turbovec.tvector_normalize('[3, 4]'::turbovec.tvector))",

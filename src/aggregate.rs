@@ -51,9 +51,15 @@ impl TvectorAccum {
     }
 }
 
-/// `state := tvector_accum(state, value)`
+/// `state := tvector_accum(state, value)`. Accepts `Option<TvectorAccum>`
+/// so pgrx generates a non-strict SQL function that handles the
+/// initial NULL state — otherwise CREATE AGGREGATE rejects the
+/// definition with "must not omit initial value when transition
+/// function is strict and transition type is not compatible with
+/// input type".
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_accum(mut state: TvectorAccum, value: Tvector) -> TvectorAccum {
+fn tvector_accum(state: Option<TvectorAccum>, value: Tvector) -> TvectorAccum {
+    let mut state = state.unwrap_or_default();
     state.ensure_dim(value.dim(), "tvector_accum");
     for (s, v) in state.sum.iter_mut().zip(value.as_slice().iter()) {
         *s += f64::from(*v);
@@ -63,27 +69,37 @@ fn tvector_accum(mut state: TvectorAccum, value: Tvector) -> TvectorAccum {
 }
 
 /// `state := tvector_combine(s1, s2)` for parallel aggregation.
+/// Both operands are nullable for symmetry with the SQL machinery.
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_combine(s1: TvectorAccum, s2: TvectorAccum) -> TvectorAccum {
-    if s1.count == 0 {
-        return s2;
+fn tvector_combine(
+    s1: Option<TvectorAccum>,
+    s2: Option<TvectorAccum>,
+) -> Option<TvectorAccum> {
+    match (s1, s2) {
+        (None, None) => None,
+        (Some(s), None) | (None, Some(s)) => Some(s),
+        (Some(a), Some(b)) => {
+            if a.count == 0 {
+                return Some(b);
+            }
+            if b.count == 0 {
+                return Some(a);
+            }
+            let mut out = a;
+            if out.sum.len() != b.sum.len() {
+                error!(
+                    "tvector_combine: cannot merge accumulators of different dimensions ({} vs {})",
+                    out.sum.len(),
+                    b.sum.len()
+                );
+            }
+            for (x, y) in out.sum.iter_mut().zip(b.sum.iter()) {
+                *x += *y;
+            }
+            out.count += b.count;
+            Some(out)
+        }
     }
-    if s2.count == 0 {
-        return s1;
-    }
-    let mut out = s1;
-    if out.sum.len() != s2.sum.len() {
-        error!(
-            "tvector_combine: cannot merge accumulators of different dimensions ({} vs {})",
-            out.sum.len(),
-            s2.sum.len()
-        );
-    }
-    for (a, b) in out.sum.iter_mut().zip(s2.sum.iter()) {
-        *a += *b;
-    }
-    out.count += s2.count;
-    out
 }
 
 /// Final function for `avg(tvector)` — divides the running sum by

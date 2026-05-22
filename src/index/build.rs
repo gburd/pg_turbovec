@@ -158,30 +158,39 @@ unsafe fn resolve_indexed_attr(
     index_relation: pg_sys::Relation,
     heap_relation: pg_sys::Relation,
 ) -> String {
-    let n_keys = (*index_relation).rd_index;
-    if n_keys.is_null() {
+    let indrel = (*index_relation).rd_index;
+    if indrel.is_null() {
         error!("turbovec: rd_index is null");
     }
-    let nkey = (*n_keys).indnatts as usize;
+    let nkey = (*indrel).indnatts as usize;
     if nkey != 1 {
         error!(
             "turbovec: only single-column indexes are supported (got {} columns)",
             nkey
         );
     }
-    let attno = (*n_keys).indkey.values[0];
+    // `indkey.values` is a `__IncompleteArrayField<i16>` flexible
+    // array; read the first element via `.as_slice(n)`.
+    let attno: i16 = *(*indrel).indkey.values.as_slice(nkey).first()
+        .unwrap_or_else(|| error!("turbovec: indkey is empty"));
+    if attno < 1 {
+        error!("turbovec: indexed attribute number {} is invalid", attno);
+    }
     let tupdesc = (*heap_relation).rd_att;
     if tupdesc.is_null() {
         error!("turbovec: heap rd_att is null");
     }
-    let attr = pg_sys::TupleDescAttr(tupdesc, (attno - 1) as i32);
-    if attr.is_null() {
-        error!("turbovec: indexed attribute {} not found", attno);
-    }
-    let name = std::ffi::CStr::from_ptr(((*attr).attname.data).as_ptr() as *const i8)
+    // pg_sys exposes the attrs as a flexible array on TupleDescData.
+    let n_attrs = (*tupdesc).natts as usize;
+    let attrs: &[pg_sys::FormData_pg_attribute] =
+        (*tupdesc).attrs.as_slice(n_attrs);
+    let attr = attrs
+        .get((attno - 1) as usize)
+        .unwrap_or_else(|| error!("turbovec: indexed attribute {} not in tupdesc", attno));
+    let raw_name = attr.attname.data.as_ptr() as *const std::os::raw::c_char;
+    std::ffi::CStr::from_ptr(raw_name)
         .to_string_lossy()
-        .into_owned();
-    name
+        .into_owned()
 }
 
 /// Autodetect dimension by reading one row from the table.

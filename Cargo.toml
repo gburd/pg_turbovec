@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -19,7 +19,7 @@ name = "pgrx_embed_pg_turbovec"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]
-default = ["pg17"]
+default = ["pg16"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]

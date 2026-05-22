@@ -175,7 +175,10 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     if (*opaque).cursor >= (*opaque).results.len() {
         return false;
     }
-    let id = (*opaque).results[(*opaque).cursor];
+    let id = {
+        let cursor = (*opaque).cursor;
+        (&(*opaque).results)[cursor]
+    };
     (*opaque).cursor += 1;
     pgrx::itemptr::u64_to_item_pointer(id, &mut (*scan).xs_heaptid);
     (*scan).xs_recheckorderby = false;

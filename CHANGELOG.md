@@ -4,6 +4,77 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — Unreleased
+
+### Phase 6 — validated against a real PostgreSQL 16 cluster
+
+This is the first release where every `#[pg_test]` case has actually
+been executed and passes. The default-feature build runs **28/28**
+tests green; the `experimental_index_am`-feature build also runs
+**28/28**, including a new end-to-end `index_am_create_and_query`
+test that:
+
+1. `CREATE TABLE`s an 8-dim `tvector` column,
+2. inserts four rows,
+3. `CREATE INDEX ... USING turbovec (... tvector_cosine_ops) WITH
+   (bit_width = 4)`,
+4. asserts the side-table row was created with `n_vectors = 4`,
+5. runs `ORDER BY emb <=> $1 LIMIT 1` and asserts the right row
+   is returned,
+6. `DROP INDEX` and verifies the heap is intact.
+
+### Fixes uncovered by running the suite
+
+- **Aggregate transition function was implicitly STRICT** (pgrx
+  derives it from non-Option args), causing `CREATE EXTENSION` to
+  fail with `must not omit initial value when transition function
+  is strict and transition type is not compatible with input
+  type`. Both `tvector_accum` and `tvector_combine` now accept
+  `Option<TvectorAccum>` so pgrx generates non-strict SQL.
+- **`trusted = true` in `pg_turbovec.control`** was rejected by
+  pgrx 0.17's control-file parser as `RedundantField`. Removed.
+- **Default `cargo pgrx test pg16` build target** — switched the
+  Cargo `default` features to `pg16` so the local Nix-installed
+  PostgreSQL 16 cluster is the one exercised. Runs against pg17
+  / pg18 still work via the matching feature flag.
+- **build.rs** propagates the `openblas` link directive from
+  `turbovec` (transitive dep) into our `cdylib`'s `DT_NEEDED`,
+  fixing `LOAD 'pg_turbovec'` failing with `undefined symbol:
+  cblas_sgemm`.
+- **Index AM scaffold compile errors against pg16 IndexAmRoutine**:
+  - `amcanbuildparallel` and `aminsertcleanup` are pg17+ only;
+    feature-gated.
+  - `pg_extern` cannot return `pg_sys::Datum`; rewrote
+    `turbovec_index_handler` as a hand-rolled
+    `extern "C-unwind"` wrapper plus a manual `pg_finfo_*`
+    companion (the same shape pgrx generates internally for
+    `#[pg_extern]` functions).
+  - `pg_sys::TupleDescAttr` isn't exposed as a Rust function in
+    pgrx 0.17; rewrote `resolve_indexed_attr` to use
+    `(*tupdesc).attrs.as_slice(natts)`.
+  - `(*indrel).indkey.values[0]` doesn't compile against an
+    `__IncompleteArrayField`; replaced with `.as_slice(nkey)`.
+  - `Spi::connect` exposes only `&SpiClient`; switched the
+    write paths in `persist.rs` to `Spi::connect_mut`.
+  - Implicit autoref on `(*opaque).results[(*opaque).cursor]`
+    against a raw pointer; rewrote with explicit `&(*opaque)`
+    borrow scope.
+- **Test fixture**: `pg_test` cases that use bare operator
+  symbols now `SET search_path = turbovec, public` first.
+
+### Added
+
+- `docs/BUILDING.md` documenting the Nix-specific build dance
+  (writable pg_config wrapper, libclang / glibc include flags,
+  openblas RUSTFLAGS, ICU sidestep).
+- `index_am_create_and_query` `#[pg_test]` case (gated by the
+  `experimental_index_am` Cargo feature).
+
+### Changed
+
+- Default Cargo `default` features set to `["pg16"]` (was
+  `["pg17"]`) to match the local development cluster.
+
 ## [0.5.0] — Unreleased
 
 ### Added — Phase 5: pgvector-parity helpers
@@ -254,6 +325,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.6.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.6.0
 [0.5.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.5.0
 [0.4.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.4.0
 [0.3.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.3.0

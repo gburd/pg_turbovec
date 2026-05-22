@@ -126,7 +126,7 @@ pub(crate) fn save(
             indexrelid, e
         ),
     };
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let sql = "INSERT INTO turbovec.am_storage \
                        (indexrelid, bit_width, dim, n_vectors, payload, version, updated_at) \
                    VALUES ($1, $2, $3, $4, $5, $6, now()) \
@@ -154,7 +154,7 @@ pub(crate) fn save(
 
 /// Insert an empty marker row used by `ambuildempty`.
 pub(crate) fn save_empty(indexrelid: pg_sys::Oid, bit_width: i32, dim: i32) {
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let sql = "INSERT INTO turbovec.am_storage \
                        (indexrelid, bit_width, dim, n_vectors, payload, version, updated_at) \
                    VALUES ($1, $2, $3, 0, ''::bytea, 1, now()) \
@@ -170,7 +170,7 @@ pub(crate) fn save_empty(indexrelid: pg_sys::Oid, bit_width: i32, dim: i32) {
 /// Remove the side-table row when the index is dropped. Hooked into
 /// the relcache invalidation callback in Phase 5.
 pub(crate) fn drop_row(indexrelid: pg_sys::Oid) {
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let _ = client.update(
             "DELETE FROM turbovec.am_storage WHERE indexrelid = $1",
             None,

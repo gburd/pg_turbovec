@@ -1,9 +1,11 @@
 # pg_turbovec — Vector Index for PostgreSQL (TurboQuant)
 
-> **Status:** v0.5.0 — stable type / operators / aggregates / JSON
-> casts / `subvector` / `turbovec.knn()`. Experimental `turbovec`
-> index access method (`CREATE INDEX ... USING turbovec`) opt-in via
-> `--features experimental_index_am`.
+> **Status:** v0.6.0 — 28/28 `#[pg_test]` cases pass against a
+> real PostgreSQL 16 cluster. Default-feature build provides the
+> stable type / operators / aggregates / casts / `turbovec.knn()`
+> surface; the `turbovec` index access method (`CREATE INDEX ...
+> USING turbovec`) ships under the opt-in `experimental_index_am`
+> Cargo feature and also passes its end-to-end test.
 
 `pg_turbovec` is a PostgreSQL extension that provides a vector data type
 and an approximate-nearest-neighbour index access method, built in Rust

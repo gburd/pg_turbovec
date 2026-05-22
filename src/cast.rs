@@ -30,9 +30,8 @@ fn float8_array_to_tvector(arr: Vec<Option<f64>>) -> Tvector {
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            let v = v.unwrap_or_else(|| {
-                error!("tvector cannot contain NULL element at index {}", i)
-            });
+            let v =
+                v.unwrap_or_else(|| error!("tvector cannot contain NULL element at index {}", i));
             if !v.is_finite() {
                 error!("tvector value at index {} is not finite ({})", i, v);
             }
@@ -49,9 +48,8 @@ fn int4_array_to_tvector(arr: Vec<Option<i32>>) -> Tvector {
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            let v = v.unwrap_or_else(|| {
-                error!("tvector cannot contain NULL element at index {}", i)
-            });
+            let v =
+                v.unwrap_or_else(|| error!("tvector cannot contain NULL element at index {}", i));
             v as f32
         })
         .collect();

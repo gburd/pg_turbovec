@@ -90,10 +90,7 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
             // HOT-update path) — don't push it again. n_vectors
             // unchanged.
             if let Err(e2) = state.index.add_with_ids(&buf, &[id]) {
-                error!(
-                    "turbovec aminsert: re-add after remove failed: {:?}",
-                    e2
-                );
+                error!("turbovec aminsert: re-add after remove failed: {:?}", e2);
             }
             state.version += 1;
             persist::save(

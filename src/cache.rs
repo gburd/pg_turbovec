@@ -142,10 +142,7 @@ fn enforce_cap(map: &mut HashMap<CacheKey, Entry>) {
     let mut total: usize = map.values().map(|e| e.bytes).sum();
     while total > cap && map.len() > 1 {
         // Find LRU entry by lowest `seq`.
-        let lru_key = map
-            .iter()
-            .min_by_key(|(_, e)| e.seq)
-            .map(|(k, _)| *k);
+        let lru_key = map.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| *k);
         match lru_key {
             Some(k) => {
                 if let Some(e) = map.remove(&k) {

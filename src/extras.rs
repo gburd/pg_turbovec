@@ -110,10 +110,7 @@ fn jsonb_to_tvector(j: pgrx::JsonB) -> Tvector {
             )
         });
         if !n.is_finite() {
-            error!(
-                "jsonb_to_tvector: element {} is not finite ({})",
-                i, n
-            );
+            error!("jsonb_to_tvector: element {} is not finite ({})", i, n);
         }
         out.push(n as f32);
     }
@@ -171,10 +168,7 @@ fn tvector_check_dim(v: Tvector, expected: i32) -> Tvector {
 #[pg_extern(immutable, parallel_safe)]
 fn tvector_zeros(dim: i32) -> Tvector {
     if dim <= 0 || dim as usize > MAX_DIM {
-        error!(
-            "tvector_zeros: dim {} out of range 1..={}",
-            dim, MAX_DIM
-        );
+        error!("tvector_zeros: dim {} out of range 1..={}", dim, MAX_DIM);
     }
     Tvector::from_vec(vec![0.0_f32; dim as usize])
 }

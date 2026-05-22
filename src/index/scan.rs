@@ -8,7 +8,6 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
-use crate::cache::{self, CacheKey};
 use crate::guc;
 use crate::index::persist;
 use crate::kernels;
@@ -210,17 +209,11 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     pgrx::itemptr::u64_to_item_pointer(id, &mut (*scan).xs_heaptid);
     let _ = dist;
 
-    // Quantised inner-product ranks approximate cosine distances.
-    // Setting xs_recheckorderby = true makes the executor recompute
-    // the orderby expression on the heap tuple, restoring exact
-    // distances for the final sort. We deliberately do NOT write
-    // xs_orderbyvals[0]: with recheck the executor recomputes
-    // anyway, and the write site has historically caused a glibc
-    // "free(): invalid pointer" abort that we have not yet
-    // tracked down (probably a memory-allocator mismatch between
-    // pgrx and the executor's expected free path).
+    // Force the executor to recheck — our quantised inner-product
+    // is approximate. Recheck recomputes the orderby expression
+    // against the heap tuple, restoring exact distances.
     (*scan).xs_recheckorderby = true;
-    (*scan).xs_recheck = true;
+    (*scan).xs_recheck = false;
     true
 }
 

@@ -152,6 +152,7 @@ fn parse_tvector(s: &str) -> Result<Vec<f32>, String> {
 
 #[cfg(any(test, feature = "pg_test"))]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

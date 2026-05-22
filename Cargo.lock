@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "pg_turbovec"
-version = "0.15.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "criterion",
  "libc",

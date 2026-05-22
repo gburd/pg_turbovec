@@ -8,6 +8,7 @@
 //! will fold in `loop_count` for nested-loop join estimation.
 
 use pgrx::pg_sys;
+#[allow(unused_imports)]
 use pgrx::prelude::*;
 
 #[pgrx::pg_guard]

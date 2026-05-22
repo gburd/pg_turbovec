@@ -103,7 +103,6 @@ fn decode_live_ids(bytes: &[u8]) -> Vec<u64> {
 /// is the most obvious target for a Phase-5 in-memory deserialiser
 /// upstream.
 fn read_idmap_from<R: std::io::Read>(r: &mut R) -> Result<IdMapIndex, String> {
-    use std::io::Write;
     let mut buf = Vec::new();
     r.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     // Write to a tmpfile so we can call IdMapIndex::load(path). This
@@ -201,6 +200,7 @@ pub(crate) fn save_empty(indexrelid: pg_sys::Oid, bit_width: i32, dim: i32) {
 
 /// Remove the side-table row when the index is dropped. Hooked into
 /// the relcache invalidation callback in Phase 5.
+#[allow(dead_code)]
 pub(crate) fn drop_row(indexrelid: pg_sys::Oid) {
     Spi::connect_mut(|client| {
         let _ = client.update(

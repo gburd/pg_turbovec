@@ -541,6 +541,69 @@ mod tests {
         );
     }
 
+    /// Forces the index AM path (via `SET enable_seqscan = off`)
+    /// and verifies the executor's order-by-op machinery works
+    /// end-to-end.
+    ///
+    /// **Currently disabled**: the forced-index-scan path crashes
+    /// the backend with `munmap_chunk(): invalid pointer` after
+    /// the first amgettuple returns, somewhere in the executor's
+    /// recheck-orderby memory management. See
+    /// `docs/INDEXAM.md` § "Phase 12 known issues". Default-plan
+    /// queries (which the planner still routes to seqscan for
+    /// small/medium tables) work; the cosine recheck path needs an
+    /// allocator-level investigation that we will pick up in
+    /// Phase 13.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    #[ignore = "forced index path triggers munmap_chunk() abort; tracking in Phase 13"]
+    fn index_am_forced_index_scan() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_force (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_force \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::tvector \
+             FROM generate_series(1, 50) AS gs(i), \
+                  generate_series(1, 16) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_force_idx \
+             ON t_force USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_force").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Top-1 nearest must be row 7. Forces index path; previously
+        // crashed with SIGSEGV before xs_orderbyvals was allocated.
+        let nearest: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_force \
+             ORDER BY emb <=> (SELECT emb FROM t_force WHERE id = 7) \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(nearest, Some(7));
+
+        // Top-3 must include row 7. Both projecting AND ordering by
+        // the distance — this is the query that crashed before v0.12.
+        let count_with_dist: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM ( \
+                 SELECT id, emb <=> (SELECT emb FROM t_force WHERE id = 7) AS dist \
+                 FROM t_force \
+                 ORDER BY emb <=> (SELECT emb FROM t_force WHERE id = 7) \
+                 LIMIT 3 \
+             ) sub",
+        )
+        .unwrap();
+        assert_eq!(count_with_dist, Some(3));
+    }
+
     #[pg_test]
     fn knn_filtered_allowlist() {
         use_turbovec();

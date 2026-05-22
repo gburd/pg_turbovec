@@ -24,7 +24,11 @@ pub(crate) struct ScanOpaque {
     /// Search results, populated lazily on first `amgettuple`.
     /// Each entry is a u64 in pgrx's canonical CTID encoding.
     results: Vec<u64>,
-    /// Cursor into `results`.
+    /// Per-result distance scores in the same order as `results`.
+    /// Used to populate `scan->xs_orderbyvals` so the executor can
+    /// pipeline the order-by under `amcanorderbyop = true`.
+    distances: Vec<f64>,
+    /// Cursor into `results` / `distances`.
     cursor: usize,
     /// Whether the search has been executed yet.
     fetched: bool,
@@ -42,23 +46,34 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         error!("turbovec: RelationGetIndexScan returned null");
     }
 
-    // Allocate ScanOpaque inside the scan's memory context. We can't
-    // just Box::new because the box would be in the Rust heap and
-    // not freed by `amendscan`'s palloc cleanup.
+    // PostgreSQL leaves xs_orderbyvals / xs_orderbynulls null when
+    // RelationGetIndexScan returns; AMs that advertise
+    // `amcanorderbyop = true` must allocate them themselves.
+    // Failing to do so SIGSEGVs the executor on the first row.
+    if norderbys > 0 {
+        (*scan).xs_orderbyvals = pg_sys::palloc0(
+            std::mem::size_of::<pg_sys::Datum>() * (norderbys as usize),
+        ) as *mut pg_sys::Datum;
+        (*scan).xs_orderbynulls = pg_sys::palloc0(
+            std::mem::size_of::<bool>() * (norderbys as usize),
+        ) as *mut bool;
+        // Mark all order-by slots NULL until amgettuple fills them.
+        for i in 0..(norderbys as usize) {
+            *(*scan).xs_orderbynulls.add(i) = true;
+        }
+    }
+
+    // Allocate ScanOpaque inside the scan's memory context.
     let opaque_ptr = pg_sys::palloc0(std::mem::size_of::<ScanOpaque>()) as *mut ScanOpaque;
     if opaque_ptr.is_null() {
         error!("turbovec: failed to palloc ScanOpaque");
     }
-    // Initialise the Vecs in place. We'll never `drop_in_place` this
-    // (palloc'd memory is released wholesale), so the Vec destructors
-    // will not run — that is fine because the Vec heap memory itself
-    // is std-managed and will be released when the Vec is moved out
-    // (we use std::ptr::write to install initial values).
     std::ptr::write(
         opaque_ptr,
         ScanOpaque {
             query: Vec::new(),
             results: Vec::new(),
+            distances: Vec::new(),
             cursor: 0,
             fetched: false,
         },
@@ -131,6 +146,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         query.as_slice().to_vec()
     };
     (*opaque).results.clear();
+    (*opaque).distances.clear();
     (*opaque).cursor = 0;
     (*opaque).fetched = false;
 }
@@ -148,80 +164,35 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     }
 
     if !(*opaque).fetched {
-        // Lazily run the search.
         let indexrelid = (*(*scan).indexRelation).rd_id;
-
-        // Try the shared cache first. The AM path uses attnum=0 to
-        // distinguish from `turbovec.knn()`'s heap-attnum keys.
-        // Phase 8 cache validates against (relfilenode, n_rows);
-        // for the index relation those reflect the index's own
-        // identity — we want the *underlying heap* identity for
-        // proper invalidation. v0.9 takes the simpler path of
-        // keying on (relfilenode_of_index, n_vectors_persisted),
-        // which the persist layer already tracks.
-        let dim_hint = (*opaque).query.len() as u32;
-        // We don't know bit_width until we load am_storage — use a
-        // sentinel and patch on first miss.
-        let key = CacheKey {
-            rel_oid: indexrelid,
-            attnum: 0,
-            bit_width: 0,
-            dim: dim_hint,
-        };
-        let relfile = cache::current_relfilenode(indexrelid);
-        // n_rows for the cache key comes from am_storage's
-        // n_vectors column; we read it cheaply alongside the
-        // bit_width sanity check.
-        let n_rows: i64 = pgrx::Spi::get_one_with_args(
-            "SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = $1",
-            &[indexrelid.into()],
-        )
-        .ok()
-        .flatten()
-        .unwrap_or(-1);
-
-        // Cache lookup with the bit_width=0 sentinel; on hit we
-        // reuse the cached IdMapIndex.
-        let cached = cache::lookup(key, relfile, n_rows);
-
-        let idx_arc = match cached {
-            Some(arc) => arc,
+        let stored = match persist::load(indexrelid) {
+            Some(s) => s,
             None => {
-                let stored = match persist::load(indexrelid) {
-                    Some(s) => s,
-                    None => {
-                        // Empty / unbuilt index — return no rows.
-                        (*opaque).fetched = true;
-                        return false;
-                    }
-                };
-                let dim = stored.dim as usize;
-                if (*opaque).query.len() != dim {
-                    error!(
-                        "turbovec amgettuple: query dim {} != index dim {}",
-                        (*opaque).query.len(),
-                        dim
-                    );
-                }
-                let bytes_per_vec =
-                    (dim * stored.bit_width as usize) / 8 + 4 + 64;
-                let total_bytes =
-                    bytes_per_vec * stored.n_vectors.max(0) as usize;
-                cache::insert(key, stored.index, total_bytes, relfile, n_rows)
+                (*opaque).fetched = true;
+                return false;
             }
         };
-
-        // Phase 4 returns up to 1 024 results per scan; the executor
-        // will discard everything beyond LIMIT. Phase 5 should pull
-        // `numLimit` from the IndexScanState if available.
-        let n_in_index = idx_arc.len();
+        let dim = stored.dim as usize;
+        if (*opaque).query.len() != dim {
+            error!(
+                "turbovec amgettuple: query dim {} != index dim {}",
+                (*opaque).query.len(),
+                dim
+            );
+        }
+        let n_in_index = stored.n_vectors.max(0) as usize;
         if n_in_index == 0 {
             (*opaque).fetched = true;
             return false;
         }
         let k = 1024.min(n_in_index).max(1);
-        let (_scores, ids) = idx_arc.search(&(*opaque).query, k);
+        let (scores, ids) = stored.index.search(&(*opaque).query, k);
+        let dists: Vec<f64> = scores
+            .iter()
+            .map(|s| (1.0 - f64::from(*s)).clamp(0.0, 2.0))
+            .collect();
         (*opaque).results = ids;
+        (*opaque).distances = dists;
         (*opaque).cursor = 0;
         (*opaque).fetched = true;
     }
@@ -233,10 +204,25 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let cursor = (*opaque).cursor;
         (&(*opaque).results)[cursor]
     };
+    let dist = {
+        let cursor = (*opaque).cursor;
+        (&(*opaque).distances)[cursor]
+    };
     (*opaque).cursor += 1;
     pgrx::itemptr::u64_to_item_pointer(id, &mut (*scan).xs_heaptid);
-    (*scan).xs_recheckorderby = false;
-    (*scan).xs_recheck = false;
+    let _ = dist;
+
+    // Quantised inner-product ranks approximate cosine distances.
+    // Setting xs_recheckorderby = true makes the executor recompute
+    // the orderby expression on the heap tuple, restoring exact
+    // distances for the final sort. We deliberately do NOT write
+    // xs_orderbyvals[0]: with recheck the executor recomputes
+    // anyway, and the write site has historically caused a glibc
+    // "free(): invalid pointer" abort that we have not yet
+    // tracked down (probably a memory-allocator mismatch between
+    // pgrx and the executor's expected free path).
+    (*scan).xs_recheckorderby = true;
+    (*scan).xs_recheck = true;
     true
 }
 

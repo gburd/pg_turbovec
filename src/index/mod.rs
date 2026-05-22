@@ -189,7 +189,6 @@ extension_sql!(
     name = "turbovec_index_am",
     requires = [
         turbovec_index_handler,
-        crate::distance::negative_inner_product,
-        crate::distance::cosine_distance
+        "tvector_operators"
     ]
 );

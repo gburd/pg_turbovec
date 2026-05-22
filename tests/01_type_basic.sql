@@ -87,3 +87,34 @@ ORDER  BY score DESC;
 -- on TurboQuant residual)
 
 ROLLBACK;
+
+-- ===================================================================
+-- Phase 5: subvector / jsonb casts / dim assertion / zeros
+-- ===================================================================
+
+BEGIN;
+CREATE EXTENSION IF NOT EXISTS pg_turbovec;
+SET search_path = public, turbovec;
+
+-- subvector
+SELECT turbovec.subvector('[10, 20, 30, 40, 50]'::tvector, 2, 3);  -- [20, 30, 40]
+
+-- jsonb round trip
+SELECT '[1, 2.5, -3]'::tvector::jsonb;                             -- [1, 2.5, -3]
+SELECT '[1, 2.5, -3]'::jsonb::tvector;                             -- [1, 2.5, -3]
+
+-- dim assertion
+SELECT turbovec.tvector_check_dim('[1, 2, 3]'::tvector, 3);        -- pass
+DO $$
+BEGIN
+    PERFORM turbovec.tvector_check_dim('[1, 2, 3]'::tvector, 4);
+    RAISE EXCEPTION 'should have errored';
+EXCEPTION WHEN OTHERS THEN
+    -- expected
+    NULL;
+END$$;
+
+-- zeros + norm
+SELECT turbovec.vector_norm(turbovec.tvector_zeros(8));            -- 0
+
+ROLLBACK;

@@ -4,7 +4,8 @@
 > writing code. When in doubt, prefer the design here over what
 > `pgvector` does; we intentionally diverge in places.
 
-**Status:** Phase 1 implemented (v0.1.0). Phase 2 in progress.
+**Status:** Phase 1–5 complete (v0.5.0 released, v0.4.0 index AM
+opt-in via `experimental_index_am`).
 **Target Postgres:** 17, 18 (primary), 16 (best-effort).
 **Toolchain:** Rust 1.85+, `pgrx = "=0.17.0"`.
 **Upstream:** [`turbovec`](https://crates.io/crates/turbovec) 0.5.x.
@@ -454,26 +455,61 @@ All five are `USERSET` — settable per-session.
 - [x] `turbovec.*` GUC namespace
 - [x] `#[pg_test]` suite + psql regression script
 
-### Phase 2 (v0.2.0)
+### Phase 2 (v0.2.0, **shipped**)
 
-- [ ] Hand-rolled binary-compatible varlena layout (Section 3.2).
-      Adds two-way casts to `pgvector.vector` when that extension is
-      present.
-- [ ] `turbovec` index access method, side-table-persisted
-      (Section 6.4 option B).
-- [ ] Operator classes `tvector_ip_ops`, `tvector_cosine_ops`.
-- [ ] `turbovec.knn(rel, col, query, k, bit_width)` SQL function
-      promoted from the `phase2_knn.rs` starter, with the
-      relcache-invalidation hook wired into `_PG_init`.
-- [ ] Filtered search via `search_with_allowlist`.
-- [ ] `pg_regress`-style tests under `tests/sql/` and `tests/expected/`.
+- [x] `turbovec.knn(rel regclass, id_col text, vec_col text, query
+      tvector, k int, bit_width int default 4)` function-driven
+      ANN search backed by `IdMapIndex`.
+- [x] Optional unit-normalisation gated by
+      `turbovec.normalize_on_insert`.
+- [ ] Filtered search via `search_with_allowlist` — deferred to
+      Phase 6 once the index AM is validated.
 
-### Phase 3 (v0.3.0)
+### Phase 3 (v0.3.0, **shipped**)
 
-- [ ] Relfile-resident, WAL-logged index pages (Section 6.4 option C).
+- [x] Pure-Rust math kernels module (`src/kernels.rs`).
+- [x] `tvector_random_unit(integer)`.
+- [x] `criterion`-based bench harness (`benches/distance.rs`).
+- [x] Codeberg Woodpecker CI configuration.
+- [x] User-facing docs: `docs/USAGE.md`, `docs/RECALL.md`.
+
+### Phase 4 (v0.4.0, **shipped, experimental**)
+
+- [x] Full `IndexAmRoutine` scaffold under `src/index/`,
+      gated by the `experimental_index_am` Cargo feature.
+- [x] `CREATE ACCESS METHOD turbovec` + operator classes
+      `tvector_ip_ops` / `tvector_cosine_ops`.
+- [x] Side-table-persisted IdMapIndex via SPI.
+- [x] `docs/INDEXAM.md` implementation guide.
+- [ ] Validated against a running cluster — needs Phase 6
+      session with `cargo-pgrx`.
+
+### Phase 5 (v0.5.0, **shipped**)
+
+- [x] `subvector(tvector, integer, integer)`.
+- [x] `tvector_to_jsonb` / `jsonb_to_tvector` and casts.
+- [x] `tvector_check_dim`, `tvector_zeros`, `tvector_to_text`.
+
+### Phase 6 (v0.6.0, planned)
+
+- [ ] Validate the experimental index AM against `cargo pgrx test
+      pg17 --features experimental_index_am`; fix issues; promote
+      to default-on.
+- [ ] Filtered search via `IdMapIndex::search_with_allowlist`
+      hooked into the planner's bitmap scan.
+- [ ] Hand-rolled binary-compatible varlena layout (Section 3.2)
+      replacing the v0.1 CBOR encoding. Adds two-way casts to
+      `pgvector.vector` when present.
+- [ ] Backend-local cache + relcache invalidation hook for
+      `turbovec.knn()`.
+
+### Phase 7 (v0.7.0, research)
+
+- [ ] Relfile-resident, WAL-logged index pages (Section 6.4
+      option C).
 - [ ] Parallel `ambuild`.
 - [ ] Incremental WAL of `aminsert` updates.
-- [ ] HNSW-on-TurboQuant variant under a different opclass (research).
+- [ ] HNSW-on-TurboQuant variant.
 
 ---
 

@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -19,7 +19,7 @@ name = "pgrx_embed_pg_turbovec"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]
-default = ["pg16"]
+default = ["pg16", "experimental_index_am"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
@@ -27,8 +27,11 @@ pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 pg_test = []
-# **EXPERIMENTAL** — opt-in build of the `turbovec` index access method.
-# Phase 4 scaffolding; see docs/INDEXAM.md before enabling on production data.
+# Cargo feature gating the `turbovec` index access method (Rust
+# IndexAmRoutine + opclasses + side-table storage). Default-on as
+# of v0.9 (was experimental v0.4..v0.8). Build without it for a
+# smaller .so when the AM isn't needed:
+#   cargo build --no-default-features --features pg16
 experimental_index_am = []
 
 [dependencies]

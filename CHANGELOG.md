@@ -4,6 +4,47 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — Unreleased
+
+### Phase 9 — index AM promoted to default + AM scan path uses the cache
+
+After v0.7's hardening (32/32 AM tests) and v0.8's cache work, the
+`turbovec` index access method is promoted out of the experimental
+feature gate and into the default build:
+
+```toml
+[features]
+default = ["pg16", "experimental_index_am"]
+```
+
+A stripped-down build without the AM is still available via
+`cargo build --no-default-features --features pg16`.
+
+### Source
+
+- `src/index/scan.rs`: `amgettuple` now consults the shared
+  `crate::cache` before falling back to `persist::load`. On cache
+  hit the scan skips:
+   1. The `am_storage` row read (one PG round-trip).
+   2. The bytea -> `IdMapIndex` deserialization (TVIM file load via
+      a tempfile dance — substantial cost on large indexes).
+  Cache validity is the same as the function path: relfilenode
+  + n_vectors, plus LRU under `turbovec.cache_size_mb`.
+
+  Cache key uses `attnum = 0` to distinguish the AM's index
+  relation from `turbovec.knn()`'s heap-relation entries (which
+  use the column attnum).
+
+- `Cargo.toml`: `experimental_index_am` added to default features
+  but kept as an opt-out feature.
+
+### Verified
+
+```
+cargo pgrx test pg16                                    -> 34 ok / 0 failed
+cargo build --no-default-features --features pg16       -> builds clean
+```
+
 ## [0.8.0] — Unreleased
 
 ### Phase 8 — backend-local cache for `turbovec.knn()`
@@ -444,6 +485,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.9.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.9.0
 [0.8.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.8.0
 [0.7.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.7.0
 [0.6.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.6.0

@@ -30,6 +30,7 @@ pub(crate) struct ScanOpaque {
 }
 
 /// `ambeginscan`: allocate the IndexScanDesc and attach our opaque.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambeginscan(
     index_relation: pg_sys::Relation,
     nkeys: c_int,
@@ -68,6 +69,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
 
 /// `amrescan`: pull the order-by query out of `orderbys[0]` and
 /// stash it in our opaque.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amrescan(
     scan: pg_sys::IndexScanDesc,
     keys: pg_sys::ScanKey,
@@ -134,6 +136,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
 
 /// `amgettuple`: on first call run the search and cache results;
 /// subsequent calls drain one TID at a time.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amgettuple(
     scan: pg_sys::IndexScanDesc,
     _direction: pg_sys::ScanDirection::Type,
@@ -188,4 +191,5 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 
 /// `amendscan`: nothing to do — palloc'd memory is freed by the scan
 /// memory context teardown.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}

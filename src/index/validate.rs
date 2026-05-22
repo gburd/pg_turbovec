@@ -4,6 +4,7 @@
 
 use pgrx::pg_sys;
 
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amvalidate(_opclassoid: pg_sys::Oid) -> bool {
     true
 }

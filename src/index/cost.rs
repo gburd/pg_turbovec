@@ -15,6 +15,7 @@
 
 use pgrx::pg_sys;
 
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amcostestimate(
     _root: *mut pg_sys::PlannerInfo,
     _path: *mut pg_sys::IndexPath,

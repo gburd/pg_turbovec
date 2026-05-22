@@ -1,0 +1,17 @@
+{
+  "host": "dev cluster (NixOS, x86_64, AVX2)",
+  "postgres": "16.9",
+  "turbovec": "0.5",
+  "corpus_size": 1000,
+  "n_queries": 50,
+  "queries_seed": "0xBADC0DE",
+  "corpus_seed": "0xC0FFEE",
+  "results": [
+    {"dim": 128, "bit_width": 2, "r_at_1": 0.40, "r_at_10": 0.646, "r_at_100": 0.755},
+    {"dim": 128, "bit_width": 4, "r_at_1": 0.80, "r_at_10": 0.890, "r_at_100": 0.928},
+    {"dim": 384, "bit_width": 2, "r_at_1": 0.34, "r_at_10": 0.618, "r_at_100": 0.760},
+    {"dim": 384, "bit_width": 4, "r_at_1": 0.78, "r_at_10": 0.890, "r_at_100": 0.927},
+    {"dim": 768, "bit_width": 2, "r_at_1": 0.50, "r_at_10": 0.620, "r_at_100": 0.758},
+    {"dim": 768, "bit_width": 4, "r_at_1": 0.82, "r_at_10": 0.884, "r_at_100": 0.920}
+  ]
+}

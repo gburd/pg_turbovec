@@ -88,4 +88,3 @@ pub fn tvector_random_unit(dim: i32) -> Tvector {
         .collect();
     Tvector::from_vec(kernels::normalise_to_vec(&raw))
 }
-

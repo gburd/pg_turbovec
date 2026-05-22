@@ -111,8 +111,7 @@ impl InOutFuncs for Tvector {
         buffer.push(']');
     }
 
-    const NULL_ERROR_MESSAGE: Option<&'static str> =
-        Some("NULL is not a valid tvector value");
+    const NULL_ERROR_MESSAGE: Option<&'static str> = Some("NULL is not a valid tvector value");
 }
 
 /// Parse a `'[a, b, c]'`-formatted tvector literal.
@@ -136,9 +135,7 @@ fn parse_tvector(s: &str) -> Result<Vec<f32>, String> {
         if tok.is_empty() {
             return Err(format!("empty value at position {}", i));
         }
-        let v: f32 = tok
-            .parse()
-            .map_err(|e| format!("position {}: {}", i, e))?;
+        let v: f32 = tok.parse().map_err(|e| format!("position {}: {}", i, e))?;
         if !v.is_finite() {
             return Err(format!(
                 "position {}: value '{}' is not a finite number",
@@ -158,7 +155,10 @@ mod tests {
     #[test]
     fn parse_basic() {
         assert_eq!(parse_tvector("[1, 2, 3]").unwrap(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(parse_tvector("[ 1.5,-2.0 , 3 ]").unwrap(), vec![1.5, -2.0, 3.0]);
+        assert_eq!(
+            parse_tvector("[ 1.5,-2.0 , 3 ]").unwrap(),
+            vec![1.5, -2.0, 3.0]
+        );
     }
 
     #[test]

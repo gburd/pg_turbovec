@@ -80,9 +80,7 @@ fn load_fixture_if_available(want_dim: usize, want_n: usize) -> Option<Vec<Vec<f
     let dim = u32::from_le_bytes(header[..4].try_into().ok()?) as usize;
     let n = u32::from_le_bytes(header[4..].try_into().ok()?) as usize;
     if dim != want_dim {
-        eprintln!(
-            "recall: skipping fixture {path}: dim={dim} but bench wants dim={want_dim}"
-        );
+        eprintln!("recall: skipping fixture {path}: dim={dim} but bench wants dim={want_dim}");
         return None;
     }
     let take = n.min(want_n);
@@ -132,14 +130,17 @@ fn recall_at_k(brute: &[usize], indexed: &[usize], k: usize) -> f64 {
         return 0.0;
     }
     let bset: std::collections::HashSet<_> = brute.iter().take(take).copied().collect();
-    let hits = indexed.iter().take(take).filter(|i| bset.contains(i)).count();
+    let hits = indexed
+        .iter()
+        .take(take)
+        .filter(|i| bset.contains(i))
+        .count();
     hits as f64 / take as f64
 }
 
 fn run_recall(n: usize, dim: usize, bit_width: usize, n_queries: usize) -> Report {
-    let corpus = load_fixture_if_available(dim, n).unwrap_or_else(|| {
-        random_corpus(n, dim, 0xC0FFEE)
-    });
+    let corpus =
+        load_fixture_if_available(dim, n).unwrap_or_else(|| random_corpus(n, dim, 0xC0FFEE));
     let queries = random_corpus(n_queries, dim, 0xBADC0DE);
 
     // Build the index.

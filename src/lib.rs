@@ -69,10 +69,8 @@ mod tests {
 
     #[pg_test]
     fn parse_and_render() {
-        let out: Option<String> = Spi::get_one(
-            "SELECT '[1, 2, 3]'::turbovec.tvector::text",
-        )
-        .unwrap();
+        let out: Option<String> =
+            Spi::get_one("SELECT '[1, 2, 3]'::turbovec.tvector::text").unwrap();
         // Round-trip through CBOR may reorder spacing but preserves values.
         assert!(out.unwrap().contains('1'));
     }
@@ -91,33 +89,25 @@ mod tests {
     #[pg_test]
     fn l2_and_l1() {
         use_turbovec();
-        let d: Option<f64> = Spi::get_one(
-            "SELECT '[1,2,3]'::tvector <-> '[4,6,3]'::tvector",
-        )
-        .unwrap();
+        let d: Option<f64> =
+            Spi::get_one("SELECT '[1,2,3]'::tvector <-> '[4,6,3]'::tvector").unwrap();
         assert!((d.unwrap() - 5.0).abs() < 1e-6); // sqrt(9+16+0) = 5
 
-        let l1: Option<f64> = Spi::get_one(
-            "SELECT '[1,2,3]'::tvector <+> '[4,6,3]'::tvector",
-        )
-        .unwrap();
+        let l1: Option<f64> =
+            Spi::get_one("SELECT '[1,2,3]'::tvector <+> '[4,6,3]'::tvector").unwrap();
         assert!((l1.unwrap() - 7.0).abs() < 1e-6); // 3 + 4 + 0
     }
 
     #[pg_test]
     fn inner_product_and_cosine() {
         use_turbovec();
-        let neg_ip: Option<f64> = Spi::get_one(
-            "SELECT '[1,0,0]'::tvector <#> '[1,0,0]'::tvector",
-        )
-        .unwrap();
+        let neg_ip: Option<f64> =
+            Spi::get_one("SELECT '[1,0,0]'::tvector <#> '[1,0,0]'::tvector").unwrap();
         // <#> = -dot = -1
         assert!((neg_ip.unwrap() + 1.0).abs() < 1e-6);
 
-        let cos: Option<f64> = Spi::get_one(
-            "SELECT '[1,0]'::tvector <=> '[0,1]'::tvector",
-        )
-        .unwrap();
+        let cos: Option<f64> =
+            Spi::get_one("SELECT '[1,0]'::tvector <=> '[0,1]'::tvector").unwrap();
         // perpendicular -> cosine distance = 1.0
         assert!((cos.unwrap() - 1.0).abs() < 1e-6);
     }
@@ -126,9 +116,7 @@ mod tests {
     fn rejects_dim_mismatch() {
         use_turbovec();
         let res = std::panic::catch_unwind(|| {
-            Spi::get_one::<f64>(
-                "SELECT '[1,2,3]'::tvector <-> '[1,2]'::tvector",
-            )
+            Spi::get_one::<f64>("SELECT '[1,2,3]'::tvector <-> '[1,2]'::tvector")
         });
         assert!(res.is_err(), "expected dim-mismatch ERROR");
     }
@@ -138,8 +126,7 @@ mod tests {
         use_turbovec();
         Spi::run("CREATE TEMP TABLE t (v tvector)").unwrap();
         Spi::run("INSERT INTO t VALUES ('[1,2,3]'),('[3,4,5]'),('[5,6,7]')").unwrap();
-        let avg: Option<String> =
-            Spi::get_one("SELECT avg(v)::text FROM t").unwrap();
+        let avg: Option<String> = Spi::get_one("SELECT avg(v)::text FROM t").unwrap();
         let s = avg.unwrap();
         assert!(s.contains("3"));
         assert!(s.contains("4"));
@@ -148,16 +135,12 @@ mod tests {
 
     #[pg_test]
     fn array_casts() {
-        let v: Option<String> = Spi::get_one(
-            "SELECT (ARRAY[1,2,3]::real[])::turbovec.tvector::text",
-        )
-        .unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT (ARRAY[1,2,3]::real[])::turbovec.tvector::text").unwrap();
         assert!(v.unwrap().contains('1'));
 
-        let v: Option<String> = Spi::get_one(
-            "SELECT '[1.5, 2.5, 3.5]'::turbovec.tvector::real[]::text",
-        )
-        .unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT '[1.5, 2.5, 3.5]'::turbovec.tvector::real[]::text").unwrap();
         let s = v.unwrap();
         assert!(s.contains("1.5") && s.contains("2.5") && s.contains("3.5"));
     }
@@ -244,16 +227,11 @@ mod tests {
              LIMIT 1",
         )
         .unwrap();
-        assert_eq!(
-            first,
-            Some(1),
-            "nearest neighbour to e1 should be row 1"
-        );
+        assert_eq!(first, Some(1), "nearest neighbour to e1 should be row 1");
 
         // Drop the index — should leave the heap intact.
         Spi::run("DROP INDEX t_ann_emb_idx").unwrap();
-        let n_remaining: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM t_ann").unwrap();
+        let n_remaining: Option<i64> = Spi::get_one("SELECT count(*) FROM t_ann").unwrap();
         assert_eq!(n_remaining, Some(4));
     }
 
@@ -267,8 +245,7 @@ mod tests {
     #[pg_test]
     fn index_am_create_index_concurrently() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_cic (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_cic (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO t_cic VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -311,8 +288,7 @@ mod tests {
     #[pg_test]
     fn index_am_vacuum_removes_dead() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_vac (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_vac (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO t_vac VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -581,8 +557,7 @@ mod tests {
     #[pg_test]
     fn knn_cache_hit_after_first_call() {
         use_turbovec();
-        Spi::run("CREATE TEMP TABLE cache_t (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TEMP TABLE cache_t (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO cache_t VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -611,8 +586,7 @@ mod tests {
     #[pg_test]
     fn knn_cache_invalidates_on_insert() {
         use_turbovec();
-        Spi::run("CREATE TEMP TABLE cache_inv (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TEMP TABLE cache_inv (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO cache_inv VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -658,8 +632,7 @@ mod tests {
     #[pg_test]
     fn index_am_forced_index_scan() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_force (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_force (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO t_force \
              SELECT i, ('[' || string_agg( \
@@ -706,8 +679,7 @@ mod tests {
     #[pg_test]
     fn knn_filtered_allowlist() {
         use_turbovec();
-        Spi::run("CREATE TEMP TABLE filt (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TEMP TABLE filt (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO filt VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -770,8 +742,7 @@ mod tests {
     #[pg_test]
     fn index_am_realistic_dim_384() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_384 (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_384 (id bigint PRIMARY KEY, emb tvector)").unwrap();
         // Seed-stable per-row vectors via hashtext.
         Spi::run(
             "INSERT INTO t_384 \
@@ -914,10 +885,9 @@ mod tests {
 
     #[pg_test]
     fn jsonb_round_trip() {
-        let txt: Option<String> = Spi::get_one(
-            "SELECT '[1, 2.5, -3]'::turbovec.tvector::jsonb::turbovec.tvector::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT '[1, 2.5, -3]'::turbovec.tvector::jsonb::turbovec.tvector::text")
+                .unwrap();
         let s = txt.unwrap();
         assert!(s.contains("1") && s.contains("2.5") && s.contains("-3"));
     }
@@ -942,29 +912,22 @@ mod tests {
 
     #[pg_test]
     fn zeros_helper() {
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT turbovec.vector_dims(turbovec.tvector_zeros(8))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT turbovec.vector_dims(turbovec.tvector_zeros(8))").unwrap();
         assert_eq!(dim, Some(8));
         let n: Option<f64> =
-            Spi::get_one("SELECT turbovec.vector_norm(turbovec.tvector_zeros(8))")
-                .unwrap();
+            Spi::get_one("SELECT turbovec.vector_norm(turbovec.tvector_zeros(8))").unwrap();
         assert_eq!(n, Some(0.0));
     }
 
     /// `tvector_random_unit(n)` returns a unit-norm vector of dim n.
     #[pg_test]
     fn random_unit_dim_and_norm() {
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT turbovec.vector_dims(turbovec.tvector_random_unit(8))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT turbovec.vector_dims(turbovec.tvector_random_unit(8))").unwrap();
         assert_eq!(dim, Some(8));
-        let n: Option<f64> = Spi::get_one(
-            "SELECT turbovec.vector_norm(turbovec.tvector_random_unit(16))",
-        )
-        .unwrap();
+        let n: Option<f64> =
+            Spi::get_one("SELECT turbovec.vector_norm(turbovec.tvector_random_unit(16))").unwrap();
         assert!((n.unwrap() - 1.0).abs() < 1e-5, "norm = {:?}", n);
     }
 
@@ -972,10 +935,9 @@ mod tests {
     /// type's text output but callable directly).
     #[pg_test]
     fn tvector_to_text_function() {
-        let s: Option<String> = Spi::get_one(
-            "SELECT turbovec.tvector_to_text('[1, 2.5, 3]'::turbovec.tvector)",
-        )
-        .unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT turbovec.tvector_to_text('[1, 2.5, 3]'::turbovec.tvector)")
+                .unwrap();
         let txt = s.unwrap();
         assert!(txt.starts_with('['));
         assert!(txt.ends_with(']'));
@@ -993,8 +955,7 @@ mod tests {
     fn aggregate_avg_empty_is_null() {
         use_turbovec();
         Spi::run("CREATE TEMP TABLE avg_empty (v tvector)").unwrap();
-        let avg: Option<String> =
-            Spi::get_one("SELECT avg(v)::text FROM avg_empty").unwrap();
+        let avg: Option<String> = Spi::get_one("SELECT avg(v)::text FROM avg_empty").unwrap();
         assert_eq!(avg, None, "avg over empty table must be NULL");
     }
 
@@ -1009,9 +970,8 @@ mod tests {
                  ('[1,2,3,4]'::tvector)",
         )
         .unwrap();
-        let res = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>("SELECT avg(v)::text FROM mixed_t")
-        });
+        let res =
+            std::panic::catch_unwind(|| Spi::get_one::<String>("SELECT avg(v)::text FROM mixed_t"));
         assert!(res.is_err(), "expected ERROR for mixed-dim avg");
     }
 
@@ -1045,10 +1005,8 @@ mod tests {
     /// `vector_norm` of the zero vector is exactly 0.
     #[pg_test]
     fn vector_norm_of_zero() {
-        let n: Option<f64> = Spi::get_one(
-            "SELECT turbovec.vector_norm('[0,0,0,0]'::turbovec.tvector)",
-        )
-        .unwrap();
+        let n: Option<f64> =
+            Spi::get_one("SELECT turbovec.vector_norm('[0,0,0,0]'::turbovec.tvector)").unwrap();
         assert_eq!(n, Some(0.0));
     }
 
@@ -1121,16 +1079,12 @@ mod tests {
     #[pg_test]
     fn jsonb_to_tvector_rejects_non_array() {
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT turbovec.jsonb_to_tvector('{\"a\": 1}'::jsonb)::text",
-            )
+            Spi::get_one::<String>("SELECT turbovec.jsonb_to_tvector('{\"a\": 1}'::jsonb)::text")
         });
         assert!(bad.is_err(), "expected ERROR for non-array jsonb");
 
         let bad2 = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT turbovec.jsonb_to_tvector('42'::jsonb)::text",
-            )
+            Spi::get_one::<String>("SELECT turbovec.jsonb_to_tvector('42'::jsonb)::text")
         });
         assert!(bad2.is_err(), "expected ERROR for scalar jsonb");
     }
@@ -1148,9 +1102,7 @@ mod tests {
         assert!(bad.is_err(), "expected ERROR for string element");
 
         let bad2 = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT turbovec.jsonb_to_tvector('[1, null, 3]'::jsonb)::text",
-            )
+            Spi::get_one::<String>("SELECT turbovec.jsonb_to_tvector('[1, null, 3]'::jsonb)::text")
         });
         assert!(bad2.is_err(), "expected ERROR for null element");
     }
@@ -1160,31 +1112,24 @@ mod tests {
     #[pg_test]
     fn guc_bit_width_default_round_trip() {
         Spi::run("SET turbovec.bit_width_default = 2").unwrap();
-        let v: Option<String> = Spi::get_one(
-            "SELECT current_setting('turbovec.bit_width_default')",
-        )
-        .unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.bit_width_default')").unwrap();
         assert_eq!(v.as_deref(), Some("2"));
 
         Spi::run("SET turbovec.bit_width_default = 4").unwrap();
-        let v: Option<String> = Spi::get_one(
-            "SELECT current_setting('turbovec.bit_width_default')",
-        )
-        .unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.bit_width_default')").unwrap();
         assert_eq!(v.as_deref(), Some("4"));
 
         // Out-of-range values are rejected by GucContext::Userset.
-        let bad = std::panic::catch_unwind(|| {
-            Spi::run("SET turbovec.bit_width_default = 5")
-        });
+        let bad = std::panic::catch_unwind(|| Spi::run("SET turbovec.bit_width_default = 5"));
         assert!(bad.is_err(), "expected ERROR for out-of-range bit_width");
     }
 
     /// `turbovec.knn()` against an empty table returns 0 rows.
     #[pg_test]
     fn knn_empty_corpus() {
-        Spi::run("CREATE TEMP TABLE empty_corp (id bigint, emb turbovec.tvector)")
-            .unwrap();
+        Spi::run("CREATE TEMP TABLE empty_corp (id bigint, emb turbovec.tvector)").unwrap();
         let n: Option<i64> = Spi::get_one(
             "SELECT count(*) FROM turbovec.knn(\
                  'empty_corp'::regclass, 'id', 'emb', \
@@ -1197,8 +1142,7 @@ mod tests {
     /// `turbovec.knn()` when k > n returns all n rows.
     #[pg_test]
     fn knn_k_greater_than_n() {
-        Spi::run("CREATE TEMP TABLE small_corp (id bigint, emb turbovec.tvector)")
-            .unwrap();
+        Spi::run("CREATE TEMP TABLE small_corp (id bigint, emb turbovec.tvector)").unwrap();
         Spi::run(
             "INSERT INTO small_corp VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -1229,8 +1173,7 @@ mod tests {
     #[pg_test]
     fn knn_cache_invalidates_on_row_count_change() {
         use_turbovec();
-        Spi::run("CREATE TEMP TABLE rc_t (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TEMP TABLE rc_t (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO rc_t VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -1268,8 +1211,7 @@ mod tests {
     #[pg_test]
     fn index_am_cache_invalidates_on_reindex() {
         use_turbovec();
-        Spi::run("CREATE TABLE reidx_t (id bigint PRIMARY KEY, emb tvector)")
-            .unwrap();
+        Spi::run("CREATE TABLE reidx_t (id bigint PRIMARY KEY, emb tvector)").unwrap();
         Spi::run(
             "INSERT INTO reidx_t VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -1315,26 +1257,20 @@ mod tests {
     #[pg_test]
     fn elementwise_arithmetic() {
         use_turbovec();
-        let s: Option<String> = Spi::get_one(
-            "SELECT ('[1,2,3]'::tvector + '[10,20,30]'::tvector)::text",
-        )
-        .unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT ('[1,2,3]'::tvector + '[10,20,30]'::tvector)::text").unwrap();
         let txt = s.unwrap();
         assert!(txt.contains("11"));
         assert!(txt.contains("22"));
         assert!(txt.contains("33"));
 
-        let s: Option<String> = Spi::get_one(
-            "SELECT ('[10,20,30]'::tvector - '[1,2,3]'::tvector)::text",
-        )
-        .unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT ('[10,20,30]'::tvector - '[1,2,3]'::tvector)::text").unwrap();
         let txt = s.unwrap();
         assert!(txt.contains("9") && txt.contains("18") && txt.contains("27"));
 
-        let s: Option<String> = Spi::get_one(
-            "SELECT ('[1,2,3]'::tvector * '[10,20,30]'::tvector)::text",
-        )
-        .unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT ('[1,2,3]'::tvector * '[10,20,30]'::tvector)::text").unwrap();
         let txt = s.unwrap();
         assert!(txt.contains("10") && txt.contains("40") && txt.contains("90"));
     }
@@ -1351,8 +1287,7 @@ mod tests {
                  ('[100,200,300]'::tvector)",
         )
         .unwrap();
-        let s: Option<String> =
-            Spi::get_one("SELECT sum(v)::text FROM sum_t").unwrap();
+        let s: Option<String> = Spi::get_one("SELECT sum(v)::text FROM sum_t").unwrap();
         let txt = s.unwrap();
         assert!(txt.contains("111"));
         assert!(txt.contains("222"));
@@ -1364,18 +1299,16 @@ mod tests {
     fn aggregate_sum_empty_is_null() {
         use_turbovec();
         Spi::run("CREATE TEMP TABLE sum_empty (v tvector)").unwrap();
-        let s: Option<String> =
-            Spi::get_one("SELECT sum(v)::text FROM sum_empty").unwrap();
+        let s: Option<String> = Spi::get_one("SELECT sum(v)::text FROM sum_empty").unwrap();
         assert_eq!(s, None);
     }
 
     /// JSONB explicit cast round-trips.
     #[pg_test]
     fn jsonb_cast_explicit_function() {
-        let txt: Option<String> = Spi::get_one(
-            "SELECT turbovec.tvector_to_jsonb('[1, 2, 3]'::turbovec.tvector)::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT turbovec.tvector_to_jsonb('[1, 2, 3]'::turbovec.tvector)::text")
+                .unwrap();
         let s = txt.unwrap();
         assert!(s.contains("1") && s.contains("2") && s.contains("3"));
     }
@@ -1384,16 +1317,12 @@ mod tests {
     #[pg_test]
     fn zeros_rejects_bad_dim() {
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<i32>(
-                "SELECT turbovec.vector_dims(turbovec.tvector_zeros(0))",
-            )
+            Spi::get_one::<i32>("SELECT turbovec.vector_dims(turbovec.tvector_zeros(0))")
         });
         assert!(bad.is_err(), "expected ERROR for dim = 0");
 
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<i32>(
-                "SELECT turbovec.vector_dims(turbovec.tvector_zeros(20000))",
-            )
+            Spi::get_one::<i32>("SELECT turbovec.vector_dims(turbovec.tvector_zeros(20000))")
         });
         assert!(bad.is_err(), "expected ERROR for dim > MAX_DIM");
     }
@@ -1410,7 +1339,6 @@ mod tests {
         });
         assert!(bad.is_err(), "expected ERROR for expected = 0");
     }
-
 }
 
 /// PGRX test runner harness.

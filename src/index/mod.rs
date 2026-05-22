@@ -42,8 +42,8 @@ mod insert;
 mod options;
 mod persist;
 mod scan;
-mod validate;
 mod vacuum;
+mod validate;
 
 /// Strategy number for the order-by operator inside both
 /// `tvector_ip_ops` (`<#>`) and `tvector_cosine_ops` (`<=>`).
@@ -220,8 +220,5 @@ extension_sql!(
             FUNCTION 1 cosine_distance(tvector, tvector);
     ",
     name = "turbovec_index_am",
-    requires = [
-        "turbovec_index_handler_decl",
-        "tvector_operators"
-    ]
+    requires = ["turbovec_index_handler_decl", "tvector_operators"]
 );

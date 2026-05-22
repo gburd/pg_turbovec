@@ -49,12 +49,11 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
     // RelationGetIndexScan returns; AMs that advertise
     // `amcanorderbyop = true` must allocate them themselves.
     if norderbys > 0 {
-        (*scan).xs_orderbyvals = pg_sys::palloc0(
-            std::mem::size_of::<pg_sys::Datum>() * (norderbys as usize),
-        ) as *mut pg_sys::Datum;
-        (*scan).xs_orderbynulls = pg_sys::palloc0(
-            std::mem::size_of::<bool>() * (norderbys as usize),
-        ) as *mut bool;
+        (*scan).xs_orderbyvals =
+            pg_sys::palloc0(std::mem::size_of::<pg_sys::Datum>() * (norderbys as usize))
+                as *mut pg_sys::Datum;
+        (*scan).xs_orderbynulls =
+            pg_sys::palloc0(std::mem::size_of::<bool>() * (norderbys as usize)) as *mut bool;
         for i in 0..(norderbys as usize) {
             *(*scan).xs_orderbynulls.add(i) = true;
         }
@@ -124,9 +123,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         // No ORDER BY \u2014 nothing to scan. Phase 5 may add a "scan
         // everything" mode for plain `WHERE` predicates; v0.4
         // intentionally rejects this combination.
-        error!(
-            "turbovec: index scan requires an ORDER BY <operator> <query> clause"
-        );
+        error!("turbovec: index scan requires an ORDER BY <operator> <query> clause");
     }
     let order = orderbys.add(0);
     let datum = (*order).sk_argument;

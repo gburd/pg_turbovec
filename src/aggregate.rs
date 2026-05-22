@@ -89,10 +89,7 @@ fn tvector_accum(state: Option<TvectorAccum>, value: Tvector) -> TvectorAccum {
 /// `state := tvector_combine(s1, s2)` for parallel aggregation.
 /// Both operands are nullable for symmetry with the SQL machinery.
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_combine(
-    s1: Option<TvectorAccum>,
-    s2: Option<TvectorAccum>,
-) -> Option<TvectorAccum> {
+fn tvector_combine(s1: Option<TvectorAccum>, s2: Option<TvectorAccum>) -> Option<TvectorAccum> {
     match (s1, s2) {
         (None, None) => None,
         (Some(s), None) | (None, Some(s)) => Some(s),

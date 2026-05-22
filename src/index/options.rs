@@ -93,10 +93,7 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
     if !opts.is_null() && validate {
         let o = &*opts;
         if !(2..=4).contains(&o.bit_width) {
-            pgrx::error!(
-                "turbovec: bit_width must be in 2..=4 (got {})",
-                o.bit_width
-            );
+            pgrx::error!("turbovec: bit_width must be in 2..=4 (got {})", o.bit_width);
         }
         if o.dim != 0 && (o.dim <= 0 || o.dim % 8 != 0) {
             pgrx::error!(

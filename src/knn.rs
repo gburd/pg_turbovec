@@ -161,8 +161,7 @@ fn run_search(
                 return Vec::new();
             }
             let take = k.min(buf.len());
-            let (scores, hit_ids) =
-                idx.search_with_allowlist(query, take, Some(&buf));
+            let (scores, hit_ids) = idx.search_with_allowlist(query, take, Some(&buf));
             hit_ids
                 .iter()
                 .zip(scores.iter())
@@ -270,10 +269,7 @@ fn collect_via_spi(
             if arr.len() != expected_dim {
                 continue;
             }
-            let values: Vec<f32> = arr
-                .into_iter()
-                .map(|v| v.unwrap_or(f32::NAN))
-                .collect();
+            let values: Vec<f32> = arr.into_iter().map(|v| v.unwrap_or(f32::NAN)).collect();
             if values.iter().any(|v| !v.is_finite()) {
                 continue;
             }

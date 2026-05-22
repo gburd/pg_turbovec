@@ -39,8 +39,7 @@ pub(crate) unsafe extern "C-unwind" fn amcostestimate(
     // pessimistic estimate.
     let (n_vectors, dim, bit_width): (i64, i32, i32) = if let Some(oid) = indexrelid {
         let row = pgrx::Spi::connect(|client| {
-            let sql =
-                "SELECT n_vectors, dim, bit_width FROM turbovec.am_storage \
+            let sql = "SELECT n_vectors, dim, bit_width FROM turbovec.am_storage \
                  WHERE indexrelid = $1";
             let mut iter = match client.select(sql, Some(1), &[oid.into()]) {
                 Ok(t) => t,

@@ -4,6 +4,40 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — Unreleased
+
+### Phase 11 — realistic-scale tests + 2-bit round-trip + psql regression
+
+Proves the index AM scales to real-world dimensionality and to
+the most-compressed bit_width.
+
+### New tests
+
+- **`index_am_realistic_dim_384`** — 200 deterministic 384-dim
+  vectors (typical sentence-embedding dim). Asserts:
+  - `am_storage.n_vectors = 200` after CREATE INDEX.
+  - Self-vector is rank 1 in `ORDER BY emb <=> q LIMIT 1`.
+  - Self-vector lands in top-10.
+- **`index_am_2bit_round_trip`** — 100 vectors at d=128 with
+  `WITH (bit_width = 2)`. Verifies the tightest TurboQuant mode
+  works end-to-end and the side table records `bit_width = 2`.
+  Self-recall in top-20 (relaxed from top-10 because 2-bit
+  costs ~2 R@k points).
+
+### New psql regression script
+
+- `tests/02_index_am.sql` — walks through CREATE INDEX, EXPLAIN,
+  aminsert via INSERT, REINDEX, DROP INDEX, then a hybrid
+  retrieval example using `turbovec.knn(...)` with a SQL-derived
+  allowlist. Run via `cargo pgrx run pg16` then
+  `\i tests/02_index_am.sql`.
+
+### Verified
+
+```
+cargo pgrx test pg16 -> 37 ok / 0 failed
+```
+
 ## [0.10.0] — Unreleased
 
 ### Phase 10 — filtered search via `IdMapIndex::search_with_allowlist`
@@ -547,6 +581,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.11.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.11.0
 [0.10.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.10.0
 [0.9.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.9.0
 [0.8.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.8.0

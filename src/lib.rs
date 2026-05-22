@@ -599,6 +599,123 @@ mod tests {
         assert_eq!(empty_count, Some(0));
     }
 
+    /// 200 random 384-dim vectors (typical sentence-embedding
+    /// dimensionality). Verifies the index works at realistic
+    /// scale rather than just on toy 8-dim corpora. With d=384 and
+    /// 4-bit quantisation TurboQuant has plenty of room — R@10
+    /// against the self-vector should be 1.0.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_realistic_dim_384() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_384 (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        // Seed-stable per-row vectors via hashtext.
+        Spi::run(
+            "INSERT INTO t_384 \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::tvector \
+             FROM generate_series(1, 200) AS gs(i), \
+                  generate_series(1, 384) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+
+        let n_rows: Option<i64> = Spi::get_one("SELECT count(*) FROM t_384").unwrap();
+        assert_eq!(n_rows, Some(200));
+
+        Spi::run(
+            "CREATE INDEX t_384_idx \
+             ON t_384 USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // The AM persisted all 200 rows.
+        let n_indexed: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_384_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_indexed, Some(200));
+
+        // Self-query: row 73's emb. At d=384 / 4-bit, self-score
+        // dominates — row 73 must be rank 1.
+        let nearest: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_384 WHERE id = 73) \
+             SELECT t.id FROM t_384 t, q \
+             ORDER BY t.emb <=> q.emb \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            nearest,
+            Some(73),
+            "at d=384 / 4-bit the self-score must dominate"
+        );
+
+        // Top-10 self-recall: row 73 in top-10.
+        let in_top10: Option<bool> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_384 WHERE id = 73), \
+             top10 AS ( \
+                 SELECT t.id FROM t_384 t, q \
+                 ORDER BY t.emb <=> q.emb \
+                 LIMIT 10 \
+             ) \
+             SELECT EXISTS (SELECT 1 FROM top10 WHERE id = 73)",
+        )
+        .unwrap();
+        assert_eq!(in_top10, Some(true));
+    }
+
+    /// Build at the lowest supported bit_width (= 2) on a realistic
+    /// dim. Confirms the kernel's tightest compression mode round-
+    /// trips end-to-end.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_2bit_round_trip() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_2bit (id bigint PRIMARY KEY, emb tvector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_2bit \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::tvector \
+             FROM generate_series(1, 100) AS gs(i), \
+                  generate_series(1, 128) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_2bit_idx \
+             ON t_2bit USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 2)",
+        )
+        .unwrap();
+
+        let bit_width: Option<i32> = Spi::get_one(
+            "SELECT bit_width FROM turbovec.am_storage \
+             WHERE indexrelid = 't_2bit_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(bit_width, Some(2));
+
+        // Self-recall in top-20 at 2-bit, d=128. Tighter quantisation
+        // = lower recall, so we relax the bar from top-1 to top-20.
+        let in_top20: Option<bool> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_2bit WHERE id = 42), \
+             top20 AS ( \
+                 SELECT t.id FROM t_2bit t, q \
+                 ORDER BY t.emb <=> q.emb \
+                 LIMIT 20 \
+             ) \
+             SELECT EXISTS (SELECT 1 FROM top20 WHERE id = 42)",
+        )
+        .unwrap();
+        assert_eq!(in_top20, Some(true));
+    }
+
     #[pg_test]
     fn knn_rejects_bad_k() {
         Spi::run("CREATE TEMP TABLE pgtv_empty (id bigint, emb turbovec.tvector)").unwrap();

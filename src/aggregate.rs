@@ -126,7 +126,7 @@ fn tvector_sum_finalfn(state: TvectorAccum) -> Option<Tvector> {
 }
 
 extension_sql!(
-    r#"
+    r"
     CREATE AGGREGATE avg(tvector) (
         SFUNC = tvector_accum,
         STYPE = TvectorAccum,
@@ -142,7 +142,7 @@ extension_sql!(
         COMBINEFUNC = tvector_combine,
         PARALLEL = SAFE
     );
-    "#,
+    ",
     name = "tvector_aggregates",
     requires = [
         TvectorAccum,

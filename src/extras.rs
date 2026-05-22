@@ -139,6 +139,7 @@ fn tvector_zeros(dim: i32) -> Tvector {
 /// function but callable directly).
 #[pg_extern(immutable, parallel_safe)]
 fn tvector_to_text(v: Tvector) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(2 + v.dim() * 6);
     out.push('[');
     let mut first = true;
@@ -147,18 +148,18 @@ fn tvector_to_text(v: Tvector) -> String {
             out.push_str(", ");
         }
         first = false;
-        out.push_str(&format!("{}", x));
+        let _ = write!(out, "{x}");
     }
     out.push(']');
     out
 }
 
 extension_sql!(
-    r#"
+    r"
     -- jsonb <-> tvector explicit casts.
     CREATE CAST (tvector AS jsonb) WITH FUNCTION tvector_to_jsonb(tvector);
     CREATE CAST (jsonb   AS tvector) WITH FUNCTION jsonb_to_tvector(jsonb);
-    "#,
+    ",
     name = "tvector_jsonb_casts",
     requires = [tvector_to_jsonb, jsonb_to_tvector]
 );

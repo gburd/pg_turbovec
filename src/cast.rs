@@ -65,12 +65,12 @@ fn tvector_to_array(v: Tvector) -> Vec<f32> {
 }
 
 extension_sql!(
-    r#"
+    r"
     CREATE CAST (real[]             AS tvector) WITH FUNCTION array_to_tvector(real[]);
     CREATE CAST (double precision[] AS tvector) WITH FUNCTION float8_array_to_tvector(double precision[]);
     CREATE CAST (integer[]          AS tvector) WITH FUNCTION int4_array_to_tvector(integer[]);
     CREATE CAST (tvector AS real[])             WITH FUNCTION tvector_to_array(tvector);
-    "#,
+    ",
     name = "tvector_casts",
     requires = [
         Tvector,

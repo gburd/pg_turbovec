@@ -20,6 +20,7 @@
 use pgrx::prelude::*;
 
 pub mod aggregate;
+pub mod cache;
 pub mod cast;
 pub mod distance;
 pub mod extras;
@@ -476,6 +477,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first, Some(1));
+    }
+
+    #[pg_test]
+    fn knn_cache_hit_after_first_call() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE cache_t (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO cache_t VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        let q = "'[1,0,0,0,0,0,0,0]'::turbovec.tvector";
+        let first: Option<i64> = Spi::get_one(&format!(
+            "SELECT id FROM turbovec.knn(\
+                 'cache_t'::regclass, 'id', 'emb', {q}, 1)"
+        ))
+        .unwrap();
+        assert_eq!(first, Some(1));
+        let second: Option<i64> = Spi::get_one(&format!(
+            "SELECT id FROM turbovec.knn(\
+                 'cache_t'::regclass, 'id', 'emb', {q}, 1)"
+        ))
+        .unwrap();
+        assert_eq!(second, Some(1));
+        assert!(
+            crate::cache::len() >= 1,
+            "cache should be populated after lookups"
+        );
+    }
+
+    #[pg_test]
+    fn knn_cache_invalidates_on_insert() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE cache_inv (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO cache_inv VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        let q = "'[0,0,1,0,0,0,0,0]'::turbovec.tvector";
+        let _warmup: Option<i64> = Spi::get_one(&format!(
+            "SELECT id FROM turbovec.knn(\
+                 'cache_inv'::regclass, 'id', 'emb', {q}, 5) \
+             ORDER BY score DESC LIMIT 1"
+        ))
+        .unwrap();
+        Spi::run("INSERT INTO cache_inv VALUES (3, '[0,0,1,0,0,0,0,0]')").unwrap();
+        let after: Option<i64> = Spi::get_one(&format!(
+            "SELECT id FROM turbovec.knn(\
+                 'cache_inv'::regclass, 'id', 'emb', {q}, 5) \
+             ORDER BY score DESC LIMIT 1"
+        ))
+        .unwrap();
+        assert_eq!(
+            after,
+            Some(3),
+            "newly-inserted closer row should win after cache invalidation"
+        );
     }
 
     #[pg_test]

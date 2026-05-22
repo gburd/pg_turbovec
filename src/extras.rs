@@ -20,6 +20,15 @@ use crate::tvector::{Tvector, MAX_DIM};
 /// `subvector(v, start, length)` \u2014 1-indexed slice (matches pgvector).
 /// `start` and `length` must be positive and the resulting range must
 /// lie within `v`.
+///
+/// ```ignore
+/// SELECT turbovec.subvector('[10, 20, 30, 40]'::turbovec.tvector, 2, 2)::text;
+/// -- returns '[20, 30]'
+///
+/// -- Out-of-bounds raises ERROR:
+/// SELECT turbovec.subvector('[1, 2, 3]'::turbovec.tvector, 2, 5);
+/// -- ERROR: subvector: range 2..6 is out of bounds for tvector of dim 3
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn subvector(v: Tvector, start: i32, length: i32) -> Tvector {
     if start < 1 {
@@ -45,6 +54,14 @@ fn subvector(v: Tvector, start: i32, length: i32) -> Tvector {
 }
 
 /// Materialise a `tvector` as a `jsonb` array of numbers.
+///
+/// ```ignore
+/// SELECT turbovec.tvector_to_jsonb('[1, 2.5, -3]'::turbovec.tvector);
+/// -- returns [1, 2.5, -3]::jsonb
+///
+/// -- Equivalent cast form:
+/// SELECT '[1, 2.5, -3]'::turbovec.tvector::jsonb;
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn tvector_to_jsonb(v: Tvector) -> pgrx::JsonB {
     let arr: Vec<Value> = v
@@ -57,6 +74,16 @@ fn tvector_to_jsonb(v: Tvector) -> pgrx::JsonB {
 
 /// Parse a `jsonb` array of numbers as a `tvector`. Rejects non-array
 /// inputs and non-numeric / non-finite elements.
+///
+/// ```ignore
+/// SELECT turbovec.jsonb_to_tvector('[1, 2.5, 3]'::jsonb)::text;
+/// -- returns '[1, 2.5, 3]'
+///
+/// -- Errors:
+/// SELECT turbovec.jsonb_to_tvector('{"a": 1}'::jsonb);     -- ERROR (not array)
+/// SELECT turbovec.jsonb_to_tvector('[1, "x", 3]'::jsonb);  -- ERROR (string elem)
+/// SELECT turbovec.jsonb_to_tvector('[1, null, 3]'::jsonb); -- ERROR (null elem)
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn jsonb_to_tvector(j: pgrx::JsonB) -> Tvector {
     let arr = match j.0 {
@@ -107,6 +134,15 @@ fn value_kind(v: &Value) -> &'static str {
 
 /// Raise an ERROR if `v.dim() != expected`, otherwise return `v`
 /// unchanged. Useful as `CHECK (turbovec.tvector_check_dim(emb, 1536))`.
+///
+/// ```ignore
+/// CREATE TABLE docs (
+///     id  bigserial PRIMARY KEY,
+///     emb turbovec.tvector
+///         CHECK (turbovec.vector_dims(
+///             turbovec.tvector_check_dim(emb, 1536)) = 1536)
+/// );
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn tvector_check_dim(v: Tvector, expected: i32) -> Tvector {
     if expected < 1 {
@@ -124,6 +160,14 @@ fn tvector_check_dim(v: Tvector, expected: i32) -> Tvector {
 
 /// Build a zero-filled `tvector` of the requested dimension. Useful
 /// as the identity for `sum(tvector)` in extension queries.
+///
+/// ```ignore
+/// SELECT turbovec.vector_dims(turbovec.tvector_zeros(8));
+/// -- returns 8
+///
+/// SELECT turbovec.vector_norm(turbovec.tvector_zeros(8));
+/// -- returns 0.0
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn tvector_zeros(dim: i32) -> Tvector {
     if dim <= 0 || dim as usize > MAX_DIM {
@@ -137,6 +181,11 @@ fn tvector_zeros(dim: i32) -> Tvector {
 
 /// Explicit text rendering of a `tvector` (mirrors the type's OUTPUT
 /// function but callable directly).
+///
+/// ```ignore
+/// SELECT turbovec.tvector_to_text('[1, 2.5, -3]'::turbovec.tvector);
+/// -- returns '[1, 2.5, -3]'
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn tvector_to_text(v: Tvector) -> String {
     use std::fmt::Write as _;

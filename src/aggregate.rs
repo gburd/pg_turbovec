@@ -11,6 +11,24 @@
 //! control over the C-side declaration (pgrx's `#[pg_aggregate]`
 //! macro is awkward for stateful types whose dim is determined at
 //! runtime).
+//!
+//! ```ignore
+//! -- Element-wise mean over a corpus.
+//! SELECT avg(emb) FROM docs;
+//!
+//! -- Element-wise sum (e.g. for centroid computation).
+//! SELECT sum(emb) FROM docs;
+//!
+//! -- An empty input or all-NULL input returns NULL (SQL spec).
+//! SELECT avg(emb) FROM docs WHERE FALSE;  -- NULL
+//!
+//! -- Mixed-dim rows raise ERROR mid-aggregate:
+//! SELECT avg(v) FROM (VALUES
+//!     ('[1,2,3]'::turbovec.tvector),
+//!     ('[1,2,3,4]'::turbovec.tvector)
+//! ) t(v);
+//! -- ERROR: tvector_accum: cannot accumulate tvectors of different dimensions (3 vs 4)
+//! ```
 
 use pgrx::prelude::*;
 use serde::{Deserialize, Serialize};

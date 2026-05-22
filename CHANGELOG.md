@@ -4,6 +4,36 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — Unreleased
+
+### Added — Phase 5: pgvector-parity helpers
+
+- **`subvector(tvector, start integer, length integer) -> tvector`**
+  — 1-indexed slice. Bounds-checked; raises `ERROR` on overrun.
+- **`tvector_to_jsonb(tvector) -> jsonb`** and
+  **`jsonb_to_tvector(jsonb) -> tvector`** plus explicit casts in
+  both directions. Useful for replication via JSONB columns,
+  logging, and audit trails.
+- **`tvector_check_dim(tvector, integer) -> tvector`** — runtime
+  dim assertion. Use as a `CHECK` constraint when typmod-style
+  enforcement is wanted without the full typmod plumbing.
+- **`tvector_zeros(integer) -> tvector`** — zero-vector helper;
+  identity for `sum(tvector)` in extension queries.
+- **`tvector_to_text(tvector) -> text`** — explicit text rendering
+  callable from SQL (the type's OUTPUT function as a regular
+  function).
+
+### Tests
+
+- `subvector_basic`, `subvector_out_of_bounds`,
+  `jsonb_round_trip`, `check_dim_passes_and_fails`,
+  `zeros_helper`.
+
+### Changed
+
+- `Cargo.toml` / `pg_turbovec.control` bump to `0.5.0`.
+- `migrations/004_pg_turbovec_v0.5.0.sql` reference mirror.
+
 ## [0.4.0] — Unreleased
 
 ### Added — Phase 4: experimental `turbovec` index access method (opt-in)
@@ -224,6 +254,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.5.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.5.0
 [0.4.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.4.0
 [0.3.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.3.0
 [0.2.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.2.0

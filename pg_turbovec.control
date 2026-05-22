@@ -1,5 +1,5 @@
 comment = 'Vector index for PostgreSQL backed by the TurboQuant quantizer (turbovec)'
-default_version = '0.4.0'
+default_version = '0.5.0'
 module_pathname = '$libdir/pg_turbovec'
 relocatable = false
 superuser = false

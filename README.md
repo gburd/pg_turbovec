@@ -1,8 +1,8 @@
 # pg_turbovec — Vector Index for PostgreSQL (TurboQuant)
 
-> **Status:** v0.4.0 — stable type / operators / aggregates /
-> `turbovec.knn()`. Experimental `turbovec` index access method
-> (`CREATE INDEX ... USING turbovec`) opt-in via
+> **Status:** v0.5.0 — stable type / operators / aggregates / JSON
+> casts / `subvector` / `turbovec.knn()`. Experimental `turbovec`
+> index access method (`CREATE INDEX ... USING turbovec`) opt-in via
 > `--features experimental_index_am`.
 
 `pg_turbovec` is a PostgreSQL extension that provides a vector data type
@@ -33,7 +33,7 @@ named `tvector` and lives in the `turbovec` schema. Casts to and from
 
 ## Features
 
-### v0.3.0 (current default build)
+### v0.5.0 (current default build)
 
 - **`tvector` type** — variable dimension `f32` vectors with text and
   binary I/O (`'[1, 2, 3]'::tvector`, COPY BINARY, libpq binary).
@@ -44,11 +44,13 @@ named `tvector` and lives in the `turbovec` schema. Casts to and from
   - `<+>` taxicab (L1) distance
 - **Functions**: `l2_distance`, `inner_product`, `cosine_distance`,
   `l1_distance`, `vector_dims`, `vector_norm`, `tvector_normalize`,
-  `tvector_random_unit`, `turbovec_self_score`.
+  `tvector_random_unit`, `turbovec_self_score`, `subvector`,
+  `tvector_check_dim`, `tvector_zeros`, `tvector_to_text`.
+- **JSONB I/O**: `tvector_to_jsonb`, `jsonb_to_tvector`, plus casts.
 - **Aggregates**: `avg(tvector)`, `sum(tvector)` — `f64` accumulators,
   `PARALLEL SAFE`.
 - **Casts**: explicit `real[]` / `double precision[]` / `integer[]`
-  ↔ `tvector`.
+  / `jsonb` ↔ `tvector`.
 - **`turbovec.knn(rel, id_col, vec_col, query, k, bit_width)`** —
   function-driven ANN search backed by `turbovec::IdMapIndex`.
   Returns `TABLE(id bigint, score float8)`, ordered by score DESC.

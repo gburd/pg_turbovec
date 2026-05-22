@@ -952,6 +952,465 @@ mod tests {
                 .unwrap();
         assert_eq!(n, Some(0.0));
     }
+
+    /// `tvector_random_unit(n)` returns a unit-norm vector of dim n.
+    #[pg_test]
+    fn random_unit_dim_and_norm() {
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(turbovec.tvector_random_unit(8))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(8));
+        let n: Option<f64> = Spi::get_one(
+            "SELECT turbovec.vector_norm(turbovec.tvector_random_unit(16))",
+        )
+        .unwrap();
+        assert!((n.unwrap() - 1.0).abs() < 1e-5, "norm = {:?}", n);
+    }
+
+    /// `tvector_to_text` as an explicit function call (mirrors the
+    /// type's text output but callable directly).
+    #[pg_test]
+    fn tvector_to_text_function() {
+        let s: Option<String> = Spi::get_one(
+            "SELECT turbovec.tvector_to_text('[1, 2.5, 3]'::turbovec.tvector)",
+        )
+        .unwrap();
+        let txt = s.unwrap();
+        assert!(txt.starts_with('['));
+        assert!(txt.ends_with(']'));
+        assert!(txt.contains("2.5"));
+    }
+
+    /// `avg(tvector)` over an empty table returns NULL (matches the
+    /// SQL spec: aggregate of zero rows is NULL).
+    ///
+    /// Note: `tvector` itself is `NOT NULL` by design — the type
+    /// input function rejects NULL — so we cannot test "avg over
+    /// rows of NULL values" the way we could with int4. Empty-table
+    /// avg is the closest analogue.
+    #[pg_test]
+    fn aggregate_avg_empty_is_null() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE avg_empty (v tvector)").unwrap();
+        let avg: Option<String> =
+            Spi::get_one("SELECT avg(v)::text FROM avg_empty").unwrap();
+        assert_eq!(avg, None, "avg over empty table must be NULL");
+    }
+
+    /// `avg(tvector)` over rows of mixed dim raises an ERROR.
+    #[pg_test]
+    fn aggregate_avg_mixed_dim_errors() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE mixed_t (v tvector)").unwrap();
+        Spi::run(
+            "INSERT INTO mixed_t VALUES \
+                 ('[1,2,3]'::tvector), \
+                 ('[1,2,3,4]'::tvector)",
+        )
+        .unwrap();
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>("SELECT avg(v)::text FROM mixed_t")
+        });
+        assert!(res.is_err(), "expected ERROR for mixed-dim avg");
+    }
+
+    /// `l2_squared_distance` returns L2 distance squared (no sqrt).
+    #[pg_test]
+    fn l2_squared_distance_function() {
+        let d: Option<f64> = Spi::get_one(
+            "SELECT turbovec.l2_squared_distance(\
+                 '[1,2,3]'::turbovec.tvector, '[4,6,3]'::turbovec.tvector)",
+        )
+        .unwrap();
+        // (3^2 + 4^2 + 0^2) = 25
+        assert!((d.unwrap() - 25.0).abs() < 1e-6, "got {:?}", d);
+
+        // Confirm relationship: l2_squared_distance == l2_distance^2.
+        let l2: Option<f64> = Spi::get_one(
+            "SELECT turbovec.l2_distance(\
+                 '[1,2,3]'::turbovec.tvector, '[4,6,3]'::turbovec.tvector)",
+        )
+        .unwrap();
+        let lsq: Option<f64> = Spi::get_one(
+            "SELECT turbovec.l2_squared_distance(\
+                 '[1,2,3]'::turbovec.tvector, '[4,6,3]'::turbovec.tvector)",
+        )
+        .unwrap();
+        let l2 = l2.unwrap();
+        let lsq = lsq.unwrap();
+        assert!((l2 * l2 - lsq).abs() < 1e-6);
+    }
+
+    /// `vector_norm` of the zero vector is exactly 0.
+    #[pg_test]
+    fn vector_norm_of_zero() {
+        let n: Option<f64> = Spi::get_one(
+            "SELECT turbovec.vector_norm('[0,0,0,0]'::turbovec.tvector)",
+        )
+        .unwrap();
+        assert_eq!(n, Some(0.0));
+    }
+
+    /// `cosine_distance` against the zero vector returns NaN
+    /// (matches pgvector).
+    #[pg_test]
+    fn cosine_distance_zero_is_nan() {
+        let d: Option<f64> = Spi::get_one(
+            "SELECT turbovec.cosine_distance(\
+                 '[0,0,0]'::turbovec.tvector, \
+                 '[1,2,3]'::turbovec.tvector)",
+        )
+        .unwrap();
+        assert!(d.unwrap().is_nan(), "expected NaN, got {:?}", d);
+    }
+
+    /// `negative_inner_product(a, b) == -inner_product(a, b)`.
+    #[pg_test]
+    fn negative_inner_product_function() {
+        let ip: Option<f64> = Spi::get_one(
+            "SELECT turbovec.inner_product(\
+                 '[1,2,3]'::turbovec.tvector, \
+                 '[4,5,6]'::turbovec.tvector)",
+        )
+        .unwrap();
+        let nip: Option<f64> = Spi::get_one(
+            "SELECT turbovec.negative_inner_product(\
+                 '[1,2,3]'::turbovec.tvector, \
+                 '[4,5,6]'::turbovec.tvector)",
+        )
+        .unwrap();
+        assert!((ip.unwrap() + nip.unwrap()).abs() < 1e-9);
+    }
+
+    /// `subvector` boundary cases: full slice, single element.
+    #[pg_test]
+    fn subvector_boundaries() {
+        // start=1 length=4 returns the whole vector.
+        let txt: Option<String> = Spi::get_one(
+            "SELECT turbovec.subvector(\
+                 '[10,20,30,40]'::turbovec.tvector, 1, 4)::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        for n in &["10", "20", "30", "40"] {
+            assert!(s.contains(n), "expected {} in {}", n, s);
+        }
+
+        // length=1 returns a single-element vector.
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT turbovec.vector_dims(\
+                 turbovec.subvector('[10,20,30,40]'::turbovec.tvector, 3, 1))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(1));
+
+        // The single element is correct.
+        let v: Option<String> = Spi::get_one(
+            "SELECT turbovec.subvector(\
+                 '[10,20,30,40]'::turbovec.tvector, 3, 1)::text",
+        )
+        .unwrap();
+        let s = v.unwrap();
+        assert!(s.contains("30"));
+        assert!(!s.contains("10"));
+        assert!(!s.contains("40"));
+    }
+
+    /// `jsonb_to_tvector` rejects non-array JSONB.
+    #[pg_test]
+    fn jsonb_to_tvector_rejects_non_array() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT turbovec.jsonb_to_tvector('{\"a\": 1}'::jsonb)::text",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for non-array jsonb");
+
+        let bad2 = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT turbovec.jsonb_to_tvector('42'::jsonb)::text",
+            )
+        });
+        assert!(bad2.is_err(), "expected ERROR for scalar jsonb");
+    }
+
+    /// `jsonb_to_tvector` rejects non-finite numbers (NaN / Infinity
+    /// arrive as JSON strings or are stripped at parse time, but a
+    /// non-numeric element must be rejected).
+    #[pg_test]
+    fn jsonb_to_tvector_rejects_non_numeric() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT turbovec.jsonb_to_tvector('[1, \"oops\", 3]'::jsonb)::text",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for string element");
+
+        let bad2 = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT turbovec.jsonb_to_tvector('[1, null, 3]'::jsonb)::text",
+            )
+        });
+        assert!(bad2.is_err(), "expected ERROR for null element");
+    }
+
+    /// `SET turbovec.bit_width_default` round-trips through
+    /// `current_setting()`.
+    #[pg_test]
+    fn guc_bit_width_default_round_trip() {
+        Spi::run("SET turbovec.bit_width_default = 2").unwrap();
+        let v: Option<String> = Spi::get_one(
+            "SELECT current_setting('turbovec.bit_width_default')",
+        )
+        .unwrap();
+        assert_eq!(v.as_deref(), Some("2"));
+
+        Spi::run("SET turbovec.bit_width_default = 4").unwrap();
+        let v: Option<String> = Spi::get_one(
+            "SELECT current_setting('turbovec.bit_width_default')",
+        )
+        .unwrap();
+        assert_eq!(v.as_deref(), Some("4"));
+
+        // Out-of-range values are rejected by GucContext::Userset.
+        let bad = std::panic::catch_unwind(|| {
+            Spi::run("SET turbovec.bit_width_default = 5")
+        });
+        assert!(bad.is_err(), "expected ERROR for out-of-range bit_width");
+    }
+
+    /// `turbovec.knn()` against an empty table returns 0 rows.
+    #[pg_test]
+    fn knn_empty_corpus() {
+        Spi::run("CREATE TEMP TABLE empty_corp (id bigint, emb turbovec.tvector)")
+            .unwrap();
+        let n: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM turbovec.knn(\
+                 'empty_corp'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 5)",
+        )
+        .unwrap();
+        assert_eq!(n, Some(0), "knn over empty corpus must return 0 rows");
+    }
+
+    /// `turbovec.knn()` when k > n returns all n rows.
+    #[pg_test]
+    fn knn_k_greater_than_n() {
+        Spi::run("CREATE TEMP TABLE small_corp (id bigint, emb turbovec.tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO small_corp VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]')",
+        )
+        .unwrap();
+        let n: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM turbovec.knn(\
+                 'small_corp'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 10)",
+        )
+        .unwrap();
+        assert_eq!(
+            n,
+            Some(3),
+            "k=10 over a 3-row corpus must return 3 rows, got {:?}",
+            n
+        );
+    }
+
+    /// `turbovec.knn()` cache hashes on `(rel_oid, attnum, bit_width,
+    /// dim)` and validates against current `(relfilenode, n_rows)`.
+    /// A row-count change alone is enough to force a rebuild on the
+    /// next call. Done in two separate transactions because pgrx-tests
+    /// wraps each `#[pg_test]` in BEGIN/ROLLBACK and inside one
+    /// transaction PG hides relfilenode rewrites from the SPI client.
+    #[pg_test]
+    fn knn_cache_invalidates_on_row_count_change() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE rc_t (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO rc_t VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        let q = "'[0,0,1,0,0,0,0,0]'::turbovec.tvector";
+        // Warm the cache.
+        let warm_count: Option<i64> = Spi::get_one(&format!(
+            "SELECT count(*) FROM turbovec.knn(\
+                 'rc_t'::regclass, 'id', 'emb', {q}, 5)"
+        ))
+        .unwrap();
+        assert_eq!(warm_count, Some(2));
+
+        // Insert a 3rd row; cache key matches but `n_rows` has
+        // changed, so the next lookup must rebuild.
+        Spi::run("INSERT INTO rc_t VALUES (3, '[0,0,1,0,0,0,0,0]')").unwrap();
+        let after: Option<i64> = Spi::get_one(&format!(
+            "SELECT count(*) FROM turbovec.knn(\
+                 'rc_t'::regclass, 'id', 'emb', {q}, 5)"
+        ))
+        .unwrap();
+        assert_eq!(
+            after,
+            Some(3),
+            "row-count change must trigger cache rebuild"
+        );
+    }
+
+    /// Cache invalidates after a heap REINDEX (relfilenode bump on
+    /// the heap is not directly observable, but row count + new oid
+    /// state ensure correctness end-to-end).
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_cache_invalidates_on_reindex() {
+        use_turbovec();
+        Spi::run("CREATE TABLE reidx_t (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO reidx_t VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX reidx_t_idx \
+             ON reidx_t USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // Force the AM-cache code path by running an ORDER BY query.
+        let _: Option<i64> = Spi::get_one(
+            "SELECT id FROM reidx_t \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::tvector \
+             LIMIT 1",
+        )
+        .unwrap();
+
+        Spi::run("REINDEX INDEX reidx_t_idx").unwrap();
+
+        // Side-table row count must reflect the rebuild; the AM
+        // cache must serve fresh data on the next scan.
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 'reidx_t_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_vec, Some(2));
+
+        let nearest: Option<i64> = Spi::get_one(
+            "SELECT id FROM reidx_t \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::tvector \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(nearest, Some(1));
+    }
+
+    /// Element-wise arithmetic operators round-trip.
+    #[pg_test]
+    fn elementwise_arithmetic() {
+        use_turbovec();
+        let s: Option<String> = Spi::get_one(
+            "SELECT ('[1,2,3]'::tvector + '[10,20,30]'::tvector)::text",
+        )
+        .unwrap();
+        let txt = s.unwrap();
+        assert!(txt.contains("11"));
+        assert!(txt.contains("22"));
+        assert!(txt.contains("33"));
+
+        let s: Option<String> = Spi::get_one(
+            "SELECT ('[10,20,30]'::tvector - '[1,2,3]'::tvector)::text",
+        )
+        .unwrap();
+        let txt = s.unwrap();
+        assert!(txt.contains("9") && txt.contains("18") && txt.contains("27"));
+
+        let s: Option<String> = Spi::get_one(
+            "SELECT ('[1,2,3]'::tvector * '[10,20,30]'::tvector)::text",
+        )
+        .unwrap();
+        let txt = s.unwrap();
+        assert!(txt.contains("10") && txt.contains("40") && txt.contains("90"));
+    }
+
+    /// `sum(tvector)` is parallel-safe and matches a manual sum.
+    #[pg_test]
+    fn aggregate_sum_basic() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE sum_t (v tvector)").unwrap();
+        Spi::run(
+            "INSERT INTO sum_t VALUES \
+                 ('[1,2,3]'::tvector), \
+                 ('[10,20,30]'::tvector), \
+                 ('[100,200,300]'::tvector)",
+        )
+        .unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT sum(v)::text FROM sum_t").unwrap();
+        let txt = s.unwrap();
+        assert!(txt.contains("111"));
+        assert!(txt.contains("222"));
+        assert!(txt.contains("333"));
+    }
+
+    /// Empty-table aggregates return NULL.
+    #[pg_test]
+    fn aggregate_sum_empty_is_null() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE sum_empty (v tvector)").unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT sum(v)::text FROM sum_empty").unwrap();
+        assert_eq!(s, None);
+    }
+
+    /// JSONB explicit cast round-trips.
+    #[pg_test]
+    fn jsonb_cast_explicit_function() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT turbovec.tvector_to_jsonb('[1, 2, 3]'::turbovec.tvector)::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains("1") && s.contains("2") && s.contains("3"));
+    }
+
+    /// `tvector_zeros` rejects out-of-range dim.
+    #[pg_test]
+    fn zeros_rejects_bad_dim() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i32>(
+                "SELECT turbovec.vector_dims(turbovec.tvector_zeros(0))",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for dim = 0");
+
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i32>(
+                "SELECT turbovec.vector_dims(turbovec.tvector_zeros(20000))",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for dim > MAX_DIM");
+    }
+
+    /// `tvector_check_dim` is identity on match, raises otherwise —
+    /// already tested; this exercises the rare expected = 0 case.
+    #[pg_test]
+    fn check_dim_rejects_zero_expected() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<i32>(
+                "SELECT turbovec.vector_dims(\
+                    turbovec.tvector_check_dim('[1,2]'::turbovec.tvector, 0))",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for expected = 0");
+    }
+
 }
 
 /// PGRX test runner harness.

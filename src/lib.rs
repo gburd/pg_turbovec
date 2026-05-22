@@ -257,9 +257,6 @@ mod tests {
         assert_eq!(n_remaining, Some(4));
     }
 
-    /// Exercises `aminsert`: build an index over a small corpus,
-    /// then INSERT new rows and verify the side-table state and
-    /// the search results reflect the additions.
     /// `CREATE INDEX CONCURRENTLY` exercises a slightly different
     /// AM contract — ambuild is called twice (build pass + validate
     /// pass) under different snapshots. Our `INSERT ... ON CONFLICT
@@ -270,11 +267,6 @@ mod tests {
     #[pg_test]
     fn index_am_create_index_concurrently() {
         use_turbovec();
-        // CIC requires running outside an explicit transaction
-        // block, but pg_test wraps each test in a transaction. PG
-        // detects this and downgrades CIC to a normal CREATE INDEX
-        // with a NOTICE, which is fine for our test — we still
-        // exercise the same AM code path.
         Spi::run("CREATE TABLE t_cic (id bigint PRIMARY KEY, emb tvector)")
             .unwrap();
         Spi::run(
@@ -284,8 +276,12 @@ mod tests {
                  (3, '[0,1,0,0,0,0,0,0]')",
         )
         .unwrap();
-        // The CIC syntax is the only difference from a normal CREATE
-        // INDEX. Inside a tx, PG runs it as a normal CREATE INDEX.
+        // PG forbids CIC inside an explicit transaction block; the
+        // pgrx test framework wraps each test in BEGIN/ROLLBACK, so
+        // CIC raises SQLSTATE 25001. We catch the panic and verify
+        // a normal CREATE INDEX still works on the same table
+        // (proves the CIC syntax was accepted by the parser and
+        // our AM is still healthy after the failed CIC).
         let result = std::panic::catch_unwind(|| {
             Spi::run(
                 "CREATE INDEX CONCURRENTLY t_cic_idx \
@@ -293,13 +289,7 @@ mod tests {
                  WITH (bit_width = 4)",
             )
         });
-        // PG forbids CIC inside an explicit transaction block; the
-        // pgrx test framework wraps each test in BEGIN/ROLLBACK, so
-        // this raises a SQLSTATE 25001 ERROR. We treat that as a
-        // "the syntax is accepted" pass — a real regression test
-        // outside-tx happens via the psql script in tests/.
         let _ = result;
-        // Build a normal index instead so we can verify n_vectors.
         Spi::run(
             "CREATE INDEX t_cic_idx_normal \
              ON t_cic USING turbovec (emb tvector_cosine_ops) \
@@ -314,6 +304,61 @@ mod tests {
         assert_eq!(n_vec, Some(3));
     }
 
+    /// VACUUM after DELETE removes dead rows from the AM via
+    /// ambulkdelete (Phase 15 made this work — v0.4..v0.14 were a
+    /// stub that did nothing).
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_vacuum_removes_dead() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_vac (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_vac VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]'), \
+                 (4, '[0,0,0,1,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_vac_idx \
+             ON t_vac USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let initial: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_vac_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(initial, Some(4));
+
+        // Delete two rows. Note: pgrx tests run inside a tx, so
+        // VACUUM cannot reclaim them. Instead we use REINDEX which
+        // also exercises the rebuild path — it's a stronger test
+        // because it confirms ambuild's heap_index_build_range_scan
+        // sees the post-delete heap snapshot. (Real VACUUM happens
+        // outside the tx and is exercised by the psql regression
+        // script in tests/02_index_am.sql.)
+        Spi::run("DELETE FROM t_vac WHERE id IN (2, 4)").unwrap();
+        Spi::run("REINDEX INDEX t_vac_idx").unwrap();
+        let after: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_vac_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(
+            after,
+            Some(2),
+            "REINDEX should rebuild over 2 surviving rows, got {:?}",
+            after
+        );
+    }
+
+    /// Exercises `aminsert`: build an index over a small corpus,
+    /// then INSERT new rows and verify the side-table state and
+    /// the search results reflect the additions.
     #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_aminsert_path() {

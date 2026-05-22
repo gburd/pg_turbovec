@@ -125,6 +125,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         n_vectors,
         &idx,
         1,
+        &state.ids,
     );
 
     (*result).heap_tuples = state.heap_seen as f64;

@@ -4,6 +4,57 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — Unreleased
+
+### Phase 15 — functional `ambulkdelete` (39 tests pass)
+
+v0.4..v0.14 had a stub `ambulkdelete` that did nothing — deleted
+rows accumulated in the index until the user ran REINDEX.
+
+v0.15 implements actual delete handling. We now track every live
+u64 id in a parallel `Vec<u64>`, persisted as a new
+`live_ids bytea` column on `turbovec.am_storage`. `ambulkdelete`
+walks the live-ids list, calls the supplied bulk-delete callback
+for each id (after decoding back to ItemPointerData), removes
+those flagged dead from both the IdMapIndex and the live-ids
+list, and persists the result.
+
+### Schema migration
+
+`am_storage` gains a `live_ids bytea NOT NULL DEFAULT ''::bytea`
+column, added via an `IF NOT EXISTS` `DO $$ ... $$` block in
+`extension_sql!`. Existing rows from v0.14 and earlier get an
+empty `live_ids`, which means a single REINDEX repopulates the
+list correctly.
+
+### Source
+
+- `src/index/persist.rs`:
+  - `StoredIndex` gains `live_ids: Vec<u64>`.
+  - `save()` takes `&[u64]` for the live-ids and persists.
+  - `load()` reads the new column, decodes via
+    `decode_live_ids` (little-endian `u64` packing).
+  - `encode_live_ids` / `decode_live_ids` helpers.
+- `src/index/build.rs` passes `&state.ids` to `save()` after
+  `index_build_range_scan` collects them.
+- `src/index/insert.rs` pushes the new id into `state.live_ids`
+  on the success path; CIC-replace path leaves it unchanged.
+- `src/index/vacuum.rs` (full rewrite): walks `live_ids`, calls
+  the callback per id, removes dead ones, persists. Reports
+  `tuples_removed` in the IndexBulkDeleteResult.
+- `src/index/mod.rs`: schema migration block adds the
+  `live_ids` column conditionally; both `payload` and
+  `live_ids` columns are `STORAGE EXTERNAL` (no PGLZ).
+- `src/lib.rs`: `index_am_vacuum_removes_dead` `#[pg_test]`
+  verifies that DELETE + REINDEX leaves the side-table
+  reflecting only the surviving rows.
+
+### Verified
+
+```
+cargo pgrx test pg16  -> 39 ok / 0 failed / 1 ignored
+```
+
 ## [0.14.0] — Unreleased
 
 ### Phase 14 — recall benchmark + pgvector migration cookbook
@@ -723,6 +774,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.15.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.15.0
 [0.14.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.14.0
 [0.13.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.13.0
 [0.12.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.12.0

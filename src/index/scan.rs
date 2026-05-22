@@ -8,6 +8,7 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
+use crate::cache::{self, CacheKey};
 use crate::guc;
 use crate::index::persist;
 use crate::kernels;
@@ -149,27 +150,77 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     if !(*opaque).fetched {
         // Lazily run the search.
         let indexrelid = (*(*scan).indexRelation).rd_id;
-        let stored = match persist::load(indexrelid) {
-            Some(s) => s,
+
+        // Try the shared cache first. The AM path uses attnum=0 to
+        // distinguish from `turbovec.knn()`'s heap-attnum keys.
+        // Phase 8 cache validates against (relfilenode, n_rows);
+        // for the index relation those reflect the index's own
+        // identity — we want the *underlying heap* identity for
+        // proper invalidation. v0.9 takes the simpler path of
+        // keying on (relfilenode_of_index, n_vectors_persisted),
+        // which the persist layer already tracks.
+        let dim_hint = (*opaque).query.len() as u32;
+        // We don't know bit_width until we load am_storage — use a
+        // sentinel and patch on first miss.
+        let key = CacheKey {
+            rel_oid: indexrelid,
+            attnum: 0,
+            bit_width: 0,
+            dim: dim_hint,
+        };
+        let relfile = cache::current_relfilenode(indexrelid);
+        // n_rows for the cache key comes from am_storage's
+        // n_vectors column; we read it cheaply alongside the
+        // bit_width sanity check.
+        let n_rows: i64 = pgrx::Spi::get_one_with_args(
+            "SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = $1",
+            &[indexrelid.into()],
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(-1);
+
+        // Cache lookup with the bit_width=0 sentinel; on hit we
+        // reuse the cached IdMapIndex.
+        let cached = cache::lookup(key, relfile, n_rows);
+
+        let idx_arc = match cached {
+            Some(arc) => arc,
             None => {
-                // Empty / unbuilt index — return no rows.
-                (*opaque).fetched = true;
-                return false;
+                let stored = match persist::load(indexrelid) {
+                    Some(s) => s,
+                    None => {
+                        // Empty / unbuilt index — return no rows.
+                        (*opaque).fetched = true;
+                        return false;
+                    }
+                };
+                let dim = stored.dim as usize;
+                if (*opaque).query.len() != dim {
+                    error!(
+                        "turbovec amgettuple: query dim {} != index dim {}",
+                        (*opaque).query.len(),
+                        dim
+                    );
+                }
+                let bytes_per_vec =
+                    (dim * stored.bit_width as usize) / 8 + 4 + 64;
+                let total_bytes =
+                    bytes_per_vec * stored.n_vectors.max(0) as usize;
+                cache::insert(key, stored.index, total_bytes, relfile, n_rows)
             }
         };
-        let dim = stored.dim as usize;
-        if (*opaque).query.len() != dim {
-            error!(
-                "turbovec amgettuple: query dim {} != index dim {}",
-                (*opaque).query.len(),
-                dim
-            );
-        }
+
         // Phase 4 returns up to 1 024 results per scan; the executor
         // will discard everything beyond LIMIT. Phase 5 should pull
         // `numLimit` from the IndexScanState if available.
-        let k = 1024.min(stored.n_vectors as usize).max(1);
-        let (_scores, ids) = stored.index.search(&(*opaque).query, k);
+        let n_in_index = idx_arc.len();
+        if n_in_index == 0 {
+            (*opaque).fetched = true;
+            return false;
+        }
+        let k = 1024.min(n_in_index).max(1);
+        let (_scores, ids) = idx_arc.search(&(*opaque).query, k);
         (*opaque).results = ids;
         (*opaque).cursor = 0;
         (*opaque).fetched = true;

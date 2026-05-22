@@ -53,6 +53,13 @@ fn turbovec_version() -> &'static str {
 mod tests {
     use pgrx::prelude::*;
 
+    /// Set up the search_path so unqualified operator and function
+    /// references resolve against the `turbovec` schema. Called at
+    /// the top of each test that uses bare operators.
+    fn use_turbovec() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+    }
+
     #[pg_test]
     fn version_string() {
         let v: Option<String> = Spi::get_one("SELECT turbovec.turbovec_version()").unwrap();
@@ -82,14 +89,15 @@ mod tests {
 
     #[pg_test]
     fn l2_and_l1() {
+        use_turbovec();
         let d: Option<f64> = Spi::get_one(
-            "SELECT '[1,2,3]'::turbovec.tvector <-> '[4,6,3]'::turbovec.tvector",
+            "SELECT '[1,2,3]'::tvector <-> '[4,6,3]'::tvector",
         )
         .unwrap();
         assert!((d.unwrap() - 5.0).abs() < 1e-6); // sqrt(9+16+0) = 5
 
         let l1: Option<f64> = Spi::get_one(
-            "SELECT '[1,2,3]'::turbovec.tvector <+> '[4,6,3]'::turbovec.tvector",
+            "SELECT '[1,2,3]'::tvector <+> '[4,6,3]'::tvector",
         )
         .unwrap();
         assert!((l1.unwrap() - 7.0).abs() < 1e-6); // 3 + 4 + 0
@@ -97,15 +105,16 @@ mod tests {
 
     #[pg_test]
     fn inner_product_and_cosine() {
+        use_turbovec();
         let neg_ip: Option<f64> = Spi::get_one(
-            "SELECT '[1,0,0]'::turbovec.tvector <#> '[1,0,0]'::turbovec.tvector",
+            "SELECT '[1,0,0]'::tvector <#> '[1,0,0]'::tvector",
         )
         .unwrap();
         // <#> = -dot = -1
         assert!((neg_ip.unwrap() + 1.0).abs() < 1e-6);
 
         let cos: Option<f64> = Spi::get_one(
-            "SELECT '[1,0]'::turbovec.tvector <=> '[0,1]'::turbovec.tvector",
+            "SELECT '[1,0]'::tvector <=> '[0,1]'::tvector",
         )
         .unwrap();
         // perpendicular -> cosine distance = 1.0
@@ -114,9 +123,10 @@ mod tests {
 
     #[pg_test]
     fn rejects_dim_mismatch() {
+        use_turbovec();
         let res = std::panic::catch_unwind(|| {
             Spi::get_one::<f64>(
-                "SELECT '[1,2,3]'::turbovec.tvector <-> '[1,2]'::turbovec.tvector",
+                "SELECT '[1,2,3]'::tvector <-> '[1,2]'::tvector",
             )
         });
         assert!(res.is_err(), "expected dim-mismatch ERROR");
@@ -124,11 +134,11 @@ mod tests {
 
     #[pg_test]
     fn aggregate_avg() {
-        Spi::run("CREATE TEMP TABLE t (v turbovec.tvector)").unwrap();
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE t (v tvector)").unwrap();
         Spi::run("INSERT INTO t VALUES ('[1,2,3]'),('[3,4,5]'),('[5,6,7]')").unwrap();
         let avg: Option<String> =
             Spi::get_one("SELECT avg(v)::text FROM t").unwrap();
-        // mean: [3, 4, 5]
         let s = avg.unwrap();
         assert!(s.contains("3"));
         assert!(s.contains("4"));
@@ -170,6 +180,80 @@ mod tests {
         let v = s.unwrap();
         assert!(v.is_finite(), "score not finite: {}", v);
         assert!(v > 0.5, "turbovec self-score should be high, got {}", v);
+    }
+
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_create_and_query() {
+        use_turbovec();
+        // 8-dim test corpus with one obvious nearest neighbour.
+        Spi::run(
+            "CREATE TABLE t_ann (\
+                 id  bigint PRIMARY KEY, \
+                 emb tvector)",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO t_ann VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0.9,0.1,0,0,0,0,0,0]'), \
+                 (3, '[0,1,0,0,0,0,0,0]'), \
+                 (4, '[-1,0,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+
+        // Build the index. WITH (bit_width = 4) is the default; we
+        // pass it explicitly so a future change to the GUC default
+        // doesn't silently change behaviour.
+        Spi::run(
+            "CREATE INDEX t_ann_emb_idx \
+             ON t_ann USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // Confirm the side-table row was created.
+        let n_rows: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM turbovec.am_storage \
+             WHERE indexrelid = 't_ann_emb_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_rows, Some(1));
+
+        // Confirm the index actually contains the heap rows. Pull the
+        // n_vectors column.
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_ann_emb_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(
+            n_vec,
+            Some(4),
+            "expected 4 indexed vectors, got {:?}",
+            n_vec
+        );
+
+        // ORDER BY <=> with the index in place. Even if the planner
+        // doesn't pick the index (cost estimate, small table, etc.)
+        // the result must still be correct.
+        let first: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_ann \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::tvector \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            Some(1),
+            "nearest neighbour to e1 should be row 1"
+        );
+
+        // Drop the index — should leave the heap intact.
+        Spi::run("DROP INDEX t_ann_emb_idx").unwrap();
+        let n_remaining: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM t_ann").unwrap();
+        assert_eq!(n_remaining, Some(4));
     }
 
     #[pg_test]

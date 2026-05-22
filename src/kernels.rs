@@ -98,6 +98,13 @@ mod tests {
         (a - b).abs() < 1e-9
     }
 
+    /// Slightly looser tolerance for f32 round-tripped through f64 —
+    /// 0.2 is not exactly representable in binary, so 3*0.2 + 4*0.2
+    /// drifts ~1e-7 from 5.0.
+    fn approx_f32(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
     #[test]
     fn dot_basic() {
         assert!(approx(dot(&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0]), 32.0));
@@ -134,10 +141,10 @@ mod tests {
     #[test]
     fn normalise_unit_norm() {
         let v = normalise_to_vec(&[3.0, 4.0]);
-        assert!(approx(norm2(&v).sqrt(), 1.0));
+        assert!(approx_f32(norm2(&v).sqrt(), 1.0));
         // 3-4-5 triangle: components become 0.6 and 0.8.
-        assert!(approx(f64::from(v[0]), 0.6));
-        assert!(approx(f64::from(v[1]), 0.8));
+        assert!(approx_f32(f64::from(v[0]), 0.6));
+        assert!(approx_f32(f64::from(v[1]), 0.8));
     }
 
     #[test]

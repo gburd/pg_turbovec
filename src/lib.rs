@@ -256,6 +256,201 @@ mod tests {
         assert_eq!(n_remaining, Some(4));
     }
 
+    /// Exercises `aminsert`: build an index over a small corpus,
+    /// then INSERT new rows and verify the side-table state and
+    /// the search results reflect the additions.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_aminsert_path() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_ins (id bigint PRIMARY KEY, emb tvector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_ins VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_ins_emb_idx \
+             ON t_ins USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // Insert two more rows AFTER the index exists — these go
+        // through aminsert.
+        Spi::run(
+            "INSERT INTO t_ins VALUES \
+                 (3, '[0,0,1,0,0,0,0,0]'), \
+                 (4, '[0,0,0,1,0,0,0,0]')",
+        )
+        .unwrap();
+
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_ins_emb_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(
+            n_vec,
+            Some(4),
+            "aminsert should have grown the index to 4 vectors, got {:?}",
+            n_vec
+        );
+
+        // Query for one of the late-inserted rows.
+        let nearest: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_ins \
+             ORDER BY emb <=> '[0,0,0,1,0,0,0,0]'::tvector \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            nearest,
+            Some(4),
+            "row 4 (inserted via aminsert) should be nearest to e4"
+        );
+    }
+
+    /// 64 random-but-deterministic 16-dim vectors. Verifies the AM
+    /// agrees with the brute-force kernel on a meaningful recall
+    /// measure. dim=8 was too lossy at 4-bit; dim=16 gives the
+    /// quantiser enough room.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_recall_64_rows() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_64 (id bigint PRIMARY KEY, emb tvector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_64 \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::tvector \
+             FROM generate_series(1, 64) AS gs(i), \
+                  generate_series(1, 16) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+
+        Spi::run(
+            "CREATE INDEX t_64_emb_idx \
+             ON t_64 USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // Side-table populated.
+        let n_indexed: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_64_emb_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_indexed, Some(64));
+
+        // Self-query: the row's own embedding queried back. With
+        // 16 dims and 4-bit quantisation the self-score should be
+        // among the top-10. (R@10 == 1.0 is the minimum bar; if
+        // this fails the kernel is broken.)
+        let target_in_top10: Option<bool> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_64 WHERE id = 17), \
+             top10 AS ( \
+                 SELECT t.id FROM t_64 t, q \
+                 ORDER BY t.emb <=> q.emb \
+                 LIMIT 10 \
+             ) \
+             SELECT EXISTS (SELECT 1 FROM top10 WHERE id = 17)",
+        )
+        .unwrap();
+        assert_eq!(
+            target_in_top10,
+            Some(true),
+            "row 17 should appear in the top-10 nearest to itself"
+        );
+
+        // The index's top-5 set should overlap with the brute-force
+        // top-10 by at least 3 entries on a fresh random query —
+        // a soft recall assertion that catches catastrophic drift
+        // without being flaky on quantiser tie-breaks.
+        Spi::run(
+            "CREATE TEMP TABLE q_64 AS \
+             SELECT ('[' || string_agg( \
+                 ((hashtext('query:' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::tvector AS q \
+             FROM generate_series(1, 16) AS sub(k)",
+        )
+        .unwrap();
+        let overlap: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT q FROM q_64), \
+             indexed AS ( \
+                 SELECT t.id FROM t_64 t, q \
+                 ORDER BY t.emb <=> q.q LIMIT 5 \
+             ), \
+             exact AS ( \
+                 SELECT t.id FROM t_64 t, q \
+                 ORDER BY (1.0 - turbovec.inner_product(t.emb, q.q) / \
+                                 (turbovec.vector_norm(t.emb) * turbovec.vector_norm(q.q))) \
+                 LIMIT 10 \
+             ) \
+             SELECT count(*) FROM indexed WHERE id IN (SELECT id FROM exact)",
+        )
+        .unwrap();
+        // With dim=16 / 4-bit, expect at least 3/5 overlap with the
+        // brute-force top-10. (Tighter recall measurement is in
+        // benches/, not unit tests.)
+        let overlap = overlap.unwrap_or(0);
+        assert!(
+            overlap >= 3,
+            "index top-5 should overlap brute-force top-10 by >= 3 \
+             entries, got {}",
+            overlap
+        );
+    }
+
+    /// Index can be rebuilt via REINDEX without errors.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_reindex() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_re (id bigint PRIMARY KEY, emb tvector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_re VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_re_emb_idx \
+             ON t_re USING turbovec (emb tvector_cosine_ops) \
+             WITH (bit_width = 2)",
+        )
+        .unwrap();
+        Spi::run("REINDEX INDEX t_re_emb_idx").unwrap();
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_re_emb_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_vec, Some(2));
+    }
+
+    /// `bit_width` reloption out-of-range is rejected at CREATE INDEX.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_rejects_bad_bit_width() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_bad (id bigint, emb tvector)").unwrap();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::run(
+                "CREATE INDEX ON t_bad USING turbovec (emb tvector_cosine_ops) \
+                 WITH (bit_width = 5)",
+            )
+        });
+        assert!(
+            bad.is_err(),
+            "bit_width = 5 should be rejected by amoptions"
+        );
+    }
+
     #[pg_test]
     fn knn_returns_nearest_first() {
         Spi::run(

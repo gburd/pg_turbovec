@@ -18,6 +18,7 @@ use crate::tvector::Tvector;
 /// `aminsert` callback. Returns `true` if the index now contains the
 /// row; `false` if we deliberately skipped it. We never skip in v0.4
 /// (any reason to skip should produce an `ERROR` instead).
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn aminsert(
     index_relation: pg_sys::Relation,
     values: *mut pg_sys::Datum,

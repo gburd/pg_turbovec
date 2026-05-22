@@ -33,6 +33,7 @@ pub(crate) struct TurbovecRelopts {
 ///
 /// Caller is PostgreSQL's reloption machinery; pointer ownership
 /// follows standard Postgres rules.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amoptions(
     reloptions: pg_sys::Datum,
     validate: bool,

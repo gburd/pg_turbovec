@@ -4,6 +4,72 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — Unreleased
+
+### Phase 7 — hardened index AM, four new end-to-end tests, real bug fixes
+
+The v0.6 index AM passed a single happy-path test. This release adds
+four more `#[pg_test]` cases that uncovered — and fixed — four
+real bugs in the AM:
+
+- **`index_am_aminsert_path`** — build, insert, query. Verifies
+  `aminsert` actually grows the side-table payload and that the
+  newly inserted row is returned by subsequent ORDER BY queries.
+- **`index_am_recall_64_rows`** — 64 deterministic 16-dim vectors,
+  build, query the corpus's own row-17 emb, assert it lands in
+  the top-10. (Top-1 is too tight at 4-bit quantisation; top-10
+  is the recall floor we won't ship below.)
+- **`index_am_reindex`** — `REINDEX INDEX foo` succeeds and the
+  side-table payload reflects the rebuild.
+- **`index_am_rejects_bad_bit_width`** — `WITH (bit_width = 5)`
+  raises ERROR cleanly without crashing the backend.
+
+### Bug fixes uncovered by the new tests
+
+- **Missing `#[pg_guard]` on AM callbacks** caused a `pgrx::error!`
+  inside `amoptions` ("bit_width must be in 2..=4") to unwind
+  across the FFI boundary, segfault the backend with signal 6,
+  and cascade to every later test in the run. Every `extern
+  "C-unwind"` callback in `src/index/` now wears `#[pg_guard]`.
+- **SPI in `ambuild` couldn't survive REINDEX** — the planner
+  inside SPI tried to AccessShareLock the very index being
+  rebuilt, hitting `cannot access index ... while it is being
+  reindexed`. Replaced with a direct call to the table AM's
+  `index_build_range_scan` callback (`(*heap_rel.rd_tableam)
+  .index_build_range_scan`) plus a fresh `build_callback` that
+  populates a `BuildState` thread-locally. Same path the built-in
+  btree / GIN / hash AMs use; no SPI lock surface.
+- **Random-vector test data was identical across rows** — PG
+  materialised `(SELECT random() FROM generate_series(1,16))`
+  once per query and reused it for every INSERT row, so the
+  recall test was actually scoring 64 copies of the same vector
+  (all distances zero, false negatives). Switched to a
+  `hashtext(i::text || ':' || k::text) % 2000 / 1000.0 - 1`
+  per-element formula that's stable per `(i,k)` and varies
+  across rows.
+
+### Source changes
+
+- `src/index/build.rs`: full rewrite of `ambuild` as a
+  `BuildState` + `index_build_range_scan` + `build_callback`
+  pipeline (no SPI). The callback validates dim consistency,
+  optionally L2-normalises, and accumulates `(u64, Vec<f32>)`
+  rows into the per-build state.
+- `src/index/{build,cost,insert,options,scan,vacuum,validate}.rs`:
+  every AM callback now has `#[pgrx::pg_guard]`.
+- `src/lib.rs`: `index_am_aminsert_path`, `index_am_recall_64_rows`,
+  `index_am_reindex`, `index_am_rejects_bad_bit_width`.
+
+### Verified
+
+```
+cargo pgrx test pg16                                  -> 27 passed; 0 failed
+cargo pgrx test pg16 --features experimental_index_am -> 32 passed; 0 failed
+```
+
+This is the first release where `aminsert` and `REINDEX` are
+actually proven to work.
+
 ## [0.6.0] — Unreleased
 
 ### Phase 6 — validated against a real PostgreSQL 16 cluster
@@ -325,6 +391,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.7.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.7.0
 [0.6.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.6.0
 [0.5.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.5.0
 [0.4.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.4.0

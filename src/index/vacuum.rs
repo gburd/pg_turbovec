@@ -11,6 +11,7 @@ use pgrx::prelude::*;
 use crate::index::persist;
 
 /// `ambulkdelete`: process dead-tuple removal.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambulkdelete(
     info: *mut pg_sys::IndexVacuumInfo,
     stats: *mut pg_sys::IndexBulkDeleteResult,
@@ -55,6 +56,7 @@ pub(crate) unsafe extern "C-unwind" fn ambulkdelete(
 
 /// `amvacuumcleanup`: nothing to do beyond what `ambulkdelete`
 /// already wrote.
+#[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amvacuumcleanup(
     _info: *mut pg_sys::IndexVacuumInfo,
     stats: *mut pg_sys::IndexBulkDeleteResult,

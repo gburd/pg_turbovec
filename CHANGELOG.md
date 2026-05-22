@@ -4,6 +4,52 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] — Unreleased
+
+### Phase 16 — informed cost estimate + end-to-end demo script
+
+**Better `amcostestimate`.** v0.4..v0.15 returned constants
+(startup = 1.0, total = 10.0). v0.16 reads the actual
+`n_vectors`, `dim`, and `bit_width` from `turbovec.am_storage`
+and computes a SIMD throughput model:
+
+- 8 ns per scored vector at d=1536, bit_width=4 (calibrated
+  against `cargo bench --bench distance` on AVX2).
+- Linear scaling with `dim * bit_width / (1536 * 4)`.
+- Startup cost = `1 + log2(n_vectors)` to model the cache load.
+- Pages estimate = `n_vectors * (dim * bit_width / 8 + 4) / 8192`.
+
+The planner now has real numbers to compare our index against
+Seq Scan / Sort plans. Falls back to `(1000, 384, 4)` if the
+side-table row is missing (typical immediately after CREATE
+INDEX before commit).
+
+### `tests/03_full_demo.sql` (NEW, 109 lines)
+
+psql script exercising every public feature end-to-end:
+
+1. tvector type literals + dims/norm/normalize
+2. All four distance operators with hand-checked numeric answers
+3. Element-wise arithmetic
+4. real[]/jsonb casts (both directions)
+5. subvector / tvector_zeros / tvector_check_dim
+6. avg/sum aggregates
+7. turbovec.knn() unfiltered + with bigint[] allowlist
+8. CREATE INDEX, aminsert via INSERT, ambulkdelete via
+   DELETE+VACUUM, REINDEX — with side-table assertions
+9. GUC visibility
+10. Diagnostics (version, self-score)
+
+Verified to run cleanly against the dev cluster with no ERRORs:
+`psql -d demo -f tests/03_full_demo.sql`.
+
+### Verified
+
+```
+cargo pgrx test pg16  -> 39 ok / 0 failed / 1 ignored
+psql -f tests/03_full_demo.sql  -> all sections complete cleanly
+```
+
 ## [0.15.0] — Unreleased
 
 ### Phase 15 — functional `ambulkdelete` (39 tests pass)
@@ -774,6 +820,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.16.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.16.0
 [0.15.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.15.0
 [0.14.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.14.0
 [0.13.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.13.0

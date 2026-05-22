@@ -1,11 +1,15 @@
 # pg_turbovec — Vector Index for PostgreSQL (TurboQuant)
 
-> **Status:** v0.6.0 — 28/28 `#[pg_test]` cases pass against a
-> real PostgreSQL 16 cluster. Default-feature build provides the
-> stable type / operators / aggregates / casts / `turbovec.knn()`
-> surface; the `turbovec` index access method (`CREATE INDEX ...
-> USING turbovec`) ships under the opt-in `experimental_index_am`
-> Cargo feature and also passes its end-to-end test.
+> **Status:** v1.0.0-rc1 — 39/39 `#[pg_test]` cases pass against
+> a real PostgreSQL 16 cluster (default + experimental_index_am
+> builds). Stable: type / operators / aggregates / casts /
+> `turbovec.knn()` / `CREATE INDEX ... USING turbovec` /
+> `CREATE INDEX CONCURRENTLY` / aminsert / ambulkdelete via VACUUM
+> / REINDEX. One `#[ignore]`d edge case: forced-index-scan with
+> `enable_seqscan = off` triggers a `munmap_chunk()` abort in the
+> executor's recheck-orderby path — documented in
+> [`docs/INDEXAM.md`](docs/INDEXAM.md), workaround is
+> `turbovec.knn()`.
 
 `pg_turbovec` is a PostgreSQL extension that provides a vector data type
 and an approximate-nearest-neighbour index access method, built in Rust
@@ -151,6 +155,27 @@ pg_turbovec/
 │   └── bin/pgrx_embed.rs
 └── tests/                       # SQL regression tests
 ```
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design, module
+  map, type/operator/aggregate signatures, index AM contract,
+  GUCs, phased roadmap.
+- [`docs/USAGE.md`](docs/USAGE.md) — cookbook with install,
+  exact + ANN search, aggregates, arithmetic, GUCs.
+- [`docs/MIGRATING_FROM_PGVECTOR.md`](docs/MIGRATING_FROM_PGVECTOR.md)
+  — hands-on migration from pgvector with query rewrite tables
+  and a feature comparison.
+- [`docs/INDEXAM.md`](docs/INDEXAM.md) — implementation guide
+  for the `turbovec` index access method, callback responsibilities,
+  storage strategy, known issues, Phase 13+ plans.
+- [`docs/RECALL.md`](docs/RECALL.md) — recall benchmark
+  methodology and latest measured numbers.
+- [`docs/BUILDING.md`](docs/BUILDING.md) — step-by-step Nix build
+  recipe.
+- [`CHANGELOG.md`](CHANGELOG.md) — phase-by-phase release notes.
+- [`tests/`](tests/) — psql regression scripts you can run
+  yourself with `cargo pgrx run pg16` then `\i tests/...`.
 
 ## License
 

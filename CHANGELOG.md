@@ -4,6 +4,60 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc.1] — Unreleased
+
+### Phase 17 — release-candidate prep
+
+First release-candidate. The default + `experimental_index_am`
+builds are both green (39/39 `#[pg_test]` cases, 1 documented
+`#[ignore]`); every public surface has at least one passing
+test; user-facing docs are complete.
+
+### Cleanup
+
+- Removed unused imports and `#[allow(dead_code)]`-annotated the
+  one remaining intentionally-unused constant (`STRAT_ORDER_BY`).
+- Default `cargo build --features pg16` now produces zero
+  warnings.
+
+### README
+
+- Status banner reflects v1.0.0-rc1 reality: 39/39 tests, real
+  cluster, documented limitations.
+- New "Documentation" section linking every docs/ file from a
+  single index.
+
+### What's in the box
+
+Stable user-facing API:
+
+- `tvector` type with text I/O, full operator suite (`<-> <#> <=> <+>`).
+- Distance functions, helpers, element-wise arithmetic.
+- `avg(tvector)` / `sum(tvector)` aggregates with `f64`
+  accumulators.
+- Casts to/from `real[]` / `double precision[]` / `integer[]` /
+  `jsonb`.
+- `subvector`, `tvector_normalize`, `tvector_check_dim`,
+  `tvector_zeros`, `turbovec_self_score`, `tvector_random_unit`.
+- `turbovec.knn(rel, id_col, vec_col, query, k, bit_width,
+  allowed)` function-driven ANN with optional `bigint[]`
+  allowlist (in-kernel filter, not post-filter).
+- `turbovec.*` GUC namespace.
+- `CREATE INDEX ... USING turbovec` access method with operator
+  classes `tvector_ip_ops` (default, `<#>`) and
+  `tvector_cosine_ops` (`<=>`).
+- `CREATE INDEX CONCURRENTLY` support.
+- aminsert / ambulkdelete via VACUUM / REINDEX all functional.
+
+Known limitations:
+
+- Forced index path (`SET enable_seqscan = off; ORDER BY emb <=>
+  q LIMIT k`) crashes with `munmap_chunk()` in the executor's
+  recheck-orderby memory management. Workaround: `turbovec.knn()`.
+  Tracking in [`docs/INDEXAM.md`](docs/INDEXAM.md).
+- L2 / L1 distances are exact-only — no index acceleration.
+- Halfvec / sparsevec types are not provided.
+
 ## [0.16.0] — Unreleased
 
 ### Phase 16 — informed cost estimate + end-to-end demo script
@@ -820,6 +874,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[1.0.0-rc.1]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v1.0.0-rc.1
 [0.16.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.16.0
 [0.15.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.15.0
 [0.14.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.14.0

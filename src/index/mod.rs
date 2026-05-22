@@ -47,6 +47,7 @@ mod vacuum;
 
 /// Strategy number for the order-by operator inside both
 /// `tvector_ip_ops` (`<#>`) and `tvector_cosine_ops` (`<=>`).
+#[allow(dead_code)]
 pub(crate) const STRAT_ORDER_BY: u16 = 1;
 
 /// Number of support functions per operator class. We expose:

@@ -113,8 +113,7 @@ fn read_idmap_from<R: std::io::Read>(r: &mut R) -> Result<IdMapIndex, String> {
     let pid = unsafe { libc::getpid() };
     let nonce: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos() as u64);
     let path = dir.join(format!("turbovec-load-{}-{}.tvim", pid, nonce));
     std::fs::write(&path, &buf).map_err(|e| e.to_string())?;
     let idx = IdMapIndex::load(&path).map_err(|e| e.to_string())?;
@@ -128,8 +127,7 @@ fn write_idmap_to_bytes(idx: &IdMapIndex) -> Result<Vec<u8>, String> {
     let pid = unsafe { libc::getpid() };
     let nonce: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos() as u64);
     let path = dir.join(format!("turbovec-store-{}-{}.tvim", pid, nonce));
     idx.write(&path).map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;

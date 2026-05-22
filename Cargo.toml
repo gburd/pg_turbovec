@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -37,7 +37,6 @@ experimental_index_am = []
 [dependencies]
 pgrx = "=0.17.0"
 turbovec = "0.5"
-once_cell = "1.20"
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -68,6 +67,18 @@ codegen-units = 1
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+# Project-wide allows. The intent is that pedantic stays warn-by-default,
+# but a small set of lints are silenced because they conflict with idioms
+# we deliberately use:
+#
+#  * pgrx's `#[pg_extern]` macro generates wrappers that take owned
+#    values and never `#[must_use]` themselves; we cannot fix the lint
+#    at the call site.
+#  * pg_sys FFI uses `as` casts and raw-pointer-to-raw-pointer
+#    conversions everywhere.
+#  * Many docstrings reference SQL identifiers and numbers that are
+#    not Rust paths.
 module_name_repetitions = "allow"
 similar_names = "allow"
 missing_safety_doc = "allow"
@@ -75,5 +86,25 @@ missing_panics_doc = "allow"
 missing_errors_doc = "allow"
 unsafe_derive_deserialize = "allow"
 cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
+needless_pass_by_value = "allow"   # pg_extern arity
+uninlined_format_args = "allow"    # style preference
+doc_markdown = "allow"             # SQL identifiers in docstrings
+single_char_pattern = "allow"      # test convenience
+must_use_candidate = "allow"       # pgrx wrappers
+ptr_as_ptr = "allow"               # pg_sys FFI
+ptr_cast_constness = "allow"       # pg_sys FFI
+borrow_as_ptr = "allow"            # pg_sys FFI
+too_many_arguments = "allow"       # pg_extern signatures
+type_complexity = "allow"          # pgrx-generated TableIterator types
+unnecessary_cast = "allow"         # pg_sys FFI
+cast_ptr_alignment = "allow"       # varlena layout
+non_std_lazy_statics = "allow"     # once_cell::Lazy used intentionally
+manual_let_else = "allow"          # readability of explicit match
+single_match_else = "allow"        # readability
+ref_as_ptr = "allow"               # pg_sys FFI
+nonminimal_bool = "allow"          # `!is_null()` reads more naturally
+if_not_else = "allow"              # FFI null-check chains read better as `!is_null()`

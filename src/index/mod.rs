@@ -161,16 +161,16 @@ pub extern "C" fn pg_finfo_turbovec_index_handler_wrapper() -> &'static pg_sys::
 }
 
 extension_sql!(
-    r#"
+    r"
     CREATE FUNCTION turbovec_index_handler(internal) RETURNS index_am_handler
         AS 'MODULE_PATHNAME', 'turbovec_index_handler_wrapper'
         LANGUAGE c;
-    "#,
+    ",
     name = "turbovec_index_handler_decl",
 );
 
 extension_sql!(
-    r#"
+    r"
     -- Side table backing the `turbovec` access method.
     CREATE TABLE IF NOT EXISTS turbovec.am_storage (
         indexrelid  oid PRIMARY KEY,
@@ -218,7 +218,7 @@ extension_sql!(
         FOR TYPE tvector USING turbovec AS
             OPERATOR 1 <=> (tvector, tvector) FOR ORDER BY float_ops,
             FUNCTION 1 cosine_distance(tvector, tvector);
-    "#,
+    ",
     name = "turbovec_index_am",
     requires = [
         "turbovec_index_handler_decl",

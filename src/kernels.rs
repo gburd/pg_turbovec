@@ -45,7 +45,7 @@ pub fn l1_abs(a: &[f32], b: &[f32]) -> f64 {
 #[inline]
 pub fn norm2(a: &[f32]) -> f64 {
     let mut acc: f64 = 0.0;
-    for x in a.iter() {
+    for x in a {
         acc += f64::from(*x) * f64::from(*x);
     }
     acc

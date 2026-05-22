@@ -22,9 +22,8 @@
 //! registration across `_PG_init` shutdowns.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use pgrx::prelude::*;
 use turbovec::IdMapIndex;
@@ -59,8 +58,9 @@ struct Entry {
     seq: u64,
 }
 
-static CACHE: Lazy<Mutex<HashMap<CacheKey, Entry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static SEQ: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
+static CACHE: LazyLock<Mutex<HashMap<CacheKey, Entry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static SEQ: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
 
 fn next_seq() -> u64 {
     let mut s = SEQ.lock();

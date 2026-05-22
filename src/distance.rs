@@ -124,7 +124,7 @@ fn tvector_mul(a: Tvector, b: Tvector) -> Tvector {
 // ---------------------------------------------------------------------
 
 extension_sql!(
-    r#"
+    r"
     CREATE OPERATOR <-> (
         LEFTARG = tvector, RIGHTARG = tvector,
         PROCEDURE = l2_distance,
@@ -165,7 +165,7 @@ extension_sql!(
         PROCEDURE = tvector_mul,
         COMMUTATOR = '*'
     );
-    "#,
+    ",
     name = "tvector_operators",
     requires = [
         Tvector,

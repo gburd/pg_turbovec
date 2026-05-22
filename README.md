@@ -1,9 +1,9 @@
 # pg_turbovec — Vector Index for PostgreSQL (TurboQuant)
 
-> **Status:** v0.1.0 — Phase 1 (type + operators + functions + aggregates).
-> Phase 2 adds the `turbovec` index access method (ANN search backed by
-> the [`turbovec`](https://crates.io/crates/turbovec) crate / Google
-> Research's [TurboQuant](https://arxiv.org/abs/2504.19874) algorithm).
+> **Status:** v0.4.0 — stable type / operators / aggregates /
+> `turbovec.knn()`. Experimental `turbovec` index access method
+> (`CREATE INDEX ... USING turbovec`) opt-in via
+> `--features experimental_index_am`.
 
 `pg_turbovec` is a PostgreSQL extension that provides a vector data type
 and an approximate-nearest-neighbour index access method, built in Rust
@@ -31,7 +31,9 @@ named `tvector` and lives in the `turbovec` schema. Casts to and from
 | Dimensionality cap | 16 000 (varlena) | 16 000 |
 | License | Apache-2.0 | PostgreSQL |
 
-## Features (Phase 1, this release)
+## Features
+
+### v0.3.0 (current default build)
 
 - **`tvector` type** — variable dimension `f32` vectors with text and
   binary I/O (`'[1, 2, 3]'::tvector`, COPY BINARY, libpq binary).
@@ -41,23 +43,41 @@ named `tvector` and lives in the `turbovec` schema. Casts to and from
   - `<=>` cosine distance
   - `<+>` taxicab (L1) distance
 - **Functions**: `l2_distance`, `inner_product`, `cosine_distance`,
-  `l1_distance`, `vector_dims`, `vector_norm`.
-- **Aggregates**: `avg(tvector)`, `sum(tvector)`.
+  `l1_distance`, `vector_dims`, `vector_norm`, `tvector_normalize`,
+  `tvector_random_unit`, `turbovec_self_score`.
+- **Aggregates**: `avg(tvector)`, `sum(tvector)` — `f64` accumulators,
+  `PARALLEL SAFE`.
+- **Casts**: explicit `real[]` / `double precision[]` / `integer[]`
+  ↔ `tvector`.
+- **`turbovec.knn(rel, id_col, vec_col, query, k, bit_width)`** —
+  function-driven ANN search backed by `turbovec::IdMapIndex`.
+  Returns `TABLE(id bigint, score float8)`, ordered by score DESC.
 - **GUCs**: `turbovec.bit_width_default`, `turbovec.cache_size_mb`,
-  `turbovec.warn_on_rebuild`.
+  `turbovec.warn_on_rebuild`, `turbovec.search_concurrency`,
+  `turbovec.normalize_on_insert`.
 
-## Features (Phase 2, planned for v0.2.0)
+### v0.4.0 — experimental index access method (opt-in)
 
-- **Index access method `turbovec`** with operator classes
-  `tvector_ip_ops` (uses `<#>`) and `tvector_cosine_ops` (uses `<=>`).
-- Reloptions:
+Build with `--features experimental_index_am`:
 
-      CREATE INDEX docs_emb_idx ON docs USING turbovec (embedding tvector_cosine_ops)
-        WITH (bit_width = 4);
+```bash
+cargo pgrx install --release --features experimental_index_am
+```
 
-- `WHERE tenant_id = $1 ORDER BY embedding <=> $2 LIMIT 10` is pushed
-  through `search_with_allowlist` so selective filters cost less, not
-  more.
+Then:
+
+```sql
+CREATE INDEX docs_emb_idx
+    ON docs USING turbovec (embedding tvector_cosine_ops)
+    WITH (bit_width = 4);
+
+SELECT id FROM docs ORDER BY embedding <=> $1 LIMIT 10;
+```
+
+The scaffold is complete (`IndexAmRoutine` callbacks, side-table
+persistence, operator classes for inner product and cosine) but
+**untested against a real cluster**. Read `docs/INDEXAM.md` before
+enabling on data you care about.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design,
 phased roadmap, and risks.

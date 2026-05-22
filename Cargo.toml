@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -27,6 +27,9 @@ pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 pg_test = []
+# **EXPERIMENTAL** — opt-in build of the `turbovec` index access method.
+# Phase 4 scaffolding; see docs/INDEXAM.md before enabling on production data.
+experimental_index_am = []
 
 [dependencies]
 pgrx = "=0.17.0"
@@ -37,6 +40,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 rand = "0.8"
+libc = "0.2"
 
 [dev-dependencies]
 pgrx-tests = "=0.17.0"

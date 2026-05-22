@@ -36,8 +36,10 @@ use crate::cache::{self, CacheKey};
 use crate::guc;
 use crate::tvector::Tvector;
 
-/// `turbovec.knn(rel, id_col, vec_col, query, k, bit_width)` — see
-/// module documentation.
+/// `turbovec.knn(rel, id_col, vec_col, query, k, bit_width, allowed)`
+/// — see module documentation. The optional `allowed` parameter
+/// restricts results to the given `bigint[]` of ids; passing NULL
+/// (or omitting the argument) does an unfiltered search.
 #[pg_extern(stable, parallel_safe)]
 fn knn(
     rel: pg_sys::Oid,
@@ -46,6 +48,7 @@ fn knn(
     query: Tvector,
     k: i32,
     bit_width: default!(i32, 4),
+    allowed: default!(Option<Vec<i64>>, "NULL"),
 ) -> TableIterator<'static, (name!(id, i64), name!(score, f64))> {
     if k <= 0 {
         error!("turbovec.knn: k must be positive (got {})", k);
@@ -93,12 +96,7 @@ fn knn(
         if take == 0 {
             return TableIterator::new(Vec::<(i64, f64)>::new());
         }
-        let (scores, hit_ids) = idx_arc.search(&q_buf, take);
-        let result: Vec<(i64, f64)> = hit_ids
-            .iter()
-            .zip(scores.iter())
-            .map(|(id, s)| (*id as i64, f64::from(*s)))
-            .collect();
+        let result = run_search(&idx_arc, &q_buf, take, allowed.as_deref());
         return TableIterator::new(result);
     }
 
@@ -129,15 +127,49 @@ fn knn(
     let idx_arc = cache::insert(key, idx, total_bytes, relfile, n_rows);
 
     let take = (k as usize).min(rows.len()).max(0);
-    let (scores, hit_ids) = idx_arc.search(&q_buf, take);
-
-    let result: Vec<(i64, f64)> = hit_ids
-        .iter()
-        .zip(scores.iter())
-        .map(|(id, s)| (*id as i64, f64::from(*s)))
-        .collect();
+    let result = run_search(&idx_arc, &q_buf, take, allowed.as_deref());
 
     TableIterator::new(result)
+}
+
+/// Dispatch on whether the caller supplied an allowlist. Translates
+/// the bigint[] to the u64 buffer the kernel expects, dropping NULL
+/// entries.
+fn run_search(
+    idx: &IdMapIndex,
+    query: &[f32],
+    k: usize,
+    allowed: Option<&[i64]>,
+) -> Vec<(i64, f64)> {
+    if k == 0 || idx.len() == 0 {
+        return Vec::new();
+    }
+    match allowed {
+        None => {
+            let (scores, hit_ids) = idx.search(query, k);
+            hit_ids
+                .iter()
+                .zip(scores.iter())
+                .map(|(id, s)| (*id as i64, f64::from(*s)))
+                .collect()
+        }
+        Some(allow) => {
+            let mut buf: Vec<u64> = allow.iter().map(|v| *v as u64).collect();
+            buf.sort_unstable();
+            buf.dedup();
+            if buf.is_empty() {
+                return Vec::new();
+            }
+            let take = k.min(buf.len());
+            let (scores, hit_ids) =
+                idx.search_with_allowlist(query, take, Some(&buf));
+            hit_ids
+                .iter()
+                .zip(scores.iter())
+                .map(|(id, s)| (*id as i64, f64::from(*s)))
+                .collect()
+        }
+    }
 }
 
 /// Resolve the heap attribute number for a column name. Returns 1

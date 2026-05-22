@@ -4,6 +4,68 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — Unreleased
+
+### Phase 10 — filtered search via `IdMapIndex::search_with_allowlist`
+
+The headline feature from upstream `turbovec`'s API is now wired
+through to SQL. `turbovec.knn()` gains an optional `allowed
+bigint[]` argument:
+
+```sql
+-- Restrict candidates to a tenant or topic without paying the
+-- cost of a post-filter:
+SELECT k.id
+FROM   turbovec.knn(
+         'docs'::regclass, 'id', 'embedding',
+         $1::tvector, 10, 4,
+         ARRAY(SELECT id FROM docs WHERE tenant_id = $2)::bigint[]
+       ) k
+ORDER  BY k.score DESC;
+```
+
+The SIMD kernel honours the allowlist at 32-vector block
+granularity — selective filters cost less, not more. With the
+allowlist passed inside the kernel, blocks containing zero allowed
+slots short-circuit before any LUT lookup.
+
+### SQL signature
+
+```sql
+turbovec.knn(
+    rel       regclass,
+    id_col    text,
+    vec_col   text,
+    query     tvector,
+    k         integer,
+    bit_width integer DEFAULT 4,
+    allowed   bigint[] DEFAULT NULL
+) RETURNS TABLE(id bigint, score double precision)
+```
+
+When `allowed` is NULL or omitted, behaviour is identical to v0.9
+(unfiltered `IdMapIndex::search`). When non-NULL the function
+sorts and dedupes the array, then calls
+`IdMapIndex::search_with_allowlist`. Empty allowlist returns zero
+rows.
+
+### Source
+
+- `src/knn.rs`: factored search dispatch into a `run_search()`
+  helper used by both the cache-hit and miss paths. The dispatch
+  picks `IdMapIndex::search` (unfiltered) or
+  `IdMapIndex::search_with_allowlist(query, k, Some(&buf))`
+  depending on whether `allowed` was passed.
+- `src/lib.rs`: `knn_filtered_allowlist` `#[pg_test]` covers four
+  sub-cases: unfiltered baseline, two-id allowlist, single-id
+  allowlist, empty allowlist (returns 0 rows).
+
+### Verified
+
+```
+cargo pgrx test pg16  -> 35 ok / 0 failed
+```
+
 ## [0.9.0] — Unreleased
 
 ### Phase 9 — index AM promoted to default + AM scan path uses the cache
@@ -485,6 +547,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.10.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.10.0
 [0.9.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.9.0
 [0.8.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.8.0
 [0.7.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.7.0

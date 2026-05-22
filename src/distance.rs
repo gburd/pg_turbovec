@@ -27,6 +27,16 @@ use crate::tvector::Tvector;
 // ---------------------------------------------------------------------
 
 /// Euclidean (L2) distance between two equal-dimension `tvector`s.
+///
+/// ```ignore
+/// SELECT turbovec.l2_distance(
+///     '[1,2,3]'::turbovec.tvector,
+///     '[4,6,3]'::turbovec.tvector
+/// );
+/// -- returns 5.0  (sqrt(9 + 16 + 0))
+/// ```
+///
+/// Both arguments must have the same dim; mismatch raises an ERROR.
 #[pg_extern(immutable, parallel_safe)]
 fn l2_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<->");
@@ -35,6 +45,14 @@ fn l2_distance(a: Tvector, b: Tvector) -> f64 {
 
 /// Squared Euclidean distance — useful when you only need order, not
 /// magnitudes. Matches pgvector's `vector_l2_squared_distance`.
+///
+/// ```ignore
+/// SELECT turbovec.l2_squared_distance(
+///     '[1,2,3]'::turbovec.tvector,
+///     '[4,6,3]'::turbovec.tvector
+/// );
+/// -- returns 25.0  (= l2_distance(...) ^ 2)
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn l2_squared_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "l2_squared_distance");
@@ -42,6 +60,14 @@ fn l2_squared_distance(a: Tvector, b: Tvector) -> f64 {
 }
 
 /// Inner (dot) product.
+///
+/// ```ignore
+/// SELECT turbovec.inner_product(
+///     '[1,2,3]'::turbovec.tvector,
+///     '[4,5,6]'::turbovec.tvector
+/// );
+/// -- returns 32.0
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn inner_product(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "inner_product");
@@ -51,6 +77,20 @@ fn inner_product(a: Tvector, b: Tvector) -> f64 {
 /// Negative inner product — used by the `<#>` operator and by the
 /// `tvector_ip_ops` index opclass so that ascending sort returns the
 /// most-similar rows first.
+///
+/// ```ignore
+/// SELECT turbovec.negative_inner_product(
+///     '[1,2,3]'::turbovec.tvector,
+///     '[4,5,6]'::turbovec.tvector
+/// );
+/// -- returns -32.0
+///
+/// -- Equivalent operator form (most-similar-first ASC):
+/// SELECT id
+/// FROM   docs
+/// ORDER  BY emb <#> '[...]'::tvector
+/// LIMIT  10;
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn negative_inner_product(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<#>");
@@ -59,6 +99,20 @@ fn negative_inner_product(a: Tvector, b: Tvector) -> f64 {
 
 /// Cosine distance: `1 - cos θ` where `cos θ = dot(a, b) / (||a|| * ||b||)`.
 /// Returns `NaN` if either operand is the zero vector, matching pgvector.
+///
+/// ```ignore
+/// SELECT turbovec.cosine_distance(
+///     '[1,0]'::turbovec.tvector,
+///     '[0,1]'::turbovec.tvector
+/// );
+/// -- returns 1.0  (perpendicular: cos = 0, distance = 1 - 0)
+///
+/// SELECT turbovec.cosine_distance(
+///     '[0,0,0]'::turbovec.tvector,
+///     '[1,2,3]'::turbovec.tvector
+/// );
+/// -- returns NaN
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn cosine_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<=>");
@@ -66,6 +120,14 @@ fn cosine_distance(a: Tvector, b: Tvector) -> f64 {
 }
 
 /// Taxicab (L1) distance.
+///
+/// ```ignore
+/// SELECT turbovec.l1_distance(
+///     '[1,2,3]'::turbovec.tvector,
+///     '[4,6,3]'::turbovec.tvector
+/// );
+/// -- returns 7.0  (|1-4| + |2-6| + |3-3|)
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn l1_distance(a: Tvector, b: Tvector) -> f64 {
     a.check_same_dim(&b, "<+>");
@@ -73,12 +135,25 @@ fn l1_distance(a: Tvector, b: Tvector) -> f64 {
 }
 
 /// Number of dimensions in a `tvector`.
+///
+/// ```ignore
+/// SELECT turbovec.vector_dims('[1,2,3,4,5]'::turbovec.tvector);
+/// -- returns 5
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn vector_dims(v: Tvector) -> i32 {
     v.dim() as i32
 }
 
 /// Euclidean (L2) norm of a `tvector`.
+///
+/// ```ignore
+/// SELECT turbovec.vector_norm('[3,4]'::turbovec.tvector);
+/// -- returns 5.0
+///
+/// SELECT turbovec.vector_norm('[0,0,0]'::turbovec.tvector);
+/// -- returns 0.0
+/// ```
 #[pg_extern(immutable, parallel_safe)]
 fn vector_norm(v: Tvector) -> f64 {
     kernels::norm2(v.as_slice()).sqrt()

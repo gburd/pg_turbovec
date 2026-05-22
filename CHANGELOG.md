@@ -4,6 +4,39 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — Unreleased
+
+### Phase 14 — recall benchmark + pgvector migration cookbook
+
+- **`benches/recall.rs`** — pure-Rust recall harness using
+  `criterion`. Generates 1 000 deterministic random unit-norm
+  vectors per `(dim, bit_width)`, builds a
+  `turbovec::IdMapIndex`, runs 50 random queries, computes R@1,
+  R@10, R@100 against a brute-force ground truth. Output is one
+  JSON line per criterion sample for downstream tooling.
+- **`benches/results/recall_2026_05_21.json`** — first run
+  results. Headlines: 4-bit hits R@1 ≈ 0.80 across 128/384/768
+  dims; 2-bit costs ~40 R@1 points; R@100 reaches 0.93 at 4-bit.
+  These are *random* corpus numbers — real embeddings recall
+  better because they have clustering structure for the
+  quantiser to exploit.
+- **`docs/RECALL.md`** — "Latest results" table now populated.
+- **`docs/MIGRATING_FROM_PGVECTOR.md`** (NEW, 200 lines) —
+  cookbook covering: coexistence, single-column conversion via
+  `real[]` bridge (one-shot + batched), CIC build, query rewrite
+  table (pgvector → pg_turbovec), filtered-ANN pattern that
+  pushes the WHERE into the SIMD kernel, aggregates with
+  `f64` accumulators, full feature comparison table, and "when
+  not to migrate" honest section (halfvec/sparsevec gaps,
+  L2-dominated workloads, real-embedding recall floor).
+
+### Verified
+
+```
+cargo bench --bench recall --no-default-features --features pg16  -> 6 configs run
+cargo pgrx test pg16                                              -> 38 ok / 1 ignored
+```
+
 ## [0.13.0] — Unreleased
 
 ### Phase 13 — `CREATE INDEX CONCURRENTLY` support (38/38 pass)
@@ -690,6 +723,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.14.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.14.0
 [0.13.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.13.0
 [0.12.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.12.0
 [0.11.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.11.0

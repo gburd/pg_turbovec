@@ -21,7 +21,46 @@ These are the kernels that back the `<->` / `<#>` / `<=>` / `<+>`
 operators on small (in-page) result sets and the `vector_norm` /
 `tvector_normalize` helpers.
 
-## 2. End-to-end ANN benchmarks (Phase 4, planned)
+## 2. Pure-Rust recall benchmark (Phase 14, **shipped**)
+
+```bash
+cargo bench --bench recall --no-default-features
+```
+
+Generates `n` deterministic random unit-norm vectors per
+`(dim, bit_width)` configuration, builds a `turbovec::IdMapIndex`,
+runs 50 random queries, and reports R@k vs a brute-force ground
+truth. Output is one JSON line per criterion sample (run with
+`--quick` for a single sample per config).
+
+### 2.1 Latest results (2026-05-21, 1 000 corpus rows, 50 queries)
+
+| dim | bit_width | R@1  | R@10 | R@100 |
+|----:|---------:|-----:|-----:|------:|
+| 128 |        2 | 0.40 | 0.65 |  0.76 |
+| 128 |        4 | 0.80 | 0.89 |  0.93 |
+| 384 |        2 | 0.34 | 0.62 |  0.76 |
+| 384 |        4 | 0.78 | 0.89 |  0.93 |
+| 768 |        2 | 0.50 | 0.62 |  0.76 |
+| 768 |        4 | 0.82 | 0.88 |  0.92 |
+
+Observations:
+
+- **4-bit hits R@1 ≈ 0.80 across all tested dims**, with R@100
+  approaching 0.93. This is the recommended setting for general
+  workloads.
+- **2-bit costs ~40 R@1 points** — use only when memory pressure
+  dominates and the application can absorb the recall hit (e.g.
+  pre-rerank candidate generation).
+- Recall on this corpus is lower than the upstream paper's
+  numbers (which use pre-trained embeddings from real datasets
+  like GloVe / OpenAI). Random vectors are a *harder* recall
+  test — they have no clustering structure for the quantiser
+  to exploit. Real embeddings will recall better.
+
+Full machine-readable history under [`benches/results/`](../benches/results/).
+
+## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:
 

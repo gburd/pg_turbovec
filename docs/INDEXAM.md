@@ -152,3 +152,54 @@ suite is:
   Interface](https://www.postgresql.org/docs/17/indexam.html).
 - pgrx-pg-sys `pg17.rs` — search for `IndexAmRoutine` and the
   `am*_function` typedefs to see the exact ABI.
+
+## Phase 12 known issue: forced-index-scan crashes the backend
+
+The `experimental_index_am` build now passes 37/37 `#[pg_test]` cases
+**when the planner picks the index naturally** (i.e. on small/medium
+tables where `enable_seqscan = on` keeps it on a sequential scan).
+The one case marked `#[ignore]` — `index_am_forced_index_scan` —
+sets `enable_seqscan = off` to force the index path and
+reproducibly crashes the backend with:
+
+```
+munmap_chunk(): invalid pointer
+... server process (PID …) was terminated by signal 6: Aborted
+```
+
+The crash happens in glibc's `free()` somewhere between when our
+`amgettuple` returns and the executor projects the row, regardless
+of whether we project the distance or just the `id`. Removing every
+write to `xs_orderbyvals` / `xs_orderbynulls` does not help, nor
+does `Box::leak`-ing the deserialised `IdMapIndex`.
+
+### Hypothesis
+
+The problem is most likely an **allocator mismatch between turbovec
+and the executor's memory contexts**. `turbovec` (and its transitive
+deps `faer`, `openblas-src`) use the global Rust allocator
+(`jemalloc` or `glibc malloc` depending on platform). The executor's
+recheck-orderby path may free memory it did not allocate, or our
+`amgettuple` may leak something into the wrong context.
+
+### Workarounds for users
+
+- **Default-plan queries work.** As long as `enable_seqscan` is on
+  (the default) and the table is small enough that the planner
+  prefers a sequential scan, ORDER-BY queries are fine.
+- **For larger corpora**, use the function-driven `turbovec.knn()`
+  instead of the index. Same SIMD kernel, no executor-recheck path:
+
+      SELECT k.id, k.score
+      FROM   turbovec.knn('docs'::regclass, 'id', 'embedding', $1, 10) k;
+
+### Phase 13 plan
+
+- Reach into PG's executor via gdb to identify the exact `free()`
+  call site.
+- Likely fix: implement a `turbovec_orderby_distance(...)` SQL
+  function returning `float8` directly from u64 ids stored in the
+  index, sidestepping the recheck path entirely.
+- Or: switch our `amcanorderbyop` to false and expose the AM as
+  `amcanorder = true` over a Btree-style strategy on the score —
+  costlier but simpler.

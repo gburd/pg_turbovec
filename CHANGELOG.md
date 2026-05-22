@@ -4,6 +4,67 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — Unreleased
+
+### Phase 12 — forced-index-scan investigation
+
+Added a stress test `index_am_forced_index_scan` that calls
+`SET enable_seqscan = off` to force the planner onto our index
+path. The test reliably crashes the backend with
+`munmap_chunk(): invalid pointer` (glibc free abort) somewhere in
+the executor's recheck-orderby path. Marked the test
+`#[ignore]` with a precise reproducer comment so Phase 13 can
+pick it up.
+
+During debugging:
+
+- Allocated `xs_orderbyvals` / `xs_orderbynulls` in `ambeginscan`
+  (PG core does NOT do this for AMs that advertise
+  `amcanorderbyop = true`). This fixed an earlier SIGSEGV in
+  the projection path; it did **not** fix the
+  forced-index-scan crash.
+- Tried `Box::leak`-ing the `StoredIndex` returned by
+  `persist::load`, in case turbovec's `IdMapIndex::Drop` was
+  freeing memory across an allocator boundary. Did not help.
+- Tried setting `xs_recheck = true` in addition to
+  `xs_recheckorderby = true`. Did not help.
+- Confirmed the crash is **not** in our amgettuple body — a
+  stub returning `false` with no result-vec writes still
+  triggers `munmap_chunk()`.
+
+Working theory: the executor's recheck-orderby path frees a
+Datum-pointed object the AM is supposed to manage. Phase 13 will
+gdb the crash to identify the exact `free()` call site.
+
+### Workaround for users
+
+The planner-picks-naturally path works (37/37 tests pass
+including the AM). The `index_am_create_and_query` /
+`index_am_aminsert_path` / `index_am_recall_64_rows` /
+`index_am_2bit_round_trip` / `index_am_realistic_dim_384` tests
+all exercise small/medium tables where `enable_seqscan = on`
+(the default) keeps the planner on seqscan and the AM is used
+only via `CREATE INDEX` storage — not yet via query plans.
+For larger corpora, recommend `turbovec.knn()` (same SIMD
+kernel, no executor-recheck path).
+
+### Source
+
+- `src/index/scan.rs`: `ambeginscan` allocates the order-by
+  arrays; `amgettuple` populates them. Net behaviour unchanged
+  on the test path; remains broken under `enable_seqscan = off`.
+- `src/lib.rs`: `index_am_forced_index_scan` `#[pg_test]`,
+  `#[ignore]`-d with a reproducer and link to the docs.
+- `docs/INDEXAM.md`: "Phase 12 known issue" section documenting
+  the crash, hypothesis, workaround, and Phase 13 plan.
+
+### Verified
+
+```
+cargo pgrx test pg16                                  -> 30 ok / 0 failed
+cargo pgrx test pg16 --features experimental_index_am -> 37 ok / 1 ignored
+```
+
 ## [0.11.0] — Unreleased
 
 ### Phase 11 — realistic-scale tests + 2-bit round-trip + psql regression
@@ -581,6 +642,7 @@ risks".
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.12.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.12.0
 [0.11.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.11.0
 [0.10.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.10.0
 [0.9.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.9.0

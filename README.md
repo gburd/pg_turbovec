@@ -1,15 +1,24 @@
 # pg_turbovec — Vector Index for PostgreSQL (TurboQuant)
 
-> **Status:** v1.0.0-rc1 — 39/39 `#[pg_test]` cases pass against
-> a real PostgreSQL 16 cluster (default + experimental_index_am
-> builds). Stable: type / operators / aggregates / casts /
-> `turbovec.knn()` / `CREATE INDEX ... USING turbovec` /
-> `CREATE INDEX CONCURRENTLY` / aminsert / ambulkdelete via VACUUM
-> / REINDEX. One `#[ignore]`d edge case: forced-index-scan with
-> `enable_seqscan = off` triggers a `munmap_chunk()` abort in the
-> executor's recheck-orderby path — documented in
-> [`docs/INDEXAM.md`](docs/INDEXAM.md), workaround is
-> `turbovec.knn()`.
+> **Status:** v1.0.0-rc.2 — release candidate.
+>
+> **🚧 RC2 — testing in progress. Not yet recommended for production
+> data; please file issues against any rough edge you hit.**
+>
+> 62/62 `#[pg_test]` cases pass against a real PostgreSQL 16 cluster
+> (default build with `experimental_index_am`); 51/51 pass on the
+> kernel-only / `--no-default-features` build. Stable surface: type /
+> operators / aggregates / casts / `turbovec.knn()` /
+> `CREATE INDEX ... USING turbovec` / `CREATE INDEX CONCURRENTLY` /
+> aminsert / ambulkdelete via VACUUM / REINDEX / forced-index-scan
+> (`SET enable_seqscan = off`).
+>
+> Open work tracked for 1.0.0 final:
+> 1. Binary-compatible varlena layout with pgvector's `vector` (Phase
+>    19, sibling-agent worktree).
+> 2. WAL-logged persistent index pages (Phase 20).
+>
+> See [`CHANGELOG.md`](CHANGELOG.md) and [`RELEASING.md`](RELEASING.md).
 
 `pg_turbovec` is a PostgreSQL extension that provides a vector data type
 and an approximate-nearest-neighbour index access method, built in Rust

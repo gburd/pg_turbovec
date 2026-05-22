@@ -1,0 +1,164 @@
+# Releasing `pg_turbovec`
+
+This document describes how to cut a release of `pg_turbovec`. The
+process is intentionally manual so each release gets a real human
+reading the diff, the test output, and the changelog.
+
+## Versioning
+
+`pg_turbovec` follows [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html)
+once it reaches `1.0.0`:
+
+* **Patch** (`1.0.0` → `1.0.1`) — bug fixes that don't change the
+  public SQL surface or the on-disk format.
+* **Minor** (`1.0.0` → `1.1.0`) — additive SQL surface changes
+  (new functions, new GUCs, new reloptions). Old applications must
+  continue to work without modification.
+* **Major** (`1.x` → `2.0.0`) — breaking SQL changes, on-disk
+  format changes that require dump/restore, or removed APIs.
+
+Pre-1.0 release candidates are cut as `1.0.0-rc.N`; we do **not**
+consider them compatible with each other or with 1.0.0 final until
+the on-disk format is frozen.
+
+## Pre-flight checklist
+
+Before tagging:
+
+* [ ] `cargo pgrx test pg16` — full feature build, every test green.
+* [ ] `cargo pgrx test pg16 --no-default-features --features pg16`
+  — kernel-only build, every test green.
+* [ ] `cargo clippy --features pg16 --tests -- -D warnings` — clean.
+* [ ] `cargo clippy --no-default-features --features pg16 --tests
+  -- -D warnings` — clean.
+* [ ] `cargo fmt --all -- --check` — formatted.
+* [ ] `cargo bench --bench distance --no-default-features
+  --features pg16 --no-run` — benches still compile.
+* [ ] `cargo bench --bench recall   --no-default-features
+  --features pg16 --no-run` — recall bench still compiles.
+* [ ] `CHANGELOG.md` entry written with phase label, summary,
+  highlights, and a `[<version>]` link at the bottom.
+* [ ] `README.md` status banner updated to reflect the new state
+  (test count, known limitations, RC vs final).
+* [ ] Any GUC range or default that changed in this release is
+  documented in `docs/USAGE.md`.
+
+## Release steps
+
+1. **Bump version**:
+
+   * `Cargo.toml`: `version = "X.Y.Z"`.
+   * `pg_turbovec.control`: `default_version = 'X.Y.Z'`.
+   * Run `cargo build --features pg16` to refresh `Cargo.lock`.
+
+2. **Regenerate the SQL schema** so consumers can install from the
+   tarball without running pgrx:
+
+   ```bash
+   cargo pgrx schema --features pg16 \
+       --out sql/pg_turbovec--X.Y.Z.sql
+   ```
+
+   Commit the regenerated `.sql` file.
+
+3. **Append the migration script** if this release changes the SQL
+   surface. Naming is `migrations/pg_turbovec--<from>--<to>.sql`.
+
+4. **Update `CHANGELOG.md`**:
+
+   * Move the new section's heading from `[X.Y.Z] — Unreleased` to
+     `[X.Y.Z] — YYYY-MM-DD`.
+   * Append the new version to the link list at the bottom.
+
+5. **Commit the release**:
+
+   ```bash
+   git add Cargo.toml Cargo.lock pg_turbovec.control \
+           CHANGELOG.md README.md \
+           sql/pg_turbovec--X.Y.Z.sql \
+           migrations/pg_turbovec--*--X.Y.Z.sql
+   git commit -m "Release vX.Y.Z"
+   ```
+
+6. **Tag and push**:
+
+   ```bash
+   git tag -s -m "Release vX.Y.Z" vX.Y.Z
+   git push origin main
+   git push origin vX.Y.Z
+   ```
+
+7. **Create the Codeberg release**:
+
+   * Open <https://codeberg.org/gregburd/pg_turbovec/releases/new>.
+   * Pick the `vX.Y.Z` tag.
+   * Title: `pg_turbovec X.Y.Z` (or `… X.Y.Z-rcN`).
+   * Body: paste the relevant `CHANGELOG.md` section.
+   * Attach the `pg_turbovec-X.Y.Z.tar.gz` source tarball:
+
+     ```bash
+     git archive --format=tar.gz --prefix=pg_turbovec-X.Y.Z/ \
+         -o pg_turbovec-X.Y.Z.tar.gz vX.Y.Z
+     ```
+
+8. **Mirror to GitHub** (if maintaining a mirror):
+
+   ```bash
+   git push github main
+   git push github vX.Y.Z
+   ```
+
+   then mirror the release notes by hand.
+
+## crates.io publish (optional, post-1.0.0)
+
+`pg_turbovec` is **not** currently published on crates.io. The
+extension is consumed via `cargo pgrx` against a checkout, and a
+crates.io publish would publish the cdylib stub and the kernels
+crate but not the SQL schema, which is the actually-useful artifact.
+If we ever do publish, the checklist is:
+
+* [ ] `cargo publish --dry-run` — manifest validates, all required
+  files are in the tarball.
+* [ ] `Cargo.toml` `description`, `license`, `repository`,
+  `homepage`, `documentation`, `keywords`, `categories`,
+  `rust-version` all populated. (They are, as of 1.0.0-rc.2.)
+* [ ] `README.md` rendered with absolute links so it makes sense
+  when displayed on crates.io.
+* [ ] `LICENSE` is present at the crate root.
+* [ ] No path/git dependencies — only registry dependencies.
+* [ ] `cargo doc --no-deps` builds without errors so docs.rs gets
+  a clean build.
+* [ ] All bench harnesses gated behind dev-dependencies.
+* [ ] `cargo publish` (after `cargo login`).
+
+If we *do* publish, the version published is the kernels-only build
+(no `experimental_index_am` feature in the default published set),
+because `IndexAmRoutine` makes no sense in a non-pgrx context.
+
+## Hot-fix release
+
+For a hot-fix off a released tag:
+
+```bash
+git checkout vX.Y.Z
+git checkout -b release/X.Y
+# apply the fix, run the pre-flight checklist
+git commit
+git tag -s -m "Release vX.Y.(Z+1)" vX.Y.(Z+1)
+git push origin release/X.Y vX.Y.(Z+1)
+```
+
+Then forward-port the fix to `main` if it isn't already there.
+
+## Yanking a release
+
+If a published release turns out to be broken:
+
+1. Mark it pre-release on Codeberg / GitHub with a banner pointing
+   at the fixed successor.
+2. Add a `WARNING` line to the affected `[X.Y.Z]` section in
+   `CHANGELOG.md` explaining what was wrong and which release
+   supersedes it.
+3. Do *not* delete the tag — downstream consumers may already have
+   it pinned.

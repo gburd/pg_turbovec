@@ -7,9 +7,18 @@ rust-version = "1.85.0"
 authors = ["Greg Burd <greg@burd.me>"]
 license = "Apache-2.0"
 repository = "https://codeberg.org/gregburd/pg_turbovec"
+homepage = "https://codeberg.org/gregburd/pg_turbovec"
+documentation = "https://codeberg.org/gregburd/pg_turbovec/src/branch/main/docs"
 readme = "README.md"
 keywords = ["postgresql", "pgrx", "vector", "ann", "quantization"]
-categories = ["database"]
+# crates.io categories must be from https://crates.io/category_slugs
+categories = ["database-implementations", "science", "algorithms"]
+exclude = [
+    "benches/results/",
+    "target/",
+    "tests/snapshots/",
+    "docs/RECALL.md.tmp",
+]
 
 [lib]
 crate-type = ["cdylib", "lib"]

@@ -121,12 +121,77 @@ These match the upstream `turbovec` paper's hardware.
 # Pure-Rust kernel benches (no Postgres required).
 cargo bench --bench distance --no-default-features
 
+# Pure-Rust recall bench (no Postgres required).
+cargo bench --bench recall --no-default-features
+
 # End-to-end ANN bench (Phase 4, when implemented):
 # cargo pgrx run pg17 --release
 # Inside psql:
 # \i bench/load_glove.sql
 # \i bench/run_ann_bench.sql
 ```
+
+## 6.1 Real-world fixtures (optional)
+
+The synthetic random-vector recall numbers in § 2.1 are
+deliberately *pessimistic* — random points have no clustering
+structure for the quantiser to exploit. To run the bench against
+real embeddings (GloVe, OpenAI, sentence-transformers, ...), set
+the `TURBOVEC_FIXTURE_PATH` environment variable:
+
+```bash
+TURBOVEC_FIXTURE_PATH=$(pwd)/fixtures/glove-200.bin \
+    cargo bench --bench recall --no-default-features
+```
+
+### Fixture file format
+
+Binary, little-endian:
+
+```
+offset  bytes  meaning
+  0       4    dim   (u32, dimensionality of each vector)
+  4       4    n     (u32, number of vectors)
+  8     4*n*d  data  (n contiguous rows of dim f32 values)
+```
+
+If the env var is unset, the file is missing, or the fixture's
+`dim` doesn't match the bench configuration, the bench falls back
+to synthetic random vectors and prints a notice on stderr. **No
+failure** — this is by design so CI doesn't break when fixtures
+aren't checked in.
+
+### Converting common public fixtures
+
+We deliberately don't ship pre-built fixtures (they're large and
+license-encumbered). Conversion scripts:
+
+* **GloVe-200**
+  ([nlp.stanford.edu/projects/glove](https://nlp.stanford.edu/projects/glove/)):
+
+  ```python
+  # convert_glove.py: text -> turbovec fixture
+  import struct, sys
+  rows = []
+  with open(sys.argv[1]) as f:
+      for line in f:
+          parts = line.split()
+          rows.append([float(x) for x in parts[1:]])
+  dim = len(rows[0])
+  n   = len(rows)
+  with open(sys.argv[2], 'wb') as f:
+      f.write(struct.pack('<II', dim, n))
+      for r in rows:
+          f.write(struct.pack(f'<{dim}f', *r))
+  ```
+
+* **OpenAI embeddings** (any of the `text-embedding-*` models):
+  the OpenAI API returns FP32 lists; concatenate them into the
+  same `<II>` + `<dim>f` layout.
+
+* **HuggingFace `sentence-transformers/*-MiniLM-*`**: load the
+  model, encode a corpus, and `.tofile()` after writing the
+  8-byte header.
 
 ## 7. Citing
 

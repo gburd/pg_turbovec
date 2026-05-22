@@ -18,6 +18,25 @@
 //! of the serialised index.
 //!
 //! All numbers go to stdout in JSON for downstream tooling.
+//!
+//! # Real-world fixtures
+//!
+//! By default the bench uses deterministic random unit-norm vectors
+//! (a deliberately *harder* recall test — random data has no
+//! clustering structure for the quantiser to exploit). To run
+//! against a real-world embedding fixture set
+//! `TURBOVEC_FIXTURE_PATH` to a file in the format:
+//!
+//! ```text
+//! <dim> <n>\n
+//! <f32 binary little-endian, dim * n floats>
+//! ```
+//!
+//! Example: `glove-200.bin`, `openai-ada-002-1536.bin`. See
+//! `docs/RECALL.md` for fixture conversion scripts. If the env var
+//! is unset or the file is missing, the bench silently falls back
+//! to synthetic data — this is by design so CI doesn't fail when
+//! the fixture isn't checked in.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
@@ -47,6 +66,43 @@ fn random_corpus(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
             kernels::normalise_to_vec(&raw)
         })
         .collect()
+}
+
+/// Try to load a real-world fixture from disk. Format:
+///   `<dim:u32_le><n:u32_le><f32_le ... dim*n>`.
+/// Returns `None` if the env var is unset or the file is missing.
+fn load_fixture_if_available(want_dim: usize, want_n: usize) -> Option<Vec<Vec<f32>>> {
+    use std::io::Read;
+    let path = std::env::var("TURBOVEC_FIXTURE_PATH").ok()?;
+    let mut f = std::fs::File::open(&path).ok()?;
+    let mut header = [0u8; 8];
+    f.read_exact(&mut header).ok()?;
+    let dim = u32::from_le_bytes(header[..4].try_into().ok()?) as usize;
+    let n = u32::from_le_bytes(header[4..].try_into().ok()?) as usize;
+    if dim != want_dim {
+        eprintln!(
+            "recall: skipping fixture {path}: dim={dim} but bench wants dim={want_dim}"
+        );
+        return None;
+    }
+    let take = n.min(want_n);
+    let mut buf = vec![0u8; take * dim * 4];
+    f.read_exact(&mut buf).ok()?;
+    let floats: Vec<f32> = buf
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let corpus: Vec<Vec<f32>> = floats
+        .chunks_exact(dim)
+        .map(|row| kernels::normalise_to_vec(row))
+        .collect();
+    eprintln!(
+        "recall: loaded {} rows of dim={} from fixture {}",
+        corpus.len(),
+        dim,
+        path
+    );
+    Some(corpus)
 }
 
 /// Brute-force top-k by inner product (= cosine similarity on
@@ -81,15 +137,18 @@ fn recall_at_k(brute: &[usize], indexed: &[usize], k: usize) -> f64 {
 }
 
 fn run_recall(n: usize, dim: usize, bit_width: usize, n_queries: usize) -> Report {
-    let corpus = random_corpus(n, dim, 0xC0FFEE);
+    let corpus = load_fixture_if_available(dim, n).unwrap_or_else(|| {
+        random_corpus(n, dim, 0xC0FFEE)
+    });
     let queries = random_corpus(n_queries, dim, 0xBADC0DE);
 
     // Build the index.
     let mut idx = IdMapIndex::new(dim, bit_width);
     let flat: Vec<f32> = corpus.iter().flat_map(|v| v.iter().copied()).collect();
-    let ids: Vec<u64> = (0..n as u64).collect();
+    let ids: Vec<u64> = (0..corpus.len() as u64).collect();
     idx.add_with_ids(&flat, &ids).expect("add_with_ids");
 
+    let n = corpus.len();
     let k_max = 100.min(n);
 
     // Run queries.

@@ -4,6 +4,110 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — Unreleased
+
+### Added — Phase 4: experimental `turbovec` index access method (opt-in)
+
+A full `IndexAmRoutine`-based access method is now scaffolded under
+`src/index/`, gated behind the **`experimental_index_am`** Cargo
+feature. Default builds **do not** include it; the v0.3 surface
+(type, operators, aggregates, `turbovec.knn()`) remains the only
+stable user-facing API.
+
+**Build:**
+
+```bash
+cargo pgrx install --release --features experimental_index_am
+```
+
+**Use:**
+
+```sql
+CREATE INDEX docs_emb_idx
+    ON docs USING turbovec (embedding tvector_cosine_ops)
+    WITH (bit_width = 4);
+
+SELECT id FROM docs ORDER BY embedding <=> $1 LIMIT 10;
+```
+
+#### Source layout (`src/index/`)
+
+- `mod.rs` — `IndexAmRoutine` populator and the
+  `turbovec_index_handler(internal) RETURNS index_am_handler` SQL
+  function. Also emits the `CREATE ACCESS METHOD turbovec`,
+  `CREATE OPERATOR CLASS tvector_ip_ops`, and `CREATE OPERATOR
+  CLASS tvector_cosine_ops` declarations via `extension_sql!`.
+- `options.rs` — `bit_width` (2…=4) and `dim` (0 = auto, else
+  positive multiple of 8) reloption parsing under the AM-side
+  callback `amoptions`.
+- `persist.rs` — SPI-backed read/write of `turbovec.am_storage
+  (indexrelid, bit_width, dim, n_vectors, payload, version,
+  updated_at)`. `payload` is `STORAGE EXTERNAL` (no PGLZ on
+  already-quantised bytes).
+- `build.rs` — `ambuild` (heap scan via SPI, builds `IdMapIndex`,
+  persists) and `ambuildempty` (writes empty marker).
+- `insert.rs` — `aminsert` (load-then-update; v0.5 will batch).
+- `scan.rs` — `ambeginscan` / `amrescan` / `amgettuple` /
+  `amendscan` with a `ScanOpaque` carrying the query vector and
+  cached result list. ORDER-BY-only scans are required.
+- `vacuum.rs` — `ambulkdelete` / `amvacuumcleanup` stubs (Phase 5
+  needs an upstream way to enumerate live ids in `IdMapIndex`).
+- `cost.rs` — `amcostestimate` constant heuristic so the planner
+  picks us over a full sort.
+- `validate.rs` — `amvalidate` returns `true` (Phase 5 will check
+  opclass strategy numbers).
+
+#### CTID encoding
+
+We use pgrx's canonical 32 / 16 packing (`item_pointer_to_u64`):
+block number in the top 32 bits, offset number in the bottom 16,
+upper 16 reserved for a future epoch. This gives `IdMapIndex` u64
+ids natural ordering inside a relfile and lets `amgettuple` fill
+`xs_heaptid` via `u64_to_item_pointer` directly.
+
+#### Capability flags
+
+```rust
+amstrategies          = 0
+amsupport             = 1
+amcanorder            = false
+amcanorderbyop        = true
+amcanbackward         = false
+amcanunique           = false
+amcanmulticol         = false
+amoptionalkey         = true
+amstorage             = true
+amcanparallel         = false      // Phase 5
+amcanbuildparallel    = false      // Phase 5
+amusemaintenanceworkmem = true
+```
+
+#### Status
+
+**Untested against a running cluster.** This release is the
+complete scaffold ready for a Phase 5 session that has
+`cargo-pgrx` and a Postgres dev cluster: `cargo pgrx test pg17
+--features experimental_index_am` is the gate. Known follow-ups
+are enumerated in `docs/INDEXAM.md` § "Test plan" and § "Known
+risks".
+
+### Added — docs
+
+- `docs/INDEXAM.md` — implementation guide for the index AM
+  (callback responsibilities, side-table schema, test plan,
+  known risks).
+- `migrations/003_pg_turbovec_v0.4.0.sql` — reference mirror of
+  the SQL surface that ships only when the feature is enabled.
+
+### Changed
+
+- `Cargo.toml` adds `libc = "0.2"` (used by `persist.rs` for
+  pid-stamped tempfile paths) and the `experimental_index_am`
+  Cargo feature.
+- `pg_turbovec.control` `default_version` bumped to `0.4.0`.
+- `src/lib.rs` mounts `mod index` only under
+  `#[cfg(feature = "experimental_index_am")]`.
+
 ## [0.3.0] — Unreleased
 
 ### Added — Phase 3: kernels module, benches, CI, docs
@@ -120,6 +224,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Binary-compatible varlena layout with pgvector's `vector`.
 - WAL-logged persistent index pages.
 
+[0.4.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.4.0
 [0.3.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.3.0
 [0.2.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.2.0
 [0.1.0]: https://codeberg.org/gregburd/pg_turbovec/releases/tag/v0.1.0

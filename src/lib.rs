@@ -23,6 +23,10 @@ pub mod aggregate;
 pub mod cast;
 pub mod distance;
 pub mod guc;
+
+#[cfg(feature = "experimental_index_am")]
+pub mod index;
+
 pub mod kernels;
 pub mod knn;
 pub mod normalize;

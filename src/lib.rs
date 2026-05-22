@@ -542,6 +542,64 @@ mod tests {
     }
 
     #[pg_test]
+    fn knn_filtered_allowlist() {
+        use_turbovec();
+        Spi::run("CREATE TEMP TABLE filt (id bigint PRIMARY KEY, emb tvector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO filt VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0.9,0.1,0,0,0,0,0,0]'), \
+                 (3, '[0,1,0,0,0,0,0,0]'), \
+                 (4, '[-1,0,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+
+        // Without allowlist: row 1 wins.
+        let unfiltered: Option<i64> = Spi::get_one(
+            "SELECT id FROM turbovec.knn(\
+                 'filt'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 1) \
+             ORDER BY score DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(unfiltered, Some(1));
+
+        // With allowlist [3, 4]: row 1 is forbidden; row 3 wins
+        // (cosine to [1,0,..] = 1.0 vs row 4's distance = 2.0).
+        let filtered: Option<i64> = Spi::get_one(
+            "SELECT id FROM turbovec.knn(\
+                 'filt'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 1, 4, ARRAY[3, 4]::bigint[]) \
+             ORDER BY score DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            filtered,
+            Some(3),
+            "with allowlist=[3,4] the filtered nearest should be row 3"
+        );
+
+        // Allowlist of just one id: must return that id (or empty).
+        let single: Option<i64> = Spi::get_one(
+            "SELECT id FROM turbovec.knn(\
+                 'filt'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 5, 4, ARRAY[2]::bigint[])",
+        )
+        .unwrap();
+        assert_eq!(single, Some(2));
+
+        // Empty allowlist: no rows.
+        let empty_count: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM turbovec.knn(\
+                 'filt'::regclass, 'id', 'emb', \
+                 '[1,0,0,0,0,0,0,0]'::turbovec.tvector, 5, 4, ARRAY[]::bigint[])",
+        )
+        .unwrap();
+        assert_eq!(empty_count, Some(0));
+    }
+
+    #[pg_test]
     fn knn_rejects_bad_k() {
         Spi::run("CREATE TEMP TABLE pgtv_empty (id bigint, emb turbovec.tvector)").unwrap();
         let bad = std::panic::catch_unwind(|| {

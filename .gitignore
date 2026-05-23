@@ -18,6 +18,10 @@ Cargo.lock.bak
 # OS
 .DS_Store
 
+# Benchmark fixtures (large, license-encumbered, regenerable from
+# scripts in benches/scripts/).
+/fixtures/
+
 # Logs
 *.log
 

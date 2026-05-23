@@ -108,6 +108,12 @@ fn sparsevec_dims(v: Sparsevec) -> i32 {
     v.dim()
 }
 
+/// pgvector-compat overload: `vector_dims(sparsevec) -> integer`.
+#[pg_extern(name = "vector_dims", immutable, parallel_safe)]
+fn vector_dims_sparsevec(v: Sparsevec) -> i32 {
+    v.dim()
+}
+
 #[pg_extern(immutable, parallel_safe)]
 fn sparsevec_nnz(v: Sparsevec) -> i32 {
     v.nnz() as i32

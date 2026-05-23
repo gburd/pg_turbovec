@@ -27,6 +27,8 @@ pub mod extras;
 pub mod guc;
 pub mod halfvec;
 pub mod halfvec_ops;
+pub mod sparsevec;
+pub mod sparsevec_ops;
 
 #[cfg(feature = "experimental_index_am")]
 pub mod index;
@@ -61,6 +63,74 @@ mod tests {
     /// the top of each test that uses bare operators.
     fn use_turbovec() {
         Spi::run("SET search_path = turbovec, public").unwrap();
+    }
+
+    #[pg_test]
+    fn sparsevec_basic_round_trip() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT '{1:1.5, 5:2.25}/10'::turbovec.sparsevec::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains("1:1.5"));
+        assert!(s.contains("5:2.25"));
+        assert!(s.contains("/10"));
+    }
+
+    #[pg_test]
+    fn sparsevec_distance_ops() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let l2: Option<f64> = Spi::get_one(
+            "SELECT '{1:1, 2:2}/3'::sparsevec <-> '{2:2, 3:1}/3'::sparsevec",
+        )
+        .unwrap();
+        let v = l2.unwrap();
+        assert!((v - 2.0_f64.sqrt()).abs() < 1e-6, "got {}", v);
+
+        let ip: Option<f64> = Spi::get_one(
+            "SELECT turbovec.sparsevec_inner_product(\
+                '{1:1, 2:2}/3'::sparsevec, '{2:2, 3:1}/3'::sparsevec)",
+        )
+        .unwrap();
+        assert!((ip.unwrap() - 4.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn sparsevec_dim_mismatch_errors() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<f64>(
+                "SELECT '{1:1}/3'::sparsevec <-> '{1:1}/4'::sparsevec",
+            )
+        });
+        assert!(bad.is_err(), "sparsevec dim mismatch should ERROR");
+    }
+
+    #[pg_test]
+    fn sparsevec_vector_round_trip() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let txt: Option<String> = Spi::get_one(
+            "SELECT (('[0, 1.5, 0, 0, 2.25]'::vector::sparsevec)::vector)::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains("1.5"));
+        assert!(s.contains("2.25"));
+    }
+
+    #[pg_test]
+    fn sparsevec_nnz_function() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let n: Option<i32> = Spi::get_one(
+            "SELECT turbovec.sparsevec_nnz('{1:1, 5:2, 9:3}/10'::sparsevec)",
+        )
+        .unwrap();
+        assert_eq!(n, Some(3));
+        let d: Option<i32> = Spi::get_one(
+            "SELECT turbovec.sparsevec_dims('{1:1}/100'::sparsevec)",
+        )
+        .unwrap();
+        assert_eq!(d, Some(100));
     }
 
     #[pg_test]

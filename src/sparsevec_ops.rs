@@ -6,6 +6,7 @@
 //! kernel. L2 / L1 are similar.
 
 use pgrx::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::sparsevec::Sparsevec;
 use crate::vec::Vector;
@@ -139,6 +140,93 @@ fn sparsevec_to_vector(v: Sparsevec) -> Vector {
     Vector::from_vec(v.to_dense())
 }
 
+// ---------------------------------------------------------------------
+// Aggregates
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PostgresType)]
+pub struct SparsevecAccum {
+    pub dim: i32,
+    /// Dense f64 running sum (sized to `dim` once first row arrives).
+    pub sum: ::std::vec::Vec<f64>,
+    pub count: i64,
+}
+
+impl SparsevecAccum {
+    fn ensure_dim(&mut self, dim: i32) {
+        if self.dim == 0 {
+            self.dim = dim;
+            self.sum = vec![0.0_f64; dim as usize];
+        } else if self.dim != dim {
+            error!(
+                "sum(sparsevec): cannot accumulate sparsevecs of different dimensions ({} vs {})",
+                self.dim, dim
+            );
+        }
+    }
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn sparsevec_accum(
+    state: Option<SparsevecAccum>,
+    value: Sparsevec,
+) -> SparsevecAccum {
+    let mut state = state.unwrap_or_default();
+    state.ensure_dim(value.dim());
+    for (i, idx) in value.indices.iter().enumerate() {
+        state.sum[*idx as usize] += f64::from(value.values[i]);
+    }
+    state.count += 1;
+    state
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn sparsevec_combine(
+    s1: Option<SparsevecAccum>,
+    s2: Option<SparsevecAccum>,
+) -> Option<SparsevecAccum> {
+    match (s1, s2) {
+        (None, None) => None,
+        (Some(s), None) | (None, Some(s)) => Some(s),
+        (Some(a), Some(b)) => {
+            if a.count == 0 {
+                return Some(b);
+            }
+            if b.count == 0 {
+                return Some(a);
+            }
+            let mut out = a;
+            if out.dim != b.dim {
+                error!(
+                    "sparsevec_combine: dim mismatch ({} vs {})",
+                    out.dim, b.dim
+                );
+            }
+            for (x, y) in out.sum.iter_mut().zip(b.sum.iter()) {
+                *x += *y;
+            }
+            out.count += b.count;
+            Some(out)
+        }
+    }
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn sparsevec_sum_finalfn(state: SparsevecAccum) -> Option<Sparsevec> {
+    if state.count == 0 {
+        return None;
+    }
+    let mut indices = ::std::vec::Vec::new();
+    let mut values = ::std::vec::Vec::new();
+    for (i, x) in state.sum.iter().enumerate() {
+        if *x != 0.0 {
+            indices.push(i as i32);
+            values.push(*x as f32);
+        }
+    }
+    Some(Sparsevec::new(state.dim, indices, values))
+}
+
 extension_sql!(
     r#"
     CREATE OPERATOR <-> (
@@ -164,15 +252,27 @@ extension_sql!(
 
     CREATE CAST (vector    AS sparsevec) WITH FUNCTION vector_to_sparsevec(vector);
     CREATE CAST (sparsevec AS vector)    WITH FUNCTION sparsevec_to_vector(sparsevec);
+
+    CREATE AGGREGATE sum(sparsevec) (
+        SFUNC = sparsevec_accum,
+        STYPE = SparsevecAccum,
+        FINALFUNC = sparsevec_sum_finalfn,
+        COMBINEFUNC = sparsevec_combine,
+        PARALLEL = SAFE
+    );
     "#,
     name = "sparsevec_surface",
     requires = [
         Sparsevec,
+        SparsevecAccum,
         sparsevec_l2_distance,
         sparsevec_negative_inner_product,
         sparsevec_cosine_distance,
         sparsevec_l1_distance,
         vector_to_sparsevec,
-        sparsevec_to_vector
+        sparsevec_to_vector,
+        sparsevec_accum,
+        sparsevec_combine,
+        sparsevec_sum_finalfn
     ]
 );

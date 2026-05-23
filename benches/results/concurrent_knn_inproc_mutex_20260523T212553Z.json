@@ -1,0 +1,59 @@
+{
+  "timestamp_utc": "20260523T212553Z",
+  "host": "floki",
+  "n_cpu": 8,
+  "corpus_rows": 10000,
+  "dim": 384,
+  "bit_width": 4,
+  "k": 10,
+  "duration_s_per_run": 5.0,
+  "mode": "mutex",
+  "notes": "in-process Mutex<HashMap> contention bench — see bench/concurrent.sh for the cross-backend pgbench sweep",
+  "runs": [
+    {
+      "threads": 1,
+      "duration_s": 5.000343526,
+      "total_ops": 14429,
+      "qps_total": 2885.6017441550475,
+      "qps_per_thread": 2885.6017441550475,
+      "speedup_vs_n1": 1.0,
+      "avg_latency_us": 346.47488627070487
+    },
+    {
+      "threads": 2,
+      "duration_s": 5.00050177,
+      "total_ops": 25436,
+      "qps_total": 5086.689530358871,
+      "qps_per_thread": 2543.3447651794354,
+      "speedup_vs_n1": 1.7627829414305884,
+      "avg_latency_us": 393.0809139801856
+    },
+    {
+      "threads": 4,
+      "duration_s": 5.000504434,
+      "total_ops": 42606,
+      "qps_total": 8520.340410121113,
+      "qps_per_thread": 2130.085102530278,
+      "speedup_vs_n1": 2.9527083657263353,
+      "avg_latency_us": 469.351719499601
+    },
+    {
+      "threads": 8,
+      "duration_s": 5.000961688,
+      "total_ops": 56019,
+      "qps_total": 11201.645502388019,
+      "qps_per_thread": 1400.2056877985024,
+      "speedup_vs_n1": 3.881909735145398,
+      "avg_latency_us": 714.7473094842821
+    },
+    {
+      "threads": 16,
+      "duration_s": 5.002460323,
+      "total_ops": 57178,
+      "qps_total": 11429.97571357249,
+      "qps_per_thread": 714.3734820982806,
+      "speedup_vs_n1": 3.9610371516875342,
+      "avg_latency_us": 1397.5769691314842
+    }
+  ]
+}

@@ -1,36 +1,36 @@
 //! Phase 5 extras: pgvector-parity helpers that don't fit cleanly
 //! into the type / distance / aggregate modules.
 //!
-//! - `subvector(tvector, start, length) -> tvector` \u2014 1-indexed
+//! - `subvector(vector, start, length) -> vector` \u2014 1-indexed
 //!   slice, mirrors pgvector's `subvector`.
-//! - `tvector_to_jsonb(tvector)` \u2014 explicit JSON output (handy for
+//! - `vec_to_jsonb(vector)` \u2014 explicit JSON output (handy for
 //!   logging, replication via JSONB columns).
-//! - `jsonb_to_tvector(jsonb)` \u2014 inverse.
-//! - `tvector_check_dim(tvector, integer)` \u2014 runtime dim assertion;
+//! - `jsonb_to_vec(jsonb)` \u2014 inverse.
+//! - `vec_check_dim(vector, integer)` \u2014 runtime dim assertion;
 //!   raises ERROR if mismatch. Cheaper than typmod plumbing.
-//! - `tvector_zeros(integer)` \u2014 zero-filled vector helper.
-//! - `tvector_to_text(tvector)` \u2014 explicit text representation
+//! - `vec_zeros(integer)` \u2014 zero-filled vector helper.
+//! - `vec_to_text(vector)` \u2014 explicit text representation
 //!   (the IO function's output, callable as a regular function).
 
 use pgrx::prelude::*;
 use serde_json::{json, Value};
 
-use crate::tvector::{Tvector, MAX_DIM};
+use crate::vec::{Vector, MAX_DIM};
 
 /// `subvector(v, start, length)` \u2014 1-indexed slice (matches pgvector).
 /// `start` and `length` must be positive and the resulting range must
 /// lie within `v`.
 ///
 /// ```ignore
-/// SELECT turbovec.subvector('[10, 20, 30, 40]'::turbovec.tvector, 2, 2)::text;
+/// SELECT turbovec.subvector('[10, 20, 30, 40]'::turbovec.vector, 2, 2)::text;
 /// -- returns '[20, 30]'
 ///
 /// -- Out-of-bounds raises ERROR:
-/// SELECT turbovec.subvector('[1, 2, 3]'::turbovec.tvector, 2, 5);
-/// -- ERROR: subvector: range 2..6 is out of bounds for tvector of dim 3
+/// SELECT turbovec.subvector('[1, 2, 3]'::turbovec.vector, 2, 5);
+/// -- ERROR: subvector: range 2..6 is out of bounds for vector of dim 3
 /// ```
 #[pg_extern(immutable, parallel_safe)]
-fn subvector(v: Tvector, start: i32, length: i32) -> Tvector {
+fn subvector(v: Vector, start: i32, length: i32) -> Vector {
     if start < 1 {
         error!(
             "subvector: start ({}) must be a positive 1-indexed offset",
@@ -44,26 +44,26 @@ fn subvector(v: Tvector, start: i32, length: i32) -> Tvector {
     let l = length as usize;
     if s + l > v.dim() {
         error!(
-            "subvector: range {}..{} is out of bounds for tvector of dim {}",
+            "subvector: range {}..{} is out of bounds for vector of dim {}",
             start,
             start + length - 1,
             v.dim()
         );
     }
-    Tvector::from_vec(v.as_slice()[s..s + l].to_vec())
+    Vector::from_vec(v.as_slice()[s..s + l].to_vec())
 }
 
-/// Materialise a `tvector` as a `jsonb` array of numbers.
+/// Materialise a `vector` as a `jsonb` array of numbers.
 ///
 /// ```ignore
-/// SELECT turbovec.tvector_to_jsonb('[1, 2.5, -3]'::turbovec.tvector);
+/// SELECT turbovec.vec_to_jsonb('[1, 2.5, -3]'::turbovec.vector);
 /// -- returns [1, 2.5, -3]::jsonb
 ///
 /// -- Equivalent cast form:
-/// SELECT '[1, 2.5, -3]'::turbovec.tvector::jsonb;
+/// SELECT '[1, 2.5, -3]'::turbovec.vector::jsonb;
 /// ```
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_to_jsonb(v: Tvector) -> pgrx::JsonB {
+fn vec_to_jsonb(v: Vector) -> pgrx::JsonB {
     let arr: Vec<Value> = v
         .as_slice()
         .iter()
@@ -72,30 +72,30 @@ fn tvector_to_jsonb(v: Tvector) -> pgrx::JsonB {
     pgrx::JsonB(json!(arr))
 }
 
-/// Parse a `jsonb` array of numbers as a `tvector`. Rejects non-array
+/// Parse a `jsonb` array of numbers as a `vector`. Rejects non-array
 /// inputs and non-numeric / non-finite elements.
 ///
 /// ```ignore
-/// SELECT turbovec.jsonb_to_tvector('[1, 2.5, 3]'::jsonb)::text;
+/// SELECT turbovec.jsonb_to_vec('[1, 2.5, 3]'::jsonb)::text;
 /// -- returns '[1, 2.5, 3]'
 ///
 /// -- Errors:
-/// SELECT turbovec.jsonb_to_tvector('{"a": 1}'::jsonb);     -- ERROR (not array)
-/// SELECT turbovec.jsonb_to_tvector('[1, "x", 3]'::jsonb);  -- ERROR (string elem)
-/// SELECT turbovec.jsonb_to_tvector('[1, null, 3]'::jsonb); -- ERROR (null elem)
+/// SELECT turbovec.jsonb_to_vec('{"a": 1}'::jsonb);     -- ERROR (not array)
+/// SELECT turbovec.jsonb_to_vec('[1, "x", 3]'::jsonb);  -- ERROR (string elem)
+/// SELECT turbovec.jsonb_to_vec('[1, null, 3]'::jsonb); -- ERROR (null elem)
 /// ```
 #[pg_extern(immutable, parallel_safe)]
-fn jsonb_to_tvector(j: pgrx::JsonB) -> Tvector {
+fn jsonb_to_vec(j: pgrx::JsonB) -> Vector {
     let arr = match j.0 {
         Value::Array(a) => a,
         other => error!(
-            "jsonb_to_tvector: expected JSON array, got {}",
+            "jsonb_to_vec: expected JSON array, got {}",
             value_kind(&other)
         ),
     };
     if arr.is_empty() || arr.len() > MAX_DIM {
         error!(
-            "jsonb_to_tvector: dim {} out of range 1..={}",
+            "jsonb_to_vec: dim {} out of range 1..={}",
             arr.len(),
             MAX_DIM
         );
@@ -104,17 +104,17 @@ fn jsonb_to_tvector(j: pgrx::JsonB) -> Tvector {
     for (i, v) in arr.into_iter().enumerate() {
         let n = v.as_f64().unwrap_or_else(|| {
             error!(
-                "jsonb_to_tvector: element {} is not a number ({})",
+                "jsonb_to_vec: element {} is not a number ({})",
                 i,
                 value_kind(&v)
             )
         });
         if !n.is_finite() {
-            error!("jsonb_to_tvector: element {} is not finite ({})", i, n);
+            error!("jsonb_to_vec: element {} is not finite ({})", i, n);
         }
         out.push(n as f32);
     }
-    Tvector::from_vec(out)
+    Vector::from_vec(out)
 }
 
 /// Returns the kind name of a `serde_json::Value` for error messages.
@@ -130,24 +130,24 @@ fn value_kind(v: &Value) -> &'static str {
 }
 
 /// Raise an ERROR if `v.dim() != expected`, otherwise return `v`
-/// unchanged. Useful as `CHECK (turbovec.tvector_check_dim(emb, 1536))`.
+/// unchanged. Useful as `CHECK (turbovec.vec_check_dim(emb, 1536))`.
 ///
 /// ```ignore
 /// CREATE TABLE docs (
 ///     id  bigserial PRIMARY KEY,
-///     emb turbovec.tvector
+///     emb turbovec.vector
 ///         CHECK (turbovec.vector_dims(
-///             turbovec.tvector_check_dim(emb, 1536)) = 1536)
+///             turbovec.vec_check_dim(emb, 1536)) = 1536)
 /// );
 /// ```
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_check_dim(v: Tvector, expected: i32) -> Tvector {
+fn vec_check_dim(v: Vector, expected: i32) -> Vector {
     if expected < 1 {
-        error!("tvector_check_dim: expected dim must be positive");
+        error!("vec_check_dim: expected dim must be positive");
     }
     if v.dim() != expected as usize {
         error!(
-            "tvector_check_dim: dim mismatch (got {}, expected {})",
+            "vec_check_dim: dim mismatch (got {}, expected {})",
             v.dim(),
             expected
         );
@@ -155,33 +155,33 @@ fn tvector_check_dim(v: Tvector, expected: i32) -> Tvector {
     v
 }
 
-/// Build a zero-filled `tvector` of the requested dimension. Useful
-/// as the identity for `sum(tvector)` in extension queries.
+/// Build a zero-filled `vector` of the requested dimension. Useful
+/// as the identity for `sum(vector)` in extension queries.
 ///
 /// ```ignore
-/// SELECT turbovec.vector_dims(turbovec.tvector_zeros(8));
+/// SELECT turbovec.vector_dims(turbovec.vec_zeros(8));
 /// -- returns 8
 ///
-/// SELECT turbovec.vector_norm(turbovec.tvector_zeros(8));
+/// SELECT turbovec.vector_norm(turbovec.vec_zeros(8));
 /// -- returns 0.0
 /// ```
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_zeros(dim: i32) -> Tvector {
+fn vec_zeros(dim: i32) -> Vector {
     if dim <= 0 || dim as usize > MAX_DIM {
-        error!("tvector_zeros: dim {} out of range 1..={}", dim, MAX_DIM);
+        error!("vec_zeros: dim {} out of range 1..={}", dim, MAX_DIM);
     }
-    Tvector::from_vec(vec![0.0_f32; dim as usize])
+    Vector::from_vec(vec![0.0_f32; dim as usize])
 }
 
-/// Explicit text rendering of a `tvector` (mirrors the type's OUTPUT
+/// Explicit text rendering of a `vector` (mirrors the type's OUTPUT
 /// function but callable directly).
 ///
 /// ```ignore
-/// SELECT turbovec.tvector_to_text('[1, 2.5, -3]'::turbovec.tvector);
+/// SELECT turbovec.vec_to_text('[1, 2.5, -3]'::turbovec.vector);
 /// -- returns '[1, 2.5, -3]'
 /// ```
 #[pg_extern(immutable, parallel_safe)]
-fn tvector_to_text(v: Tvector) -> String {
+fn vec_to_text(v: Vector) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(2 + v.dim() * 6);
     out.push('[');
@@ -199,10 +199,10 @@ fn tvector_to_text(v: Tvector) -> String {
 
 extension_sql!(
     r"
-    -- jsonb <-> tvector explicit casts.
-    CREATE CAST (tvector AS jsonb) WITH FUNCTION tvector_to_jsonb(tvector);
-    CREATE CAST (jsonb   AS tvector) WITH FUNCTION jsonb_to_tvector(jsonb);
+    -- jsonb <-> vector explicit casts.
+    CREATE CAST (vector AS jsonb) WITH FUNCTION vec_to_jsonb(vector);
+    CREATE CAST (jsonb   AS vector) WITH FUNCTION jsonb_to_vec(jsonb);
     ",
-    name = "tvector_jsonb_casts",
-    requires = [tvector_to_jsonb, jsonb_to_tvector]
+    name = "vec_jsonb_casts",
+    requires = [vec_to_jsonb, jsonb_to_vec]
 );

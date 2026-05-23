@@ -6,20 +6,20 @@
 use pgrx::prelude::*;
 
 use crate::kernels;
-use crate::tvector::Tvector;
+use crate::vec::Vector;
 
-/// L2-normalise a `tvector` to unit length. Required by the TurboQuant
+/// L2-normalise a `vector` to unit length. Required by the TurboQuant
 /// kernel; we expose it as a SQL function so users can pre-normalise
 /// vectors in pipelines that don't run through the index.
 ///
 /// Returns the input unchanged when the L2 norm is zero (avoids
 /// producing NaNs).
 #[pg_extern(immutable, parallel_safe)]
-pub fn tvector_normalize(v: Tvector) -> Tvector {
-    Tvector::from_vec(kernels::normalise_to_vec(v.as_slice()))
+pub fn vec_normalize(v: Vector) -> Vector {
+    Vector::from_vec(kernels::normalise_to_vec(v.as_slice()))
 }
 
-/// Diagnostic: encode a `tvector` through the turbovec quantiser and
+/// Diagnostic: encode a `vector` through the turbovec quantiser and
 /// score it back against itself, returning the inner-product self-score.
 ///
 /// This is intentionally narrow — it is *not* a full ANN function. Its
@@ -31,7 +31,7 @@ pub fn tvector_normalize(v: Tvector) -> Tvector {
 /// - `dim` must be a multiple of 8 (turbovec assertion).
 /// - `bit_width` must be in `2..=4`.
 #[pg_extern(immutable, parallel_safe)]
-pub fn turbovec_self_score(v: Tvector, bit_width: i32) -> f64 {
+pub fn turbovec_self_score(v: Vector, bit_width: i32) -> f64 {
     use turbovec::IdMapIndex;
 
     if v.dim() % 8 != 0 {
@@ -58,7 +58,7 @@ pub fn turbovec_self_score(v: Tvector, bit_width: i32) -> f64 {
     f64::from(scores[0])
 }
 
-/// Build a random unit-norm `tvector` of dimension `dim`. Useful for
+/// Build a random unit-norm `vector` of dimension `dim`. Useful for
 /// benchmarks and recall tests; deliberately *not* deterministic
 /// across calls (we want different vectors each invocation).
 ///
@@ -66,13 +66,13 @@ pub fn turbovec_self_score(v: Tvector, bit_width: i32) -> f64 {
 /// normal followed by L2 normalisation — the canonical "uniform on
 /// the sphere" sampling.
 #[pg_extern(volatile, parallel_safe)]
-pub fn tvector_random_unit(dim: i32) -> Tvector {
+pub fn vec_random_unit(dim: i32) -> Vector {
     use rand::Rng;
 
-    if dim <= 0 || dim as usize > crate::tvector::MAX_DIM {
+    if dim <= 0 || dim as usize > crate::vec::MAX_DIM {
         error!(
-            "tvector_random_unit: dim must be in 1..={} (got {})",
-            crate::tvector::MAX_DIM,
+            "vec_random_unit: dim must be in 1..={} (got {})",
+            crate::vec::MAX_DIM,
             dim
         );
     }
@@ -86,5 +86,5 @@ pub fn tvector_random_unit(dim: i32) -> Tvector {
             u
         })
         .collect();
-    Tvector::from_vec(kernels::normalise_to_vec(&raw))
+    Vector::from_vec(kernels::normalise_to_vec(&raw))
 }

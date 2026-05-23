@@ -13,8 +13,8 @@
 //! turbovec.knn(
 //!     rel       regclass,
 //!     id_col    text,            -- bigint primary key column
-//!     vec_col   text,            -- tvector column
-//!     query     tvector,
+//!     vec_col   text,            -- vector column
+//!     query     vector,
 //!     k         integer,
 //!     bit_width integer DEFAULT 4
 //! ) RETURNS TABLE(id bigint, score double precision)
@@ -34,7 +34,7 @@ use turbovec::IdMapIndex;
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
-use crate::tvector::Tvector;
+use crate::vec::Vector;
 
 /// `turbovec.knn(rel, id_col, vec_col, query, k, bit_width, allowed)`
 /// — see module documentation. The optional `allowed` parameter
@@ -45,7 +45,7 @@ fn knn(
     rel: pg_sys::Oid,
     id_col: &str,
     vec_col: &str,
-    query: Tvector,
+    query: Vector,
     k: i32,
     bit_width: default!(i32, 4),
     allowed: default!(Option<Vec<i64>>, "NULL"),
@@ -109,18 +109,18 @@ fn knn(
     let mut idx = IdMapIndex::new(query.dim(), bit_width as usize);
     let mut flat: Vec<f32> = Vec::with_capacity(rows.len() * query.dim());
     let mut ids: Vec<u64> = Vec::with_capacity(rows.len());
-    for (id, vec) in &rows {
+    for (id, vector) in &rows {
         if normalise {
-            push_normalised(&mut flat, vec);
+            push_normalised(&mut flat, vector);
         } else {
-            flat.extend_from_slice(vec);
+            flat.extend_from_slice(vector);
         }
         ids.push(*id as u64);
     }
     idx.add_with_ids(&flat, &ids)
         .unwrap_or_else(|e| error!("turbovec.knn: add_with_ids failed: {:?}", e));
 
-    // Approximate bytes: packed_codes (dim*bit_width/8 per vec)
+    // Approximate bytes: packed_codes (dim*bit_width/8 per vector)
     // plus 4-byte scale, plus a 64-byte id-map overhead heuristic.
     let bytes_per_vec = (query.dim() * bit_width as usize) / 8 + 4 + 64;
     let total_bytes = bytes_per_vec * rows.len();
@@ -221,7 +221,7 @@ fn push_normalised(dst: &mut Vec<f32>, src: &[f32]) {
     }
 }
 
-/// Pull `(id, vec)` rows out of the relation via SPI. Skips rows
+/// Pull `(id, vector)` rows out of the relation via SPI. Skips rows
 /// with NULL id, NULL vector, or vectors whose dim does not match
 /// `expected_dim`.
 fn collect_via_spi(
@@ -249,7 +249,7 @@ fn collect_via_spi(
 
     let sql = format!(
         "SELECT ({id_q})::bigint, \
-                ({vec_q})::turbovec.tvector::real[] \
+                ({vec_q})::turbovec.vector::real[] \
          FROM   {qualified} \
          WHERE  ({id_q}) IS NOT NULL AND ({vec_q}) IS NOT NULL"
     );

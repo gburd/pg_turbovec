@@ -11,7 +11,7 @@ use pgrx::prelude::*;
 use crate::guc;
 use crate::index::persist;
 use crate::kernels;
-use crate::tvector::Tvector;
+use crate::vec::Vector;
 
 /// Scan-private state. Lives in the scan's memory context (allocated
 /// by `palloc0` so all fields start zeroed).
@@ -132,9 +132,9 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         error!("turbovec: ORDER BY query datum is NULL");
     }
 
-    let query: Tvector = match pgrx::FromDatum::from_datum(datum, false) {
+    let query: Vector = match pgrx::FromDatum::from_datum(datum, false) {
         Some(v) => v,
-        None => error!("turbovec: ORDER BY datum did not decode to tvector"),
+        None => error!("turbovec: ORDER BY datum did not decode to vector"),
     };
 
     let normalise = guc::NORMALIZE_ON_INSERT.get();

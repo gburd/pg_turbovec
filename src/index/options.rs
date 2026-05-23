@@ -61,7 +61,7 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
             c"Vector dimension (0 = auto-detect on first build)".as_ptr(),
             0,
             0,
-            crate::tvector::MAX_DIM as i32,
+            crate::vec::MAX_DIM as i32,
             pg_sys::AccessExclusiveLock as i32,
         );
 

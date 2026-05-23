@@ -1,4 +1,4 @@
-//! The `tvector` SQL type — variable-dimension `f32` vector.
+//! The `vector` SQL type — variable-dimension `f32` vector.
 //!
 //! Phase 1 representation: pgrx `PostgresType` with serde-derived
 //! varlena (CBOR) encoding. This is *not* binary-compatible with
@@ -22,34 +22,34 @@ use serde::{Deserialize, Serialize};
 /// storage, but values up to this dimension are accepted.
 pub const MAX_DIM: usize = 16_000;
 
-/// A turbovec `tvector` value — a variable-dimension `f32` vector.
+/// A turbovec `vector` value — a variable-dimension `f32` vector.
 ///
 /// Stored on disk as a CBOR-encoded varlena (Phase 1). The Rust
-/// representation is a heap-allocated `Vec<f32>`; FromDatum/IntoDatum
+/// representation is a heap-allocated `::std::vec::Vec<f32>`; FromDatum/IntoDatum
 /// pay one serde round-trip per call. For Phase 2 we replace this
 /// with a zero-copy `&[f32]` over a hand-rolled varlena layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PostgresType)]
 #[inoutfuncs]
-pub struct Tvector {
+pub struct Vector {
     /// Per-coordinate values. Always finite.
-    pub data: Vec<f32>,
+    pub data: ::std::vec::Vec<f32>,
 }
 
-impl Tvector {
-    /// Build a vector from an owned `Vec<f32>`, validating that all
+impl Vector {
+    /// Build a vector from an owned `::std::vec::Vec<f32>`, validating that all
     /// values are finite and that the dimension is in `1..=MAX_DIM`.
     /// Raises a Postgres `ERROR` on violation.
     #[must_use]
-    pub fn from_vec(data: Vec<f32>) -> Self {
+    pub fn from_vec(data: ::std::vec::Vec<f32>) -> Self {
         if data.is_empty() {
-            error!("tvector must have at least one dimension");
+            error!("vector must have at least one dimension");
         }
         if data.len() > MAX_DIM {
-            error!("tvector cannot have more than {} dimensions", MAX_DIM);
+            error!("vector cannot have more than {} dimensions", MAX_DIM);
         }
         for (i, v) in data.iter().enumerate() {
             if !v.is_finite() {
-                error!("tvector value at index {} is not finite ({})", i, v);
+                error!("vector value at index {} is not finite ({})", i, v);
             }
         }
         Self { data }
@@ -72,10 +72,10 @@ impl Tvector {
     /// Assert that `self` and `other` have the same dimensionality;
     /// raise a Postgres ERROR otherwise.
     #[inline]
-    pub(crate) fn check_same_dim(&self, other: &Tvector, op: &str) {
+    pub(crate) fn check_same_dim(&self, other: &Vector, op: &str) {
         if self.dim() != other.dim() {
             error!(
-                "different tvector dimensions {} and {} for operator '{}'",
+                "different vector dimensions {} and {} for operator '{}'",
                 self.dim(),
                 other.dim(),
                 op
@@ -84,14 +84,14 @@ impl Tvector {
     }
 }
 
-impl InOutFuncs for Tvector {
+impl InOutFuncs for Vector {
     fn input(input: &CStr) -> Self {
         let s = input
             .to_str()
-            .unwrap_or_else(|e| error!("tvector input is not valid UTF-8: {}", e));
-        match parse_tvector(s) {
-            Ok(v) => Tvector::from_vec(v),
-            Err(msg) => error!("invalid tvector input '{}': {}", s, msg),
+            .unwrap_or_else(|e| error!("vector input is not valid UTF-8: {}", e));
+        match parse_vec(s) {
+            Ok(v) => Vector::from_vec(v),
+            Err(msg) => error!("invalid vector input '{}': {}", s, msg),
         }
     }
 
@@ -111,11 +111,11 @@ impl InOutFuncs for Tvector {
         buffer.push(']');
     }
 
-    const NULL_ERROR_MESSAGE: Option<&'static str> = Some("NULL is not a valid tvector value");
+    const NULL_ERROR_MESSAGE: Option<&'static str> = Some("NULL is not a valid vector value");
 }
 
-/// Parse a `'[a, b, c]'`-formatted tvector literal.
-pub(crate) fn parse_tvector(s: &str) -> Result<Vec<f32>, String> {
+/// Parse a `'[a, b, c]'`-formatted vector literal.
+pub(crate) fn parse_vec(s: &str) -> Result<::std::vec::Vec<f32>, String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Err("empty input".to_string());
@@ -127,7 +127,7 @@ pub(crate) fn parse_tvector(s: &str) -> Result<Vec<f32>, String> {
         .ok_or_else(|| "expected ']' at end".to_string())?;
     let body = stripped.trim();
     if body.is_empty() {
-        return Err("tvector must have at least one dimension".to_string());
+        return Err("vector must have at least one dimension".to_string());
     }
     let mut out = Vec::with_capacity(8);
     for (i, tok) in body.split(',').enumerate() {
@@ -154,20 +154,20 @@ mod tests {
 
     #[test]
     fn parse_basic() {
-        assert_eq!(parse_tvector("[1, 2, 3]").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(parse_vec("[1, 2, 3]").unwrap(), vec![1.0, 2.0, 3.0]);
         assert_eq!(
-            parse_tvector("[ 1.5,-2.0 , 3 ]").unwrap(),
+            parse_vec("[ 1.5,-2.0 , 3 ]").unwrap(),
             vec![1.5, -2.0, 3.0]
         );
     }
 
     #[test]
     fn parse_rejects() {
-        assert!(parse_tvector("").is_err());
-        assert!(parse_tvector("1, 2, 3").is_err());
-        assert!(parse_tvector("[1, 2,]").is_err());
-        assert!(parse_tvector("[]").is_err());
-        assert!(parse_tvector("[NaN]").is_err());
-        assert!(parse_tvector("[inf]").is_err());
+        assert!(parse_vec("").is_err());
+        assert!(parse_vec("1, 2, 3").is_err());
+        assert!(parse_vec("[1, 2,]").is_err());
+        assert!(parse_vec("[]").is_err());
+        assert!(parse_vec("[NaN]").is_err());
+        assert!(parse_vec("[inf]").is_err());
     }
 }

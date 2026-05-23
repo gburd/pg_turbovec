@@ -21,11 +21,11 @@ All extension objects live in the `turbovec` schema. Set
 CREATE TABLE docs (
     id        bigserial PRIMARY KEY,
     body      text,
-    embedding turbovec.tvector
+    embedding turbovec.vector
 );
 ```
 
-`tvector` accepts any dimension from 1 to 16 000. **A single index
+`vector` accepts any dimension from 1 to 16 000. **A single index
 fixes the dimension at build time**, so keep your column homogeneous —
 mixed-dim rows are stored fine, but the ANN function will skip rows
 with a mismatched dim.
@@ -44,7 +44,7 @@ INSERT INTO docs (body, embedding) VALUES
 -- Casting from a Rust / Python emitter that produces an array literal:
 INSERT INTO docs (body, embedding)
 VALUES ('greeting',
-        ARRAY[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]::real[]::tvector);
+        ARRAY[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]::real[]::vector);
 ```
 
 ## 4. Exact (brute-force) similarity search
@@ -81,7 +81,7 @@ SELECT k.id, k.score, d.body
 FROM   turbovec.knn(
          'docs'::regclass,
          'id', 'embedding',
-         '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::tvector,
+         '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::vector,
          10
        ) k
 JOIN   docs d ON d.id = k.id
@@ -98,7 +98,7 @@ in v0.3.
 ```sql
 SELECT * FROM turbovec.knn(
     'docs'::regclass, 'id', 'embedding',
-    '[...]'::tvector, 10,
+    '[...]'::vector, 10,
     bit_width => 2);   -- 2-bit, 32x compression vs FP32
 ```
 
@@ -142,13 +142,13 @@ FROM   turbovec.knn(
        ) k;
 ```
 
-Operators on `tvector`:
+Operators on `vector`:
 
 | Op  | Function       | Result                      |
 |-----|----------------|-----------------------------|
-| `+` | `tvector_add`  | element-wise sum            |
-| `-` | `tvector_sub`  | element-wise difference     |
-| `*` | `tvector_mul`  | Hadamard (element-wise) product |
+| `+` | `vec_add`  | element-wise sum            |
+| `-` | `vec_sub`  | element-wise difference     |
+| `*` | `vec_mul`  | Hadamard (element-wise) product |
 
 ## 8. Configuration GUCs
 
@@ -165,17 +165,17 @@ All five are `USERSET` — settable per-session.
 ## 9. Coexisting with pgvector
 
 `pg_turbovec` and `pgvector` can coexist in the same database. They
-own different types (`turbovec.tvector` vs `public.vector`) and
+own different types (`turbovec.vector` vs `public.vector`) and
 their distance operators dispatch by operand type — no collisions.
 
-To migrate from a `pgvector.vector` column to `turbovec.tvector`:
+To migrate from a `pgvector.vector` column to `turbovec.vector`:
 
 ```sql
 -- Phase 1: add a parallel column.
-ALTER TABLE docs ADD COLUMN embedding_tv turbovec.tvector;
+ALTER TABLE docs ADD COLUMN embedding_tv turbovec.vector;
 
 UPDATE docs
-SET    embedding_tv = embedding::real[]::turbovec.tvector;
+SET    embedding_tv = embedding::real[]::turbovec.vector;
 
 -- Phase 2: drop the old column at your leisure.
 ALTER TABLE docs DROP COLUMN embedding;
@@ -188,7 +188,7 @@ ALTER TABLE docs RENAME COLUMN embedding_tv TO embedding;
 SELECT turbovec.turbovec_version();          -- '0.3.0'
 SELECT turbovec.vector_dims(emb) FROM docs LIMIT 1;
 SELECT turbovec.vector_norm(emb) FROM docs LIMIT 1;
-SELECT turbovec.turbovec_self_score(turbovec.tvector_normalize(emb), 4)
+SELECT turbovec.turbovec_self_score(turbovec.vec_normalize(emb), 4)
   FROM docs LIMIT 1;
 ```
 

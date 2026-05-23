@@ -19,7 +19,7 @@ Measures the f64-accumulator distance kernels (`dot`, `l2_sq`,
 `l1_abs`, `cosine_distance`) at dims 128, 384, 768, 1536, 3072.
 These are the kernels that back the `<->` / `<#>` / `<=>` / `<+>`
 operators on small (in-page) result sets and the `vector_norm` /
-`tvector_normalize` helpers.
+`vec_normalize` helpers.
 
 ## 2. Pure-Rust recall benchmark (Phase 14, **shipped**)
 
@@ -66,7 +66,7 @@ Full machine-readable history under [`benches/results/`](../benches/results/).
 
 1. Spin up a `cargo pgrx` cluster.
 2. Load `glove-200`, `openai-1536`, `openai-3072` into Postgres
-   tables under both `pg_turbovec.tvector` and `pgvector.vector`.
+   tables under both `pg_turbovec.vector` and `pgvector.vector`.
 3. For each of (k = 1, 10, 100):
    - run 1 000 random queries through `turbovec.knn(...)` at
      `bit_width ∈ {2, 3, 4}`,

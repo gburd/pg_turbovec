@@ -70,21 +70,21 @@ test; user-facing docs are complete.
 
 Stable user-facing API:
 
-- `tvector` type with text I/O, full operator suite (`<-> <#> <=> <+>`).
+- `vector` type with text I/O, full operator suite (`<-> <#> <=> <+>`).
 - Distance functions, helpers, element-wise arithmetic.
-- `avg(tvector)` / `sum(tvector)` aggregates with `f64`
+- `avg(vector)` / `sum(vector)` aggregates with `f64`
   accumulators.
 - Casts to/from `real[]` / `double precision[]` / `integer[]` /
   `jsonb`.
-- `subvector`, `tvector_normalize`, `tvector_check_dim`,
-  `tvector_zeros`, `turbovec_self_score`, `tvector_random_unit`.
+- `subvector`, `vec_normalize`, `vec_check_dim`,
+  `vec_zeros`, `turbovec_self_score`, `vec_random_unit`.
 - `turbovec.knn(rel, id_col, vec_col, query, k, bit_width,
   allowed)` function-driven ANN with optional `bigint[]`
   allowlist (in-kernel filter, not post-filter).
 - `turbovec.*` GUC namespace.
 - `CREATE INDEX ... USING turbovec` access method with operator
-  classes `tvector_ip_ops` (default, `<#>`) and
-  `tvector_cosine_ops` (`<=>`).
+  classes `vec_ip_ops` (default, `<#>`) and
+  `vec_cosine_ops` (`<=>`).
 - `CREATE INDEX CONCURRENTLY` support.
 - aminsert / ambulkdelete via VACUUM / REINDEX all functional.
 
@@ -121,11 +121,11 @@ INDEX before commit).
 
 psql script exercising every public feature end-to-end:
 
-1. tvector type literals + dims/norm/normalize
+1. vector type literals + dims/norm/normalize
 2. All four distance operators with hand-checked numeric answers
 3. Element-wise arithmetic
 4. real[]/jsonb casts (both directions)
-5. subvector / tvector_zeros / tvector_check_dim
+5. subvector / vec_zeros / vec_check_dim
 6. avg/sum aggregates
 7. turbovec.knn() unfiltered + with bigint[] allowlist
 8. CREATE INDEX, aminsert via INSERT, ambulkdelete via
@@ -256,13 +256,13 @@ CTID more than once.
 ### Manual verification (psql, no transaction wrapper)
 
 ```
-CREATE TABLE cic_demo (id bigint PRIMARY KEY, emb tvector);
+CREATE TABLE cic_demo (id bigint PRIMARY KEY, emb vector);
 INSERT INTO cic_demo VALUES (1, '[1,0,0,0,0,0,0,0]'), ...;
 CREATE INDEX CONCURRENTLY cic_demo_idx
-  ON cic_demo USING turbovec (emb tvector_cosine_ops);
+  ON cic_demo USING turbovec (emb vec_cosine_ops);
 \d cic_demo
   Indexes:
-    "cic_demo_idx" turbovec (emb tvector_cosine_ops)   -- valid, no INVALID marker
+    "cic_demo_idx" turbovec (emb vec_cosine_ops)   -- valid, no INVALID marker
 ```
 
 Before v0.13 this terminated with
@@ -300,7 +300,7 @@ During debugging:
 - Tried setting `xs_recheck = true` in addition to
   `xs_recheckorderby = true`. Did not help.
 - Confirmed the crash is **not** in our amgettuple body — a
-  stub returning `false` with no result-vec writes still
+  stub returning `false` with no result-vector writes still
   triggers `munmap_chunk()`.
 
 Working theory: the executor's recheck-orderby path frees a
@@ -384,7 +384,7 @@ bigint[]` argument:
 SELECT k.id
 FROM   turbovec.knn(
          'docs'::regclass, 'id', 'embedding',
-         $1::tvector, 10, 4,
+         $1::vector, 10, 4,
          ARRAY(SELECT id FROM docs WHERE tenant_id = $2)::bigint[]
        ) k
 ORDER  BY k.score DESC;
@@ -402,7 +402,7 @@ turbovec.knn(
     rel       regclass,
     id_col    text,
     vec_col   text,
-    query     tvector,
+    query     vector,
     k         integer,
     bit_width integer DEFAULT 4,
     allowed   bigint[] DEFAULT NULL
@@ -602,9 +602,9 @@ tests green; the `experimental_index_am`-feature build also runs
 **28/28**, including a new end-to-end `index_am_create_and_query`
 test that:
 
-1. `CREATE TABLE`s an 8-dim `tvector` column,
+1. `CREATE TABLE`s an 8-dim `vector` column,
 2. inserts four rows,
-3. `CREATE INDEX ... USING turbovec (... tvector_cosine_ops) WITH
+3. `CREATE INDEX ... USING turbovec (... vec_cosine_ops) WITH
    (bit_width = 4)`,
 4. asserts the side-table row was created with `n_vectors = 4`,
 5. runs `ORDER BY emb <=> $1 LIMIT 1` and asserts the right row
@@ -617,8 +617,8 @@ test that:
   derives it from non-Option args), causing `CREATE EXTENSION` to
   fail with `must not omit initial value when transition function
   is strict and transition type is not compatible with input
-  type`. Both `tvector_accum` and `tvector_combine` now accept
-  `Option<TvectorAccum>` so pgrx generates non-strict SQL.
+  type`. Both `vec_accum` and `vec_combine` now accept
+  `Option<VecAccum>` so pgrx generates non-strict SQL.
 - **`trusted = true` in `pg_turbovec.control`** was rejected by
   pgrx 0.17's control-file parser as `RedundantField`. Removed.
 - **Default `cargo pgrx test pg16` build target** — switched the
@@ -667,18 +667,18 @@ test that:
 
 ### Added — Phase 5: pgvector-parity helpers
 
-- **`subvector(tvector, start integer, length integer) -> tvector`**
+- **`subvector(vector, start integer, length integer) -> vector`**
   — 1-indexed slice. Bounds-checked; raises `ERROR` on overrun.
-- **`tvector_to_jsonb(tvector) -> jsonb`** and
-  **`jsonb_to_tvector(jsonb) -> tvector`** plus explicit casts in
+- **`vec_to_jsonb(vector) -> jsonb`** and
+  **`jsonb_to_vec(jsonb) -> vector`** plus explicit casts in
   both directions. Useful for replication via JSONB columns,
   logging, and audit trails.
-- **`tvector_check_dim(tvector, integer) -> tvector`** — runtime
+- **`vec_check_dim(vector, integer) -> vector`** — runtime
   dim assertion. Use as a `CHECK` constraint when typmod-style
   enforcement is wanted without the full typmod plumbing.
-- **`tvector_zeros(integer) -> tvector`** — zero-vector helper;
-  identity for `sum(tvector)` in extension queries.
-- **`tvector_to_text(tvector) -> text`** — explicit text rendering
+- **`vec_zeros(integer) -> vector`** — zero-vector helper;
+  identity for `sum(vector)` in extension queries.
+- **`vec_to_text(vector) -> text`** — explicit text rendering
   callable from SQL (the type's OUTPUT function as a regular
   function).
 
@@ -713,7 +713,7 @@ cargo pgrx install --release --features experimental_index_am
 
 ```sql
 CREATE INDEX docs_emb_idx
-    ON docs USING turbovec (embedding tvector_cosine_ops)
+    ON docs USING turbovec (embedding vec_cosine_ops)
     WITH (bit_width = 4);
 
 SELECT id FROM docs ORDER BY embedding <=> $1 LIMIT 10;
@@ -724,8 +724,8 @@ SELECT id FROM docs ORDER BY embedding <=> $1 LIMIT 10;
 - `mod.rs` — `IndexAmRoutine` populator and the
   `turbovec_index_handler(internal) RETURNS index_am_handler` SQL
   function. Also emits the `CREATE ACCESS METHOD turbovec`,
-  `CREATE OPERATOR CLASS tvector_ip_ops`, and `CREATE OPERATOR
-  CLASS tvector_cosine_ops` declarations via `extension_sql!`.
+  `CREATE OPERATOR CLASS vec_ip_ops`, and `CREATE OPERATOR
+  CLASS vec_cosine_ops` declarations via `extension_sql!`.
 - `options.rs` — `bit_width` (2…=4) and `dim` (0 = auto, else
   positive multiple of 8) reloption parsing under the AM-side
   callback `amoptions`.
@@ -807,7 +807,7 @@ risks".
   `distance.rs` / `normalize.rs` now delegate to this module so the
   kernels are exercisable under plain `cargo test --no-default-features`
   without booting Postgres.
-- **`tvector_random_unit(integer)`** — random unit-norm `tvector`,
+- **`vec_random_unit(integer)`** — random unit-norm `vector`,
   for benchmarking and recall scaffolding.
 - **`benches/distance.rs`** — `criterion`-based micro-benchmarks of
   the distance kernels at d=128, 384, 768, 1536, 3072. Runs via
@@ -835,7 +835,7 @@ risks".
 ### Added — Phase 2: function-driven ANN
 
 - **`turbovec.knn(rel regclass, id_col text, vec_col text, query
-  tvector, k int, bit_width int default 4)`** — function-driven
+  vector, k int, bit_width int default 4)`** — function-driven
   ANN backed by `turbovec::IdMapIndex`. Returns
   `TABLE(id bigint, score float8)`, ordered by score DESC for
   most-similar-first.
@@ -853,11 +853,11 @@ risks".
 
 ### Added — Phase 1: type, operators, functions, aggregates
 
-- **`tvector` type** — variable-dimension `f32` vector, stored as a
+- **`vector` type** — variable-dimension `f32` vector, stored as a
   CBOR-serialised varlena via `pgrx::PostgresType`. Text I/O accepts
   `'[1, 2, 3]'` with whitespace tolerance and rejects NaN / ±Inf.
   Hard cap at 16 000 dimensions, matching pgvector.
-- **Distance operators** between `tvector` operands:
+- **Distance operators** between `vector` operands:
   - `<->` Euclidean (L2)
   - `<#>` negative inner product (so `ORDER BY a <#> b` sorts most-
     similar-first under ASC, mirroring pgvector)
@@ -867,24 +867,24 @@ risks".
   `inner_product`, `negative_inner_product`, `cosine_distance`,
   `l1_distance`.
 - **Helper functions**: `vector_dims`, `vector_norm`,
-  `tvector_normalize`.
-- **Element-wise arithmetic**: `tvector_add` (`+`), `tvector_sub`
-  (`-`), `tvector_mul` (`*`).
-- **Aggregates**: `avg(tvector)` and `sum(tvector)`. Internal state
+  `vec_normalize`.
+- **Element-wise arithmetic**: `vec_add` (`+`), `vec_sub`
+  (`-`), `vec_mul` (`*`).
+- **Aggregates**: `avg(vector)` and `sum(vector)`. Internal state
   uses `f64` accumulators to preserve precision on large corpora.
   Both are `PARALLEL SAFE`; `combinefn` merges partial states.
 - **Casts** (explicit only):
-  - `real[]` → `tvector`
-  - `double precision[]` → `tvector`
-  - `integer[]` → `tvector`
-  - `tvector` → `real[]`
+  - `real[]` → `vector`
+  - `double precision[]` → `vector`
+  - `integer[]` → `vector`
+  - `vector` → `real[]`
 - **GUCs** under the `turbovec.*` namespace:
   - `bit_width_default` (int, default 4, range 2..=4)
   - `cache_size_mb` (int, default 256, range 0..=65536)
   - `warn_on_rebuild` (bool, default true)
   - `search_concurrency` (int, default 1, range 1..=128)
   - `normalize_on_insert` (bool, default true)
-- **Diagnostic**: `turbovec_self_score(tvector, bit_width)` exercises
+- **Diagnostic**: `turbovec_self_score(vector, bit_width)` exercises
   the upstream `turbovec::IdMapIndex` end-to-end and returns the
   self-score, used by the test suite as an integration tripwire.
 
@@ -907,7 +907,7 @@ risks".
 ### Not yet shipped (Phase 2 / Phase 3)
 
 - Index access method `turbovec` and operator classes
-  `tvector_ip_ops`, `tvector_cosine_ops`. A starter is checked
+  `vec_ip_ops`, `vec_cosine_ops`. A starter is checked
   in at `src/phase2_knn.rs` (not yet mounted by `lib.rs`).
 - Filtered search via `IdMapIndex::search_with_allowlist`.
 - Binary-compatible varlena layout with pgvector's `vector`.

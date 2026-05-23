@@ -91,6 +91,12 @@ fn sparsevec_norm(v: Sparsevec) -> f64 {
     acc.sqrt()
 }
 
+/// pgvector-compat overload: `vector_norm(sparsevec)`.
+#[pg_extern(name = "vector_norm", immutable, parallel_safe)]
+fn vector_norm_sparsevec(v: Sparsevec) -> f64 {
+    sparsevec_norm(v)
+}
+
 #[pg_extern(immutable, parallel_safe)]
 fn sparsevec_cosine_distance(a: Sparsevec, b: Sparsevec) -> f64 {
     a.check_same_dim(&b, "<=>");

@@ -30,7 +30,7 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 | `sum(vector)` | ✓ | ✓ |
 | `avg(halfvec)` | ✓ | ✓ |
 | `sum(halfvec)` | ✓ | ✓ |
-| `sum(sparsevec)` | ✓ | ✗ — follow-up (the index-walk semantics need care) |
+| `sum(sparsevec)` | ✓ | ✓ |
 
 ## Functions
 

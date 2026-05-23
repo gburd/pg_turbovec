@@ -135,6 +135,26 @@ mod tests {
     }
 
     #[pg_test]
+    fn sparsevec_sum_aggregate() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        Spi::run("CREATE TEMP TABLE sv (v sparsevec)").unwrap();
+        Spi::run(
+            "INSERT INTO sv VALUES \
+                 ('{1:1, 3:2}/5'::sparsevec), \
+                 ('{1:1, 5:3}/5'::sparsevec)",
+        )
+        .unwrap();
+        // Sum: idx 1 → 2.0, idx 3 → 2.0, idx 5 → 3.0.
+        let s: Option<String> =
+            Spi::get_one("SELECT sum(v)::text FROM sv").unwrap();
+        let txt = s.unwrap();
+        assert!(txt.contains("1:2"), "expected 1:2 in {}", txt);
+        assert!(txt.contains("3:2"), "expected 3:2 in {}", txt);
+        assert!(txt.contains("5:3"), "expected 5:3 in {}", txt);
+        assert!(txt.contains("/5"));
+    }
+
+    #[pg_test]
     fn sparsevec_basic_round_trip() {
         let txt: Option<String> = Spi::get_one(
             "SELECT '{1:1.5, 5:2.25}/10'::turbovec.sparsevec::text",

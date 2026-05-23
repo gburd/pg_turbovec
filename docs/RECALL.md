@@ -33,7 +33,129 @@ runs 50 random queries, and reports R@k vs a brute-force ground
 truth. Output is one JSON line per criterion sample (run with
 `--quick` for a single sample per config).
 
-### 2.1 Latest results (2026-05-21, 1 000 corpus rows, 50 queries)
+### 2.1 Latest results
+
+Two passes are reported here: the **pure-Rust kernel** (the upper
+bound for what `pg_turbovec` can deliver — no SQL, no heap, no
+planner) and the **end-to-end SQL path** through pg_turbovec's
+index AM in a real cluster running side-by-side with pgvector.
+
+#### 2.1.1 Real-embedding fixture: GloVe-100 (2026-05-23)
+
+- **Source**: `glove-100-angular.hdf5` from
+  [ann-benchmarks.com](http://ann-benchmarks.com/) —
+  1 183 514 × 100-dim FP32 GloVe embeddings released by Stanford NLP.
+- **Subset used**: 100 000 corpus rows, 1 000 query rows.
+- **Ground truth**: top-100 exact cosine neighbours, **recomputed**
+  against the 100 000-row subset (the published `neighbors` are
+  over the full 1.18 M corpus and are not directly applicable).
+- **Hardware**: x86_64 NixOS dev box (single-thread benches; no
+  parallel workers).
+- **PG version**: 16.9 (pgrx-bundled). pgvector 0.8.2.
+  pg_turbovec 1.0.0-rc.2.
+- **Reproduce**: see `benches/scripts/prepare_glove_fixture.py` and
+  `benches/scripts/run_recall_vs_pgvector.py`.
+
+##### Pure-Rust kernel (upper bound)
+
+`benches/recall_vs_pgvector.rs`. GloVe-100 is dim 100; turbovec
+requires `dim % 8 == 0`, so the kernel sees zero-padded dim 104
+(zero-padding is identity-preserving for cosine on unit-norm
+input).
+
+| Configuration         | R@1   | R@10  | R@100 | p50 µs/q | bytes/row | build  |
+|-----------------------|------:|------:|------:|---------:|----------:|-------:|
+| **bit_width = 4**     | 0.846 | 0.862 | 0.887 |    744   |    64.0   | 0.86 s |
+| **bit_width = 2**     | 0.483 | 0.565 | 0.623 |    373   |    38.0   | 0.37 s |
+| Exact brute-force     | 1.000 | 1.000 | 1.000 |   6 294  |   400.0   | n/a    |
+
+- 4-bit recall on GloVe-100 is materially **higher** than the
+  random-vector synthetic numbers in § 2.1.2: real-world
+  embeddings have clustering structure the quantiser exploits.
+- 4-bit kernel is **~8.4× faster than brute force** at
+  **6.25× less storage** (64 B/row vs 400 B/row FP32).
+- 2-bit on the small-dim GloVe-100 is the weak spot — quantising
+  100 dimensions into 25 bytes leaves too little signal. On
+  larger dims (768, 1536, 3072) the trade-off is more favourable;
+  see § 2.1.2.
+- Full machine-readable run:
+  [`benches/results/recall_vs_pgvector_2026_05_23_kernel.json`](../benches/results/recall_vs_pgvector_2026_05_23_kernel.json).
+
+##### Head-to-head SQL: pgvector HNSW vs pg_turbovec index AM
+
+Same fixture, same Postgres cluster, both extensions installed.
+pgvector indexes the raw 100-dim `vector` column; pg_turbovec
+indexes a 104-dim `turbovec.vector` column (zero-padded).
+Ground-truth recall is computed against the original 100-dim
+corpus, so padding contributes no recall difference.
+
+| Index                                                | R@1   | R@10  | R@100 | p50 µs | p95 µs | p99 µs | index size |
+|------------------------------------------------------|------:|------:|------:|-------:|-------:|-------:|-----------:|
+| pgvector HNSW (m=16, efc=64, **ef_search=40**)       | 0.850 | 0.800 | 0.715 |    392 |  1 031 |  1 412 |    71 MiB  |
+| pgvector HNSW (m=16, efc=64, **ef_search=80**)       | 0.901 | 0.863 | 0.752 |    672 |    995 |  1 187 |    71 MiB  |
+| pgvector HNSW (m=16, efc=64, **ef_search=200**)      | 0.957 | 0.929 | 0.851 |  1 648 |  2 161 |  2 384 |    71 MiB  |
+| **pg_turbovec (bit_width = 4)**                      | 1.000 | 1.000 | 1.000 | 315 085 | 327 331 | 480 023 |  side-table |
+| **pg_turbovec (bit_width = 2)**                      | 1.000 | 1.000 | 0.992 | 159 582 | 444 105 | 538 365 |  side-table |
+| pgvector seq scan (exact, no index)                  | 1.000 | 1.000 | 1.000 | 22 843 | 23 996 | 24 437 | (heap only) |
+
+Full machine-readable run:
+[`benches/results/recall_vs_pgvector_2026_05_23.json`](../benches/results/recall_vs_pgvector_2026_05_23.json).
+
+##### Reading the numbers honestly
+
+This comparison surfaces two facts that matter for `pg_turbovec`'s
+positioning, neither of which the synthetic-only numbers in
+§ 2.1.2 made obvious:
+
+1. **Recall via the index AM is essentially perfect.** The scan
+   path retrieves up to 1 024 quantised candidates and asks the
+   executor to recheck via `xs_recheckorderby`, which recomputes
+   the exact `<=>` distance against the heap tuple. With 1 024
+   candidates out of 100 000 and re-ranked on the original FP32,
+   the top-100 is recovered ~1.0 of the time. The recall **at the
+   quantiser level** (R@100 ≈ 0.89 at bit_width = 4) is
+   re-projected to ~1.0 by the heap re-rank.
+
+2. **End-to-end SQL latency is currently dominated by re-rank,
+   not the kernel.** 315 ms/q at bit_width = 4 vs 744 µs/q in the
+   pure-Rust kernel is a **~420×** SQL overhead. The dominant
+   costs, in order, are: (a) heap-fetch + exact distance recompute
+   for each of 1 024 candidates, (b) IdMapIndex.search returning
+   1 024 instead of `LIMIT k`, (c) per-tuple
+   amrescan/amgettuple/recheck overhead. The kernel itself is fast.
+
+   This is a **known architectural cost** of the v1.0 index AM:
+   it trades latency for recall by re-ranking exhaustively. It
+   makes pg_turbovec a strong fit for **memory-pressured workloads
+   that can absorb double-digit-millisecond p50** (analytics-style
+   ANN, batch retrieval, RAG with low QPS) and a poor fit for
+   high-QPS interactive search until the re-rank fan-out is made
+   adaptive (a planned post-1.0 optimisation tracked in
+   `docs/ROADMAP_DECISIONS.md` § "Where future work would pay
+   off").
+
+   For workloads where pgvector HNSW (default `ef_search=40`) hits
+   acceptable recall, it will be ~800× faster end-to-end than the
+   v1.0 pg_turbovec index AM. The trade pg_turbovec offers in
+   exchange is **storage**: 64 B/row vs the ~745 B/row that
+   pgvector's HNSW occupies (heap 400 B/row + ~345 B/row of graph
+   pointers at m=16). On a 100 M-row table that is the difference
+   between 6.4 GB and ~74 GB.
+
+3. **pgvector HNSW does not fully cover R@100 at default settings.**
+   At `ef_search = 40` (pgvector default) HNSW returns at most 40
+   candidates, so R@100 is capped at 40 % — we measure 0.715
+   because the planner pads the result list with sequential-scan
+   candidates after the index is exhausted. Raising `ef_search`
+   to 200 closes the gap to 0.85 at the cost of a 4× latency hit.
+
+#### 2.1.2 Synthetic random vectors (legacy, 2026-05-21)
+
+The pre-1.0 numbers from `benches/recall.rs`, kept for trend
+history. **Random vectors have no clustering structure**, which
+is a deliberately *harder* recall test than real-world embeddings.
+These numbers are a lower bound; real-world recall is shown above
+in § 2.1.1.
 
 | dim | bit_width | R@1  | R@10 | R@100 |
 |----:|---------:|-----:|-----:|------:|
@@ -44,19 +166,14 @@ truth. Output is one JSON line per criterion sample (run with
 | 768 |        2 | 0.50 | 0.62 |  0.76 |
 | 768 |        4 | 0.82 | 0.88 |  0.92 |
 
-Observations:
+Observations carry over:
 
-- **4-bit hits R@1 ≈ 0.80 across all tested dims**, with R@100
-  approaching 0.93. This is the recommended setting for general
-  workloads.
-- **2-bit costs ~40 R@1 points** — use only when memory pressure
-  dominates and the application can absorb the recall hit (e.g.
-  pre-rerank candidate generation).
-- Recall on this corpus is lower than the upstream paper's
-  numbers (which use pre-trained embeddings from real datasets
-  like GloVe / OpenAI). Random vectors are a *harder* recall
-  test — they have no clustering structure for the quantiser
-  to exploit. Real embeddings will recall better.
+- 4-bit hits R@1 ≈ 0.80 across all tested dims and is the
+  recommended setting for general workloads.
+- 2-bit costs ~40 R@1 points on random data. On real embeddings
+  the gap is wider on small dims (GloVe-100: bit_width = 2 hits
+  R@1 ≈ 0.48, see § 2.1.1) and narrower on larger dims (more
+  signal to spread across fewer bits).
 
 Full machine-readable history under [`benches/results/`](../benches/results/).
 
@@ -119,16 +236,32 @@ These match the upstream `turbovec` paper's hardware.
 
 ```bash
 # Pure-Rust kernel benches (no Postgres required).
-cargo bench --bench distance --no-default-features
+cargo bench --bench distance --no-default-features --features pg16
 
-# Pure-Rust recall bench (no Postgres required).
-cargo bench --bench recall --no-default-features
+# Pure-Rust recall bench, synthetic random vectors:
+cargo bench --bench recall --no-default-features --features pg16
 
-# End-to-end ANN bench (Phase 4, when implemented):
-# cargo pgrx run pg17 --release
-# Inside psql:
-# \i bench/load_glove.sql
-# \i bench/run_ann_bench.sql
+# Pure-Rust recall bench against a real-embedding fixture (e.g. GloVe-100):
+TURBOVEC_FIXTURE_DIR=fixtures/glove-100 \
+    cargo bench --bench recall_vs_pgvector --no-default-features --features pg16
+
+# End-to-end head-to-head with pgvector HNSW (Python driver):
+nix-shell -p python3Packages.numpy python3Packages.psycopg2 --run "
+    python3 benches/scripts/run_recall_vs_pgvector.py \
+        fixtures/glove-100 \
+        benches/results/recall_vs_pgvector_$(date -u +%Y_%m_%d).json
+"
+```
+
+### 6.0 Building the GloVe-100 fixture
+
+```bash
+mkdir -p fixtures && cd fixtures
+curl -L -O http://ann-benchmarks.com/glove-100-angular.hdf5
+nix-shell -p python3Packages.numpy python3Packages.h5py --run \
+    "python3 ../benches/scripts/prepare_glove_fixture.py \
+        glove-100-angular.hdf5 ./glove-100 100000 1000"
+# produces fixtures/glove-100/{corpus.bin,queries.bin,ground_truth.bin,fixture.json}
 ```
 
 ## 6.1 Real-world fixtures (optional)

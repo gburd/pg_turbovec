@@ -6,6 +6,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.0-rc.2] — Unreleased
 
+### Phase 20 — real-embedding recall benchmark vs pgvector
+
+The synthetic-only recall numbers in `docs/RECALL.md` § 2.1 are
+now joined by a real-world fixture run against
+[ann-benchmarks](http://ann-benchmarks.com/)' GloVe-100 dataset
+(100 000 corpus rows, 1 000 query rows, exact ground truth
+recomputed against the subset). Two new bench drivers:
+
+- `benches/recall_vs_pgvector.rs`: a pure-Rust harness that loads
+  a binary fixture (corpus.bin / queries.bin / ground_truth.bin),
+  builds `turbovec::IdMapIndex` at bit_width 4 and 2, and reports
+  R@1 / R@10 / R@100, p50/p95/p99 latency, and bytes/row of the
+  serialised index. Drives the kernel directly — no Postgres.
+- `benches/scripts/run_recall_vs_pgvector.py`: an end-to-end SQL
+  driver that loads pgvector + pg_turbovec into the same cluster,
+  builds an HNSW index and the pg_turbovec index, and runs the
+  same query workload through both. Sweeps `hnsw.ef_search` to
+  produce a recall-latency curve.
+- `benches/scripts/prepare_glove_fixture.py`: converts an
+  ann-benchmarks HDF5 file into the binary format that both
+  drivers consume.
+
+Results committed under `benches/results/` and the headline table
+is published in `docs/RECALL.md` § 2.1.1. **Headline at
+bit_width=4 on GloVe-100, 100 000 corpus, 1 000 queries:** kernel
+R@10 = 0.862 at 744 µs/query (8.4× faster than brute force at
+6.25× less storage); SQL R@10 = 1.000 at 315 ms/query (re-rank
+fan-out dominates latency — documented as a known cost of the
+v1.0 index AM).
+
 ### Phase 18 — fix munmap_chunk() abort on forced index scan
 
 The forced-index-scan path (`SET enable_seqscan = off; SELECT ...

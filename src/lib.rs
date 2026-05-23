@@ -537,6 +537,46 @@ mod tests {
     /// L2 queries still return exact results; this test only
     /// confirms the SQL surface accepts the opclass.
     #[pg_test]
+    fn pgvector_aliases() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        // l2_normalize is the pgvector spelling of vec_normalize.
+        let n: Option<f64> = Spi::get_one(
+            "SELECT vector_norm(l2_normalize('[3, 4]'::vector))",
+        )
+        .unwrap();
+        assert!((n.unwrap() - 1.0).abs() < 1e-6);
+
+        // to_vector(text) is the pgvector spelling of to_vec(text).
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT vector_dims(to_vector('[1, 2, 3]'))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(3));
+
+        // to_vector(text, integer, boolean) with dim check.
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT vector_dims(to_vector('[1, 2, 3]', 3, false))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(3));
+
+        // array_to_vector(real[], integer, boolean) with dim check.
+        let dim: Option<i32> = Spi::get_one(
+            "SELECT vector_dims(array_to_vector(ARRAY[1,2,3,4]::real[], 4, false))",
+        )
+        .unwrap();
+        assert_eq!(dim, Some(4));
+
+        // vector_to_float4 narrows back to real[].
+        let txt: Option<String> = Spi::get_one(
+            "SELECT vector_to_float4('[1.5, 2.5, 3.5]'::vector, 3, false)::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains("1.5") && s.contains("2.5") && s.contains("3.5"));
+    }
+
+    #[pg_test]
     fn vector_dims_overloads() {
         Spi::run("SET search_path = turbovec, public").unwrap();
         // Same SQL function name dispatches by argument type, the

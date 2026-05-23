@@ -73,6 +73,12 @@ fn to_vec_text(s: &str) -> Vector {
     }
 }
 
+/// pgvector-compat alias: `to_vector(text) -> vector`.
+#[pg_extern(name = "to_vector", immutable, parallel_safe)]
+fn to_vector_text(s: &str) -> Vector {
+    to_vec_text(s)
+}
+
 /// `to_vec(text, integer, boolean) -> vector` — parse and
 /// optionally enforce a dimension. Matches pgvector's signature
 /// for drop-in compatibility.
@@ -95,6 +101,27 @@ fn to_vec_text_dim(s: &str, dim: i32, _transpose: bool) -> Vector {
     v
 }
 
+/// pgvector-compat alias: `to_vector(text, integer, boolean)`.
+#[pg_extern(name = "to_vector", immutable, parallel_safe)]
+fn to_vector_text_dim(s: &str, dim: i32, transpose: bool) -> Vector {
+    to_vec_text_dim(s, dim, transpose)
+}
+
+/// `vector_to_float4(vector, integer, boolean) -> real[]` —
+/// pgvector-compat. The `dim` arg gates a runtime dim check (0
+/// disables); `transpose` is a no-op for our 1-D vectors.
+#[pg_extern(immutable, parallel_safe)]
+fn vector_to_float4(v: Vector, dim: i32, _transpose: bool) -> Vec<f32> {
+    if dim != 0 && v.dim() != dim as usize {
+        error!(
+            "vector_to_float4: expected dim {}, got {}",
+            dim,
+            v.dim()
+        );
+    }
+    v.data
+}
+
 /// `array_to_vec(real[], integer, boolean) -> vector` —
 /// pgvector-compatible array-to-vector conversion with explicit
 /// dim check. The two-argument form (without dim/transpose) is
@@ -110,6 +137,12 @@ fn array_to_vec_dim(arr: Vec<Option<f32>>, dim: i32, _transpose: bool) -> Vector
         );
     }
     v
+}
+
+/// pgvector-compat alias: `array_to_vector(real[], integer, boolean)`.
+#[pg_extern(name = "array_to_vector", immutable, parallel_safe)]
+fn array_to_vector_dim(arr: Vec<Option<f32>>, dim: i32, transpose: bool) -> Vector {
+    array_to_vec_dim(arr, dim, transpose)
 }
 
 extension_sql!(

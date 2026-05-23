@@ -19,6 +19,13 @@ pub fn vec_normalize(v: Vector) -> Vector {
     Vector::from_vec(kernels::normalise_to_vec(v.as_slice()))
 }
 
+/// pgvector-compat alias: `l2_normalize(vector)` does the same
+/// thing as `vec_normalize`.
+#[pg_extern(name = "l2_normalize", immutable, parallel_safe)]
+pub fn l2_normalize_vector(v: Vector) -> Vector {
+    Vector::from_vec(kernels::normalise_to_vec(v.as_slice()))
+}
+
 /// Diagnostic: encode a `vector` through the turbovec quantiser and
 /// score it back against itself, returning the inner-product self-score.
 ///

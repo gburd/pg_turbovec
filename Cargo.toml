@@ -66,6 +66,14 @@ harness = false
 name = "recall"
 harness = false
 
+[[bench]]
+name = "concurrent_knn"
+harness = false
+
+[[bench]]
+name = "recall_vs_pgvector"
+harness = false
+
 [profile.dev]
 panic = "unwind"
 

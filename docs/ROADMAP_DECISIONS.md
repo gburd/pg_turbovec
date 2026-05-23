@@ -117,6 +117,15 @@ the right tool and there is no reason to use pg_turbovec there.
    the same index will serialise on the cache lookup. We have no
    measurement of how bad it is; an `Rwlock` or sharded map may be
    warranted at high QPS.
+   *(Update 2026-05-23.) Measured. The mutex itself contributes
+   < 1 % to the per-call hot path: an in-process bench with N
+   threads sharing one cache is statistically tied with a
+   no-lock control at every N from 1 to 16. The pgbench curve
+   does scale sub-linearly (2.85 × at N=8), but each backend has
+   its own cache; the bottleneck is the per-call `count(*)` SPI
+   roundtrip in `relation_row_count`, not the lock. See
+   [`docs/CONCURRENCY.md`](CONCURRENCY.md). Skipped the
+   `RwLock` / sharded-map work.*
 3. **README polish around the TurboQuant-vs-1-bit-Hamming win.**
    The README mentions binary quantization briefly; it should
    spotlight the 2-bit-vs-1-bit recall comparison as the principal

@@ -1,0 +1,63 @@
+{
+  "timestamp_utc": "20260523T211637Z",
+  "host": "floki",
+  "cpu": "Intel(R) Core(TM) Ultra 7 258V",
+  "n_cpu": 8,
+  "corpus_rows": 10000,
+  "dim": 384,
+  "query_pool": 256,
+  "k": 10,
+  "bit_width": 4,
+  "duration_s": 10,
+  "runs": [
+    {
+      "clients": 1,
+      "tps_excluding_connection_setup": 670.127257,
+      "tps_including_connection_setup": null,
+      "avg_latency_ms": 1.492,
+      "initial_connection_time_ms": 2.493,
+      "n_transactions": 6700,
+      "speedup_vs_n1": 1.0
+    }
+    ,
+    {
+      "clients": 2,
+      "tps_excluding_connection_setup": 870.704223,
+      "tps_including_connection_setup": null,
+      "avg_latency_ms": 2.297,
+      "initial_connection_time_ms": 2.749,
+      "n_transactions": 8706,
+      "speedup_vs_n1": 1.299
+    }
+    ,
+    {
+      "clients": 4,
+      "tps_excluding_connection_setup": 1378.825197,
+      "tps_including_connection_setup": null,
+      "avg_latency_ms": 2.901,
+      "initial_connection_time_ms": 4.128,
+      "n_transactions": 13787,
+      "speedup_vs_n1": 2.058
+    }
+    ,
+    {
+      "clients": 8,
+      "tps_excluding_connection_setup": 1909.288443,
+      "tps_including_connection_setup": null,
+      "avg_latency_ms": 4.190,
+      "initial_connection_time_ms": 5.739,
+      "n_transactions": 19087,
+      "speedup_vs_n1": 2.849
+    }
+    ,
+    {
+      "clients": 16,
+      "tps_excluding_connection_setup": 1871.344608,
+      "tps_including_connection_setup": null,
+      "avg_latency_ms": 8.550,
+      "initial_connection_time_ms": 8.597,
+      "n_transactions": 18714,
+      "speedup_vs_n1": 2.793
+    }
+  ]
+}

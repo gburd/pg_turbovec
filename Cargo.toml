@@ -15,6 +15,7 @@ keywords = ["postgresql", "pgrx", "vector", "ann", "quantization"]
 categories = ["database-implementations", "science", "algorithms"]
 exclude = [
     "benches/results/",
+    "fixtures/",
     "target/",
     "tests/snapshots/",
     "docs/RECALL.md.tmp",

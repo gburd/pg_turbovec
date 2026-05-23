@@ -64,7 +64,7 @@ pub(crate) unsafe extern "C-unwind" fn amcostestimate(
     // plus a small constant for the LUT. Real-world numbers from
     // the upstream paper (and our `cargo bench --bench distance`)
     // are 5–10 ns per scored vector at 4-bit / dim=1536 on AVX2.
-    // We use 8 ns/vec as a portable default and scale linearly
+    // We use 8 ns/vector as a portable default and scale linearly
     // with `dim * bit_width`.
     let bits_per_vec = (dim as f64) * (bit_width as f64);
     let nanos_per_vec = 8.0 * (bits_per_vec / (1536.0 * 4.0));

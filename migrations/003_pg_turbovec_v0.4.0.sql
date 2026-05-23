@@ -40,15 +40,15 @@ SET search_path = turbovec, public;
 -- Operator classes
 -- ===================================================================
 
--- CREATE OPERATOR CLASS tvector_ip_ops
---     DEFAULT FOR TYPE tvector USING turbovec AS
---         OPERATOR 1 <#> (tvector, tvector) FOR ORDER BY float_ops,
---         FUNCTION 1 negative_inner_product(tvector, tvector);
+-- CREATE OPERATOR CLASS vec_ip_ops
+--     DEFAULT FOR TYPE vector USING turbovec AS
+--         OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+--         FUNCTION 1 negative_inner_product(vector, vector);
 --
--- CREATE OPERATOR CLASS tvector_cosine_ops
---     FOR TYPE tvector USING turbovec AS
---         OPERATOR 1 <=> (tvector, tvector) FOR ORDER BY float_ops,
---         FUNCTION 1 cosine_distance(tvector, tvector);
+-- CREATE OPERATOR CLASS vec_cosine_ops
+--     FOR TYPE vector USING turbovec AS
+--         OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+--         FUNCTION 1 cosine_distance(vector, vector);
 
 -- ===================================================================
 -- Reloptions
@@ -59,8 +59,8 @@ SET search_path = turbovec, public;
 --
 -- Examples:
 --   CREATE INDEX docs_emb_cosine_idx
---       ON docs USING turbovec (embedding tvector_cosine_ops)
+--       ON docs USING turbovec (embedding vec_cosine_ops)
 --       WITH (bit_width = 4);
 --   CREATE INDEX docs_emb_ip_idx
---       ON docs USING turbovec (embedding tvector_ip_ops)
+--       ON docs USING turbovec (embedding vec_ip_ops)
 --       WITH (bit_width = 2, dim = 1536);

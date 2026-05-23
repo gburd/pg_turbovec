@@ -13,7 +13,7 @@ use turbovec::IdMapIndex;
 use crate::guc;
 use crate::index::{options, persist};
 use crate::kernels;
-use crate::tvector::Tvector;
+use crate::vec::Vector;
 
 /// State threaded through `index_build_range_scan` into our callback.
 struct BuildState {
@@ -154,7 +154,7 @@ unsafe extern "C-unwind" fn build_callback(
         return;
     }
     let datum = *values;
-    let value: Option<Tvector> = pgrx::FromDatum::from_datum(datum, false);
+    let value: Option<Vector> = pgrx::FromDatum::from_datum(datum, false);
     let Some(value) = value else {
         return;
     };

@@ -13,7 +13,7 @@ use turbovec::IdMapIndex;
 use crate::guc;
 use crate::index::{options, persist};
 use crate::kernels;
-use crate::tvector::Tvector;
+use crate::vec::Vector;
 
 /// `aminsert` callback. Returns `true` if the index now contains the
 /// row; `false` if we deliberately skipped it. We never skip in v0.4
@@ -37,7 +37,7 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
         return false;
     }
     let datum: pg_sys::Datum = *values;
-    let value: Option<Tvector> = pgrx::FromDatum::from_datum(datum, false);
+    let value: Option<Vector> = pgrx::FromDatum::from_datum(datum, false);
     let Some(value) = value else {
         return false;
     };

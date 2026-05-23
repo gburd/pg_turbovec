@@ -9,22 +9,22 @@ SET search_path = turbovec, public;
 -- Slicing
 -- ===================================================================
 
--- subvector(v tvector, start integer, length integer) RETURNS tvector
+-- subvector(v vector, start integer, length integer) RETURNS vector
 --   1-indexed slice, mirrors pgvector's `subvector`.
 
 -- ===================================================================
 -- JSONB I/O
 -- ===================================================================
 
--- tvector_to_jsonb(tvector) RETURNS jsonb
--- jsonb_to_tvector(jsonb)   RETURNS tvector
--- CREATE CAST (tvector AS jsonb) WITH FUNCTION tvector_to_jsonb(tvector);
--- CREATE CAST (jsonb   AS tvector) WITH FUNCTION jsonb_to_tvector(jsonb);
+-- vec_to_jsonb(vector) RETURNS jsonb
+-- jsonb_to_vec(jsonb)   RETURNS vector
+-- CREATE CAST (vector AS jsonb) WITH FUNCTION vec_to_jsonb(vector);
+-- CREATE CAST (jsonb   AS vector) WITH FUNCTION jsonb_to_vec(jsonb);
 
 -- ===================================================================
 -- Constructors and assertions
 -- ===================================================================
 
--- tvector_zeros(integer) RETURNS tvector
--- tvector_check_dim(tvector, integer) RETURNS tvector
--- tvector_to_text(tvector) RETURNS text
+-- vec_zeros(integer) RETURNS vector
+-- vec_check_dim(vector, integer) RETURNS vector
+-- vec_to_text(vector) RETURNS text

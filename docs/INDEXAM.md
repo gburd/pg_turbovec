@@ -38,7 +38,7 @@ v0.3 default build deliberately excludes this code so:
 src/index/
 ├── mod.rs         # IndexAmRoutine builder + handler entry point
 ├── options.rs     # bit_width / dim reloption parser (amoptions callback)
-├── opclass.rs     # extension_sql! for tvector_ip_ops + AM declaration
+├── opclass.rs     # extension_sql! for vec_ip_ops + AM declaration
 ├── persist.rs     # SPI helpers for the turbovec.am_storage side table
 ├── build.rs       # ambuild + ambuildempty
 ├── insert.rs      # aminsert
@@ -90,15 +90,15 @@ CREATE TABLE turbovec.am_storage (
 ## Operator class plumbing
 
 ```sql
-CREATE OPERATOR CLASS tvector_ip_ops
-  DEFAULT FOR TYPE tvector USING turbovec AS
-    OPERATOR 1 <#> (tvector, tvector) FOR ORDER BY float_ops,
-    FUNCTION 1 negative_inner_product(tvector, tvector);
+CREATE OPERATOR CLASS vec_ip_ops
+  DEFAULT FOR TYPE vector USING turbovec AS
+    OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 negative_inner_product(vector, vector);
 
-CREATE OPERATOR CLASS tvector_cosine_ops
-  FOR TYPE tvector USING turbovec AS
-    OPERATOR 1 <=> (tvector, tvector) FOR ORDER BY float_ops,
-    FUNCTION 1 cosine_distance(tvector, tvector);
+CREATE OPERATOR CLASS vec_cosine_ops
+  FOR TYPE vector USING turbovec AS
+    OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 cosine_distance(vector, vector);
 ```
 
 Strategy 1 = "the order-by operator". `amcanorderbyop = true`,
@@ -112,7 +112,7 @@ experimental_index_am` boots a cluster, the minimum acceptance
 suite is:
 
 1. `CREATE INDEX docs_emb_idx ON docs USING turbovec (embedding
-   tvector_cosine_ops) WITH (bit_width = 4);` succeeds.
+   vec_cosine_ops) WITH (bit_width = 4);` succeeds.
 2. `EXPLAIN (ANALYZE) SELECT id FROM docs ORDER BY embedding <=>
    $1 LIMIT 10;` shows `Index Scan using docs_emb_idx`.
 3. The same query without the index returns the same top-1 result
@@ -284,7 +284,7 @@ should Just Work; the test is the deliverable.
 
 ### Other Phase 14+ items
 
-- **Binary-compatible `tvector` varlena layout** — replace the
+- **Binary-compatible `vector` varlena layout** — replace the
   v0.x CBOR-derived storage with the pgvector-compatible
   `[i32 vl_len_, i16 dim, i16 unused, f32[dim]]` layout. Adds
   zero-copy casts to/from `pgvector.vector` when both extensions

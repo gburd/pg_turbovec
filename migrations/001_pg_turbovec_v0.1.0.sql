@@ -20,19 +20,19 @@ SET search_path = turbovec, public;
 -- Type
 -- ===================================================================
 
--- The `tvector` type is a CBOR-serialised varlena (Phase 1). Phase 2
+-- The `vector` type is a CBOR-serialised varlena (Phase 1). Phase 2
 -- swaps in a binary layout compatible with pgvector's `vector`.
 --
--- CREATE TYPE tvector;            -- shell (pgrx)
--- CREATE FUNCTION tvector_in(cstring) RETURNS tvector;
--- CREATE FUNCTION tvector_out(tvector) RETURNS cstring;
--- CREATE FUNCTION tvector_send(tvector) RETURNS bytea;
--- CREATE FUNCTION tvector_recv(internal) RETURNS tvector;
--- CREATE TYPE tvector (
---     INPUT          = tvector_in,
---     OUTPUT         = tvector_out,
---     RECEIVE        = tvector_recv,
---     SEND           = tvector_send,
+-- CREATE TYPE vector;            -- shell (pgrx)
+-- CREATE FUNCTION vec_in(cstring) RETURNS vector;
+-- CREATE FUNCTION vec_out(vector) RETURNS cstring;
+-- CREATE FUNCTION vec_send(vector) RETURNS bytea;
+-- CREATE FUNCTION vec_recv(internal) RETURNS vector;
+-- CREATE TYPE vector (
+--     INPUT          = vec_in,
+--     OUTPUT         = vec_out,
+--     RECEIVE        = vec_recv,
+--     SEND           = vec_send,
 --     INTERNALLENGTH = VARIABLE,
 --     STORAGE        = EXTENDED,
 --     ALIGNMENT      = double
@@ -42,22 +42,22 @@ SET search_path = turbovec, public;
 -- Distance functions (immutable, parallel safe)
 -- ===================================================================
 
--- l2_distance(tvector, tvector)            -> double precision
--- l2_squared_distance(tvector, tvector)    -> double precision
--- inner_product(tvector, tvector)          -> double precision
--- negative_inner_product(tvector, tvector) -> double precision
--- cosine_distance(tvector, tvector)        -> double precision
--- l1_distance(tvector, tvector)            -> double precision
--- vector_dims(tvector)                     -> integer
--- vector_norm(tvector)                     -> double precision
+-- l2_distance(vector, vector)            -> double precision
+-- l2_squared_distance(vector, vector)    -> double precision
+-- inner_product(vector, vector)          -> double precision
+-- negative_inner_product(vector, vector) -> double precision
+-- cosine_distance(vector, vector)        -> double precision
+-- l1_distance(vector, vector)            -> double precision
+-- vector_dims(vector)                     -> integer
+-- vector_norm(vector)                     -> double precision
 
 -- ===================================================================
 -- Element-wise arithmetic
 -- ===================================================================
 
--- tvector_add(tvector, tvector) -> tvector
--- tvector_sub(tvector, tvector) -> tvector
--- tvector_mul(tvector, tvector) -> tvector
+-- vec_add(vector, vector) -> vector
+-- vec_sub(vector, vector) -> vector
+-- vec_mul(vector, vector) -> vector
 
 -- ===================================================================
 -- Operators
@@ -67,18 +67,18 @@ SET search_path = turbovec, public;
 -- a <#> b   = negative_inner_product(a, b)        -- so ASC = most-similar-first
 -- a <=> b   = cosine_distance(a, b)
 -- a <+> b   = l1_distance(a, b)
--- a +   b   = tvector_add(a, b)
--- a -   b   = tvector_sub(a, b)
--- a *   b   = tvector_mul(a, b)                   -- Hadamard product
+-- a +   b   = vec_add(a, b)
+-- a -   b   = vec_sub(a, b)
+-- a *   b   = vec_mul(a, b)                   -- Hadamard product
 
 -- ===================================================================
 -- Aggregates
 -- ===================================================================
 
--- avg(tvector) -> tvector            -- element-wise mean
--- sum(tvector) -> tvector            -- element-wise sum
+-- avg(vector) -> vector            -- element-wise mean
+-- sum(vector) -> vector            -- element-wise sum
 --
--- Internal state TvectorAccum { sum: float8[dim], count: int8 } is a
+-- Internal state VecAccum { sum: float8[dim], count: int8 } is a
 -- CBOR varlena. Both aggregates are PARALLEL SAFE; combinefn merges
 -- partial states.
 
@@ -96,15 +96,15 @@ SET search_path = turbovec, public;
 -- Phase 2 (planned, NOT in this migration)
 -- ===================================================================
 
--- CREATE OPERATOR CLASS tvector_ip_ops
---   DEFAULT FOR TYPE tvector USING turbovec AS
---     OPERATOR 1 <#> (tvector, tvector) FOR ORDER BY float_ops,
---     FUNCTION 1 negative_inner_product(tvector, tvector);
+-- CREATE OPERATOR CLASS vec_ip_ops
+--   DEFAULT FOR TYPE vector USING turbovec AS
+--     OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+--     FUNCTION 1 negative_inner_product(vector, vector);
 --
--- CREATE OPERATOR CLASS tvector_cosine_ops
---   FOR TYPE tvector USING turbovec AS
---     OPERATOR 1 <=> (tvector, tvector) FOR ORDER BY float_ops,
---     FUNCTION 1 cosine_distance(tvector, tvector);
+-- CREATE OPERATOR CLASS vec_cosine_ops
+--   FOR TYPE vector USING turbovec AS
+--     OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+--     FUNCTION 1 cosine_distance(vector, vector);
 --
 -- CREATE ACCESS METHOD turbovec
 --   TYPE INDEX

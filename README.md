@@ -14,7 +14,7 @@ your data. Supports:
   L1 distance (`<+>`)
 - in-kernel filtered ANN — push your `WHERE` predicate into the SIMD
   scoring loop so selective filters get *cheaper*, not more expensive
-- pgvector-compatible function names (`to_tvector`, `array_to_tvector`,
+- pgvector-compatible function names (`to_vec`, `array_to_vec`,
   `subvector`, `vector_dims`, `vector_norm`, `inner_product`,
   `l2_distance`, `cosine_distance`, `l1_distance`)
 - any [language](https://www.postgresql.org/docs/current/external-pl.html)
@@ -85,13 +85,13 @@ CREATE EXTENSION pg_turbovec;
 SET search_path = public, turbovec;
 ```
 
-Create a table with a `tvector` column:
+Create a table with a `vector` column:
 
 ```sql
 CREATE TABLE items (
     id        bigserial PRIMARY KEY,
     body      text,
-    embedding tvector
+    embedding vector
 );
 ```
 
@@ -105,19 +105,19 @@ INSERT INTO items (body, embedding) VALUES
 -- Or via array cast:
 INSERT INTO items (body, embedding)
 VALUES ('greeting',
-        ARRAY[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]::real[]::tvector);
+        ARRAY[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]::real[]::vector);
 
 -- Or via the pgvector-style function:
 INSERT INTO items (body, embedding)
-VALUES ('hi',  to_tvector('[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]', 8, false));
+VALUES ('hi',  to_vec('[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]', 8, false));
 ```
 
 Get the nearest neighbours by cosine distance:
 
 ```sql
-SELECT id, body, embedding <=> '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::tvector AS dist
+SELECT id, body, embedding <=> '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::vector AS dist
 FROM   items
-ORDER  BY embedding <=> '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::tvector
+ORDER  BY embedding <=> '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::vector
 LIMIT  5;
 ```
 
@@ -129,21 +129,21 @@ returns most-similar-first — same convention as pgvector.
 
 ```sql
 -- Variable dimension:
-CREATE TABLE items (id bigserial PRIMARY KEY, embedding tvector);
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding vector);
 
 -- Or with a runtime dim assertion via a CHECK constraint
 -- (typmod-style enforcement without typmod plumbing):
 CREATE TABLE items (
     id        bigserial PRIMARY KEY,
-    embedding tvector,
-    CHECK (turbovec.tvector_check_dim(embedding, 1536))
+    embedding vector,
+    CHECK (turbovec.vec_check_dim(embedding, 1536))
 );
 
 -- Or add to an existing table:
-ALTER TABLE items ADD COLUMN embedding tvector;
+ALTER TABLE items ADD COLUMN embedding vector;
 ```
 
-`tvector` accepts dim 1..16000 (matching pgvector's cap). The TurboQuant
+`vector` accepts dim 1..16000 (matching pgvector's cap). The TurboQuant
 kernel additionally requires dim be a multiple of 8 when used with the
 index AM; pad your embeddings if your model emits something awkward
 (e.g. 384 = 48 × 8 ✓, 1536 = 192 × 8 ✓).
@@ -171,34 +171,34 @@ INSERT INTO items (id, embedding) VALUES (1, '[1,2,3,4,5,6,7,8]')
 | Op    | Meaning                            | Indexed (with `experimental_index_am`)? |
 |-------|------------------------------------|------------------------------------------|
 | `<->` | Euclidean (L2) distance            | exact only                               |
-| `<#>` | negative inner product             | yes — `tvector_ip_ops` (default)         |
-| `<=>` | cosine distance (`1 - cos θ`)      | yes — `tvector_cosine_ops`               |
+| `<#>` | negative inner product             | yes — `vec_ip_ops` (default)         |
+| `<=>` | cosine distance (`1 - cos θ`)      | yes — `vec_cosine_ops`               |
 | `<+>` | taxicab (L1) distance              | exact only                               |
 
 Distances are returned as `double precision`. Distance accumulators
-are `f64` internally — `pg_turbovec`'s `avg(tvector)` and `sum(tvector)`
+are `f64` internally — `pg_turbovec`'s `avg(vector)` and `sum(vector)`
 preserve more precision than pgvector's `f32` accumulators on
 million-row corpora.
 
 ### Named functions (pgvector-compatible)
 
 ```sql
-l2_distance(a tvector, b tvector)            RETURNS double precision
-inner_product(a tvector, b tvector)          RETURNS double precision
-cosine_distance(a tvector, b tvector)        RETURNS double precision
-l1_distance(a tvector, b tvector)            RETURNS double precision
-vector_dims(v tvector)                       RETURNS integer
-vector_norm(v tvector)                       RETURNS double precision
+l2_distance(a vector, b vector)            RETURNS double precision
+inner_product(a vector, b vector)          RETURNS double precision
+cosine_distance(a vector, b vector)        RETURNS double precision
+l1_distance(a vector, b vector)            RETURNS double precision
+vector_dims(v vector)                       RETURNS integer
+vector_norm(v vector)                       RETURNS double precision
 
-to_tvector(text)                             RETURNS tvector
-to_tvector(text, integer, boolean)           RETURNS tvector  -- with dim check
-array_to_tvector(real[])                     RETURNS tvector
-array_to_tvector(real[], integer, boolean)   RETURNS tvector  -- with dim check
+to_vec(text)                             RETURNS vector
+to_vec(text, integer, boolean)           RETURNS vector  -- with dim check
+array_to_vec(real[])                     RETURNS vector
+array_to_vec(real[], integer, boolean)   RETURNS vector  -- with dim check
 
-subvector(v tvector, start integer, length integer) RETURNS tvector
-tvector_normalize(tvector)                   RETURNS tvector
-tvector_zeros(integer)                       RETURNS tvector
-tvector_check_dim(tvector, integer)          RETURNS tvector  -- assertion
+subvector(v vector, start integer, length integer) RETURNS vector
+vec_normalize(vector)                   RETURNS vector
+vec_zeros(integer)                       RETURNS vector
+vec_check_dim(vector, integer)          RETURNS vector  -- assertion
 ```
 
 ### Aggregates
@@ -213,8 +213,8 @@ Both are `PARALLEL SAFE` and use `f64` accumulators.
 ### JSONB I/O
 
 ```sql
-SELECT '[1, 2.5, -3]'::tvector::jsonb;             -- → [1, 2.5, -3]
-SELECT '[1, 2.5, -3]'::jsonb::tvector;             -- → tvector
+SELECT '[1, 2.5, -3]'::vector::jsonb;             -- → [1, 2.5, -3]
+SELECT '[1, 2.5, -3]'::jsonb::vector;             -- → vector
 ```
 
 
@@ -225,16 +225,16 @@ in the default build via the `experimental_index_am` Cargo feature.
 
 ```sql
 -- Cosine-distance ordering (most common for semantic search):
-CREATE INDEX items_emb_idx ON items USING turbovec (embedding tvector_cosine_ops)
+CREATE INDEX items_emb_idx ON items USING turbovec (embedding vec_cosine_ops)
     WITH (bit_width = 4);
 
 -- Inner-product ordering:
-CREATE INDEX items_emb_ip_idx ON items USING turbovec (embedding tvector_ip_ops)
+CREATE INDEX items_emb_ip_idx ON items USING turbovec (embedding vec_ip_ops)
     WITH (bit_width = 2);   -- 32× compression vs FP32; some recall loss
 
 -- Online (non-blocking) build:
 CREATE INDEX CONCURRENTLY items_emb_idx ON items
-    USING turbovec (embedding tvector_cosine_ops);
+    USING turbovec (embedding vec_cosine_ops);
 ```
 
 Reloptions:
@@ -270,7 +270,7 @@ SELECT k.id, d.body
 FROM   turbovec.knn(
          'items'::regclass,
          'id', 'embedding',
-         '[…]'::tvector,
+         '[…]'::vector,
          10, 4,
          ARRAY(SELECT id FROM items WHERE tenant_id = $1)::bigint[]
        ) k
@@ -315,7 +315,7 @@ documented in [`docs/RECALL.md`](docs/RECALL.md) § 6.1.
 
 ### Compression (from the TurboQuant paper)
 
-| dim   | FP32 / vec | TurboQuant 4-bit / vec | TurboQuant 2-bit / vec |
+| dim   | FP32 / vector | TurboQuant 4-bit / vector | TurboQuant 2-bit / vector |
 |-------|-----------:|-----------------------:|-----------------------:|
 |   128 |    512 B   |                  68 B  |                  36 B  |
 |   384 |  1 536 B   |                 196 B  |                 100 B  |
@@ -389,27 +389,27 @@ name, and operator-dispatch table. See
 for the full cookbook. TL;DR:
 
 ```sql
-ALTER TABLE docs ADD COLUMN embedding_tv turbovec.tvector;
+ALTER TABLE docs ADD COLUMN embedding_tv turbovec.vector;
 
-UPDATE docs SET embedding_tv = embedding::real[]::turbovec.tvector;
+UPDATE docs SET embedding_tv = embedding::real[]::turbovec.vector;
 
 CREATE INDEX CONCURRENTLY docs_emb_tv_idx
-    ON docs USING turbovec (embedding_tv tvector_cosine_ops)
+    ON docs USING turbovec (embedding_tv vec_cosine_ops)
     WITH (bit_width = 4);
 ```
 
-A binary-compatible `tvector` varlena layout (zero-copy cast to/from
+A binary-compatible `vector` varlena layout (zero-copy cast to/from
 pgvector's `vector`) is on the v1.0 roadmap; until then the `real[]`
 bridge is the supported interop path.
 
 ## Reference
 
-- **Type:** `tvector` (variable dimension, `f32` coordinates, 1..16000)
+- **Type:** `vector` (variable dimension, `f32` coordinates, 1..16000)
 - **Schema:** `turbovec` (set on the search_path or fully qualify)
-- **Operator classes:** `tvector_ip_ops` (default, `<#>`),
-  `tvector_cosine_ops` (`<=>`)
+- **Operator classes:** `vec_ip_ops` (default, `<#>`),
+  `vec_cosine_ops` (`<=>`)
 - **Index AM:** `turbovec` (build with `WITH (bit_width = 2|3|4)`)
-- **Aggregates:** `avg(tvector)`, `sum(tvector)`
+- **Aggregates:** `avg(vector)`, `sum(vector)`
 - **Full surface listing:** [`docs/USAGE.md`](docs/USAGE.md) and the
   generated `sql/pg_turbovec--<version>.sql` after
   `cargo pgrx schema`.
@@ -441,7 +441,7 @@ bridge is the supported interop path.
 
 **Is `pg_turbovec` a drop-in replacement for `pgvector`?**
 
-No, by design. We coexist: type name `tvector`, schema `turbovec`,
+No, by design. We coexist: type name `vector`, schema `turbovec`,
 operator dispatch by argument type. Pgvector users have years of
 `vector(1536)` columns and tooling — pretending to be a drop-in would
 silently change semantics around normalisation and recall. The

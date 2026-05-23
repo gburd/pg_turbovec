@@ -8,7 +8,7 @@ SET search_path = turbovec, public;
 BEGIN;
 
 -- 1. Create + populate a small corpus.
-CREATE TEMP TABLE ix_demo (id bigint PRIMARY KEY, emb tvector);
+CREATE TEMP TABLE ix_demo (id bigint PRIMARY KEY, emb vector);
 INSERT INTO ix_demo VALUES
   (1, '[1, 0, 0, 0, 0, 0, 0, 0]'),
   (2, '[0.9, 0.1, 0, 0, 0, 0, 0, 0]'),
@@ -17,7 +17,7 @@ INSERT INTO ix_demo VALUES
 
 -- 2. Build the index.
 CREATE INDEX ix_demo_idx
-  ON ix_demo USING turbovec (emb tvector_cosine_ops)
+  ON ix_demo USING turbovec (emb vec_cosine_ops)
   WITH (bit_width = 4);
 
 -- 3. The side-table row exists.
@@ -26,22 +26,22 @@ FROM   turbovec.am_storage
 WHERE  indexrelid = 'ix_demo_idx'::regclass;
 
 -- 4. Top-1 nearest \u2014 must be row 1 (the self-vector).
-SELECT id, emb <=> '[1,0,0,0,0,0,0,0]'::tvector AS dist
+SELECT id, emb <=> '[1,0,0,0,0,0,0,0]'::vector AS dist
 FROM   ix_demo
-ORDER  BY emb <=> '[1,0,0,0,0,0,0,0]'::tvector
+ORDER  BY emb <=> '[1,0,0,0,0,0,0,0]'::vector
 LIMIT  3;
 
 -- 5. EXPLAIN: the planner picks the index.
 EXPLAIN (COSTS OFF)
 SELECT id FROM ix_demo
-ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::tvector
+ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector
 LIMIT 3;
 
 -- 6. INSERT after CREATE INDEX exercises aminsert.
 INSERT INTO ix_demo VALUES (5, '[0.95, 0.05, 0, 0, 0, 0, 0, 0]');
 SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = 'ix_demo_idx'::regclass;
 SELECT id FROM ix_demo
-ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::tvector
+ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector
 LIMIT 1;
 -- Expected: 1 (still the closest), 5 should be in top-3.
 
@@ -58,7 +58,7 @@ ROLLBACK;
 \echo === Phase 8: filtered turbovec.knn() ===
 
 BEGIN;
-CREATE TEMP TABLE filt_demo (id bigint PRIMARY KEY, emb tvector, tag text);
+CREATE TEMP TABLE filt_demo (id bigint PRIMARY KEY, emb vector, tag text);
 INSERT INTO filt_demo VALUES
   (1, '[1, 0, 0, 0, 0, 0, 0, 0]', 'A'),
   (2, '[0.9, 0.1, 0, 0, 0, 0, 0, 0]', 'B'),
@@ -71,7 +71,7 @@ INSERT INTO filt_demo VALUES
 SELECT k.id, k.score
 FROM   turbovec.knn(
          'filt_demo'::regclass, 'id', 'emb',
-         '[1, 0, 0, 0, 0, 0, 0, 0]'::tvector,
+         '[1, 0, 0, 0, 0, 0, 0, 0]'::vector,
          5, 4,
          ARRAY(SELECT id FROM filt_demo WHERE tag = 'A')::bigint[]
        ) k

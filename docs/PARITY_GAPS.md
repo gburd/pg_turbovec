@@ -40,20 +40,21 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 | `inner_product` | ✓ | ✓ |
 | `cosine_distance` | ✓ | ✓ |
 | `l1_distance` | ✓ | ✓ |
-| `vector_dims` | ✓ | ✓ |
-| `vector_norm` | ✓ | ✓ |
+| `vector_dims(vector)` | ✓ | ✓ |
+| `vector_dims(halfvec)` | ✓ | ✓ |
+| `vector_dims(sparsevec)` | ✓ | ✓ |
+| `vector_norm(vector)` | ✓ | ✓ |
+| `vector_norm(halfvec)` | ✓ | ✓ |
 | `subvector` | ✓ | ✓ |
-| `to_vector(text)` | ✓ | ✓ (`to_vec`) |
+| `to_vector(text)` | ✓ | ✓ (also `to_vec`) |
 | `to_vector(text, integer, boolean)` | ✓ | ✓ |
 | `array_to_vector(real[])` | ✓ | ✓ (cast + `array_to_vec`) |
 | `array_to_vector(real[], integer, boolean)` | ✓ | ✓ |
-| `vector_to_float4(vector, integer, boolean)` | ✓ | ✗ — Phase HV |
+| `vector_to_float4(vector, integer, boolean)` | ✓ | ✓ |
 | `binary_quantize(vector)` | ✓ | ✓ |
 | `hamming_distance(bitvec, bitvec)` | ✓ | ✓ |
 | `jaccard_distance(bitvec, bitvec)` | ✓ | ✓ |
-| `l2_normalize(vector)` | ✓ | ✓ (`vec_normalize`) |
-| `vector_dims(halfvec)` | ✓ | ✗ |
-| `vector_dims(sparsevec)` | ✓ | ✗ |
+| `l2_normalize(vector)` | ✓ | ✓ (also `vec_normalize`) |
 
 ## Index AMs
 
@@ -78,14 +79,15 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 
 ## Phase plan
 
-- **Phase HV** — add `halfvec` (FP16) type. Storage: `[i32 vl_len_, i16
-  dim, i16 unused, f16[dim]]`. Operators / aggregates / casts.
-  Conversion functions to/from `vector`. `halfvec_*_ops` for the
-  index AM.
-- **Phase SV** — add `sparsevec` type for high-dim sparse data
-  (CSR-style: nnz int4, indices int4[nnz], values f32[nnz]).
-- **Phase BV** — add `bit`/`bitvec` flavour: binary quantisation,
-  Hamming + Jaccard distance, opclasses for the AM.
-- **Phase L2** — investigate whether the TurboQuant kernel can
-  support indexed L2 / L1 ANN. Likely requires a separate kernel
-  variant; may not be feasible without upstream changes.
+- ~~**Phase HV** — add `halfvec` (FP16) type.~~ ✓ done.
+- ~~**Phase SV** — add `sparsevec` type.~~ ✓ done.
+- ~~**Phase BV** — add `bitvec` type, Hamming + Jaccard.~~ ✓ done.
+- ~~**Phase L2** — indexed L2 / L1 ANN.~~ ✓ done via `vec_l2_ops` /
+  `vec_l1_ops` and the existing recheck-orderby path.
+- **Phase BV-IDX** — binary-vector ANN index. The TurboQuant kernel
+  doesn't fit Hamming-space ANN; if we want indexed bitvec we'd
+  need a separate kernel (LSH or multi-index hashing). Out of
+  scope for the 1.0 line.
+- **Phase BC** — binary-compatible varlena layout for `vector` so
+  casts to/from `pgvector.vector` are zero-copy. See
+  an internal design note.

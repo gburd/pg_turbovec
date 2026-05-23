@@ -67,14 +67,14 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 
 | Opclass family | pgvector | pg_turbovec |
 |----------------|----------|-------------|
-| `vector_l2_ops` (ivfflat + hnsw) | ✓ | ✗ — TurboQuant kernel doesn't index L2 |
+| `vector_l2_ops` (ivfflat + hnsw) | ✓ | ✓ — `vec_l2_ops` (uses recheck-orderby; quality matches cosine for unit-norm vectors) |
 | `vector_ip_ops` | ✓ | ✓ (`vec_ip_ops`, default) |
 | `vector_cosine_ops` | ✓ | ✓ (`vec_cosine_ops`) |
-| `vector_l1_ops` (hnsw) | ✓ | ✗ |
-| `halfvec_*_ops` | ✓ | ✗ |
-| `sparsevec_*_ops` | ✓ | ✗ |
-| `bit_hamming_ops` | ✓ | ✗ |
-| `bit_jaccard_ops` | ✓ | ✗ |
+| `vector_l1_ops` (hnsw) | ✓ | ✓ — `vec_l1_ops` (recheck-orderby; candidate-set quality is approximate, recheck makes final order exact) |
+| `halfvec_*_ops` | ✓ | ✓ via expression index: `CREATE INDEX ... USING turbovec ((emb::vector) vec_cosine_ops)` |
+| `sparsevec_*_ops` | ✓ | ✓ via expression index, same pattern (note: dense-cast cost on each row may dominate for very high-dim sparse) |
+| `bit_hamming_ops` | ✓ | ✗ — TurboQuant kernel doesn't fit Hamming-space ANN; use the exact `<~>` operator (no index) |
+| `bit_jaccard_ops` | ✓ | ✗ — same |
 
 ## Phase plan
 

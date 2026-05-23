@@ -531,6 +531,95 @@ mod tests {
     /// DO UPDATE` in the persist layer makes ambuild idempotent;
     /// this test confirms PG accepts our AM under the CIC path and
     /// the resulting index has the expected row count.
+    /// Verify the new vec_l2_ops opclass: `CREATE INDEX ... USING
+    /// turbovec (emb vec_l2_ops)` succeeds, and the side-table
+    /// payload reflects the index. The recheck-orderby path means
+    /// L2 queries still return exact results; this test only
+    /// confirms the SQL surface accepts the opclass.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_l2_opclass() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_l2 (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_l2 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_l2_idx \
+             ON t_l2 USING turbovec (emb vec_l2_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_l2_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_vec, Some(3));
+    }
+
+    /// Same, for vec_l1_ops.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_l1_opclass() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_l1 (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_l1 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_l1_idx ON t_l1 USING turbovec (emb vec_l1_ops)",
+        )
+        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_l1_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_vec, Some(2));
+    }
+
+    /// Expression index workaround for halfvec: index `(emb::vector)`
+    /// instead of `emb` directly. Postgres expression-index machinery
+    /// handles the cast at build and query time, so halfvec users get
+    /// indexed ANN without needing dedicated halfvec opclasses on the
+    /// AM. Same pattern works for sparsevec.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_halfvec_expression_index() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_hv (id bigint PRIMARY KEY, emb halfvec)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_hv VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]')",
+        )
+        .unwrap();
+        // Expression index on the cast.
+        Spi::run(
+            "CREATE INDEX t_hv_idx ON t_hv \
+             USING turbovec ((emb::vector) vec_cosine_ops)",
+        )
+        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_hv_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_vec, Some(3));
+    }
+
     #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_create_index_concurrently() {

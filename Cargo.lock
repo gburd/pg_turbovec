@@ -1096,6 +1096,7 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
+ "serde",
  "zerocopy",
 ]
 
@@ -1854,6 +1855,7 @@ name = "pg_turbovec"
 version = "1.0.0-rc.2"
 dependencies = [
  "criterion",
+ "half 2.7.1",
  "libc",
  "parking_lot",
  "pgrx",

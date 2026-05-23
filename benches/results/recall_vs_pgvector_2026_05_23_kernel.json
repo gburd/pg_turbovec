@@ -1,0 +1,56 @@
+{
+  "fixture_dir": "/home/gburd/ws/pg_turbovec/fixtures/glove-100",
+  "fixture_dim": 100,
+  "fixture_corpus_n": 100000,
+  "fixture_queries_n": 1000,
+  "ground_truth_k": 100,
+  "pg_turbovec": [
+    {
+      "bit_width": 4,
+      "n_corpus": 100000,
+      "n_queries": 1000,
+      "dim": 100,
+      "r_at_1": 0.846,
+      "r_at_10": 0.8621999999999915,
+      "r_at_100": 0.8866699999999996,
+      "p50_us": 886.0,
+      "p95_us": 906.0,
+      "p99_us": 942.0,
+      "mean_us": 879.831,
+      "limit_k": 10,
+      "index_bytes": 6400014,
+      "bytes_per_row": 64.00014,
+      "build_secs": 1.025874728
+    },
+    {
+      "bit_width": 2,
+      "n_corpus": 100000,
+      "n_queries": 1000,
+      "dim": 100,
+      "r_at_1": 0.483,
+      "r_at_10": 0.5647000000000003,
+      "r_at_100": 0.6233799999999999,
+      "p50_us": 438.0,
+      "p95_us": 452.0,
+      "p99_us": 454.0,
+      "mean_us": 440.836,
+      "limit_k": 10,
+      "index_bytes": 3800014,
+      "bytes_per_row": 38.00014,
+      "build_secs": 0.431635776
+    }
+  ],
+  "exact_brute_force": {
+    "n_corpus": 100000,
+    "n_queries": 1000,
+    "dim": 100,
+    "p50_us": 6575.0,
+    "p95_us": 6780.0,
+    "p99_us": 6869.0,
+    "mean_us": 6589.038,
+    "limit_k": 10,
+    "bytes_per_row": 400.0
+  },
+  "timestamp": "2026-05-23T21:53:50Z",
+  "host": "unknown"
+}

@@ -610,6 +610,13 @@ mod tests {
         let nh: Option<f64> =
             Spi::get_one("SELECT vector_norm('[3, 4]'::halfvec)").unwrap();
         assert!((nh.unwrap() - 5.0).abs() < 1e-3);
+
+        // sparsevec norm: only the non-zero coordinates contribute.
+        // {1:3, 2:4}/5 has the same magnitude as the dense [3,4,0,0,0].
+        let ns: Option<f64> =
+            Spi::get_one("SELECT vector_norm('{1:3, 2:4}/5'::sparsevec)")
+                .unwrap();
+        assert!((ns.unwrap() - 5.0).abs() < 1e-6);
     }
 
     #[cfg(feature = "experimental_index_am")]

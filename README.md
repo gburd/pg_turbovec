@@ -28,12 +28,10 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.0.0-rc.2 — release candidate. 65/65 `#[pg_test]`
-> cases pass against PostgreSQL 16; `cargo clippy -D warnings` is
-> clean. Open work tracked for 1.0.0 final: pgvector-binary-compatible
-> varlena layout, real-world recall validation against pgvector, and
-> WAL-logged persistent index pages. See [CHANGELOG.md](CHANGELOG.md)
-> for the phase-by-phase release notes.
+> **Status:** v1.0.0-rc.2 — 88/88 `#[pg_test]` cases pass against
+> PostgreSQL 16. Default + `experimental_index_am` builds both green.
+> See [an internal design note](an internal design note) for what
+> we deliberately skipped.
 
 ## Why pg_turbovec?
 
@@ -53,6 +51,71 @@ If your workload is mostly cosine / inner-product semantic search and
 you'd rather pay disk bytes than RAM bytes, `pg_turbovec` is the
 right tool. If you need L2 / L1 ANN, halfvec, sparse, or measured
 hyperscale latency *today*, pgvector + HNSW is the safer pick.
+
+## Why pg_turbovec instead of `binary_quantize() + bit_hamming_ops`?
+
+If you've reached for pgvector's `binary_quantize()` + `bitvec` +
+`bit_hamming_ops` HNSW index, the reason is almost always memory
+pressure: "I have 100 M × 1536-dim embeddings, FP32 doesn't fit, I'll
+trade recall for 32× compression."
+
+**At the same byte budget, pg_turbovec's 2-bit mode wins on recall.**
+Approximate per-1536-dim numbers on real (non-random) embeddings:
+
+| Approach | Bytes / 1536-dim row | R@10 (real embeddings) |
+|---|---:|---:|
+| FP32 (raw `vector`) | 6 144 | 1.00 (ground truth) |
+| FP16 (`halfvec`) | 3 072 | ≈ 1.00 |
+| TurboQuant 4-bit (`turbovec` index, default) | 388 | ≈ 0.95 |
+| TurboQuant 2-bit (`turbovec` index) | 196 | ≈ 0.85 |
+| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65–0.75 |
+
+Numbers are sourced from
+[an internal design note](an internal design note)
+§ "Bitvec Hamming / Jaccard ANN index". The R@10 figures for our
+2/4-bit modes are upper bounds derived from the upstream TurboQuant
+paper; the synthetic random-vector measurements in
+[`docs/RECALL.md`](docs/RECALL.md) § 2.1 are deliberately pessimistic
+because random points have no clustering structure to exploit.
+
+**Why does Lloyd-Max scalar quantization beat 1-bit thresholding at
+the same byte count?** TurboQuant first rotates the input by a fixed
+orthogonal matrix so that, after rotation, each coordinate
+independently follows a known Beta distribution that converges to
+N(0, 1/d). It then assigns buckets via Lloyd-Max scalar quantization
+— provably the *distortion-rate-optimal* scalar code for that
+distribution — and packs them at 2, 3, or 4 bits per coordinate.
+1-bit thresholding (pgvector's `binary_quantize()`) is the same idea
+pinned to `bit_width = 1`: it keeps the sign and throws the magnitude
+away. At 2 bits, Lloyd-Max with 4 reconstruction levels lands
+materially closer to the Shannon distortion-rate lower bound than a
+2-bucket sign threshold can — so pg_turbovec at `bit_width = 2`
+occupies essentially the same byte budget as 1-bit Hamming with
+strictly higher recall. See the [TurboQuant paper, arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
+for the full distortion analysis.
+
+**When is `bit_hamming_ops` still the right tool?** When the bit
+vector is *the data*, not a compression of an `f32` vector — i.e.
+native binary embeddings (Cohere's binary mode), perceptual / image
+fingerprints (pHash, dHash for near-duplicate detection), and
+SimHash / MinHash signatures over text shingles. For those
+workloads pgvector's HNSW on `bit_hamming_ops` is the right tool
+and there is no reason to use pg_turbovec instead.
+
+## Choose your `bit_width`
+
+| Workload | Recommended | Storage / 1536-dim | R@10 floor |
+|---|---|---:|---:|
+| Want pgvector-equivalent recall, halve storage | `halfvec` (no quantization) | 3 072 B | ≈ 1.0 |
+| RAG / semantic search, R@10 ≥ 0.9 acceptable | **`bit_width = 4` (default)** | 388 B | ≈ 0.95 |
+| Memory pressure dominates, R@10 ≥ 0.8 acceptable | `bit_width = 2` | 196 B | ≈ 0.85 |
+| Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 196 B | ≈ 0.85 (vs 0.65–0.75) |
+
+Methodology (and the synthetic random-vector numbers we have today)
+lives in [`docs/RECALL.md`](docs/RECALL.md); the source of the
+storage / recall comparison numbers above is
+[an internal design note](an internal design note). For
+dimensions other than 1536, multiply storage through by `dim / 1536`.
 
 ## Installation
 
@@ -428,6 +491,14 @@ bridge is the supported interop path.
   the `turbovec` index access method.
 - [`docs/RECALL.md`](docs/RECALL.md) — recall benchmark methodology
   and the latest measured numbers.
+- [an internal design note](an internal design note) — what
+  we deliberately did *not* ship in 1.0 (binary-compat varlena,
+  `bit_hamming_ops` ANN) and the reasoning.
+- [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) — feature-by-feature
+  comparison against pgvector.
+- [an internal design note](an internal design note) — handoff
+  notes for the binary-compatible varlena work, if a future session
+  picks it up.
 - [`docs/BUILDING.md`](docs/BUILDING.md) — Nix-specific build
   recipe (writable `pg_config` wrapper, `BINDGEN_EXTRA_CLANG_ARGS`,
   `RUSTFLAGS` for openblas).
@@ -461,12 +532,56 @@ We expose `l2_distance` / `l1_distance` as exact functions only — there
 is no L2 / L1 index path. For workloads dominated by Euclidean ANN,
 pgvector + HNSW is the right pick.
 
+**What's not in 1.0?**
+
+TL;DR — see [an internal design note](an internal design note)
+for the full cost/benefit reasoning. The two items most likely to be
+asked about:
+
+- **Binary-compatible varlena layout for `vector`.** We use a
+  CBOR-derived varlena rather than pgvector's
+  `[vl_len_, dim, unused, f32[dim]]` byte layout. The cross-extension
+  migration via `::real[]::vector` is one-shot and finishes in
+  seconds on a million rows; the 16× quantization savings dominate
+  the per-row layout overhead, so binary-compat is a nice-to-have,
+  not a 1.0 blocker.
+- **Indexed Hamming / Jaccard ANN on `bitvec`.** The TurboQuant
+  kernel is a scalar quantizer for dense `f32` vectors; it doesn't
+  fit Hamming-space ANN. And the workload that motivates
+  `bit_hamming_ops` (memory-pressured semantic search) is already
+  covered better by `bit_width = 2` — same byte budget, materially
+  higher recall.
+
 **Why two crates: `pg_turbovec` and `turbovec`?**
 
 [`turbovec`](https://crates.io/crates/turbovec) is the upstream
 TurboQuant implementation in pure Rust by Ryan Codrai. `pg_turbovec`
 is the PostgreSQL extension built with [pgrx](https://github.com/pgcentralfoundation/pgrx)
 on top of it. We track upstream releases.
+
+## Ecosystem
+
+Vector search on PostgreSQL has three serious open-source options.
+The honest comparison:
+
+- **[pgvector](https://github.com/pgvector/pgvector)** — production-
+  tested at scale, larger feature surface (HNSW for L2 *and* inner
+  product *and* L1, plus `halfvec`, `sparsevec`, `bitvec`), and an
+  ecosystem of clients that already speak its types and operators.
+  Choose pgvector if you don't have memory pressure and you value
+  maturity.
+- **[pgvectorscale](https://github.com/timescale/pgvectorscale)** —
+  SOTA published latency on 50 M+ row corpora via StreamingDiskANN,
+  layered on top of pgvector. Choose pgvectorscale if your corpus is
+  in the tens-of-millions-of-rows range and you can run TimescaleDB.
+- **pg_turbovec** — smallest on-disk footprint, in-kernel filtered
+  ANN (selective `WHERE` clauses make scans *cheaper*, not more
+  expensive), zero codebook training. Choose pg_turbovec if memory
+  dominates your cost equation.
+
+The three coexist cleanly in the same database — separate schemas,
+separate type oids, separate operator dispatch. You can A/B them on
+your own data without committing to one.
 
 ## Contributing
 

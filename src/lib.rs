@@ -25,6 +25,8 @@ pub mod cast;
 pub mod distance;
 pub mod extras;
 pub mod guc;
+pub mod halfvec;
+pub mod halfvec_ops;
 
 #[cfg(feature = "experimental_index_am")]
 pub mod index;
@@ -59,6 +61,77 @@ mod tests {
     /// the top of each test that uses bare operators.
     fn use_turbovec() {
         Spi::run("SET search_path = turbovec, public").unwrap();
+    }
+
+    #[pg_test]
+    fn halfvec_basic_round_trip() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT '[1.0, 2.0, 3.0]'::turbovec.halfvec::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains('1') && s.contains('2') && s.contains('3'));
+    }
+
+    #[pg_test]
+    fn halfvec_distance_ops() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let l2: Option<f64> = Spi::get_one(
+            "SELECT '[1, 2, 3]'::halfvec <-> '[4, 6, 3]'::halfvec",
+        )
+        .unwrap();
+        assert!((l2.unwrap() - 5.0).abs() < 1e-3);
+
+        let cos: Option<f64> = Spi::get_one(
+            "SELECT '[1, 0]'::halfvec <=> '[0, 1]'::halfvec",
+        )
+        .unwrap();
+        assert!((cos.unwrap() - 1.0).abs() < 1e-3);
+
+        let neg_ip: Option<f64> = Spi::get_one(
+            "SELECT '[1, 0, 0]'::halfvec <#> '[1, 0, 0]'::halfvec",
+        )
+        .unwrap();
+        assert!((neg_ip.unwrap() + 1.0).abs() < 1e-3);
+    }
+
+    #[pg_test]
+    fn halfvec_vector_round_trip() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT (('[1.5, 2.25, 3.125]'::turbovec.vector::turbovec.halfvec)::turbovec.vector)::text",
+        )
+        .unwrap();
+        let s = txt.unwrap();
+        assert!(s.contains("1.5"));
+        assert!(s.contains("2.25"));
+        assert!(s.contains("3.125"));
+    }
+
+    #[pg_test]
+    fn halfvec_aggregate_avg() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        Spi::run("CREATE TEMP TABLE hv (v halfvec)").unwrap();
+        Spi::run("INSERT INTO hv VALUES ('[1,2,3]'),('[3,4,5]'),('[5,6,7]')")
+            .unwrap();
+        let avg: Option<String> =
+            Spi::get_one("SELECT avg(v)::text FROM hv").unwrap();
+        let s = avg.unwrap();
+        assert!(s.contains('3'));
+        assert!(s.contains('4'));
+        assert!(s.contains('5'));
+    }
+
+    #[pg_test]
+    fn halfvec_overflow_rejected() {
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT '[1, 100000, 3]'::turbovec.halfvec::text",
+            )
+        });
+        assert!(
+            bad.is_err(),
+            "halfvec should reject f16-overflowing values"
+        );
     }
 
     #[pg_test]

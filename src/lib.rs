@@ -29,6 +29,7 @@ pub mod halfvec;
 pub mod halfvec_ops;
 pub mod sparsevec;
 pub mod sparsevec_ops;
+pub mod bitvec;
 
 #[cfg(feature = "experimental_index_am")]
 pub mod index;
@@ -63,6 +64,74 @@ mod tests {
     /// the top of each test that uses bare operators.
     fn use_turbovec() {
         Spi::run("SET search_path = turbovec, public").unwrap();
+    }
+
+    #[pg_test]
+    fn bitvec_basic_round_trip() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT '101010'::turbovec.bitvec::text",
+        )
+        .unwrap();
+        assert_eq!(txt.as_deref(), Some("101010"));
+    }
+
+    #[pg_test]
+    fn bitvec_hamming_distance() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        // 1010 vs 1100: differ at positions 1 and 2 = 2 bits.
+        let h: Option<f64> = Spi::get_one(
+            "SELECT '1010'::bitvec <~> '1100'::bitvec",
+        )
+        .unwrap();
+        assert_eq!(h, Some(2.0));
+        // Same -> 0.
+        let z: Option<f64> = Spi::get_one(
+            "SELECT '1111'::bitvec <~> '1111'::bitvec",
+        )
+        .unwrap();
+        assert_eq!(z, Some(0.0));
+    }
+
+    #[pg_test]
+    fn bitvec_jaccard_distance() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        // 1110 ∩ 1011 = 1010 (popcount 2)
+        // 1110 ∪ 1011 = 1111 (popcount 4)
+        // Jaccard = 1 - 2/4 = 0.5
+        let j: Option<f64> = Spi::get_one(
+            "SELECT '1110'::bitvec <%> '1011'::bitvec",
+        )
+        .unwrap();
+        assert!((j.unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[pg_test]
+    fn bitvec_binary_quantize() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        // [-0.1, 0.5, 0, 0.7, -2.0] → 0,1,0,1,0 (positive bits set).
+        let txt: Option<String> = Spi::get_one(
+            "SELECT turbovec.binary_quantize('[-0.1, 0.5, 0, 0.7, -2.0]'::turbovec.vector)::text",
+        )
+        .unwrap();
+        assert_eq!(txt.as_deref(), Some("01010"));
+    }
+
+    #[pg_test]
+    fn bitvec_popcount_function() {
+        let p: Option<i64> = Spi::get_one(
+            "SELECT turbovec.bitvec_popcount('11010110'::turbovec.bitvec)",
+        )
+        .unwrap();
+        assert_eq!(p, Some(5));
+    }
+
+    #[pg_test]
+    fn bitvec_length_mismatch_errors() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<f64>("SELECT '101'::bitvec <~> '1010'::bitvec")
+        });
+        assert!(bad.is_err(), "bitvec length mismatch should ERROR");
     }
 
     #[pg_test]

@@ -7,20 +7,20 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 | pgvector type | pg_turbovec status |
 |---------------|--------------------|
 | `vector` (FP32) | ✓ — `turbovec.vector` |
-| `halfvec` (FP16) | ✗ — Phase HV (planned) |
-| `sparsevec` | ✗ — Phase SV (planned) |
-| `bit` (binary) | ✗ — Phase BV (planned, uses Postgres core `bit` type for input + a wrapper) |
+| `halfvec` (FP16) | ✓ — `turbovec.halfvec` |
+| `sparsevec` | ✓ — `turbovec.sparsevec` |
+| `bit` (binary) | ✓ — `turbovec.bitvec` (named differently to avoid colliding with PG core's built-in `bit`) |
 
 ## Distance operators
 
 | Op | pgvector | pg_turbovec |
 |----|----------|-------------|
-| `<->` L2 | ✓ | ✓ (exact only on AM) |
-| `<#>` neg-IP | ✓ | ✓ (indexed) |
-| `<=>` cosine | ✓ | ✓ (indexed) |
-| `<+>` L1 | ✓ | ✓ (exact only on AM) |
-| `<~>` Hamming (binary) | ✓ | ✗ — Phase BV |
-| `<%>` Jaccard (binary) | ✓ | ✗ — Phase BV |
+| `<->` L2 | ✓ | ✓ (vector, halfvec, sparsevec; exact only on AM) |
+| `<#>` neg-IP | ✓ | ✓ (indexed for vector) |
+| `<=>` cosine | ✓ | ✓ (indexed for vector) |
+| `<+>` L1 | ✓ | ✓ (vector, halfvec, sparsevec; exact only on AM) |
+| `<~>` Hamming (binary) | ✓ | ✓ (bitvec) |
+| `<%>` Jaccard (binary) | ✓ | ✓ (bitvec) |
 
 ## Aggregates
 
@@ -28,10 +28,9 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 |-----------|----------|-------------|
 | `avg(vector)` | ✓ | ✓ |
 | `sum(vector)` | ✓ | ✓ |
-| `avg(halfvec)` | ✓ | ✗ |
-| `sum(halfvec)` | ✓ | ✗ |
-| `avg(bit)` | ✗ | ✗ |
-| `sum(sparsevec)` | ✓ | ✗ |
+| `avg(halfvec)` | ✓ | ✓ |
+| `sum(halfvec)` | ✓ | ✓ |
+| `sum(sparsevec)` | ✓ | ✗ — follow-up (the index-walk semantics need care) |
 
 ## Functions
 
@@ -49,9 +48,9 @@ What pgvector offers (as of 0.8.x) and where pg_turbovec stands.
 | `array_to_vector(real[])` | ✓ | ✓ (cast + `array_to_vec`) |
 | `array_to_vector(real[], integer, boolean)` | ✓ | ✓ |
 | `vector_to_float4(vector, integer, boolean)` | ✓ | ✗ — Phase HV |
-| `binary_quantize(vector)` | ✓ | ✗ — Phase BV |
-| `hamming_distance(bit, bit)` | ✓ | ✗ — Phase BV |
-| `jaccard_distance(bit, bit)` | ✓ | ✗ — Phase BV |
+| `binary_quantize(vector)` | ✓ | ✓ |
+| `hamming_distance(bitvec, bitvec)` | ✓ | ✓ |
+| `jaccard_distance(bitvec, bitvec)` | ✓ | ✓ |
 | `l2_normalize(vector)` | ✓ | ✓ (`vec_normalize`) |
 | `vector_dims(halfvec)` | ✓ | ✗ |
 | `vector_dims(sparsevec)` | ✓ | ✗ |

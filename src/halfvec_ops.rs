@@ -58,8 +58,20 @@ fn halfvec_dims(v: Halfvec) -> i32 {
     v.dim() as i32
 }
 
+/// pgvector-compat overload: `vector_dims(halfvec) -> integer`.
+#[pg_extern(name = "vector_dims", immutable, parallel_safe)]
+fn vector_dims_halfvec(v: Halfvec) -> i32 {
+    v.dim() as i32
+}
+
 #[pg_extern(immutable, parallel_safe)]
 fn halfvec_norm(v: Halfvec) -> f64 {
+    kernels::norm2(&v.to_f32_vec()).sqrt()
+}
+
+/// pgvector-compat overload: `vector_norm(halfvec) -> double precision`.
+#[pg_extern(name = "vector_norm", immutable, parallel_safe)]
+fn vector_norm_halfvec(v: Halfvec) -> f64 {
     kernels::norm2(&v.to_f32_vec()).sqrt()
 }
 

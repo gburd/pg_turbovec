@@ -536,6 +536,42 @@ mod tests {
     /// payload reflects the index. The recheck-orderby path means
     /// L2 queries still return exact results; this test only
     /// confirms the SQL surface accepts the opclass.
+    #[pg_test]
+    fn vector_dims_overloads() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        // Same SQL function name dispatches by argument type, the
+        // pgvector convention.
+        let dv: Option<i32> = Spi::get_one(
+            "SELECT vector_dims('[1,2,3,4]'::vector)",
+        )
+        .unwrap();
+        assert_eq!(dv, Some(4));
+
+        let dh: Option<i32> = Spi::get_one(
+            "SELECT vector_dims('[1,2,3,4,5]'::halfvec)",
+        )
+        .unwrap();
+        assert_eq!(dh, Some(5));
+
+        let ds: Option<i32> = Spi::get_one(
+            "SELECT vector_dims('{1:1, 5:2}/100'::sparsevec)",
+        )
+        .unwrap();
+        assert_eq!(ds, Some(100));
+    }
+
+    #[pg_test]
+    fn vector_norm_overloads() {
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let nv: Option<f64> =
+            Spi::get_one("SELECT vector_norm('[3, 4]'::vector)").unwrap();
+        assert!((nv.unwrap() - 5.0).abs() < 1e-6);
+
+        let nh: Option<f64> =
+            Spi::get_one("SELECT vector_norm('[3, 4]'::halfvec)").unwrap();
+        assert!((nh.unwrap() - 5.0).abs() < 1e-3);
+    }
+
     #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_l2_opclass() {

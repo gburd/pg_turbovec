@@ -175,3 +175,51 @@ on corpora ≥ 1 M rows.
 
 For everyone else, the storage savings and in-kernel filtered
 search make the swap worthwhile.
+
+## 11. Indexing halfvec / sparsevec via expression indexes
+
+`pg_turbovec`'s index AM natively indexes `vector`. To get the same
+ANN speed-up on `halfvec` or `sparsevec` columns without converting
+the column itself, use an *expression index* over the cast:
+
+```sql
+-- halfvec column, cosine-distance ANN:
+CREATE INDEX docs_emb_idx ON docs
+    USING turbovec ((embedding::vector) vec_cosine_ops);
+
+SELECT id FROM docs
+ORDER BY embedding::vector <=> $1::vector LIMIT 10;
+```
+
+Postgres's expression-index machinery rebuilds the index against
+the cast result during `CREATE INDEX` and again on each `INSERT`
+(via `aminsert`); query-side, the same cast in the `ORDER BY`
+matches the index. There is no halfvec/sparsevec-specific opclass
+needed.
+
+Cost trade-offs:
+
+- **`halfvec`**: cast widens FP16 → FP32, free in CPU terms.
+- **`sparsevec`**: cast materialises the dense form, so memory
+  scales with `dim` rather than `nnz`. Skip if your sparsevecs
+  are e.g. 30 000-dim with a handful of non-zeros.
+
+## 12. Indexed L2 / L1 distance queries
+
+The TurboQuant kernel ranks by inner product; we expose
+`vec_l2_ops` and `vec_l1_ops` opclasses that drive the same kernel
+and rely on the executor's `xs_recheckorderby` path to recompute
+the exact distance against each heap tuple:
+
+```sql
+CREATE INDEX docs_emb_l2_idx ON docs
+    USING turbovec (embedding vec_l2_ops);
+
+SELECT id FROM docs ORDER BY embedding <-> $1 LIMIT 10;
+```
+
+For unit-norm vectors (the default insert mode under
+`turbovec.normalize_on_insert = on`), L2 ranking is mathematically
+equivalent to inner-product ranking, so candidate-set quality
+matches cosine. For L1 the candidate-set quality is approximate
+but the executor's recheck makes the *returned* order exact.

@@ -27,3 +27,6 @@ Cargo.lock.bak
 
 # Local-only files
 .local-gitignore
+vendor/turbovec/.cargo-ok
+vendor/turbovec/.cargo_vcs_info.json
+vendor/turbovec/Cargo.toml.orig

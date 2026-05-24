@@ -138,42 +138,37 @@ fn decode_live_ids(bytes: &[u8]) -> Vec<u64> {
     out
 }
 
-/// Read an `IdMapIndex` from an arbitrary `Read`. The upstream crate
-/// only exposes `IdMapIndex::load(path)` which reads from disk; we
-/// dump to a temp file and call into it.  This is genuinely slow and
-/// is the most obvious target for a Phase-5 in-memory deserialiser
-/// upstream.
+/// Read an `IdMapIndex` from an arbitrary `Read`. Avoids the
+/// tmpfile dance by going directly through the upstream
+/// `IdMapIndex::load_from_reader` API surfaced in our vendor patch.
 fn read_idmap_from<R: std::io::Read>(r: &mut R) -> Result<IdMapIndex, String> {
-    let mut buf = Vec::new();
-    r.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    // Write to a tmpfile so we can call IdMapIndex::load(path). This
-    // is unfortunate; v0.5 should reach upstream for an in-memory
-    // load. We use mkstemp via PgMemoryContexts to keep cleanup
-    // deterministic even on backend abort.
-    let dir = std::env::temp_dir();
-    let pid = unsafe { libc::getpid() };
-    let nonce: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
-    let path = dir.join(format!("turbovec-load-{}-{}.tvim", pid, nonce));
-    std::fs::write(&path, &buf).map_err(|e| e.to_string())?;
-    let idx = IdMapIndex::load(&path).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&path);
-    Ok(idx)
+    IdMapIndex::load_from_reader(r).map_err(|e| e.to_string())
 }
 
-/// Serialise an `IdMapIndex` to bytes via the same temp-file dance.
+/// Serialise an `IdMapIndex` to bytes. Uses the upstream
+/// `IdMapIndex::write_to_writer` API surfaced in our vendor patch —
+/// no tmpfile, no syscall, no /tmp churn.
 fn write_idmap_to_bytes(idx: &IdMapIndex) -> Result<Vec<u8>, String> {
-    let dir = std::env::temp_dir();
-    let pid = unsafe { libc::getpid() };
-    let nonce: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
-    let path = dir.join(format!("turbovec-store-{}-{}.tvim", pid, nonce));
-    idx.write(&path).map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&path);
-    Ok(bytes)
+    let mut buf = Vec::with_capacity(estimate_idmap_size(idx));
+    idx.write_to_writer(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// Estimate the serialised size of an `IdMapIndex` so we can presize
+/// the destination buffer. Slightly over-allocating beats reallocating
+/// during the write.
+fn estimate_idmap_size(idx: &IdMapIndex) -> usize {
+    // 4 (magic) + 1 (version) + 9 (core header)
+    //   + (dim/8) * bit_width * n_vectors  (packed codes)
+    //   + n_vectors * 4                     (scales: f32)
+    //   + n_vectors * 8                     (slot_to_id: u64)
+    let n = idx.len();
+    let dim = idx.dim();
+    let bw = idx.bit_width();
+    let codes = (dim / 8) * bw * n;
+    let scales = n * 4;
+    let ids = n * 8;
+    14 + codes + scales + ids
 }
 
 /// Insert or update the side-table row for this index.

@@ -2988,8 +2988,6 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 [[package]]
 name = "turbovec"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1d138b0027a7ac80014b7333ffdeb668613d684cfb2d00d81bc9a92f4a9f1f"
 dependencies = [
  "blas-src",
  "faer",

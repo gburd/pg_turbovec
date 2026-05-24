@@ -68,16 +68,23 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
         INITIALISED = true;
     }
 
+    // PG 18 added an `isset_offset` field to `relopt_parse_elt` so
+    // callers can distinguish "explicitly set to default" from "never
+    // set". We don't track that distinction; pass -1 (unused).
     let tab = [
         pg_sys::relopt_parse_elt {
             optname: c"bit_width".as_ptr(),
             opttype: pg_sys::relopt_type::RELOPT_TYPE_INT,
             offset: std::mem::offset_of!(TurbovecRelopts, bit_width) as i32,
+            #[cfg(feature = "pg18")]
+            isset_offset: -1,
         },
         pg_sys::relopt_parse_elt {
             optname: c"dim".as_ptr(),
             opttype: pg_sys::relopt_type::RELOPT_TYPE_INT,
             offset: std::mem::offset_of!(TurbovecRelopts, dim) as i32,
+            #[cfg(feature = "pg18")]
+            isset_offset: -1,
         },
     ];
 

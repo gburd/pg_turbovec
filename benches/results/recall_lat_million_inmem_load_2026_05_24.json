@@ -1,0 +1,39 @@
+{
+  "head": "1769a43",
+  "build_profile": "release",
+  "vendor_patch": "in-memory turbovec read/write trait API (commit 0c42f55)",
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9 (pgrx-bundled)",
+  "pgvector_version": "0.8.0",
+  "pg_turbovec_version": "1.0.0",
+  "corpus": {"n": 1000000, "dim": 384, "distance": "cosine"},
+  "method": "Phase G methodology unchanged: pg_ctl restart -m fast clears shared_buffers + per-backend caches, then 50 fresh psql sessions each issue one EXPLAIN (ANALYZE) k=10 NN query (search_k=100, tv_4bit). Warm sweep is 50 queries in a single primed session.",
+  "configs": [
+    {
+      "label": "tv_4bit_k100_cold",
+      "n": 50,
+      "min_ms": 6635.953,
+      "p50_ms": 6802.271,
+      "p95_ms": 7698.141,
+      "max_ms": 14633.228,
+      "mean_ms": 7119.021,
+      "note": "First fresh-backend query (qid=1) was 14.6 s (shared_buffers also cold); subsequent fresh backends ran 6.6-7.4 s with shared_buffers warm but per-backend Arc<IdMapIndex> cache cold."
+    },
+    {
+      "label": "tv_4bit_k100",
+      "n": 50,
+      "min_ms": 21.094,
+      "p50_ms": 22.034,
+      "p95_ms": 28.496,
+      "max_ms": 28.662,
+      "mean_ms": 23.337,
+      "note": "warm-cache control; matches Phase G to within 1 ms p50 as expected (warm path skips read_idmap_from via cache hit)."
+    }
+  ],
+  "comparison": {
+    "cold_p50_release_v1_0_0": 6786,
+    "cold_p50_release_inmem":  6802.271,
+    "speedup_inmem_vs_v1_0_0": 0.998,
+    "interpretation": "No measurable speedup. The vendor patch eliminated the tmpfile round-trip but cold cost on this corpus is dominated by SPI fetch of the ~195 MiB bytea payload (PG TOAST decompression + detoasting) plus HashMap<u64, usize> construction for slot_to_id (1M entries). Both happen whether the deserialiser reads from a tmpfile or directly from a &[u8]. Closing the cold-path gap will require a relfile-resident page format (cached in shared_buffers) instead of a single bytea heap row."
+  }
+}

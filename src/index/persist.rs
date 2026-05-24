@@ -26,6 +26,47 @@ pub(crate) struct StoredIndex {
     pub live_ids: Vec<u64>,
 }
 
+/// Cheap metadata-only fetch: enough to build a cache key and
+/// compute a freshness signal without paying the cost of dragging
+/// the full `payload bytea` (which can be hundreds of MiB on big
+/// indexes) over SPI. Used on the AM scan hot path.
+pub(crate) struct StoredMeta {
+    pub bit_width: i32,
+    pub dim: i32,
+    pub n_vectors: i64,
+    pub version: i32,
+}
+
+/// Read just `(bit_width, dim, n_vectors, version)` for `indexrelid`.
+/// Returns `None` when no side-table row exists yet (e.g. between
+/// `CREATE INDEX` and the first `ambuildempty`).
+pub(crate) fn load_meta(indexrelid: pg_sys::Oid) -> Option<StoredMeta> {
+    let row: Option<(i32, i32, i64, i32)> = Spi::connect(|client| {
+        let sql = "SELECT bit_width, dim, n_vectors, version \
+                   FROM turbovec.am_storage WHERE indexrelid = $1";
+        let mut iter = match client.select(sql, Some(1), &[indexrelid.into()]) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        let row = iter.next()?;
+        let bw: Option<i32> = row.get(1).ok().flatten();
+        let dim: Option<i32> = row.get(2).ok().flatten();
+        let nv: Option<i64> = row.get(3).ok().flatten();
+        let ver: Option<i32> = row.get(4).ok().flatten();
+        match (bw, dim, nv, ver) {
+            (Some(bw), Some(dim), Some(nv), Some(ver)) => Some((bw, dim, nv, ver)),
+            _ => None,
+        }
+    });
+    let (bit_width, dim, n_vectors, version) = row?;
+    Some(StoredMeta {
+        bit_width,
+        dim,
+        n_vectors,
+        version,
+    })
+}
+
 /// Read the current payload for `indexrelid`. Returns `None` if no
 /// row exists (typical immediately after `CREATE INDEX` before
 /// `ambuildempty` has run).

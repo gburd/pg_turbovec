@@ -4,10 +4,13 @@
 //! one TID per call.
 
 use std::ffi::c_int;
+use std::sync::Arc;
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
+use turbovec::IdMapIndex;
 
+use crate::cache::{self, CacheKey};
 use crate::guc;
 use crate::index::persist;
 use crate::kernels;
@@ -168,14 +171,18 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 
     if !(*opaque).fetched {
         let indexrelid = (*(*scan).indexRelation).rd_id;
-        let stored = match persist::load(indexrelid) {
-            Some(s) => s,
+
+        // Cheap metadata-only fetch: lets us build the cache key and
+        // compute a freshness signal without dragging the (possibly
+        // hundreds-of-MiB) payload bytea across SPI on every query.
+        let meta = match persist::load_meta(indexrelid) {
+            Some(m) => m,
             None => {
                 (*opaque).fetched = true;
                 return false;
             }
         };
-        let dim = stored.dim as usize;
+        let dim = meta.dim as usize;
         if (*opaque).query.len() != dim {
             error!(
                 "turbovec amgettuple: query dim {} != index dim {}",
@@ -183,11 +190,59 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 dim
             );
         }
-        let n_in_index = stored.n_vectors.max(0) as usize;
+        let n_in_index = meta.n_vectors.max(0) as usize;
         if n_in_index == 0 {
             (*opaque).fetched = true;
             return false;
         }
+
+        // Cache lookup. The AM path uses `attnum = 0` by convention
+        // (the index relation owns a single attribute and we don't
+        // disambiguate further); the kernel path uses positive heap
+        // attnums, so the namespaces never collide. The freshness
+        // tuple is `(relfilenode, version)` — `meta.version` is
+        // bumped on every `aminsert` / `ambuild` / `ambulkdelete`,
+        // and we stash it into the cache's `n_rows` slot since the
+        // cache only compares for equality.
+        let key = CacheKey {
+            rel_oid: indexrelid,
+            attnum: 0,
+            bit_width: meta.bit_width as u8,
+            dim: meta.dim as u32,
+        };
+        let relfile = cache::current_relfilenode(indexrelid);
+        let version_as_i64 = meta.version as i64;
+
+        let arc: Arc<IdMapIndex> = match cache::lookup(key, relfile, version_as_i64) {
+            Some(a) => a,
+            None => {
+                // Miss: pay the SPI + tmpfile + IdMapIndex::load cost
+                // once, then publish the Arc into the cache so every
+                // subsequent scan on this index version is free.
+                let stored = match persist::load(indexrelid) {
+                    Some(s) => s,
+                    None => {
+                        (*opaque).fetched = true;
+                        return false;
+                    }
+                };
+                // Approximate bytes: packed_codes (dim*bit_width/8
+                // per vector) plus per-vector scale + id-map overhead
+                // heuristic, mirroring the knn.rs estimate so a
+                // single `cache_size_mb` budget governs both paths.
+                let bytes_per_vec =
+                    (meta.dim as usize * meta.bit_width as usize) / 8 + 4 + 64;
+                let total_bytes = bytes_per_vec * (n_in_index.max(1));
+                cache::insert(
+                    key,
+                    stored.index,
+                    total_bytes,
+                    relfile,
+                    version_as_i64,
+                )
+            }
+        };
+
         // The K knob: how many candidates to fetch per scan. v1.0
         // shipped a hard 1024 which made every ORDER BY on a million-
         // row index ~17 s. Default lowered to 100 (turbovec.search_k
@@ -195,7 +250,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // sub-ms latency.
         let k_pref = crate::guc::SEARCH_K.get() as usize;
         let k = k_pref.min(n_in_index).max(1);
-        let (scores, ids) = stored.index.search(&(*opaque).query, k);
+        let (scores, ids) = arc.search(&(*opaque).query, k);
         let dists: Vec<f64> = scores
             .iter()
             .map(|s| (1.0 - f64::from(*s)).clamp(0.0, 2.0))

@@ -1833,6 +1833,96 @@ mod tests {
         });
         assert!(bad.is_err(), "expected ERROR for expected = 0");
     }
+
+    /// First AM scan populates the backend-local cache; the second
+    /// scan must reuse the same entry rather than evicting and
+    /// rebuilding. We assert via `cache::len()` that no entry was
+    /// dropped between the two scans (a relfilenode/version
+    /// mismatch would have removed the entry inside `cache::lookup`).
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_cache_hits_on_second_query() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_cc (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_cc \
+             SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vector \
+             FROM generate_series(1, 50) g",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX t_cc_idx ON t_cc USING turbovec (emb vec_cosine_ops)").unwrap();
+        // Force the AM path; default `enable_seqscan = on` keeps
+        // small tables on a seqscan, which never reaches our cache.
+        Spi::run("ANALYZE t_cc").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        crate::cache::invalidate_all();
+        let len_before: usize = crate::cache::len();
+        // First scan: miss, populates the cache.
+        let _: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT '[1,0,0,0,0,0,0,0]'::vector AS v) \
+             SELECT id FROM t_cc, q ORDER BY emb <=> q.v LIMIT 1",
+        )
+        .unwrap();
+        let len_after: usize = crate::cache::len();
+        assert!(
+            len_after > len_before,
+            "cache should be populated by first AM scan ({} -> {})",
+            len_before,
+            len_after
+        );
+        // Second scan: hit. We can't directly observe the lookup,
+        // but the cache must still be populated (nothing evicted)
+        // and the answer must agree.
+        let id: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT '[1,0,0,0,0,0,0,0]'::vector AS v) \
+             SELECT id FROM t_cc, q ORDER BY emb <=> q.v LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(id, Some(1));
+        assert_eq!(crate::cache::len(), len_after);
+    }
+
+    /// `aminsert` bumps `version` on the side-table row, which is
+    /// the freshness signal we stash into the cache's `n_rows`
+    /// slot. The next AM scan must therefore see a version mismatch
+    /// in `cache::lookup`, evict the stale entry, and rebuild from
+    /// the new payload — otherwise the freshly-inserted row would
+    /// be invisible.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_cache_invalidates_on_insert() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_civ (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_civ VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX t_civ_idx ON t_civ USING turbovec (emb vec_cosine_ops)").unwrap();
+        Spi::run("ANALYZE t_civ").unwrap();
+        // Force the AM path for the ORDER BY queries below. We can't
+        // leave `enable_seqscan = off` set globally because the
+        // `count(*)` probe would otherwise pick our AM (which serves
+        // an empty result set for non-orderby scans) instead of a
+        // seqscan or PK index-only scan.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let _: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_civ ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = on").unwrap();
+        // INSERT bumps version; next scan must rebuild from new payload.
+        Spi::run("INSERT INTO t_civ VALUES (3, '[0,0,1,0,0,0,0,0]')").unwrap();
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_civ").unwrap();
+        assert_eq!(n, Some(3));
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let id: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_civ ORDER BY emb <=> '[0,0,1,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(id, Some(3));
+    }
 }
 
 /// PGRX test runner harness.

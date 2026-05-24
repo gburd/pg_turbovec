@@ -104,6 +104,46 @@ the right tool and there is no reason to use pg_turbovec there.
 
 ## Where future work would pay off (in priority order)
 
+### 1. Relfile-resident page format for the index AM (the cold-path fix)
+
+**Status:** earmarked for 1.1. **Measured cost it would save:** ~6.8 s
+→ ~tens of ms on the first AM scan in any fresh backend
+on a 1 M × 384-d 4-bit corpus.
+
+**The story.** v1.0 stores the serialised index in a side-table
+(`turbovec.am_storage`, a regular heap with a `bytea payload`
+column). On the cold path, every fresh backend pays:
+
+  1. SPI fetch of ~195 MiB of TOASTed bytea (must detoast +
+     decompress every chunk through the buffer manager);
+  2. parse the magic / header / packed codes / scales / id table
+     via the `Read`-based deserialiser;
+  3. construct a `HashMap<u64, usize>` slot → id for the 1 M
+     entries.
+
+Measured on arnold (1 M × 384-d, release build):
+
+| commit | cold p50 | warm p50 | comment |
+|---|---:|---:|---|
+| `cca1ddc` (1.0.0) | 6 786 ms | 22.16 ms | Phase G baseline. |
+| `0c42f55` (in-memory deserialiser) | 6 802 ms | 22.0 ms | Phase H. tmpfile dance gone; cold path unchanged because step 1 (SPI fetch) and step 3 (HashMap construct) dominate. |
+
+Closing the gap requires moving the serialised payload into the
+index relation's main fork — the index AM's `relfilenode` — so
+shared buffers caches it cluster-wide rather than re-reading +
+rebuilding per backend. That is genuinely a Phase 5/Phase 6
+rewrite (callbacks for `ambuild`, `aminsertcleanup`,
+`ambuildempty`, the bgwriter / checkpointer integration, plus a
+page format that's amenable to mmap) and is the right shape for
+1.1 rather than 1.0.x.
+
+The HashMap rebuild is independently addressable: store the
+`slot_to_id` table sorted by slot, drop the inverse map
+(`id_to_slot`) entirely, and resolve `id` lookups in
+`ambulkdelete` via binary search instead. Trade O(log n) lookup
+for zero allocation on the cold path. Worth ~half a second on
+our corpus per the rough back-of-envelope.
+
 1. **Real-world recall measurement vs. pgvector HNSW and
    pgvectorscale StreamingDiskANN.** We have synthetic random-vector
    numbers in `docs/RECALL.md`; we do not have head-to-head numbers

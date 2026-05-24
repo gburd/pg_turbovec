@@ -18,6 +18,12 @@ use crate::vec::Vector;
 /// `aminsert` callback. Returns `true` if the index now contains the
 /// row; `false` if we deliberately skipped it. We never skip in v0.4
 /// (any reason to skip should produce an `ERROR` instead).
+///
+/// The callback signature changed in PG 14 to add the
+/// `indexUnchanged` flag (used by HOT chain elision); pg13 has the
+/// 7-arg form. We expose two thin wrappers and pick which one to
+/// install in `register_am`.
+#[cfg(not(feature = "pg13"))]
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn aminsert(
     index_relation: pg_sys::Relation,
@@ -28,6 +34,30 @@ pub(crate) unsafe extern "C-unwind" fn aminsert(
     _check_unique: pg_sys::IndexUniqueCheck::Type,
     _index_unchanged: bool,
     _index_info: *mut pg_sys::IndexInfo,
+) -> bool {
+    aminsert_impl(index_relation, values, isnull, heap_tid)
+}
+
+/// PG 13 `aminsert` shape — no `indexUnchanged` parameter.
+#[cfg(feature = "pg13")]
+#[pgrx::pg_guard]
+pub(crate) unsafe extern "C-unwind" fn aminsert(
+    index_relation: pg_sys::Relation,
+    values: *mut pg_sys::Datum,
+    isnull: *mut bool,
+    heap_tid: pg_sys::ItemPointer,
+    _heap_relation: pg_sys::Relation,
+    _check_unique: pg_sys::IndexUniqueCheck::Type,
+    _index_info: *mut pg_sys::IndexInfo,
+) -> bool {
+    aminsert_impl(index_relation, values, isnull, heap_tid)
+}
+
+unsafe fn aminsert_impl(
+    index_relation: pg_sys::Relation,
+    values: *mut pg_sys::Datum,
+    isnull: *mut bool,
+    heap_tid: pg_sys::ItemPointer,
 ) -> bool {
     let indexrelid = (*index_relation).rd_id;
 

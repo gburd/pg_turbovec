@@ -4,9 +4,68 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — 2026-05-24
+
+### Fix — build on PostgreSQL 13, 14, 15, 18
+
+v1.0.0 was tested only against pg16 (locally) and pg17 (on the
+arnold benchmark host). Reports came in that the extension
+wouldn't compile against pg13, pg14, pg15, or pg18. Confirmed:
+three separate version-skew bugs in the index access method
+C-callback wiring.
+
+All fixes are additive `#[cfg(...)]` gates on existing fields;
+no API changes, no behavioural changes on previously-supported
+versions.
+
+- **`src/index/mod.rs::register_am`**:
+  - `(*routine).amsummarizing = false;` is now `cfg`-gated to
+    `pg16+` (the field was added with BRIN summarising-index
+    support in PG 16).
+  - `(*routine).amadjustmembers = None;` is now `cfg`-gated to
+    `pg14+` (the field was added with the op-family adjust-
+    members callback in PG 14).
+- **`src/index/insert.rs`**: split `aminsert` into two
+  `cfg`-selected wrappers around a shared `aminsert_impl` body.
+  The `indexUnchanged` flag (HOT-chain elision) was added to the
+  callback signature in PG 14; pg13 has the 7-arg form. Both
+  wrappers delegate to the same Rust implementation.
+- **`src/index/options.rs`**: `pg_sys::relopt_parse_elt` gained
+  an `isset_offset: i32` field in PG 18. Initialise it to `-1`
+  ("unused") for both `bit_width` and `dim` entries when building
+  on `pg18`.
+
+### Tests
+
+`cargo pgrx test pg<N> --no-default-features --features
+"pg<N> experimental_index_am pg_test"` for N in 13..=18:
+
+| Version | Result |
+|---|---|
+| 13.23 | 92/92 passing |
+| 14.22 | 92/92 passing |
+| 15.17 | 92/92 passing |
+| 16.13 | 92/92 passing |
+| 17.9  | 92/92 passing |
+| 18.3  | 92/92 passing |
+
+A `docs/PG_VERSION_SUPPORT.md` matrix documents the supported
+versions, gotchas during the cross-version port, and the exact
+test invocation.
+
+### Known follow-ups
+
+The sub-agent helping verify on arnold caught a fourth issue
+that is **not** a bug but worth recording: when refactoring
+`aminsert` into a thin C-ABI wrapper plus an inner Rust
+implementation, the inner helper cannot be called
+`aminsert_inner` because `#[pgrx::pg_guard]` already generates
+a private `<fn_name>_inner`. We renamed the helper to
+`aminsert_impl`. Documented at the call site.
+
+
 ## [1.0.0] — 2026-05-24
 
-### Phase 21 — million-row benchmark, search_k tunable, AM-scan cache
 
 A real-hardware million-row run on `arnold` (Intel i9-12900H, PG
 17, pgvector 0.8.0 in the same cluster) drove three cumulative

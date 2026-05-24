@@ -92,7 +92,11 @@ unsafe fn make_routine() -> *mut pg_sys::IndexAmRoutine {
     (*routine).amcanparallel = false;
     (*routine).amcaninclude = false;
     (*routine).amusemaintenanceworkmem = true;
-    (*routine).amsummarizing = false;
+    // `amsummarizing` was added in PG 16 (BRIN summarising indexes).
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    {
+        (*routine).amsummarizing = false;
+    }
     (*routine).amparallelvacuumoptions = 0;
     (*routine).amkeytype = pg_sys::InvalidOid;
 
@@ -118,7 +122,11 @@ unsafe fn make_routine() -> *mut pg_sys::IndexAmRoutine {
     (*routine).amproperty = None;
     (*routine).ambuildphasename = None;
     (*routine).amvalidate = Some(validate::amvalidate);
-    (*routine).amadjustmembers = None;
+    // `amadjustmembers` was added in PG 14 (op family adjust callback).
+    #[cfg(not(feature = "pg13"))]
+    {
+        (*routine).amadjustmembers = None;
+    }
     (*routine).ambeginscan = Some(scan::ambeginscan);
     (*routine).amrescan = Some(scan::amrescan);
     (*routine).amgettuple = Some(scan::amgettuple);

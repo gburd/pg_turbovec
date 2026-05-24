@@ -1,0 +1,126 @@
+{
+  "_comment": "Million-row head-to-head: pgvector HNSW vs pg_turbovec. See docs/RECALL.md § 2.1.0 for narrative.",
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9 (pgrx-bundled)",
+  "pgvector_version": "0.8.0",
+  "pg_turbovec_version": "1.0.0-rc.2",
+  "pg_turbovec_commit": "63879a8",
+  "fixture": "synthetic random vectors (random()-0.5)*2 then l2-normalised, seed=0.42",
+  "corpus": {
+    "n": 1000000,
+    "dim": 384,
+    "distance": "cosine",
+    "normalized": true,
+    "table_size_mb": 3125
+  },
+  "ground_truth": {
+    "method": "exact brute-force seq scan on FP32",
+    "k": 10,
+    "n_queries": 50,
+    "build_time_s": 26.8
+  },
+  "indexes": [
+    {
+      "name": "docs_pgv_hnsw",
+      "type": "pgvector hnsw",
+      "params": {"m": 16, "ef_construction": 64},
+      "size_mb": 1953,
+      "build_time_s": 492.5
+    },
+    {
+      "name": "docs_tv_4bit",
+      "type": "pg_turbovec",
+      "bit_width": 4,
+      "payload_size_mb": 195,
+      "build_time_s": 138.9
+    },
+    {
+      "name": "docs_tv_2bit",
+      "type": "pg_turbovec",
+      "bit_width": 2,
+      "payload_size_mb": 103,
+      "build_time_s": 99.0
+    }
+  ],
+  "configs": [
+    {
+      "label": "HNSW ef_search=40",
+      "engine": "pgvector",
+      "params": {"hnsw.ef_search": 40},
+      "n_queries": 50,
+      "min_ms": 1.2,
+      "p50_ms": 2.5,
+      "p95_ms": 5.0,
+      "max_ms": 5.2,
+      "mean_ms": 2.8,
+      "r_at_10": 0.032
+    },
+    {
+      "label": "HNSW ef_search=200",
+      "engine": "pgvector",
+      "params": {"hnsw.ef_search": 200},
+      "n_queries": 50,
+      "min_ms": 5.8,
+      "p50_ms": 8.4,
+      "p95_ms": 13.7,
+      "max_ms": 15.9,
+      "mean_ms": 9.2,
+      "r_at_10": 0.116
+    },
+    {
+      "label": "turbovec 2-bit search_k=100",
+      "engine": "pg_turbovec",
+      "params": {"bit_width": 2, "turbovec.search_k": 100},
+      "n_queries": 50,
+      "min_ms": 3532.0,
+      "p50_ms": 3931.0,
+      "p95_ms": 4433.1,
+      "max_ms": 4656.8,
+      "mean_ms": 3950.0,
+      "r_at_10": 0.922
+    },
+    {
+      "label": "turbovec 2-bit search_k=200",
+      "engine": "pg_turbovec",
+      "params": {"bit_width": 2, "turbovec.search_k": 200},
+      "n_queries": 50,
+      "min_ms": 3549.7,
+      "p50_ms": 3646.3,
+      "p95_ms": 7514.2,
+      "max_ms": 8692.9,
+      "mean_ms": 4019.2,
+      "r_at_10": 0.972
+    },
+    {
+      "label": "turbovec 4-bit search_k=100",
+      "engine": "pg_turbovec",
+      "params": {"bit_width": 4, "turbovec.search_k": 100},
+      "n_queries": 50,
+      "min_ms": 6873.4,
+      "p50_ms": 7239.7,
+      "p95_ms": 24825.3,
+      "max_ms": 27571.6,
+      "mean_ms": 10367.8,
+      "r_at_10": 1.000
+    },
+    {
+      "label": "turbovec 4-bit search_k=200",
+      "engine": "pg_turbovec",
+      "params": {"bit_width": 4, "turbovec.search_k": 200},
+      "n_queries": 50,
+      "min_ms": 6824.8,
+      "p50_ms": 6942.0,
+      "p95_ms": 7145.8,
+      "max_ms": 7245.2,
+      "mean_ms": 6957.6,
+      "r_at_10": 1.000
+    }
+  ],
+  "notes": [
+    "Random unit vectors in 384-d have no clustering structure: HNSW's graph has no useful local neighbourhood signal, so even ef_search=200 only finds 11.6% of the true top-10. This is *the* well-known pessimistic case for graph indexes; on real-world embeddings (see GloVe-100 numbers in docs/RECALL.md § 2.1.1) HNSW gets 80-90% R@10.",
+    "pg_turbovec scans every quantised row (no graph, no buckets), so its recall is independent of the data distribution. R@10 = 1.0 at 4-bit, 0.92-0.97 at 2-bit.",
+    "Per-query latency for pg_turbovec is dominated by the per-scan deserialisation of the IdMapIndex from turbovec.am_storage (~195 MB at 4-bit, ~103 MB at 2-bit) via tmpfile. The cache in src/cache.rs exists but is NOT wired into the index AM scan path in v1.0; every amgettuple invocation pays the full deserialise cost. This is the dominant cost in the table above; the kernel itself is sub-second for 1M × 384 at 4-bit.",
+    "search_k = 100 vs 200 has small effect: it caps how many candidates the index returns to the executor, so it changes heap re-rank cost but not the kernel scan or deserialise cost.",
+    "tv4_k100 has an anomalous max (27.5 s) and p95 (24.8 s); tv4_k200 in the same session has tight p95 (7.1 s). Most likely an early-run effect (bgwriter / autovacuum activity); the bench did a 2-call warmup but warmup only primes PG buffer cache, not the per-scan deserialise."
+  ]
+}

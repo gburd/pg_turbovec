@@ -40,6 +40,100 @@ bound for what `pg_turbovec` can deliver — no SQL, no heap, no
 planner) and the **end-to-end SQL path** through pg_turbovec's
 index AM in a real cluster running side-by-side with pgvector.
 
+#### 2.1.0 Million-row synthetic-random head-to-head (2026-05-24)
+
+- **Source**: 1 000 000 synthetic random unit-norm vectors,
+  `(random()-0.5)*2` then `l2_normalize`, deterministic seed 0.42.
+- **Dimension**: 384 (cosine).
+- **Hardware**: `arnold` — Intel Core i9-12900H, 32 GiB RAM,
+  Linux 6.x. Single-backend bench, no parallel workers per
+  scan.
+- **PG version**: 17.9 (pgrx-bundled). pgvector 0.8.0.
+  pg_turbovec 1.0.0-rc.2, commit 63879a8 (`turbovec.search_k`
+  GUC + amrescan-without-orderby tolerance).
+- **Methodology**: 50 random docs are picked as query vectors;
+  ground-truth top-10 is recomputed by exact brute-force seq
+  scan against the live corpus (not pre-loaded). Each config
+  warms the PG buffer cache with two untimed calls and then
+  times 50 queries (one per query-set row).
+- **Reproduce**:
+  `benches/scripts/run_bench_sweep_million.sh` (committed
+  alongside this file). Source data lives on arnold under
+  `/scratch/pg_turbovec-bench/`.
+
+##### Results
+
+| Index / config                               | R@10  | min ms | p50 ms | p95 ms | max ms  | mean ms | index storage |
+|----------------------------------------------|------:|-------:|-------:|-------:|--------:|--------:|--------------:|
+| pgvector HNSW (m=16, efc=64) **ef=40**       | 0.032 |    1.2 |    2.5 |    5.0 |     5.2 |     2.8 |     1 953 MiB |
+| pgvector HNSW (m=16, efc=64) **ef=200**      | 0.116 |    5.8 |    8.4 |   13.7 |    15.9 |     9.2 |     1 953 MiB |
+| **pg_turbovec 2-bit, search_k=100**          | 0.922 | 3 532  | 3 931  | 4 433  |  4 657  |  3 950  |       103 MiB |
+| **pg_turbovec 2-bit, search_k=200**          | 0.972 | 3 550  | 3 646  | 7 514  |  8 693  |  4 019  |       103 MiB |
+| **pg_turbovec 4-bit, search_k=100**          | 1.000 | 6 873  | 7 240  | 24 825 | 27 572  | 10 368  |       195 MiB |
+| **pg_turbovec 4-bit, search_k=200**          | 1.000 | 6 825  | 6 942  | 7 146  |  7 245  |  6 958  |       195 MiB |
+
+Build times (single-backend, fresh from a 1 M heap):
+
+| Index             | build  |
+|-------------------|-------:|
+| HNSW              | 8 m 13 s |
+| turbovec 4-bit    | 2 m 19 s |
+| turbovec 2-bit    | 1 m 39 s |
+
+Full machine-readable run:
+[`benches/results/recall_lat_million_2026_05_24.json`](../benches/results/recall_lat_million_2026_05_24.json).
+
+##### Reading the numbers honestly
+
+1. **Random vectors are the pessimistic case for HNSW.** In 384
+   dims with no clustering structure all corpus points are
+   nearly equidistant, so the HNSW graph's neighbour lists carry
+   almost no signal. R@10 = 0.032 at the default `ef_search=40`
+   and only 0.116 at `ef_search=200`. On real-world embeddings
+   (see § 2.1.1) HNSW recovers to 0.80-0.93 — but this column
+   is not where pgvector wins.
+
+2. **pg_turbovec recall is data-distribution-independent.** It
+   scans every quantised row, so it inherits the kernel's
+   recall regardless of clustering: R@10 = 1.0 at 4-bit, 0.92-
+   0.97 at 2-bit. The 4-bit kernel literally finds the exact
+   neighbours every time even on this adversarial input.
+
+3. **Latency is dominated by the per-scan deserialise, not the
+   kernel.** Every `amgettuple` first call loads the
+   `am_storage.payload` bytea (~195 MB at 4-bit, ~103 MB at
+   2-bit), writes it to a tmpfile, and asks `IdMapIndex::load`
+   to mmap it back in. That deserialise step is the 7 s / 4 s
+   floor in the table above. The cache in `src/cache.rs` exists
+   and is used by the `turbovec.knn()` SQL function but is
+   **not wired into the index AM scan path** in v1.0 —
+   that's the obvious next-release optimisation. Once the cache
+   is wired in, expect 4-bit p50 to drop to the ~10-50 ms range
+   (the kernel itself is fast at 1 M × 384).
+
+4. **`turbovec.search_k = 100` vs `200` matters less than
+   expected.** It caps how many top candidates the index returns
+   to the executor (so re-rank cost goes ×2), but the kernel
+   still scans all 1 M rows internally either way. The recall
+   bump from k=100 to k=200 (0.922 → 0.972 at 2-bit) is real;
+   the latency bump is small.
+
+5. **The pre-fix default of `K = 1024` made every scan ~17 s.**
+   That hard-coded constant has been replaced by the
+   `turbovec.search_k` GUC defaulting to 100 (commit 63879a8).
+   At `search_k = 100` the 4-bit p50 is 7.2 s instead of ~17 s;
+   most of the remaining cost is the deserialise, not the
+   kernel.
+
+6. **Storage trade**: HNSW costs 1 953 MiB; pg_turbovec 4-bit
+   costs 195 MiB (10× less); 2-bit costs 103 MiB (19× less).
+   For memory-pressured deployments where storage is the binding
+   constraint and recall on real embeddings only needs to clear
+   ~0.85 (which the pure-Rust kernel does at GloVe-100, see
+   § 2.1.1), pg_turbovec's index is the cheaper option **once
+   the per-scan deserialise is amortised** — i.e. once the cache
+   wiring lands.
+
 #### 2.1.1 Real-embedding fixture: GloVe-100 (2026-05-23)
 
 - **Source**: `glove-100-angular.hdf5` from

@@ -46,7 +46,7 @@ experimental_index_am = []
 
 [dependencies]
 pgrx = "=0.17.0"
-turbovec = "0.5"
+turbovec = { path = "vendor/turbovec" }
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -210,9 +210,7 @@ impl IdMapIndex {
             mask
         });
 
-        let res = self
-            .inner
-            .search_with_mask(queries, k, mask_buf.as_deref());
+        let res = self.inner.search_with_mask(queries, k, mask_buf.as_deref());
 
         let mut ids = Vec::with_capacity(res.indices.len());
         for &slot in &res.indices {
@@ -245,6 +243,25 @@ impl IdMapIndex {
     /// seen an add yet (matches [`TurboQuantIndex::dim`] semantics).
     pub fn dim(&self) -> usize {
         self.inner.dim()
+    }
+
+    /// Borrow the packed code bytes as written by `write_to_writer`.
+    /// Useful for embedders that page out the codes through a
+    /// custom storage substrate (PG relfile, mmap, etc).
+    pub fn packed_codes(&self) -> &[u8] {
+        self.inner.packed_codes()
+    }
+
+    /// Borrow the per-vector scales. Same use case as
+    /// [`Self::packed_codes`].
+    pub fn scales(&self) -> &[f32] {
+        self.inner.scales()
+    }
+
+    /// Borrow the slot → id table. Same use case as
+    /// [`Self::packed_codes`].
+    pub fn slot_to_id(&self) -> &[u64] {
+        &self.slot_to_id
     }
 
     /// Vector dimensionality as an [`Option`], where `None` means the
@@ -296,8 +313,7 @@ impl IdMapIndex {
 
     /// Load a `.tvim` file previously written by [`Self::write`].
     pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let (bit_width, dim, n_vectors, packed_codes, scales, slot_to_id) =
-            io::load_id_map(path)?;
+        let (bit_width, dim, n_vectors, packed_codes, scales, slot_to_id) = io::load_id_map(path)?;
         Self::from_id_map_parts(bit_width, dim, n_vectors, packed_codes, scales, slot_to_id)
     }
 
@@ -315,7 +331,12 @@ impl IdMapIndex {
     /// Build an `IdMapIndex` from already-decoded raw parts. Shared
     /// helper for the path- and reader-based loaders. Validates the
     /// id table for duplicates and rejects corrupt files.
-    fn from_id_map_parts(
+    ///
+    /// Made `pub` so embedders that materialise the parts from an
+    /// alternative substrate (e.g. PostgreSQL relfile pages, mmap'd
+    /// memory, a side database) can construct an `IdMapIndex`
+    /// without round-tripping through the TVIM byte stream.
+    pub fn from_id_map_parts(
         bit_width: usize,
         dim: usize,
         n_vectors: usize,
@@ -324,7 +345,8 @@ impl IdMapIndex {
         slot_to_id: Vec<u64>,
     ) -> std::io::Result<Self> {
         let dim_opt = if dim == 0 { None } else { Some(dim) };
-        let inner = TurboQuantIndex::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales);
+        let inner =
+            TurboQuantIndex::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales);
         let id_to_slot: HashMap<u64, usize> = slot_to_id
             .iter()
             .enumerate()

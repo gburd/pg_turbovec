@@ -43,6 +43,13 @@ pg_test = []
 # smaller .so when the AM isn't needed:
 #   cargo build --no-default-features --features pg16
 experimental_index_am = []
+# Cargo feature gating Phase L: relfile-resident page format.
+# Replaces the `turbovec.am_storage` SPI side-table with pages
+# written into the index relation's main fork via the buffer
+# manager. Default-OFF: still experimental as of v1.0.x. Enables
+# only with `experimental_index_am`.
+#   cargo build --features "experimental_index_am relfile_storage"
+relfile_storage = ["experimental_index_am"]
 
 [dependencies]
 pgrx = "=0.17.0"

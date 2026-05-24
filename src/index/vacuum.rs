@@ -12,6 +12,8 @@ use pgrx::pg_sys;
 use pgrx::prelude::*;
 
 use crate::index::persist;
+#[cfg(feature = "relfile_storage")]
+use crate::index::relfile;
 
 /// `ambulkdelete`: process dead-tuple removal.
 #[pgrx::pg_guard]
@@ -31,7 +33,93 @@ pub(crate) unsafe extern "C-unwind" fn ambulkdelete(
         error!("turbovec: failed to allocate IndexBulkDeleteResult");
     }
 
-    let indexrelid = (*(*info).index).rd_id;
+    #[cfg(feature = "relfile_storage")]
+    {
+        ambulkdelete_relfile((*info).index, stats, callback, callback_state)
+    }
+    #[cfg(not(feature = "relfile_storage"))]
+    ambulkdelete_sidetable((*(*info).index).rd_id, stats, callback, callback_state)
+}
+
+#[cfg(feature = "relfile_storage")]
+unsafe fn ambulkdelete_relfile(
+    index: pg_sys::Relation,
+    stats: *mut pg_sys::IndexBulkDeleteResult,
+    callback: pg_sys::IndexBulkDeleteCallback,
+    callback_state: *mut std::ffi::c_void,
+) -> *mut pg_sys::IndexBulkDeleteResult {
+    use turbovec::IdMapIndex;
+
+    let indexrelid = (*index).rd_id;
+    let meta = match relfile::read_meta(index) {
+        Some(m) if m.n_vectors > 0 => m,
+        _ => return stats,
+    };
+
+    let (codes, scales, ids) = relfile::read_full(index, &meta);
+    let mut idx = match IdMapIndex::from_id_map_parts(
+        meta.bit_width as usize,
+        meta.dim as usize,
+        meta.n_vectors as usize,
+        codes,
+        scales,
+        ids,
+    ) {
+        Ok(i) => i,
+        Err(e) => error!("turbovec ambulkdelete: corrupt relfile: {}", e),
+    };
+
+    let Some(cb) = callback else {
+        (*stats).num_index_tuples = meta.n_vectors as f64;
+        return stats;
+    };
+
+    // Snapshot the live ids before we start mutating idx (remove()
+    // does swap-remove, so iterating idx.slot_to_id() during
+    // mutation would skip / repeat slots).
+    let live_ids: Vec<u64> = idx.slot_to_id().to_vec();
+    let mut dead_count: i64 = 0;
+    for id in &live_ids {
+        let mut tid = pg_sys::ItemPointerData::default();
+        pgrx::itemptr::u64_to_item_pointer(*id, &mut tid);
+        let is_dead = (cb)(&mut tid as *mut _, callback_state);
+        if is_dead {
+            idx.remove(*id);
+            dead_count += 1;
+        }
+    }
+
+    let n_after = idx.len() as u64;
+    let next_version = meta.am_version.saturating_add(1);
+    relfile::write_full(
+        index,
+        meta.bit_width,
+        meta.dim,
+        n_after,
+        idx.packed_codes(),
+        idx.scales(),
+        idx.slot_to_id(),
+        next_version,
+    );
+    persist::save_empty_with_count(
+        indexrelid,
+        meta.bit_width as i32,
+        meta.dim as i32,
+        n_after as i64,
+    );
+
+    (*stats).num_index_tuples = n_after as f64;
+    (*stats).tuples_removed += dead_count as f64;
+    stats
+}
+
+#[cfg(not(feature = "relfile_storage"))]
+unsafe fn ambulkdelete_sidetable(
+    indexrelid: pg_sys::Oid,
+    stats: *mut pg_sys::IndexBulkDeleteResult,
+    callback: pg_sys::IndexBulkDeleteCallback,
+    callback_state: *mut std::ffi::c_void,
+) -> *mut pg_sys::IndexBulkDeleteResult {
     let Some(mut state) = persist::load(indexrelid) else {
         return stats;
     };

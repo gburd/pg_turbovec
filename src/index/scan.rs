@@ -12,7 +12,10 @@ use turbovec::IdMapIndex;
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
+#[cfg(not(feature = "relfile_storage"))]
 use crate::index::persist;
+#[cfg(feature = "relfile_storage")]
+use crate::index::relfile;
 use crate::kernels;
 use crate::vec::Vector;
 
@@ -159,6 +162,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
 
 /// `amgettuple`: on first call run the search and cache results;
 /// subsequent calls drain one TID at a time.
+#[allow(clippy::too_many_lines)] // single linear flow; splitting hides logic
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amgettuple(
     scan: pg_sys::IndexScanDesc,
@@ -172,17 +176,44 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     if !(*opaque).fetched {
         let indexrelid = (*(*scan).indexRelation).rd_id;
 
-        // Cheap metadata-only fetch: lets us build the cache key and
-        // compute a freshness signal without dragging the (possibly
-        // hundreds-of-MiB) payload bytea across SPI on every query.
-        let meta = match persist::load_meta(indexrelid) {
-            Some(m) => m,
-            None => {
-                (*opaque).fetched = true;
-                return false;
-            }
+        // Phase L: when relfile storage is enabled we read the
+        // meta page directly from the index relation's main fork
+        // via the buffer manager. shared_buffers caches it
+        // cluster-wide; subsequent backends pay only the buffer-
+        // pool hit cost, not the SPI fetch + TOAST + parse cost.
+        #[cfg(feature = "relfile_storage")]
+        let (bit_width_u8, dim_u32, n_vectors_u64, am_version_u32) = {
+            let m = match relfile::read_meta((*scan).indexRelation) {
+                Some(m) => m,
+                None => {
+                    (*opaque).fetched = true;
+                    return false;
+                }
+            };
+            (m.bit_width, m.dim, m.n_vectors, m.am_version)
         };
-        let dim = meta.dim as usize;
+        #[cfg(not(feature = "relfile_storage"))]
+        let (bit_width_u8, dim_u32, n_vectors_u64, am_version_u32) = {
+            // Cheap metadata-only fetch: lets us build the cache
+            // key and compute a freshness signal without dragging
+            // the (possibly hundreds-of-MiB) payload bytea across
+            // SPI on every query.
+            let meta = match persist::load_meta(indexrelid) {
+                Some(m) => m,
+                None => {
+                    (*opaque).fetched = true;
+                    return false;
+                }
+            };
+            (
+                meta.bit_width as u8,
+                meta.dim as u32,
+                meta.n_vectors.max(0) as u64,
+                meta.version as u32,
+            )
+        };
+
+        let dim = dim_u32 as usize;
         if (*opaque).query.len() != dim {
             error!(
                 "turbovec amgettuple: query dim {} != index dim {}",
@@ -190,7 +221,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 dim
             );
         }
-        let n_in_index = meta.n_vectors.max(0) as usize;
+        let n_in_index = n_vectors_u64 as usize;
         if n_in_index == 0 {
             (*opaque).fetched = true;
             return false;
@@ -200,46 +231,52 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // (the index relation owns a single attribute and we don't
         // disambiguate further); the kernel path uses positive heap
         // attnums, so the namespaces never collide. The freshness
-        // tuple is `(relfilenode, version)` — `meta.version` is
-        // bumped on every `aminsert` / `ambuild` / `ambulkdelete`,
-        // and we stash it into the cache's `n_rows` slot since the
-        // cache only compares for equality.
+        // tuple is `(relfilenode, am_version)` so the cache
+        // invalidates whenever the relfile changes (REINDEX) or the
+        // version is bumped (aminsert / ambulkdelete).
         let key = CacheKey {
             rel_oid: indexrelid,
             attnum: 0,
-            bit_width: meta.bit_width as u8,
-            dim: meta.dim as u32,
+            bit_width: bit_width_u8,
+            dim: dim_u32,
         };
-        let relfile = cache::current_relfilenode(indexrelid);
-        let version_as_i64 = meta.version as i64;
+        let relfile_node = cache::current_relfilenode(indexrelid);
+        let version_as_i64 = am_version_u32 as i64;
 
-        let arc: Arc<IdMapIndex> = match cache::lookup(key, relfile, version_as_i64) {
+        let arc: Arc<IdMapIndex> = match cache::lookup(key, relfile_node, version_as_i64) {
             Some(a) => a,
             None => {
-                // Miss: pay the SPI + tmpfile + IdMapIndex::load cost
-                // once, then publish the Arc into the cache so every
-                // subsequent scan on this index version is free.
-                let stored = match persist::load(indexrelid) {
-                    Some(s) => s,
+                #[cfg(feature = "relfile_storage")]
+                let stored_index = {
+                    let meta = relfile::read_meta((*scan).indexRelation)
+                        .expect("meta disappeared mid-scan");
+                    let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
+                    match IdMapIndex::from_id_map_parts(
+                        meta.bit_width as usize,
+                        meta.dim as usize,
+                        meta.n_vectors as usize,
+                        codes,
+                        scales,
+                        ids,
+                    ) {
+                        Ok(idx) => idx,
+                        Err(e) => error!(
+                            "turbovec relfile: corrupt page chain for {:?}: {}",
+                            indexrelid, e
+                        ),
+                    }
+                };
+                #[cfg(not(feature = "relfile_storage"))]
+                let stored_index = match persist::load(indexrelid) {
+                    Some(s) => s.index,
                     None => {
                         (*opaque).fetched = true;
                         return false;
                     }
                 };
-                // Approximate bytes: packed_codes (dim*bit_width/8
-                // per vector) plus per-vector scale + id-map overhead
-                // heuristic, mirroring the knn.rs estimate so a
-                // single `cache_size_mb` budget governs both paths.
-                let bytes_per_vec =
-                    (meta.dim as usize * meta.bit_width as usize) / 8 + 4 + 64;
+                let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
                 let total_bytes = bytes_per_vec * (n_in_index.max(1));
-                cache::insert(
-                    key,
-                    stored.index,
-                    total_bytes,
-                    relfile,
-                    version_as_i64,
-                )
+                cache::insert(key, stored_index, total_bytes, relfile_node, version_as_i64)
             }
         };
 

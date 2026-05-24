@@ -1,0 +1,109 @@
+{
+  "head": "cca1ddc (v1.0.0)",
+  "build_profile": "release",
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9 (pgrx-bundled)",
+  "pgvector_version": "0.8.0",
+  "pg_turbovec_version": "1.0.0",
+  "note": "cargo pgrx install --release on v1.0.0. Per-backend Arc<IdMapIndex> cache (commit 1293e7b) wired into amgettuple. Cold = first scan in a fresh backend; warm = subsequent scans in the same backend.",
+  "corpus": {
+    "n": 1000000,
+    "dim": 384,
+    "distance": "cosine",
+    "normalized": true
+  },
+  "indexes": [
+    {
+      "name": "docs_tv_4bit",
+      "build_time_s": 33.544,
+      "payload_bytes": 204000014,
+      "payload_size_mb": 194.5
+    },
+    {
+      "name": "docs_tv_2bit",
+      "build_time_s": 23.097,
+      "payload_bytes": 108000014,
+      "payload_size_mb": 103.0
+    },
+    {
+      "name": "docs_pgv_hnsw",
+      "build_time_s": null,
+      "note": "carried over from debug-build session; pgvector binary unchanged between debug and release of pg_turbovec",
+      "size_mb": 1953
+    }
+  ],
+  "configs": [
+    {
+      "label": "tv_4bit_k100_cold",
+      "p50_ms": 6785.641,
+      "p95_ms": 7000.876,
+      "mean_ms": 6796.857,
+      "min_ms": 6637.622,
+      "max_ms": 7558.044,
+      "n": 50,
+      "r_at_10": 1
+    },
+    {
+      "label": "tv_4bit_k100",
+      "p50_ms": 22.161,
+      "p95_ms": 23.02,
+      "mean_ms": 22.417,
+      "min_ms": 21.47,
+      "max_ms": 28.019,
+      "n": 50,
+      "r_at_10": 1
+    },
+    {
+      "label": "tv_4bit_k500",
+      "p50_ms": 60.782,
+      "p95_ms": 69.341,
+      "mean_ms": 60.91,
+      "min_ms": 29.045,
+      "max_ms": 73.091,
+      "n": 50,
+      "r_at_10": 1
+    },
+    {
+      "label": "tv_2bit_k100",
+      "p50_ms": 11.996,
+      "p95_ms": 12.625,
+      "mean_ms": 12.061,
+      "min_ms": 11.714,
+      "max_ms": 12.769,
+      "n": 50,
+      "r_at_10": 0.922
+    },
+    {
+      "label": "hnsw_ef40",
+      "p50_ms": 99.458,
+      "p95_ms": 148.711,
+      "mean_ms": 102.998,
+      "min_ms": 0.913,
+      "max_ms": 173.588,
+      "n": 50,
+      "r_at_10": 0.032
+    },
+    {
+      "label": "hnsw_ef200",
+      "p50_ms": 120.536,
+      "p95_ms": 266.948,
+      "mean_ms": 122.949,
+      "min_ms": 4.321,
+      "max_ms": 282.108,
+      "n": 50,
+      "r_at_10": 0.116
+    }
+  ],
+  "comparison": {
+    "speedup_release_vs_debug_warm_p50": 151.8,
+    "vs_hnsw_ef200_p50_ratio": 0.1839,
+    "vs_hnsw_ef40_p50_ratio": 0.2228,
+    "speedup_release_vs_debug_cold_p50": 4.69,
+    "speedup_release_vs_debug_2bit_warm_p50": 146.43
+  },
+  "methodology": {
+    "cold_one_shot": "tv_4bit_k100_cold: 50 fresh psql sessions, each runs ONE timed scan via bench_record. Includes psql connect cost + first amgettuple-path cache miss (SPI fetch + IdMapIndex::load + insert).",
+    "warm_steady": "tv_4bit_k100, tv_4bit_k500, tv_2bit_k100, hnsw_ef40, hnsw_ef200: single warm psql session, 2 untimed warmup scans + 50 timed scans per config. All 50 are cache hits.",
+    "recall": "R@10 computed against gt_top10 (exact brute-force top-10 over the same 50-query set, recomputed on the 1 M corpus)."
+  }
+}

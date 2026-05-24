@@ -621,6 +621,38 @@ mod tests {
 
     #[cfg(feature = "experimental_index_am")]
     #[pg_test]
+    fn search_k_guc_round_trip() {
+        Spi::run("SET turbovec.search_k = 250").unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.search_k')").unwrap();
+        assert_eq!(v.as_deref(), Some("250"));
+    }
+
+    /// `count(*)` and other non-orderby queries used to ERROR out
+    /// of amrescan. v1.0.0-rc.3: amrescan returns an empty scan in
+    /// that case so the executor can fall through to a seq scan.
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
+    fn index_am_count_star_does_not_error() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_cnt (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_cnt VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_cnt_idx ON t_cnt USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_cnt").unwrap();
+        assert_eq!(n, Some(2));
+    }
+
+    #[cfg(feature = "experimental_index_am")]
+    #[pg_test]
     fn index_am_l2_opclass() {
         use_turbovec();
         Spi::run("CREATE TABLE t_l2 (id bigint PRIMARY KEY, emb vector)")

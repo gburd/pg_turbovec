@@ -21,6 +21,7 @@ pub static CACHE_SIZE_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
+pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
 
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
@@ -83,6 +84,19 @@ pub fn register_gucs() {
             b"TurboQuant assumes unit-norm inputs; with this on (the default) we apply that normalisation transparently. Turn off only if you have a calibrated upstream that already emits unit vectors.\0",
         ),
         &NORMALIZE_ON_INSERT,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.search_k\0"),
+        c_str(b"Max candidates to fetch from the index per scan (default 100).\0"),
+        c_str(
+            b"The kernel ranks all corpus rows; this caps how many top-scoring candidates the index returns from one amgettuple sweep. The executor then drains them under LIMIT/recheck-orderby. Set higher for queries with LIMIT > 100 or when xs_recheckorderby semantics require oversampling. Set lower for lower-latency queries that accept slightly worse recall.\0",
+        ),
+        &SEARCH_K,
+        1,
+        100_000,
         GucContext::Userset,
         GucFlags::default(),
     );

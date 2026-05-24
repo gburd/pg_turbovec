@@ -28,29 +28,57 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.0.0-rc.2 — 88/88 `#[pg_test]` cases pass against
-> PostgreSQL 16. Default + `experimental_index_am` builds both green.
+> **Status:** v1.0.1 — 92/92 `#[pg_test]` cases pass against
+> PostgreSQL 13, 14, 15, 16, 17, and 18. Default,
+> `experimental_index_am`, and `experimental_index_am +
+> relfile_storage` (Phase L preview) builds all green.
 > See [`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md) for what
-> we deliberately skipped.
+> we deliberately skipped, and
+> [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
+> for the honest scoreboard of where we lose to pgvector
+> (cold-cache, INSERT throughput) and the in-flight fixes for both.
 
 ## Why pg_turbovec?
 
+**On 1 M × 1536-d real OpenAI `text-embedding-ada-002` embeddings
+([`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M))
+pg_turbovec 4-bit matches pgvector HNSW recall at ~10× less storage
+and ~1.6× faster p50.**
+
+Head-to-head, warm cache, release build (full sweep:
+[`benches/results/recall_dbpedia_1M_2026_05_24.json`](benches/results/recall_dbpedia_1M_2026_05_24.json)):
+
+| Index                          | Storage  | Build  | p50 (warm) | R@10  |
+|--------------------------------|---------:|-------:|-----------:|------:|
+| pgvector HNSW (ef_search=40)   | 8 192 MB | 4.9 min |    61 ms |  0.962 |
+| pgvector HNSW (ef_search=200)  | 8 192 MB | 4.9 min |   115 ms |  0.970 |
+| **pg_turbovec 4-bit (k=100)**  |   780 MB | 2.7 min | **71 ms** | **1.000** |
+| pg_turbovec 4-bit (k=500)      |   780 MB | 2.7 min |   124 ms |  1.000 |
+| **pg_turbovec 2-bit (k=100)**  |   396 MB | 2.1 min | **48 ms** | **1.000** |
+| pg_turbovec 2-bit (k=500)      |   396 MB | 2.1 min |    78 ms |  1.000 |
+
+Feature breakdown:
+
 | Feature                          | pg_turbovec       | pgvector + HNSW   |
 |----------------------------------|-------------------|-------------------|
-| Storage / 1536-dim row (4-bit)   | **≈ 388 B**       | 6 144 B           |
-| Build cost                       | Zero training, single pass | Multi-pass HNSW build |
+| Storage / 1536-dim row (4-bit)   | **≈ 780 B (measured)** | 8 192 B (measured) |
+| Build cost (1 M × 1536-d)        | **2.7 min (4-bit) / 2.1 min (2-bit)** | 4.9 min |
+| p50 warm @ R@10 ≥ 0.96 (1 M × 1536-d) | **48 ms (2-bit, k=100)** | 61 ms (ef=40) |
 | Filtered search                  | In-kernel SIMD allowlist | Post-filter |
 | Index AM lifecycle               | CREATE / CIC / aminsert / ambulkdelete / VACUUM / REINDEX | same |
 | Distance ops indexed             | `<#>` `<=>` (turbovec kernel) | `<->` `<#>` `<=>` `<+>` (HNSW + IVF) |
 | L2 / L1 distance ANN             | exact only        | indexed via HNSW  |
 | Halfvec, sparsevec, bitvec       | ✗                 | ✓                 |
-| Query latency at 1 M × 1536, k=10 | not yet measured | published numbers |
 | License                          | Apache-2.0        | PostgreSQL        |
 
 If your workload is mostly cosine / inner-product semantic search and
 you'd rather pay disk bytes than RAM bytes, `pg_turbovec` is the
 right tool. If you need L2 / L1 ANN, halfvec, sparse, or measured
 hyperscale latency *today*, pgvector + HNSW is the safer pick.
+
+*Caveat: the dbpedia query set is drawn from inside the corpus, so
+rank-1 is trivially the query itself; R@10 is dominated by ranks
+2..10. See [`docs/RECALL.md § 2.2`](docs/RECALL.md) for methodology.*
 
 ## Why pg_turbovec instead of `binary_quantize() + bit_hamming_ops`?
 
@@ -60,23 +88,26 @@ pressure: "I have 100 M × 1536-dim embeddings, FP32 doesn't fit, I'll
 trade recall for 32× compression."
 
 **At the same byte budget, pg_turbovec's 2-bit mode wins on recall.**
-Approximate per-1536-dim numbers on real (non-random) embeddings:
+Measured numbers from
+[`benches/results/recall_dbpedia_1M_2026_05_24.json`](benches/results/recall_dbpedia_1M_2026_05_24.json)
+on 1 M × 1536-d OpenAI ada-002 embeddings; the 1-bit Hamming line is
+the upper bound from the upstream pgvector docs since we don't have a
+direct 1 M-row measurement on the same corpus.
 
-| Approach | Bytes / 1536-dim row | R@10 (real embeddings) |
+| Approach | Bytes / 1536-dim row | R@10 (real OpenAI ada-002 embeddings) |
 |---|---:|---:|
 | FP32 (raw `vector`) | 6 144 | 1.00 (ground truth) |
 | FP16 (`halfvec`) | 3 072 | ≈ 1.00 |
-| TurboQuant 4-bit (`turbovec` index, default) | 388 | ≈ 0.95 |
-| TurboQuant 2-bit (`turbovec` index) | 196 | ≈ 0.85 |
-| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65–0.75 |
+| TurboQuant 4-bit (`turbovec` index, default) | 780 (measured payload / 1 M rows) | **1.000 (search_k = 100)** |
+| TurboQuant 2-bit (`turbovec` index) | 396 (measured payload / 1 M rows) | **1.000 (search_k = 100)** |
+| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65–0.75 (literature) |
 
-Numbers are sourced from
-[`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md)
-§ "Bitvec Hamming / Jaccard ANN index". The R@10 figures for our
-2/4-bit modes are upper bounds derived from the upstream TurboQuant
-paper; the synthetic random-vector measurements in
-[`docs/RECALL.md`](docs/RECALL.md) § 2.1 are deliberately pessimistic
-because random points have no clustering structure to exploit.
+The 4-bit / 2-bit numbers come from the 50-query head-to-head sweep
+in [`docs/RECALL.md § 2.2`](docs/RECALL.md); the synthetic random-vector
+measurements in [`docs/RECALL.md § 2.1`](docs/RECALL.md) are
+deliberately pessimistic because random points have no clustering
+structure to exploit — the dbpedia run shows what real embedding
+geometry buys you.
 
 **Why does Lloyd-Max scalar quantization beat 1-bit thresholding at
 the same byte count?** TurboQuant first rotates the input by a fixed
@@ -104,18 +135,17 @@ and there is no reason to use pg_turbovec instead.
 
 ## Choose your `bit_width`
 
-| Workload | Recommended | Storage / 1536-dim | R@10 floor |
+| Workload | Recommended | Storage / 1536-dim (measured) | R@10 (1 M dbpedia) |
 |---|---|---:|---:|
 | Want pgvector-equivalent recall, halve storage | `halfvec` (no quantization) | 3 072 B | ≈ 1.0 |
-| RAG / semantic search, R@10 ≥ 0.9 acceptable | **`bit_width = 4` (default)** | 388 B | ≈ 0.95 |
-| Memory pressure dominates, R@10 ≥ 0.8 acceptable | `bit_width = 2` | 196 B | ≈ 0.85 |
-| Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 196 B | ≈ 0.85 (vs 0.65–0.75) |
+| RAG / semantic search, R@10 ≥ 0.95 acceptable | **`bit_width = 4` (default)** | 780 B | 1.000 |
+| Memory pressure dominates, R@10 ≥ 0.85 acceptable | `bit_width = 2` | 396 B | 1.000 |
+| Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 396 B | 1.000 (vs 0.65–0.75) |
 
-Methodology (and the synthetic random-vector numbers we have today)
-lives in [`docs/RECALL.md`](docs/RECALL.md); the source of the
-storage / recall comparison numbers above is
-[`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md). For
-dimensions other than 1536, multiply storage through by `dim / 1536`.
+Measured storage and recall come from the head-to-head sweep on
+1 M × 1536-d OpenAI ada-002 embeddings; methodology and the synthetic
+random-vector numbers (§ 2.1) live in [`docs/RECALL.md`](docs/RECALL.md).
+For dimensions other than 1536, multiply storage through by `dim / 1536`.
 
 ## Installation
 
@@ -347,12 +377,21 @@ is fully supported but the AM scan path is newer.
 
 ## Performance
 
-> **Honest caveat.** As of v1.0.0-rc.2 we have **not** run head-to-
-> head benchmarks against pgvector's HNSW or pgvectorscale's
-> StreamingDiskANN. The numbers below are from the upstream
-> [TurboQuant paper](https://arxiv.org/abs/2504.19874) and from our
-> own pure-Rust kernel benches; treat them as the upper bound the
-> Postgres SQL layer can deliver.
+> **Performance methodology.** As of v1.0.1 the headline numbers
+> in the table at the top of this README come from a real
+> head-to-head against pgvector 0.8.0 HNSW on the
+> [`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)
+> corpus (1 M Wikipedia/DBpedia entities × 1536-d OpenAI
+> `text-embedding-ada-002` embeddings) running on a single Intel
+> i9-12900H box with 32 GiB RAM and PG 17.9 from the pgrx-managed
+> install tree. Full methodology, query set, ground-truth
+> generation, and reproduction scripts in
+> [`docs/RECALL.md § 2.2`](docs/RECALL.md) and
+> [`benches/scripts/`](benches/scripts/). The synthetic-uniform
+> tables below are from a pure-Rust kernel bench and are kept for
+> historical comparison — they understate real-world recall because
+> uniform-random vectors have no clustering structure for
+> quantization to exploit.
 
 ### Recall (synthetic, 1 000 random unit-norm vectors, 50 queries)
 

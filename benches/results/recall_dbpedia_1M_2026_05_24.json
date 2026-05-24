@@ -1,0 +1,116 @@
+{
+  "head": "2c45824",
+  "build_profile": "release",
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9",
+  "pgvector_version": "0.8.0",
+  "pg_turbovec_version": "1.0.0",
+  "date": "2026-05-24",
+  "n_queries": 50,
+  "corpus": {
+    "name": "dbpedia-entities-openai-1M",
+    "source": "huggingface://KShivendu/dbpedia-entities-openai-1M",
+    "n": 1000000,
+    "dim": 1536,
+    "embedding_model": "text-embedding-ada-002 (OpenAI)",
+    "distance": "cosine",
+    "normalized": true
+  },
+  "indexes": [
+    {
+      "name": "docs_pgv_hnsw",
+      "type": "pgvector hnsw",
+      "size_bytes": 8192008192,
+      "size_mb": 8192.0,
+      "build_time_s": 295,
+      "params": {
+        "m": 16,
+        "ef_construction": 64
+      }
+    },
+    {
+      "name": "docs_tv_2bit",
+      "type": "pg_turbovec 2-bit",
+      "payload_size_bytes": 396000014,
+      "payload_size_mb": 396.0,
+      "bit_width": 2,
+      "n_vectors": 1000000,
+      "dim": 1536,
+      "build_time_s": 126
+    },
+    {
+      "name": "docs_tv_4bit",
+      "type": "pg_turbovec 4-bit",
+      "payload_size_bytes": 780000014,
+      "payload_size_mb": 780.0,
+      "bit_width": 4,
+      "n_vectors": 1000000,
+      "dim": 1536,
+      "build_time_s": 163
+    }
+  ],
+  "configs": [
+    {
+      "label": "hnsw_ef40",
+      "n": 50,
+      "min_ms": 1.18,
+      "p50_ms": 61.08,
+      "p95_ms": 93.36,
+      "max_ms": 106.86,
+      "mean_ms": 62.63,
+      "r_at_10": 0.962
+    },
+    {
+      "label": "hnsw_ef200",
+      "n": 50,
+      "min_ms": 4.22,
+      "p50_ms": 114.84,
+      "p95_ms": 222.27,
+      "max_ms": 253.22,
+      "mean_ms": 121.5,
+      "r_at_10": 0.97
+    },
+    {
+      "label": "tv_4bit_k100",
+      "n": 50,
+      "min_ms": 48.09,
+      "p50_ms": 70.53,
+      "p95_ms": 91.27,
+      "max_ms": 101.85,
+      "mean_ms": 71.2,
+      "r_at_10": 1.0
+    },
+    {
+      "label": "tv_4bit_k500",
+      "n": 50,
+      "min_ms": 80.56,
+      "p50_ms": 123.85,
+      "p95_ms": 143.15,
+      "max_ms": 160.59,
+      "mean_ms": 124.4,
+      "r_at_10": 1.0
+    },
+    {
+      "label": "tv_2bit_k100",
+      "n": 50,
+      "min_ms": 46.3,
+      "p50_ms": 48.25,
+      "p95_ms": 49.68,
+      "max_ms": 50.75,
+      "mean_ms": 48.23,
+      "r_at_10": 1.0
+    },
+    {
+      "label": "tv_2bit_k500",
+      "n": 50,
+      "min_ms": 75.71,
+      "p50_ms": 78.02,
+      "p95_ms": 79.57,
+      "max_ms": 80.58,
+      "mean_ms": 77.86,
+      "r_at_10": 1.0
+    }
+  ],
+  "summary": "On 1M x 1536-d OpenAI ada-002 embeddings, pg_turbovec 4-bit (search_k=500) reaches R@10=1.000 at 780 MB / p50 123.8 ms; pgvector HNSW (ef_search=200) gets R@10=0.970 at 8192 MB / p50 114.8 ms. 2-bit comes in at 396 MB / p50 78.0 ms / R@10=1.000.",
+  "method_notes": "Per-query Execution Time captured via plpgsql clock_timestamp() around `ORDER BY emb <=> q LIMIT 10`. Two warmup queries per config before the timed pass. Query set = first 50 docs in the corpus, so top-1 is trivially the query itself; R@10 is dominated by ranks 2..10. Brute-force cosine ground truth from a parallel seqscan with indexscan/bitmapscan disabled. Indexes were renamed in/out of the way (no rebuild) to force the planner to pick a single AM per phase."
+}

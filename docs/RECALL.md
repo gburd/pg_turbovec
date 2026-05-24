@@ -90,7 +90,7 @@ Full machine-readable run:
    nearly equidistant, so the HNSW graph's neighbour lists carry
    almost no signal. R@10 = 0.032 at the default `ef_search=40`
    and only 0.116 at `ef_search=200`. On real-world embeddings
-   (see § 2.1.2) HNSW recovers to 0.80-0.93 — but this column
+   (see § 2.1.3) HNSW recovers to 0.80-0.93 — but this column
    is not where pgvector wins.
 
 2. **pg_turbovec recall is data-distribution-independent.** It
@@ -224,7 +224,105 @@ to recover it. The cache wiring was the only architectural
 gap; once you flip the build profile, the row above is the
 production p50.
 
-#### 2.1.2 Real-embedding fixture: GloVe-100 (2026-05-23)
+#### 2.1.2 Release-build numbers (commit cca1ddc / v1.0.0, 2026-05-24)
+
+Same corpus, same hardware, same Postgres cluster as §§2.1.0 /
+2.1.1, with the only delta being the build profile:
+`cargo pgrx install --release` (`opt-level = 3`, LTO on, AVX2
+intrinsics fully inlined). All other knobs — `turbovec.search_k`
+GUC, the per-backend `Arc<IdMapIndex>` cache, indexes,
+`gt_top10`, query set — are unchanged from § 2.1.1.
+
+Indexes were dropped and rebuilt under the release binary so the
+build-time numbers are also release-mode.
+
+##### Build times (single-backend `CREATE INDEX` on the 1 M heap)
+
+| Index             | Debug  | Release | Speedup |
+|-------------------|-------:|--------:|--------:|
+| turbovec 4-bit    | 2 m 19 s | 33.5 s | 4.1×   |
+| turbovec 2-bit    | 1 m 39 s | 23.1 s | 4.3×   |
+| HNSW (m=16, efc=64, pgvector) | 8 m 13 s | 8 m 13 s | n/a (pgvector binary unchanged) |
+
+##### Latency / recall
+
+| Index            | Storage   | p50 (cold) | p50 (warm) | p95 (warm) | R@10  |
+|------------------|----------:|-----------:|-----------:|-----------:|------:|
+| pgvector HNSW ef=40    | 1 953 MiB |    n/a*   |     99 ms  |    149 ms  | 0.032 |
+| pgvector HNSW ef=200   | 1 953 MiB |    n/a*   |    121 ms  |    267 ms  | 0.116 |
+| **turbovec 4-bit, k=100**  |    195 MiB | **6 786 ms** | **22 ms**  |    23 ms   | 1.000 |
+| turbovec 4-bit, k=500      |    195 MiB |   6 786 ms† |   61 ms  |    69 ms   | 1.000 |
+| turbovec 2-bit, k=100      |    103 MiB |   ~3 600 ms‡ |   12 ms  |    13 ms   | 0.922 |
+
+\* Same caveat as § 2.1.1: pgvector has no per-backend
+deserialise step, so HNSW has no analog of turbovec's cache-miss
+cold state.
+† Cold p50 only measured at `search_k = 100`; the cold
+bottleneck is `IdMapIndex::load` from the bytea payload, which is
+independent of `search_k`.
+‡ 2-bit cold not measured directly this run; quoted figure is
+the 4-bit cold p50 scaled by storage ratio (103 / 195).
+
+Full machine-readable run:
+[`benches/results/recall_lat_million_release_v1_0_0.json`](../benches/results/recall_lat_million_release_v1_0_0.json).
+
+##### What the release build buys
+
+1. **Warm 4-bit p50 collapses from 3 364 ms (debug) to 22 ms
+   (release) — a 152× speedup.** This is the AVX2 distance
+   kernel + LTO inlining doing exactly what § 2.1.1 projected
+   ("~10–50 ms for 1 M × 384 at 4-bit"). The kernel was the
+   only remaining warm-path cost after the cache wiring landed,
+   so flipping the optimiser unlocks essentially the full
+   pure-Rust kernel speed.
+
+2. **Warm 2-bit p50 collapses from 1 757 ms to 12 ms — 146×.**
+   Half the bytes per row scanned, half the kernel time, recall
+   stays at 0.922.
+
+3. **`turbovec.search_k = 100` vs `500` is now the same order
+   of magnitude as the kernel itself.** 22 ms (k=100) vs 61 ms
+   (k=500); the per-tuple recheck cost (heap fetch + exact
+   FP32 distance recompute on 5× more candidates) becomes a
+   meaningful slice of the budget once the kernel is no longer
+   the floor.
+
+4. **Release pg_turbovec is 5.4× *faster* than pgvector HNSW
+   ef=200 on this fixture and 4.5× faster than HNSW ef=40,**
+   with strictly higher recall (1.000 vs 0.116 / 0.032). On
+   uniform-random data HNSW degenerates while turbovec scans
+   every quantised row, so recall is data-distribution
+   independent. See § 2.1.3 / GloVe-100 for the real-embedding
+   trade-off.
+
+5. **Cold-cache 4-bit p50: 6 786 ms — down 4.7× from the
+   debug-build 31 802 ms.** Most of the cold cost is the
+   `IdMapIndex::load` deserialise via SPI + tmpfile + mmap,
+   which is I/O- and allocator-bound rather than kernel-bound;
+   release helps less than on the warm path. Eliminating the
+   tmpfile round-trip (load straight from the bytea slice) is
+   tracked for 1.1 — see `docs/ROADMAP_DECISIONS.md`.
+
+6. **Build times also drop ~4×.** 4-bit `CREATE INDEX` on 1 M
+   rows: 2 m 19 s → 33.5 s. The TurboQuant fit is matrix-heavy
+   (BLAS/LAPACK calls into OpenBLAS, which is the same C
+   library either way), but the surrounding tight loops were
+   debug-build hot.
+
+##### Final head-to-head (1 M × 384, cosine, release, warm cache)
+
+| Index            | Storage   | p50 (warm) | R@10 (synthetic random) |
+|------------------|----------:|-----------:|------------------------:|
+| HNSW ef=40       |   1 953 MB |    99 ms  | 0.032 |
+| HNSW ef=200      |   1 953 MB |   121 ms  | 0.116 |
+| **turbovec 4-bit** |    195 MB |    22 ms  | 1.000 |
+| **turbovec 2-bit** |    103 MB |    12 ms  | 0.922 |
+
+10× smaller than HNSW, 5× faster, with strictly better recall on
+uniform-random data. GloVe-100 (§ 2.1.3 below) is the real-world
+reference.
+
+#### 2.1.3 Real-embedding fixture: GloVe-100 (2026-05-23)
 
 - **Source**: `glove-100-angular.hdf5` from
   [ann-benchmarks.com](http://ann-benchmarks.com/) —
@@ -261,7 +359,7 @@ input).
 - 2-bit on the small-dim GloVe-100 is the weak spot — quantising
   100 dimensions into 25 bytes leaves too little signal. On
   larger dims (768, 1536, 3072) the trade-off is more favourable;
-  see § 2.1.3.
+  see § 2.1.4.
 - Full machine-readable run:
   [`benches/results/recall_vs_pgvector_2026_05_23_kernel.json`](../benches/results/recall_vs_pgvector_2026_05_23_kernel.json).
 
@@ -289,7 +387,7 @@ Full machine-readable run:
 
 This comparison surfaces two facts that matter for `pg_turbovec`'s
 positioning, neither of which the synthetic-only numbers in
-§ 2.1.3 made obvious:
+§ 2.1.4 made obvious:
 
 1. **Recall via the index AM is essentially perfect.** The scan
    path retrieves up to 1 024 quantised candidates and asks the
@@ -316,7 +414,11 @@ positioning, neither of which the synthetic-only numbers in
    high-QPS interactive search until the re-rank fan-out is made
    adaptive (a planned post-1.0 optimisation tracked in
    `docs/ROADMAP_DECISIONS.md` § "Where future work would pay
-   off").
+   off"). **Update (§ 2.1.2):** the v1.0.0 release build on the
+   1 M synthetic corpus brings 4-bit warm p50 to 22 ms and 2-bit
+   to 12 ms, *faster than HNSW ef=200*. The 315 ms GloVe number
+   below is debug-build; expect the release-build pattern to
+   match the 1 M results once re-measured on the GloVe fixture.
 
    For workloads where pgvector HNSW (default `ef_search=40`) hits
    acceptable recall, it will be ~800× faster end-to-end than the
@@ -333,7 +435,7 @@ positioning, neither of which the synthetic-only numbers in
    candidates after the index is exhausted. Raising `ef_search`
    to 200 closes the gap to 0.85 at the cost of a 4× latency hit.
 
-#### 2.1.3 Synthetic random vectors (legacy, 2026-05-21)
+#### 2.1.4 Synthetic random vectors (legacy, 2026-05-21)
 
 The pre-1.0 numbers from `benches/recall.rs`, kept for trend
 history. **Random vectors have no clustering structure**, which
@@ -356,7 +458,7 @@ Observations carry over:
   recommended setting for general workloads.
 - 2-bit costs ~40 R@1 points on random data. On real embeddings
   the gap is wider on small dims (GloVe-100: bit_width = 2 hits
-  R@1 ≈ 0.48, see § 2.1.2) and narrower on larger dims (more
+  R@1 ≈ 0.48, see § 2.1.3) and narrower on larger dims (more
   signal to spread across fewer bits).
 
 Full machine-readable history under [`benches/results/`](../benches/results/).

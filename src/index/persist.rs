@@ -7,6 +7,13 @@
 //!
 //! All functions assume they are called from within a PostgreSQL
 //! backend with a valid memory context.
+//!
+//! Phase L: under `--features relfile_storage` most of this module
+//! is dead code (the AM uses `relfile.rs` instead). We keep it
+//! compileable so the side-table marker writes (`save_empty`,
+//! `save_empty_with_count`) remain available, and squelch the
+//! per-fn dead-code warnings with a single `#[allow]`.
+#![cfg_attr(feature = "relfile_storage", allow(dead_code))]
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
@@ -228,6 +235,43 @@ pub(crate) fn save_empty(indexrelid: pg_sys::Oid, bit_width: i32, dim: i32) {
             sql,
             None,
             &[indexrelid.into(), bit_width.into(), dim.into()],
+        );
+    });
+}
+
+/// Phase L marker row: same shape as [`save_empty`] but records
+/// the current row count so existing tests that read `n_vectors`
+/// from the side-table keep working under the relfile path. The
+/// payload column stays empty (relfile path doesn't use it). Hard
+/// to be too clever here — the side-table is going away in v1.1.
+#[cfg(feature = "relfile_storage")]
+pub(crate) fn save_empty_with_count(
+    indexrelid: pg_sys::Oid,
+    bit_width: i32,
+    dim: i32,
+    n_vectors: i64,
+) {
+    Spi::connect_mut(|client| {
+        let sql = "INSERT INTO turbovec.am_storage \
+                       (indexrelid, bit_width, dim, n_vectors, payload, version, live_ids, updated_at) \
+                   VALUES ($1, $2, $3, $4, ''::bytea, 1, ''::bytea, now()) \
+                   ON CONFLICT (indexrelid) DO UPDATE SET \
+                       bit_width  = EXCLUDED.bit_width, \
+                       dim        = EXCLUDED.dim, \
+                       n_vectors  = EXCLUDED.n_vectors, \
+                       payload    = EXCLUDED.payload, \
+                       version    = EXCLUDED.version, \
+                       live_ids   = EXCLUDED.live_ids, \
+                       updated_at = EXCLUDED.updated_at";
+        let _ = client.update(
+            sql,
+            None,
+            &[
+                indexrelid.into(),
+                bit_width.into(),
+                dim.into(),
+                n_vectors.into(),
+            ],
         );
     });
 }

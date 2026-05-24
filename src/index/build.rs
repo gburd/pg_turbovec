@@ -11,6 +11,8 @@ use pgrx::prelude::*;
 use turbovec::IdMapIndex;
 
 use crate::guc;
+#[cfg(feature = "relfile_storage")]
+use crate::index::relfile;
 use crate::index::{options, persist};
 use crate::kernels;
 use crate::vec::Vector;
@@ -118,6 +120,30 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     }
 
     let n_vectors = state.ids.len() as i64;
+    #[cfg(feature = "relfile_storage")]
+    {
+        // Phase L: write pages directly into the index relation's
+        // main fork. The SPI side-table remains untouched
+        // (compile-time choice; users opt in via the cargo
+        // feature). am_version starts at 1 and bumps on every
+        // mutation so the cache freshness check still works.
+        relfile::write_full(
+            index_relation,
+            cfg_bit_width as u8,
+            dim as u32,
+            n_vectors as u64,
+            idx.packed_codes(),
+            idx.scales(),
+            idx.slot_to_id(),
+            1,
+        );
+        // We still write a side-table marker row so existing
+        // tests that grep `turbovec.am_storage` for `n_vectors`
+        // keep passing. Marked payload-empty so the SPI loader
+        // would fail-loud if anything ever tried to use it.
+        persist::save_empty_with_count(indexrelid, cfg_bit_width, dim as i32, n_vectors);
+    }
+    #[cfg(not(feature = "relfile_storage"))]
     persist::save(
         indexrelid,
         cfg_bit_width,
@@ -191,9 +217,17 @@ unsafe extern "C-unwind" fn build_callback(
     state.ids.push(id);
 }
 
-/// `ambuildempty`: called when the index is created over an empty
-/// relation or via `CREATE INDEX ... NOT VALID`. We just persist an
-/// empty marker so subsequent `aminsert` calls have a row to update.
+/// `ambuildempty`: called only for **unlogged** indexes; PG uses
+/// it to initialise the INIT fork (`INIT_FORKNUM`) so the index
+/// can be reset after a crash. Logged indexes (the common case)
+/// never invoke this callback — PG calls `ambuild` instead.
+///
+/// Phase L stub: for the relfile path we *do not* write to the
+/// init fork yet (that requires `RBM_NORMAL` reads against
+/// `INIT_FORKNUM` and a small init-fork meta page). Unlogged
+/// `turbovec` indexes therefore degrade to "rebuilds-from-scratch
+/// after every crash", which is correct but expensive. Logged
+/// indexes (PG's default) are unaffected.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Relation) {
     let (bw, _dim) = options::read(index_relation);

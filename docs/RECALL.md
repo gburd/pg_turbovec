@@ -322,6 +322,45 @@ Full machine-readable run:
 uniform-random data. GloVe-100 (§ 2.1.3 below) is the real-world
 reference.
 
+#### 2.1.3 After in-memory deserialiser (commit 0c42f55, 2026-05-24)
+
+Follow-up bench against § 2.1.2's release-build baseline. The
+only change is the vendored `turbovec` 0.5.0 patch landed in
+commit `0c42f55`: public `Read`/`Write` trait deserialisers let
+`src/index/persist.rs::read_idmap_from` skip the SPI -> tmpfile
+-> mmap dance and parse straight from the bytea slice in memory.
+Corpus, hardware, indexes, and methodology are otherwise
+identical to § 2.1.2.
+
+| Metric (tv_4bit, k=100) | § 2.1.2 (cca1ddc) | § 2.1.3 (1769a43) |
+|--|--:|--:|
+| Cold-cache p50 | 6 786 ms | **6 802 ms** |
+| Warm-cache p50 |    22 ms |     22 ms    |
+
+No measurable cold-path speedup (0.998×; within run-to-run
+noise). Removing the tmpfile round-trip was the cheapest of
+three dominant cold-path costs; the remaining two are still in
+place:
+
+1. **SPI fetch of the ~195 MiB bytea payload** (PG TOAST detoast
+   + decompress on every fresh backend).
+2. **`HashMap<u64, usize>` construction for `slot_to_id`** — 1 M
+   entries built from scratch on every cache miss.
+
+The in-memory parser is still a strict win on code clarity and
+removes a `/tmp` file dependency, but closing the cold-path gap
+requires storing the index payload as relfile pages in
+`shared_buffers` (cached cluster-wide, not per-backend) instead
+of a single bytea heap row. Tracked for 1.1; see
+`docs/ROADMAP_DECISIONS.md`.
+
+Warm-cache p50 is unchanged — the warm path was already
+bypassing `read_idmap_from` via the per-backend `Arc<IdMapIndex>`
+cache, so this patch could not have moved it.
+
+Full run:
+[`benches/results/recall_lat_million_inmem_load_2026_05_24.json`](../benches/results/recall_lat_million_inmem_load_2026_05_24.json).
+
 #### 2.1.3 Real-embedding fixture: GloVe-100 (2026-05-23)
 
 - **Source**: `glove-100-angular.hdf5` from

@@ -1,0 +1,103 @@
+{
+    "head": "1293e7b",
+    "host": "arnold (Intel i9-12900H, 32 GiB)",
+    "pg_version": "17.9 (pgrx-bundled)",
+    "pgvector_version": "0.8.0",
+    "pg_turbovec_version": "1.0.0-rc.2",
+    "build_profile": "cargo pgrx install (debug; opt-level=0, no LTO) \u2014 same as the pre-cache 63879a8 sweep, so the warm/cold delta is apples-to-apples.",
+    "note": "Backend-local Arc<IdMapIndex> cache wired into amgettuple. Cache is per-process (LazyLock<Mutex<HashMap>>). Every fresh backend starts cold; subsequent scans in the same backend hit the cache.",
+    "methodology": {
+        "cold_one_shot": "tv_4bit_k100_cold: 50 fresh psql sessions, each runs ONE timed scan. Includes psql connect cost + first amgettuple-path cache miss (SPI fetch + IdMapIndex::load + insert).",
+        "cold_paired": "tv_4bit_k100_intracold / _intrawarm (n=16): 16 fresh psql sessions, each runs TWO timed scans on different qids. First = cold (cache miss). Second = warm (cache hit). Pairs cancel backend-startup cost in the cold-vs-warm delta.",
+        "warm_steady": "tv_4bit_k100, tv_4bit_k500, tv_2bit_k100: single warm psql session, 2 untimed warmup scans + 50 timed scans. All 50 are cache hits.",
+        "hnsw": "hnsw_ef40, hnsw_ef200: same 50-timed pattern in a single warm session (search_path=public so pgvector ops resolve correctly)."
+    },
+    "corpus": {
+        "n": 1000000,
+        "dim": 384,
+        "distance": "cosine",
+        "normalized": true
+    },
+    "configs": [
+        {
+            "label": "hnsw_ef200",
+            "n": 50,
+            "min_ms": 7.181,
+            "p50_ms": 130.068,
+            "p95_ms": 270.725,
+            "max_ms": 283.433,
+            "mean_ms": 134.395,
+            "r_at_10": 0.116
+        },
+        {
+            "label": "hnsw_ef40",
+            "n": 50,
+            "min_ms": 1.533,
+            "p50_ms": 104.368,
+            "p95_ms": 160.415,
+            "max_ms": 182.74,
+            "mean_ms": 107.359,
+            "r_at_10": 0.032
+        },
+        {
+            "label": "tv_2bit_k100",
+            "n": 50,
+            "min_ms": 1661.385,
+            "p50_ms": 1756.607,
+            "p95_ms": 1891.592,
+            "max_ms": 1997.729,
+            "mean_ms": 1757.219,
+            "r_at_10": 0.922
+        },
+        {
+            "label": "tv_4bit_k100",
+            "n": 50,
+            "min_ms": 3245.052,
+            "p50_ms": 3364.115,
+            "p95_ms": 3515.688,
+            "max_ms": 3564.266,
+            "mean_ms": 3376.472,
+            "r_at_10": 1
+        },
+        {
+            "label": "tv_4bit_k100_cold",
+            "n": 50,
+            "min_ms": 30562.553,
+            "p50_ms": 31801.581,
+            "p95_ms": 32643.708,
+            "max_ms": 32824.28,
+            "mean_ms": 31800.444,
+            "r_at_10": 1
+        },
+        {
+            "label": "tv_4bit_k100_intracold",
+            "n": 16,
+            "min_ms": 30258.104,
+            "p50_ms": 35734.569,
+            "p95_ms": 65056.721,
+            "max_ms": 84785.451,
+            "mean_ms": 40531.676,
+            "r_at_10": 1
+        },
+        {
+            "label": "tv_4bit_k100_intrawarm",
+            "n": 16,
+            "min_ms": 3176.456,
+            "p50_ms": 3668.635,
+            "p95_ms": 5786.063,
+            "max_ms": 8137.646,
+            "mean_ms": 4036.873,
+            "r_at_10": 1
+        },
+        {
+            "label": "tv_4bit_k500",
+            "n": 50,
+            "min_ms": 3311.835,
+            "p50_ms": 3446.805,
+            "p95_ms": 3544.571,
+            "max_ms": 3560.859,
+            "mean_ms": 3446.053,
+            "r_at_10": 1
+        }
+    ]
+}

@@ -117,13 +117,18 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         error!("turbovec amrescan: opaque is null");
     }
 
-    // We support exactly one order-by (the distance operator). The
-    // operand is `(*orderbys).sk_argument`.
+    // If the planner chose us without an ORDER BY operator (e.g. a
+    // count(*) over an indexed column), produce an empty result
+    // rather than ERROR. The executor falls through to whatever else
+    // can satisfy the query; fetched=true on entry to amgettuple
+    // short-circuits to an immediate `false` return.
     if norderbys < 1 || orderbys.is_null() {
-        // No ORDER BY \u2014 nothing to scan. Phase 5 may add a "scan
-        // everything" mode for plain `WHERE` predicates; v0.4
-        // intentionally rejects this combination.
-        error!("turbovec: index scan requires an ORDER BY <operator> <query> clause");
+        (*opaque).query.clear();
+        (*opaque).results.clear();
+        (*opaque).distances.clear();
+        (*opaque).cursor = 0;
+        (*opaque).fetched = true;
+        return;
     }
     let order = orderbys.add(0);
     let datum = (*order).sk_argument;
@@ -183,7 +188,13 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             (*opaque).fetched = true;
             return false;
         }
-        let k = 1024.min(n_in_index).max(1);
+        // The K knob: how many candidates to fetch per scan. v1.0
+        // shipped a hard 1024 which made every ORDER BY on a million-
+        // row index ~17 s. Default lowered to 100 (turbovec.search_k
+        // GUC) — tune up for high LIMITs or higher recall, down for
+        // sub-ms latency.
+        let k_pref = crate::guc::SEARCH_K.get() as usize;
+        let k = k_pref.min(n_in_index).max(1);
         let (scores, ids) = stored.index.search(&(*opaque).query, k);
         let dists: Vec<f64> = scores
             .iter()

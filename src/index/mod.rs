@@ -40,7 +40,11 @@ mod build;
 mod cost;
 mod insert;
 mod options;
+#[cfg(feature = "relfile_storage")]
+pub(crate) mod page;
 mod persist;
+#[cfg(feature = "relfile_storage")]
+pub(crate) mod relfile;
 mod scan;
 mod vacuum;
 mod validate;

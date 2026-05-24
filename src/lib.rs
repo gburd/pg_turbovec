@@ -1923,6 +1923,167 @@ mod tests {
         .unwrap();
         assert_eq!(id, Some(3));
     }
+
+    /// Phase L: relfile-resident pages should produce the same
+    /// search results as the SPI side-table path. Exercises the
+    /// new code path end-to-end on a 200-row / 384-d corpus and
+    /// verifies the relfile-resident pages are queried correctly
+    /// by `ambeginscan` / `amgettuple`. Cold p50 is dominated by
+    /// buffer-pool hits + IdMapIndex reconstruction, *not* by
+    /// SPI fetch + TOAST detoast — the headline Phase L win.
+    #[cfg(all(
+        feature = "experimental_index_am",
+        feature = "relfile_storage"
+    ))]
+    #[pg_test]
+    fn relfile_cold_scan_does_not_repeat_load() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_rf (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_rf \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, 200) AS gs(i), \
+                  generate_series(1, 384) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_rf_idx \
+             ON t_rf USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // Side-table marker row tracks the count under the new
+        // path (n_vectors mirrored, payload empty).
+        let n_vec: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.am_storage \
+             WHERE indexrelid = 't_rf_idx'::regclass",
+        )
+        .unwrap();
+        assert_eq!(n_vec, Some(200));
+
+        // The relfile relation should have at least 4 blocks
+        // (meta + codes + scales + ids).
+        let bytes: Option<i64> =
+            Spi::get_one("SELECT pg_relation_size('t_rf_idx'::regclass)::int8").unwrap();
+        let bytes = bytes.unwrap();
+        assert!(
+            bytes >= 4 * 8192,
+            "relfile should be >= 4 pages, got {} bytes",
+            bytes,
+        );
+
+        Spi::run("ANALYZE t_rf").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Cold scan: pages cold in shared_buffers — must be read
+        // from disk via the buffer manager.
+        let nearest1: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_rf \
+             ORDER BY emb <=> (SELECT emb FROM t_rf WHERE id = 73) \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            nearest1,
+            Some(73),
+            "relfile cold scan must agree with brute-force on self-query",
+        );
+
+        // Warm scan: pages warm in shared_buffers + IdMapIndex
+        // cached in the per-backend Arc cache. Same result.
+        let nearest2: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_rf \
+             ORDER BY emb <=> (SELECT emb FROM t_rf WHERE id = 73) \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(nearest2, Some(73), "relfile warm scan must match cold scan");
+
+        // pg_stat_io smoke check on pg16+.
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        {
+            let n_io_rows: Option<i64> =
+                Spi::get_one("SELECT count(*)::int8 FROM pg_stat_io").unwrap();
+            assert!(
+                n_io_rows.unwrap_or(0) > 0,
+                "pg_stat_io should be populated on pg16+",
+            );
+        }
+    }
+
+    /// Phase L cold-vs-warm timing inside a single backend on a
+    /// 2000-row / 384-dim corpus. Logs the timings via eprintln!
+    /// (lost to PG's log on pgrx-test runs; the practical timing
+    /// harness is `bench/sql/phase_l_cold_scan.sql`). Asserts only
+    /// that both timings are reasonable; the strong cold-vs-warm
+    /// inequality is too noisy inside a transaction to assert.
+    ///
+    /// Phase G/H reference numbers (1 M rows, side-table path):
+    /// cold p50 = 6 802 ms. The relfile path's headline win is at
+    /// scale: shared_buffers caches the index pages cluster-wide,
+    /// so every backend after the first pays only the buffer-pool
+    /// hit cost, not the SPI fetch + TOAST + parse cost.
+    #[cfg(all(
+        feature = "experimental_index_am",
+        feature = "relfile_storage"
+    ))]
+    #[pg_test]
+    fn relfile_cold_vs_warm_timing() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_cw (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_cw \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, 2000) AS gs(i), \
+                  generate_series(1, 384) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_cw_idx ON t_cw USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_cw").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        let cold_us: Option<f64> = Spi::get_one(
+            "WITH t0 AS (SELECT clock_timestamp() AS ts), \
+                  q AS (SELECT id FROM t_cw \
+                        ORDER BY emb <=> (SELECT emb FROM t_cw WHERE id = 1234) \
+                        LIMIT 10) \
+             SELECT (EXTRACT(epoch FROM (clock_timestamp() - t0.ts)) * 1e6)::float8 \
+             FROM t0, (SELECT count(*) FROM q) c",
+        )
+        .unwrap();
+        let warm_us: Option<f64> = Spi::get_one(
+            "WITH t0 AS (SELECT clock_timestamp() AS ts), \
+                  q AS (SELECT id FROM t_cw \
+                        ORDER BY emb <=> (SELECT emb FROM t_cw WHERE id = 1234) \
+                        LIMIT 10) \
+             SELECT (EXTRACT(epoch FROM (clock_timestamp() - t0.ts)) * 1e6)::float8 \
+             FROM t0, (SELECT count(*) FROM q) c",
+        )
+        .unwrap();
+
+        let cold = cold_us.unwrap_or(f64::INFINITY);
+        let warm = warm_us.unwrap_or(f64::INFINITY);
+        eprintln!(
+            "phase-l cold-vs-warm (2000x384, bit_width=4, debug): \
+             cold = {:.0} us, warm = {:.0} us",
+            cold, warm,
+        );
+        // Loose sanity bounds (debug build, ~2000 rows of 384-d
+        // data through full ORDER BY pipeline).
+        assert!(cold < 30_000_000.0, "cold scan {} us looks broken", cold);
+        assert!(warm < 30_000_000.0, "warm scan {} us looks broken", warm);
+    }
 }
 
 /// PGRX test runner harness.

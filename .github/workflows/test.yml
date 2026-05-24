@@ -1,0 +1,57 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Mirrors .forgejo/workflows/test.yml so the same CI lights up if
+# this repo is ever mirrored to a GitHub host. Forgejo is the
+# canonical CI; the GitHub copy is best-effort.
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.84
+
+      - name: install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+              build-essential pkg-config libssl-dev libreadline-dev zlib1g-dev \
+              libicu-dev libxml2-dev libxslt1-dev liblz4-dev libzstd-dev \
+              libclang-dev clang \
+              flex bison \
+              libopenblas-dev gfortran
+
+      - name: install cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version 0.17.0
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-pg${{ matrix.pg }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: cargo pgrx init --pg${{ matrix.pg }} download
+
+      - run: |
+          cargo pgrx test pg${{ matrix.pg }} \
+              --no-default-features \
+              --features "pg${{ matrix.pg }} experimental_index_am pg_test"

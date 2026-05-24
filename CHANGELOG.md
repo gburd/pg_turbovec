@@ -4,6 +4,93 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — 2026-05-24
+
+### Phase 21 — million-row benchmark, search_k tunable, AM-scan cache
+
+A real-hardware million-row run on `arnold` (Intel i9-12900H, PG
+17, pgvector 0.8.0 in the same cluster) drove three cumulative
+fixes that ship together as `1.0.0` proper:
+
+- **`turbovec.search_k` GUC** (default 100). The 0.4 development
+  branch shipped a hard-coded `K=1024` per-scan candidate fan-out
+  that made every ORDER BY on a million-row index take ~17 s.
+  Lowering the default to 100 and exposing a per-session knob
+  (`SET turbovec.search_k = 250` for higher recall, lower for
+  sub-ms latency) drops the same query to ~7 s without touching
+  recall on cosine workloads. (#63879a8)
+- **`amrescan` tolerates non-orderby plans.** The planner can
+  pick our index for queries without an ORDER BY operator
+  (e.g. `SELECT count(*)` over the indexed column, because
+  `amoptionalkey = true` and `amcanorderbyop = true`); previously
+  this raised `index scan requires an ORDER BY <operator>
+  <query>`. We now return an empty scan and let the executor fall
+  through to whatever else can satisfy the query. (#63879a8)
+- **Backend-local cache wired into the AM scan path.** The
+  cache (`src/cache.rs`) was already used by the kernel/SQL-
+  function path but never called from `src/index/scan.rs`; every
+  AM scan paid an SPI fetch + tmpfile write + `IdMapIndex::load`
+  of the full payload (~195 MiB on 1 M × 384-dim 4-bit). Now the
+  AM path issues a payload-free `load_meta` to derive the cache
+  key, looks up an `Arc<IdMapIndex>` keyed on `(rel_oid, attnum,
+  bit_width, dim)` × `(relfilenode, version)`, and only falls
+  through to `persist::load` on miss. Intra-backend warm-cache
+  speedup observed in the field is ~9.7× (35.7 s → 3.7 s on the
+  arnold corpus, debug build). (#1293e7b)
+
+### Phase 21 — million-row recall + latency vs pgvector HNSW
+
+`docs/RECALL.md` now carries three side-by-side tables: the
+original synthetic uniform sweep, the real-world GloVe-100 run
+from `1.0.0-rc.2`, and a fresh million-row arnold sweep at 384
+dimensions. Headline (warm cache, debug build):
+
+| Index | Storage | p50 | R@10 (synth) |
+|---|---:|---:|---:|
+| pgvector HNSW ef=40 | 1953 MiB | 104 ms | 0.032 |
+| pgvector HNSW ef=200 | 1953 MiB | 130 ms | 0.116 |
+| **pg_turbovec 4-bit** | **195 MiB** | 3 364 ms | 1.000 |
+| pg_turbovec 2-bit | 103 MiB | 1 757 ms | 0.922 |
+
+Uniform-random vectors in 384 dimensions are a documented
+pessimistic case for graph indexes — see § 2.1 for the GloVe-100
+numbers where HNSW recovers to 0.80–0.93. The headline take-
+away is the storage-vs-recall tradeoff: pg_turbovec at 4-bit is
+10× smaller than HNSW with strictly better recall on this
+corpus.
+
+New artefacts:
+
+- `benches/results/recall_lat_million_2026_05_24.json` — full
+  pre-cache sweep, including the loader-bug discovery and rebuild
+  documented in the JSON note field.
+- `benches/results/recall_lat_million_post_cache_2026_05_24.json`
+  — paired cold/warm latency measurement for the cache-wiring
+  speedup. Use these to reproduce the 9.7× intra-backend ratio.
+- `benches/scripts/{rebuild_corpus_million.sh,
+  bench_million_setup.sql, run_bench_sweep_million.sh,
+  MILLION_ROW_BENCH.md}` — reproduction harness.
+
+### Tests
+
+88 → **92** `#[pg_test]` cases. Two added with the cache wiring
+(`index_am_cache_hits_on_second_query`,
+`index_am_cache_invalidates_on_insert`); two added with the GUC
+(`search_k_guc_round_trip`, `index_am_count_star_does_not_error`).
+All green on PostgreSQL 16 and 17.
+
+### Known follow-ups (not blocking 1.0)
+
+- Cold-cache p50 on a fresh backend is still dominated by
+  `IdMapIndex::load` going through a tmpfile because the upstream
+  crate's deserialiser only reads from a path. An in-memory load
+  in `turbovec` (or a relfile-resident page format here) would
+  drop first-query latency from ~32 s to ~tens of ms on a
+  million-row 4-bit index.
+- The post-cache warm p50 of 3.4 s on debug is debug-build cost,
+  not algorithm cost; a `--release` rebuild on the same corpus
+  is expected to drop us into the tens-of-ms range.
+
 ## [1.0.0-rc.2] — Unreleased
 
 ### Phase 20 — real-embedding recall benchmark vs pgvector

@@ -1,0 +1,80 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CI matrix: every PG version we claim to support must pass the full
+# #[pg_test] suite. v1.0.0 shipped with build failures on pg13/14/15/18
+# because the local dev box only had pg16 and arnold only ran pg17;
+# this workflow exists so that never happens again.
+#
+# `cargo pgrx init --pgN download` builds a fresh PostgreSQL N from
+# source the first time the workflow runs in a given runner image,
+# then caches it across runs. Each version takes ~5–10 min cold,
+# ~30 s warm.
+#
+# OpenBLAS is needed because the `turbovec` kernel pulls in BLAS via
+# `ndarray + faer`. Fedora/Debian package names differ; we use
+# Debian (the default Forgejo runner image).
+
+jobs:
+  test:
+    runs-on: docker
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+    container:
+      image: rust:1.84-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install build deps
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+              build-essential pkg-config libssl-dev libreadline-dev zlib1g-dev \
+              libicu-dev libxml2-dev libxslt1-dev liblz4-dev libzstd-dev \
+              libclang-dev clang \
+              flex bison \
+              libopenblas-dev gfortran \
+              git ca-certificates curl
+          # IMPORTANT: cargo-pgrx 0.17.0 matches the project Cargo.toml.
+          # Bumping pgrx requires bumping cargo-pgrx in lockstep.
+          cargo install --locked cargo-pgrx --version 0.17.0
+
+      - name: cache cargo-pgrx PG installs
+        uses: actions/cache@v4
+        with:
+          path: ~/.pgrx
+          key: pgrx-pg${{ matrix.pg }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+
+      - name: cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: cargo pgrx init pg${{ matrix.pg }}
+        run: cargo pgrx init --pg${{ matrix.pg }} download
+
+      - name: cargo pgrx test pg${{ matrix.pg }}
+        run: |
+          cargo pgrx test pg${{ matrix.pg }} \
+              --no-default-features \
+              --features "pg${{ matrix.pg }} experimental_index_am pg_test"
+
+      # Surface the test count in the run summary so we can spot
+      # regressions at a glance.
+      - name: report
+        if: always()
+        run: |
+          # Most recent test run produces a stdout we can scrape.
+          # When green:  "test result: ok. 92 passed; 0 failed;"
+          # When broken: surfaced in the previous step's failure.
+          echo "pg${{ matrix.pg }}: see step output above"

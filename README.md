@@ -28,15 +28,13 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.0.1 — 92/92 `#[pg_test]` cases pass against
-> PostgreSQL 13, 14, 15, 16, 17, and 18. Default,
-> `experimental_index_am`, and `experimental_index_am +
-> relfile_storage` (Phase L preview) builds all green.
-> See [`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md) for what
-> we deliberately skipped, and
+> **Status:** v1.1.0 — 94/94 `#[pg_test]` cases pass against
+> PostgreSQL 13, 14, 15, 16, 17, and 18 on the default + index-AM
+> path; 100/100 with the Phase L `relfile_storage` preview
+> enabled. See [`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md)
+> for what we deliberately skipped, and
 > [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
-> for the honest scoreboard of where we lose to pgvector
-> (cold-cache, INSERT throughput) and the in-flight fixes for both.
+> for the honest scoreboard of every metric vs pgvector.
 
 ## Why pg_turbovec?
 
@@ -377,7 +375,7 @@ is fully supported but the AM scan path is newer.
 
 ## Performance
 
-> **Performance methodology.** As of v1.0.1 the headline numbers
+> **Performance methodology.** As of v1.1.0 the headline numbers
 > in the table at the top of this README come from a real
 > head-to-head against pgvector 0.8.0 HNSW on the
 > [`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)

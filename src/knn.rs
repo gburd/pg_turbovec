@@ -92,11 +92,11 @@ fn knn(
     };
 
     if let Some(idx_arc) = cache::lookup(key, relfile, n_rows) {
-        let take = (k as usize).min(idx_arc.len());
+        let take = (k as usize).min(idx_arc.read().len());
         if take == 0 {
             return TableIterator::new(Vec::<(i64, f64)>::new());
         }
-        let result = run_search(&idx_arc, &q_buf, take, allowed.as_deref());
+        let result = run_search(&idx_arc.read(), &q_buf, take, allowed.as_deref());
         return TableIterator::new(result);
     }
 
@@ -127,7 +127,7 @@ fn knn(
     let idx_arc = cache::insert(key, idx, total_bytes, relfile, n_rows);
 
     let take = (k as usize).min(rows.len());
-    let result = run_search(&idx_arc, &q_buf, take, allowed.as_deref());
+    let result = run_search(&idx_arc.read(), &q_buf, take, allowed.as_deref());
 
     TableIterator::new(result)
 }

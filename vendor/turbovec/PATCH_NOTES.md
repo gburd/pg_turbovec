@@ -20,11 +20,12 @@ the public surface needs widening.
 
 ## What we changed
 
-Three additive surfaces (no behavioural changes to existing APIs):
+Four additive surfaces (no behavioural changes to existing APIs):
 
 | Location | Added |
 |---|---|
 | `src/lib.rs` | `TurboQuantIndex::from_parts` made `pub` (was `pub(crate)`). `packed_codes()` and `scales()` made `pub` (were `pub(crate)`). |
+| `src/lib.rs` | Added a `boundaries: OnceLock<Vec<f32>>` field on `TurboQuantIndex` next to the existing `centroids: OnceLock<Vec<f32>>`. `add_with_ids` now caches the Lloyd-Max codebook boundaries on the first add and reuses them across subsequent adds in the same backend. Pre-cache, the boundaries were recomputed on every single-row insert (~47 ms / row at bit_width=4 / dim=8); caching brings that to amortised constant. Pure performance fix; the same boundaries are produced. |
 | `src/io.rs` | `pub fn write_to<W: Write>(…)` mirroring `write`. `pub fn load_from<R: Read>(…)` mirroring `load`. `pub fn write_id_map_to<W: Write>(…)` mirroring `write_id_map`. `pub fn load_id_map_from<R: Read>(…)` mirroring `load_id_map`. The path-based functions are now thin wrappers around the generic ones. |
 | `src/id_map.rs` | `IdMapIndex::write_to_writer<W: Write>` and `IdMapIndex::load_from_reader<R: Read>` thin wrappers around the new `io::*_from`/`*_to` functions. Refactored shared post-decode validation into `from_id_map_parts`. |
 

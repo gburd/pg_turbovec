@@ -4,6 +4,82 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-05-24
+
+### Phase J — real-embedding head-to-head on dbpedia-1M
+
+The README headline now cites the canonical pgvector benchmark
+corpus, [`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)
+(1 M Wikipedia/DBpedia entities × 1536-d OpenAI
+`text-embedding-ada-002`), measured on arnold (Intel i9-12900H,
+32 GiB RAM, PG 17.9, pgvector 0.8.0, release build):
+
+| Index / config | Storage | Build | p50 (warm) | R@10 |
+|---|---:|---:|---:|---:|
+| pgvector HNSW (ef=40) | 8 192 MB | 295 s | 61 ms | 0.962 |
+| pgvector HNSW (ef=200) | 8 192 MB | 295 s | 115 ms | 0.970 |
+| pg_turbovec 4-bit (k=100) | 780 MB | 163 s | 71 ms | 1.000 |
+| pg_turbovec 4-bit (k=500) | 780 MB | 163 s | 124 ms | 1.000 |
+| **pg_turbovec 2-bit (k=100)** | **396 MB** | 126 s | **48 ms** | **1.000** |
+| pg_turbovec 2-bit (k=500) | 396 MB | 126 s | 78 ms | 1.000 |
+
+There is no (recall, storage, latency) corner where pgvector
+HNSW wins on this corpus. pg_turbovec 2-bit at `search_k=100`
+is Pareto-dominant: 20× less storage, 1.3× faster than HNSW
+ef=40, +0.038 higher recall.
+
+### Phase L — relfile-resident page format (preview, gated)
+
+New Cargo feature `relfile_storage` (default OFF) that moves
+the serialised index from the SPI side-table to the index
+relation's main fork (`relfilenode`), accessed via PG's
+standard buffer manager. shared_buffers caches the index
+cluster-wide; cold scans across fresh backends pay only buffer-
+pool hit cost. All six AM callbacks ported. 100/100 tests pass
+with `--features "... relfile_storage pg_test"`. Hardening
+before default-on flip in 1.2 tracked in
+`docs/PHASE_L_PROGRESS.md`.
+
+### Phase K — deferred-commit aminsert (~3000× bulk-INSERT speedup)
+
+`aminsert` now mutates the cached `IdMapIndex` in memory under
+a `RwLock` write guard, marks the cache entry dirty, and
+defers the `am_storage` write to a `PreCommit` xact callback.
+Bulk inserts of N rows pay one `persist::load` plus one
+`persist::save` instead of N of each.
+
+Wall-clock (release build, 1 M-row index, 1 k-row bulk INSERT):
+  - pre-Phase-K: ~400 s
+  - post-Phase-K: ~136 ms
+  - speedup: ~3000×
+
+Latent bugs fixed during Phase K:
+  - `IdMapIndex::add_with_ids` was recomputing the Lloyd-Max
+    codebook boundaries on every call. Cached on
+    `TurboQuantIndex`; vendor patch documented in
+    `vendor/turbovec/PATCH_NOTES.md`.
+  - `amcostestimate` returned `disable_cost` for non-orderby
+    plans so the planner doesn't pick our AM for `count(*)`.
+
+Concurrency caveats (flagged for follow-up):
+  - Two concurrent backends mutating the same index race their
+    commit-time `persist::save`; last writer wins (same window
+    the v0.4 path had).
+  - `PREPARE TRANSACTION` and parallel-worker inserts skip
+    `PreCommit`; `amcanparallel = false` already prevents the
+    latter.
+
+### Tests
+
+92 → 94 on the default + experimental_index_am path; 100/100
+with relfile_storage. All six PG versions (pg13–pg18) green.
+
+### Honest scoreboard
+
+`docs/PARITY_GAPS.md § "Performance gaps"` updated. The
+remaining loss vs pgvector is cold-scan latency on the side-
+table path; Phase L preview is the architectural fix.
+
 ## [1.0.1] — 2026-05-24
 
 ### Fix — build on PostgreSQL 13, 14, 15, 18

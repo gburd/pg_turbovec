@@ -28,10 +28,11 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.2.0 — 94/94 `#[pg_test]` cases pass against
-> PostgreSQL 13, 14, 15, 16, 17, and 18 on the default + index-AM
-> path; 100/100 with the Phase L `relfile_storage` preview
-> enabled. See [an internal design note](an internal design note)
+> **Status:** v1.2.0 — 94/94 `#[pg_test]` cases pass on the
+> default + `experimental_index_am` build, 104/104 on
+> `+ relfile_storage` (Phase L preview), against PostgreSQL
+> 13, 14, 15, 16, 17, and 18. See
+> [an internal design note](an internal design note)
 > for what we deliberately skipped, and
 > [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
 > for the honest scoreboard of every metric vs pgvector.

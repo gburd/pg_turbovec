@@ -91,6 +91,11 @@ unsafe fn ambulkdelete_relfile(
 
     let n_after = idx.len() as u64;
     let next_version = meta.am_version.saturating_add(1);
+    // `relfile::write_full` calls `RelationTruncate` itself when
+    // the new layout is smaller than the old one (Phase L
+    // hardening item 3), so a VACUUM that consolidates dead rows
+    // actually shrinks the on-disk file instead of leaving orphan
+    // trailing pages.
     relfile::write_full(
         index,
         meta.bit_width,

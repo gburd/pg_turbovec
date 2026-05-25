@@ -432,6 +432,12 @@ impl TurboQuantIndex {
     /// match what `pack::repack(packed_codes, n_vectors,
     /// bit_width, dim)` would produce, search results will be
     /// silently wrong.
+    ///
+    /// `rotation`, when `Some`, must be a row-major `dim * dim`
+    /// orthogonal matrix matching what
+    /// `rotation::make_rotation_matrix(dim)` produces. When
+    /// `None`, the lazy QR runs on the first `search` call (the
+    /// pre-Phase-R-2 default).
     pub fn from_parts_with_prepared(
         dim: Option<usize>,
         bit_width: usize,
@@ -442,6 +448,7 @@ impl TurboQuantIndex {
         n_blocks: usize,
         centroids: Vec<f32>,
         boundaries: Vec<f32>,
+        rotation: Option<Vec<f32>>,
     ) -> Self {
         let s = Self {
             dim,
@@ -463,6 +470,9 @@ impl TurboQuantIndex {
             data: blocked_codes,
             n_blocks,
         });
+        if let Some(r) = rotation {
+            let _ = s.rotation.set(r);
+        }
         s
     }
 
@@ -548,6 +558,34 @@ impl TurboQuantIndex {
             let (b, _) = codebook::codebook(bw, dim);
             b
         })
+    }
+
+    /// Borrow the random orthogonal rotation matrix. Forces the
+    /// QR decomposition if it hasn't been cached yet — at
+    /// `dim = 1536` this is the ~64% self-time hotspot Phase R
+    /// flagged on the warm-scan profile, so embedders that
+    /// can persist the matrix should drive this accessor on
+    /// the writer side and feed the bytes back via
+    /// [`Self::from_parts_with_prepared`] on the reader side.
+    ///
+    /// Returns a row-major `dim * dim` `f32` slice. On a lazy
+    /// index that hasn't seen an add yet, returns an empty
+    /// slice (no dim → no rotation).
+    pub fn rotation(&self) -> &[f32] {
+        let Some(dim) = self.dim else {
+            return &[];
+        };
+        self.rotation
+            .get_or_init(|| rotation::make_rotation_matrix(dim))
+    }
+
+    /// Number of `f32` elements in the rotation matrix for a
+    /// given dim. Convenience helper so embedders can
+    /// pre-allocate the on-disk chain without consulting an
+    /// instantiated index.
+    #[must_use]
+    pub fn rotation_size(dim: usize) -> usize {
+        dim * dim
     }
 
     /// Remove the vector at `idx` in O(1) by swapping with the last vector.

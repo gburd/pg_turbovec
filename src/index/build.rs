@@ -141,11 +141,22 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // until the next mutation.
     if n_vectors > 0 {
         idx.prepare_eager();
+        // Phase R-2: also drive the rotation `OnceLock` so we
+        // can persist the matrix alongside the codes. The
+        // rotation is a deterministic function of `(dim,
+        // ROTATION_SEED)` whose lazy QR was the warm-scan
+        // hotspot Phase R diagnosed (~64% self time at
+        // dim = 1536). Computing it once here — we already pay
+        // QR on the first search of every backend in the
+        // pre-Phase-R-2 path — lets every backend reading the
+        // index skip it forever.
+        let rotation = idx.rotation();
         let prepared = relfile::PreparedParts {
             blocked_codes: idx.blocked_codes(),
             n_blocks: idx.n_blocks() as u32,
             centroids: idx.centroids(),
             boundaries: idx.boundaries(),
+            rotation,
         };
         relfile::write_full_with_prepared(
             index_relation,

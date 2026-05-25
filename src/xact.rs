@@ -56,11 +56,13 @@ unsafe fn flush_to_relfile(
             // cache.rs amortises it across all the rows in one
             // transaction.
             idx.prepare_eager();
+            let rotation = idx.rotation();
             crate::index::relfile::PreparedParts {
                 blocked_codes: idx.blocked_codes(),
                 n_blocks: idx.n_blocks() as u32,
                 centroids: idx.centroids(),
                 boundaries: idx.boundaries(),
+                rotation,
             }
         },
     );

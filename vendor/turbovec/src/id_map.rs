@@ -310,6 +310,19 @@ impl IdMapIndex {
         self.inner.boundaries()
     }
 
+    /// Borrow the random orthogonal rotation matrix. See
+    /// [`TurboQuantIndex::rotation`].
+    pub fn rotation(&self) -> &[f32] {
+        self.inner.rotation()
+    }
+
+    /// Number of `f32` elements in the rotation matrix for a
+    /// given dim. See [`TurboQuantIndex::rotation_size`].
+    #[must_use]
+    pub fn rotation_size(dim: usize) -> usize {
+        TurboQuantIndex::rotation_size(dim)
+    }
+
     /// Serialize to a `.tvim` file — the inner quantized index plus the
     /// id-map side-tables. Round-trips exactly through [`Self::load`].
     pub fn write(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
@@ -400,6 +413,7 @@ impl IdMapIndex {
         n_blocks: usize,
         centroids: Vec<f32>,
         boundaries: Vec<f32>,
+        rotation: Option<Vec<f32>>,
     ) -> std::io::Result<Self> {
         let dim_opt = if dim == 0 { None } else { Some(dim) };
         let inner = TurboQuantIndex::from_parts_with_prepared(
@@ -412,6 +426,7 @@ impl IdMapIndex {
             n_blocks,
             centroids,
             boundaries,
+            rotation,
         );
         Self::finalise_from_inner(inner, slot_to_id)
     }

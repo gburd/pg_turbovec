@@ -4,6 +4,152 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-05-25
+
+### Headline (Phase R-2): rotation matrix persisted in the relfile
+
+The random orthogonal rotation matrix used by TurboQuant—a
+deterministic function of `(dim, ROTATION_SEED)` produced by
+QR decomposition of a `dim x dim` Gaussian random matrix—is
+now persisted alongside the existing prepared parts (centroids,
+boundaries, blocked layout). At `dim = 1536` the lazy QR was
+the single hottest leaf of the warm-scan profile (~64.8% self
+time; see
+`benches/results/profile_warm_v1_3_0_2026_05_25.json` and
+`docs/PROFILING.md`), and it ran once per fresh backend
+because the per-backend cache `OnceLock` was driven on first
+search instead of read off disk.
+
+`ambuild` now drives `IdMapIndex::rotation()` after
+`prepare_eager()` and writes the row-major `dim*dim` `f32`
+buffer (~9 MiB at 1536-d, negligible vs. the existing
+~1.5 GiB index) into a new chain on the relfile. Backends
+opening the index pre-fill the rotation `OnceLock` from those
+bytes via the extended
+`IdMapIndex::from_id_map_parts_with_prepared(…, rotation:
+Option<Vec<f32>>)` constructor.
+
+Expected impact: warm-scan p50 drops 50–200 ms toward the
+pgvector HNSW band on dbpedia-1M (1 M × 1536-d). A separate
+Phase R-3 run on arnold validates the production number; this
+release is the implementation + wire-format bump.
+
+### ⚠️ BREAKING: hard migration boundary (v1.3.x indexes)
+
+`MetaPageData::version` bumps 2 → 3 to add the new
+`rotation_first` / `rotation_count` / `rotation_dim` fields and
+the rotation chain. v1.4.0 binaries refuse to scan v2 (v1.3.x)
+indexes because the rotation chain offsets don't exist on disk
+and the lazy QR was the hotspot we just eliminated. After
+upgrading:
+
+```sql
+ALTER EXTENSION pg_turbovec UPDATE TO '1.4.0';
+REINDEX INDEX <every_turbovec_index>;
+```
+
+Without `REINDEX`, `ambeginscan` raises
+`ERROR: turbovec index built under pg_turbovec ≤ 1.3 cannot
+be scanned by pg_turbovec 1.4+` with a `HINT: Run REINDEX
+INDEX <name>;`. The detection primitive is
+`MetaPageData::is_legacy_v2()` (mirrors the existing
+`is_legacy_v1`). The matrix in `docs/UPGRADING.md` documents
+the scripted path.
+
+### Migration
+
+```sql
+DO $$
+DECLARE
+    idx record;
+BEGIN
+    FOR idx IN
+        SELECT n.nspname || '.' || c.relname AS qname
+        FROM pg_class c
+        JOIN pg_am a ON a.oid = c.relam
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE a.amname = 'turbovec'
+    LOOP
+        RAISE NOTICE 'reindexing %', idx.qname;
+        EXECUTE 'REINDEX INDEX CONCURRENTLY ' || idx.qname;
+    END LOOP;
+END $$;
+```
+
+`REINDEX INDEX CONCURRENTLY` rebuilds without taking an
+`AccessExclusiveLock` so reads keep working during the
+migration. The new index is built first; the cutover swap is
+atomic.
+
+### Vendor turbovec patch
+
+Three additive surfaces on top of the existing Phase P
+prepared-cache APIs (see `vendor/turbovec/PATCH_NOTES.md` for
+the full table):
+
+- `TurboQuantIndex::rotation() -> &[f32]` accessor mirroring
+  `centroids` / `boundaries` / `blocked_codes`. Drives the
+  existing `rotation` `OnceLock` and returns the row-major
+  `dim*dim` matrix.
+- `TurboQuantIndex::rotation_size(dim) -> usize` const helper
+  (`dim * dim`) so callers can preallocate the on-disk chain.
+- `TurboQuantIndex::from_parts_with_prepared(…, rotation:
+  Option<Vec<f32>>)` and the matching `IdMapIndex::
+  from_id_map_parts_with_prepared` overload — `Some` pre-fills
+  the rotation `OnceLock`, `None` falls back to the lazy QR
+  (used during `ambuild` itself, when the matrix isn't yet on
+  disk). Tracked as a follow-up to upstream PR #70 (Codrai
+  turbovec issue #70).
+
+### Source
+
+- `src/index/page.rs`: `VERSION = 3`. `MetaPageData` gains
+  `rotation_first` / `rotation_count` / `rotation_dim`.
+  `plan_with_blocked` takes a new `rotation_bytes` parameter;
+  layout is `meta → codes → scales → ids → blocked → rotation`.
+  Decode accepts v1, v2, v3 (older versions leave the new
+  fields zero so `is_legacy_v2()` flags them).
+- `src/index/relfile.rs`: `PreparedParts` gains
+  `rotation: &'a [f32]`. `write_full_inner` writes the
+  rotation chain after the blocked chain.
+  `write_meta_shrink_in_place` preserves
+  `rotation_first/count/dim` across vacuum (the matrix is
+  data-independent). New `read_rotation()` mirrors the
+  existing `read_blocked()`.
+- `src/index/scan.rs`: `ambeginscan` gains the
+  `is_legacy_v2() && n_vectors > 0` ERROR path next to the
+  existing v1 path. `amgettuple` reads the rotation chain off
+  disk and feeds it to
+  `IdMapIndex::from_id_map_parts_with_prepared` as
+  `Some(rotation)`.
+- `src/index/build.rs`: `ambuild` calls `idx.rotation()` after
+  `prepare_eager()` and threads it through `PreparedParts`.
+  `src/xact.rs`: same edit on the deferred-commit flush path.
+- `src/lib.rs`: `EXPECTED_WIRE_FORMAT_VERSION = 3`. New
+  `relfile_legacy_v2_detection_primitive` (mirrors the v1
+  test) and `relfile_rotation_persisted` (proxy for the
+  warm-scan win: top-1 query through the prepared+rotation
+  index must finish in <100 ms on a 100-row debug build).
+
+### Tests
+
+113/113 default. +2 vs. v1.3.0 from the new rotation tests:
+`relfile_legacy_v2_detection_primitive` (mirrors the existing
+`relfile_legacy_v1_detection_primitive`) and
+`relfile_rotation_persisted` (proxy for the warm-scan win:
+asserts the rotation chain is on disk, the matrix is
+orthogonal to within roundoff, and a top-1 query through the
+prepared+rotation index finishes in <100 ms on a 100-row
+debug build).
+
+### Docs
+
+- `docs/UPGRADING.md`: new migration matrix row for
+  1.3.x → 1.4.0+, citing `is_legacy_v2()`.
+- `vendor/turbovec/PATCH_NOTES.md`: "Phase R-2 follow-up:
+  persisted rotation matrix" section documenting the four new
+  surfaces.
+
 ## [1.3.0] — 2026-05-25
 
 ### Headline (Phase Q): one storage strategy, no flags

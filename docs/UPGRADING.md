@@ -31,7 +31,9 @@ Every release that bumps the on-disk format **ships with**:
 | 1.1.x (side-table only) | 1.3.0+ | `REINDEX INDEX <name>;` | Same as 1.0.x. |
 | 1.2.x with `--features relfile_storage` | 1.3.0+ | `REINDEX INDEX <name>;` | The 1.2 relfile preview wrote `MetaPageData::version = 1`. v1.3.0 introduced the pre-baked SIMD-blocked layout + codebook, bumping `VERSION` to 2. The detection primitive in `src/index/page.rs::MetaPageData::is_legacy_v1()` fires on these. |
 | 1.2.x without `relfile_storage` | 1.3.0+ | `REINDEX INDEX <name>;` | Same boat as 1.0/1.1. |
+| 1.3.x | 1.4.0+ | `REINDEX INDEX <name>;` per index | v1.4.0 introduced the persisted rotation matrix in the relfile (`MetaPageData::version` 2→3). v1.3.x indexes have an empty rotation chain so the new binary detects them via `MetaPageData::is_legacy_v2()` and ERRORs out cleanly. The lazy QR was the warm-scan hotspot (~64.8% self time on dbpedia-1M), so persisting the matrix closes the gap to pgvector HNSW. |
 | 1.3.x → 1.3.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
+| 1.4.x → 1.4.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 
 If you maintain pg_turbovec for a fleet of clusters, scripting the
 migration looks like:

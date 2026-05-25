@@ -24,16 +24,28 @@ disables it by default for new repos. To turn it on:
 3. Tick "Enable Repository Actions".
 4. Save.
 
-After that the existing `.forgejo/workflows/test.yml` will run on
-every push.
-
-Verify via API:
+Verify via API (after enabling):
 
 ```bash
 curl -s "https://codeberg.org/api/v1/repos/gregburd/pg_turbovec" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['has_actions'])"
 # Expected: True
 ```
+
+The workflow file at `.forgejo/workflows/test.yml` already exists and
+uses fully-qualified Docker image names (`docker.io/library/debian:bookworm-slim`,
+`docker.io/library/rust:1-bookworm`) so it works on the default
+Forgejo runner image without needing a custom registry. Until
+Actions is flipped on by hand, the GitHub mirror at
+`gburd/pg_turbovec` carries the canonical CI green badge.
+
+## Status
+
+- **GitHub mirror CI:** ✅ green (verified on commit `5dbe3aa`,
+  drift-check + 6 PG versions all pass).
+- **Codeberg Actions:** ⚠️ disabled at the repo level
+  (`has_actions: False` per the API). Manual flip required; workflow
+  is committed and ready to run once enabled.
 
 ## What the workflows do
 

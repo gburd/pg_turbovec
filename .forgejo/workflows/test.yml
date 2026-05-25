@@ -20,6 +20,19 @@ on:
 # Debian (the default Forgejo runner image).
 
 jobs:
+  drift-check:
+    runs-on: docker
+    container:
+      image: bookworm-slim
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need tag history for the version-vs-tag check
+      - name: install bash + grep
+        run: apt-get update -qq && apt-get install -y --no-install-recommends bash grep
+      - name: drift-check
+        run: bash scripts/drift-check.sh
+
   test:
     runs-on: docker
     strategy:

@@ -15,7 +15,7 @@ close.
 | Storage | 1 953 MiB | 195 MiB (4-bit) | ✅ we win 10× |
 | Build time | 8 m 13 s | 33 s | ✅ we win 15× |
 | Warm scan p50 | 100 ms | 22 ms | ✅ we win 5× |
-| Cold scan p50 (after backend restart) | ~100 ms | 6 800 ms (1 M × 384-d) / 26 310 ms (1 M × 1536-d) | ❌ **we lose 68× (384-d) / 130× (1536-d)** — Phase L preview *did not close it*; Phase P (shared-mem IdMap or pre-baked blocked layout) is the actual fix |
+| Cold scan p50 (after backend restart, --features relfile_storage) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38) | ⚠️ **20.9× speedup vs Phase L preview**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. v1.3.0 will flip `relfile_storage` default ON and remove the side-table path. |
 | INSERT throughput (per row, into a 1 M-row index) | ~0.5 ms (HNSW O(log n)) | ~200 ms (full re-serialise per row) | ❌ **we lose ~400×** |
 | Recall on uniform-random | 0.03 | 1.000 | ✅ (but synthetic; real-world recall varies) |
 | Recall on real OpenAI ada-002 (dbpedia-1M) | ~0.95 | TBD (see `docs/RECALL.md` §2.2) | ❌ / ✅ (depends on `search_k`) |

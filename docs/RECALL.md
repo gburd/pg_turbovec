@@ -706,6 +706,52 @@ of Lloyd-Max + repack still dominates. Speedup vs side-table on
   (saved into the run directory; reproducible via
   `bash cold_bench.sh tv_4bit_k100_cold_relfile docs_tv_4bit 100 cold`).
 
+## 2.4 Cold-scan latency: pre-baked layout (Phase P, commit a801f38)
+
+**The cold-scan fix.** Phase O-2 found that the relfile-resident
+page format (§2.3) hadn't closed the cold-scan gap on a
+1 M × 1536-d corpus because the dominant per-backend cost wasn't
+storage I/O — it was `pack::repack` (transposing 768 MiB of
+packed codes into the SIMD-blocked layout) plus the Lloyd-Max
+codebook compute, both lazy-init'd via `OnceLock` on the first
+`search()` in any fresh backend.
+
+Phase P (commit `a801f38`) pre-bakes both at `ambuild` time and
+persists them into the relfile. Backends now read a prepared
+structure straight off disk; no per-backend prep work.
+
+**Re-measured on arnold** (Intel i9-12900H, 32 GiB, PG 17.9,
+release build, 1 M × 1536-d dbpedia-1M, same 50-query workload
+as §2.3):
+
+| metric | Phase O-2 (v1.2.0 relfile preview) | Phase O-3 (v1.2.0 + Phase P) | speedup |
+|---|---:|---:|---:|
+| min | 25 725 ms | 1 140 ms | 22.6× |
+| **p50** | **26 310 ms** | **1 256 ms** | **20.9×** |
+| p95 | 27 376 ms | 2 617 ms | 10.5× |
+| max | 28 499 ms | 2 732 ms | 10.4× |
+| mean | ~26 600 ms | 1 499 ms | 17.7× |
+
+**Index size**: 1 527 MiB (vs 793 MiB pre-Phase-P). The pre-baked
+blocked layout roughly doubles the on-disk size; we trade disk
+for cold-scan latency. Even at this size the index is still 5×
+smaller than pgvector HNSW's 8 192 MiB on the same corpus.
+
+**Build time**: 237 s (vs 163 s pre-Phase-P, +45%). The `prepare`
+step that was lazy is now eager and runs once during `CREATE
+INDEX` instead of once per backend.
+
+**Verdict**: ready for v1.3.0 default-on flip. The 1.26 s cold
+p50 is acceptable for a fresh-backend first-query; subsequent
+queries in the same backend hit the warm cache at ~87 ms. The
+v1.0.x side-table storage path will be removed in Phase Q so
+that relfile becomes the only and default storage, matching
+the convention every other PG index AM follows.
+
+**Source data**
+- [`benches/results/recall_relfile_phase_p_cold_scan_2026_05_25.json`](../benches/results/recall_relfile_phase_p_cold_scan_2026_05_25.json)
+- Per-sample TSV: [`recall_relfile_phase_p_cold_scan_2026_05_25.cold.tsv`](../benches/results/recall_relfile_phase_p_cold_scan_2026_05_25.cold.tsv)
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

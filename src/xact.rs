@@ -14,6 +14,50 @@ use pgrx::pg_sys;
 use crate::cache;
 use crate::index::persist;
 
+/// PreCommit flush sink for the relfile path: re-opens the index
+/// relation by oid (the original `Relation` from aminsert was
+/// dropped at end of the executor's tuple loop), writes the cached
+/// `IdMapIndex` out as relfile pages, then closes. WAL-logged via
+/// the `GenericXLog` path inside `relfile::write_full`.
+#[cfg(feature = "relfile_storage")]
+unsafe fn flush_to_relfile(
+    indexrelid: pg_sys::Oid,
+    idx: &turbovec::IdMapIndex,
+    state: &cache::PersistState,
+) {
+    // RowExclusiveLock is sufficient — VACUUM holds
+    // ShareUpdateExclusiveLock, REINDEX holds AccessExclusiveLock,
+    // and our writer must NOT block readers.
+    let rel = pg_sys::index_open(indexrelid, pg_sys::RowExclusiveLock as i32);
+    if rel.is_null() {
+        // Index was dropped between the aminsert and the PreCommit
+        // (e.g. user did INSERT then DROP INDEX in the same tx).
+        // Bail silently; the heap rows aren't indexed but that's
+        // already the user's stated intent.
+        return;
+    }
+    crate::index::relfile::write_full(
+        rel,
+        state.bit_width as u8,
+        state.dim as u32,
+        state.n_vectors as u64,
+        idx.packed_codes(),
+        idx.scales(),
+        idx.slot_to_id(),
+        state.version as u32,
+    );
+    // Mirror n_vectors into the side-table so `am_storage` queries
+    // (used by `docs/RECALL.md` reproduction scripts and a couple
+    // of legacy tests) keep working post-Phase-N-C.
+    persist::save_empty_with_count(
+        indexrelid,
+        state.bit_width,
+        state.dim,
+        state.n_vectors,
+    );
+    pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);
+}
+
 thread_local! {
     /// Tracks whether the `PreCommit` / `Abort` xact callbacks have
     /// already been registered for the current top-level transaction.
@@ -58,15 +102,22 @@ pub(crate) fn ensure_xact_callbacks_registered() {
             }
             for d in &dirty {
                 let guard = d.index.read();
-                persist::save(
-                    d.key.rel_oid,
-                    d.persist.bit_width,
-                    d.persist.dim,
-                    d.persist.n_vectors,
-                    &*guard,
-                    d.persist.version,
-                    &d.persist.live_ids,
-                );
+                #[cfg(feature = "relfile_storage")]
+                {
+                    unsafe { flush_to_relfile(d.key.rel_oid, &*guard, &d.persist); }
+                }
+                #[cfg(not(feature = "relfile_storage"))]
+                {
+                    persist::save(
+                        d.key.rel_oid,
+                        d.persist.bit_width,
+                        d.persist.dim,
+                        d.persist.n_vectors,
+                        &*guard,
+                        d.persist.version,
+                        &d.persist.live_ids,
+                    );
+                }
                 drop(guard);
                 cache::clear_dirty(d.key);
             }

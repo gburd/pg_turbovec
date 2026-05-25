@@ -620,6 +620,35 @@ mod tests {
         assert!((ns.unwrap() - 5.0).abs() < 1e-6);
     }
 
+    /// Phase N-C: deferred-commit aminsert applies to the relfile
+    /// path too. Same 1k-row bulk-insert budget as the side-table
+    /// version (< 5 s); pre-Phase-N-C this would full-rewrite every
+    /// page on every row.
+    #[cfg(all(feature = "experimental_index_am", feature = "relfile_storage"))]
+    #[pg_test]
+    fn relfile_aminsert_deferred_commit_bulk() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_rfb (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("CREATE INDEX t_rfb_idx ON t_rfb USING turbovec (emb vec_cosine_ops)")
+            .unwrap();
+        let t0 = std::time::Instant::now();
+        Spi::run(
+            "INSERT INTO t_rfb SELECT g, \
+                ('[' || g || ',0,0,0,0,0,0,0]')::vector \
+                FROM generate_series(1, 1000) g",
+        )
+        .unwrap();
+        let elapsed = t0.elapsed().as_millis();
+        eprintln!("relfile 1k bulk insert took {} ms", elapsed);
+        // Pre-Phase-N-C, this took several minutes on the relfile
+        // path. Post-fix it should match the side-table path's
+        // ~136 ms; loose 5 s upper bound.
+        assert!(elapsed < 5_000, "relfile bulk insert too slow: {} ms", elapsed);
+
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_rfb").unwrap();
+        assert_eq!(n, Some(1000));
+    }
+
     /// Phase K: deferred-commit aminsert. A 1k-row bulk INSERT into
     /// a turbovec-indexed table must finish in well under 5 s
     /// (the pre-Phase-K cost was ~400 s @ 400 ms/row). The deferred

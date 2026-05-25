@@ -258,22 +258,45 @@ Verification: `relfile_wal_emit_and_truncate` pgrx-test deletes
 most of a corpus, runs VACUUM, and asserts the post-VACUUM index
 file is strictly smaller than the post-build size.
 
-### 4. `aminsert` deferred-commit batching (Phase K)
+### 4. `aminsert` deferred-commit batching (Phase K) — **DONE (v1.2.0 hardening)**
 
-The current `aminsert_relfile` reads the whole page chain on
-every row, mutates, writes it back. That's `O(n_vectors)` per row,
-same as the SPI path. The Phase K design (per-tx pending buffer
-flushed on commit hook) would reduce per-row cost to `O(1)`. Hook
-points: `RegisterXactCallback(XACT_EVENT_PRE_COMMIT)` to flush;
-per-rel `HashMap<Oid, Vec<(id, vector)>>` keyed by index oid.
+Phase K's `Arc<RwLock<IdMapIndex>>` cache + `PreCommit` xact
+callback pattern was originally applied only to the side-table
+path. Phase N-C extends it to the relfile path:
 
-This is independent of relfile vs side-table — same speed-up
-applies to both — but most naturally lives in the relfile module
-since per-tx pending state can be flushed by appending a single
-contiguous chain extension on commit (no rewrite-in-place needed
-for an append-only insert).
+- `src/index/insert.rs::aminsert_relfile` now mutates the cache
+  in-memory under a write guard, marks dirty, returns; the
+  actual page write is deferred to the PreCommit handler.
+- `src/xact.rs` grows a `cfg`-selected flush sink:
+  `flush_to_relfile(rel_oid, idx, state)` re-opens the index by
+  oid (RowExclusiveLock), calls `relfile::write_full`, mirrors
+  `n_vectors` into the side-table for backwards-compat queries,
+  and closes.
+- New test `relfile_aminsert_deferred_commit_bulk` (104/104 with
+  `relfile_storage`) asserts a 1k-row bulk INSERT through the
+  relfile path finishes in < 5 s; pre-fix this would have taken
+  several minutes.
 
-### 5. v1.0.x → v1.1 migration check (`HINT`)
+Same correctness guarantees as the side-table path: rollback
+invalidates the dirty entry; cross-backend writers race the
+commit-time flush (last writer wins, same window the v0.4 path
+had). Documented at the call site.
+
+### 5. v1.0.x → v1.1 migration check (`HINT`) — **DONE (v1.2.0 hardening)**
+
+`ambeginscan` now detects when an index opened under a
+`relfile_storage`-built binary has an empty / never-initialised
+main fork but a non-empty side-table row, and emits a
+`pgrx::ereport!(NOTICE, ERRCODE_FEATURE_NOT_SUPPORTED, …)` with
+a directed HINT pointing the user at
+`REINDEX INDEX <name>;` to convert. Without this, the scan would
+silently return zero rows (the relfile is empty so meta says
+`n_vectors = 0`).
+
+If you flip `relfile_storage` from default OFF to default ON in
+1.2.0 and a user upgrades, this is the single reliable signal
+they'll see telling them what's wrong.
+
 
 The brief asks for an `ambeginscan` check that detects an
 old-format (side-table-only) index after a feature-flag flip and

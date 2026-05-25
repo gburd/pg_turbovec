@@ -51,6 +51,32 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         error!("turbovec: RelationGetIndexScan returned null");
     }
 
+    // Migration HINT (Phase L hardening item 5): when the running
+    // binary has --features relfile_storage but is opening an
+    // index that was built under the older side-table path, the
+    // main fork's meta page is empty / never initialised.
+    // Emit a NOTICE pointing the user at REINDEX so they can
+    // convert without silently falling through to a confusing
+    // "empty index" result.
+    #[cfg(feature = "relfile_storage")]
+    {
+        let indexrelid = (*index_relation).rd_id;
+        let relfile_meta = crate::index::relfile::read_meta(index_relation);
+        if relfile_meta.is_none() || relfile_meta.as_ref().is_some_and(|m| m.dim == 0 && m.n_vectors == 0) {
+            // Fall back to side-table to see if a row exists there.
+            if let Some(legacy) = crate::index::persist::load_meta(indexrelid) {
+                if legacy.n_vectors > 0 {
+                    pgrx::ereport!(
+                        pgrx::PgLogLevel::NOTICE,
+                        pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "turbovec index appears to be in the legacy side-table format",
+                        "This binary was built with --features relfile_storage but the index uses the v1.0.x / v1.1.0 side-table layout. The scan will return no rows. Run `REINDEX INDEX <name>;` to migrate."
+                    );
+                }
+            }
+        }
+    }
+
     // PostgreSQL leaves xs_orderbyvals / xs_orderbynulls null when
     // RelationGetIndexScan returns; AMs that advertise
     // `amcanorderbyop = true` must allocate them themselves.

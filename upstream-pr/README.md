@@ -121,8 +121,25 @@ gh pr create --repo RyanCodrai/turbovec --title "Public Read/Write I/O API + cac
 
 ## Status
 
-- Diffs captured: ✅ (this commit)
-- Upstream tests verified locally: pending (need fresh `cargo test -p turbovec` against a clean upstream checkout)
-- PR submitted: pending (manual step; requires GitHub auth)
+- Diffs captured: ✅ (this directory)
+- Upstream tests verified locally: ✅ (`cargo test --tests --release` against
+  the draft branch on `RyanCodrai/turbovec` v0.6.0; all upstream test
+  files green)
+- Upstream issue opened: ✅ [issue #70](https://github.com/RyanCodrai/turbovec/issues/70)
+- Draft PR branch published: ✅ [`gburd/turbovec` `in-memory-io-and-pub-from-parts`](https://github.com/gburd/turbovec/tree/in-memory-io-and-pub-from-parts)
+- PR submitted: pending the by-invitation gate per upstream `CONTRIBUTING.md`
 - Upstream merged + released: pending
-- `vendor/turbovec/` removed from `pg_turbovec` and dependency switched to crates.io: blocked on the above
+- `vendor/turbovec/` removed from `pg_turbovec` and dependency switched to
+  crates.io: blocked on the above
+
+## Notes
+
+Upstream `turbovec 0.6.0` already absorbed the cached Lloyd-Max boundaries
+(`boundaries: OnceLock<Vec<f32>>` on `TurboQuantIndex`) that we'd been
+carrying separately — they arrived at the same fix independently. The
+remaining items in the issue are the in-memory `Read`/`Write` API and
+promoting `TurboQuantIndex::from_parts` (plus its `packed_codes()` /
+`scales()` accessors) from `pub(crate)` to `pub`. The diff captured
+here targets `v0.6.0` (not the original `v0.5.0` we vendored), so when
+upstream merges we can `cargo update -p turbovec` and drop
+`vendor/turbovec/` cleanly.

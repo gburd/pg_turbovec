@@ -7,11 +7,46 @@
 //! the call.
 //!
 //! v0.15: actual removal (was a no-op stub in v0.4..v0.14).
+//!
+//! ## Phase L hardening (item 6) — in-place page walk
+//!
+//! Earlier relfile builds rebuilt the entire `IdMapIndex` from
+//! disk, removed dead ids in memory, and rewrote every chain page
+//! via `relfile::write_full`. That cost O(n_vectors) of disk I/O
+//! and WAL on every VACUUM regardless of how few rows died — a
+//! single dead row in a 1 M-vector index rewrote ~200 MiB.
+//!
+//! The current implementation walks the existing chain pages and
+//! does in-place swap-removes (analogue of `IdMapIndex::remove`):
+//!
+//! 1. Read the ids chain only (~8 MiB on 1 M rows) and ask the
+//!    callback for each id; collect the dead slot indices.
+//! 2. Sort dead slots **descending** and process from the back.
+//!    For each dead slot `s` with `last = alive_count - 1`:
+//!    - if `s == last`: nothing to copy, just decrement.
+//!    - else: copy slot `last` → slot `s` on the codes / scales /
+//!      ids chains (3 page writes per swap, each WAL-logged via
+//!      `GenericXLog`), then decrement.
+//!    Descending order guarantees the source `last` row is always
+//!    a still-live row whose data hasn't been moved by an earlier
+//!    iteration.
+//! 3. Rewrite the meta page with the smaller `n_vectors` and a
+//!    bumped `am_version` (drives the cache freshness check in
+//!    `scan.rs`).
+//! 4. `RelationTruncate` to release trailing ids-chain pages
+//!    that the shrink left orphaned. Mid-file gaps between the
+//!    codes / scales / ids chains are left in place; the next
+//!    `write_full` (build / aminsert commit) re-packs.
+//!
+//! Cost: O(deleted) page writes + 1 meta write + 1 truncate, vs.
+//! the old O(total) full rewrite. WAL volume scales the same way.
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
 use crate::index::persist;
+#[cfg(feature = "relfile_storage")]
+use crate::index::page::MetaPageData;
 #[cfg(feature = "relfile_storage")]
 use crate::index::relfile;
 
@@ -48,72 +83,120 @@ unsafe fn ambulkdelete_relfile(
     callback: pg_sys::IndexBulkDeleteCallback,
     callback_state: *mut std::ffi::c_void,
 ) -> *mut pg_sys::IndexBulkDeleteResult {
-    use turbovec::IdMapIndex;
-
     let indexrelid = (*index).rd_id;
     let meta = match relfile::read_meta(index) {
         Some(m) if m.n_vectors > 0 => m,
         _ => return stats,
     };
 
-    let (codes, scales, ids) = relfile::read_full(index, &meta);
-    let mut idx = match IdMapIndex::from_id_map_parts(
-        meta.bit_width as usize,
-        meta.dim as usize,
-        meta.n_vectors as usize,
-        codes,
-        scales,
-        ids,
-    ) {
-        Ok(i) => i,
-        Err(e) => error!("turbovec ambulkdelete: corrupt relfile: {}", e),
-    };
-
     let Some(cb) = callback else {
+        // No callback supplied (cleanup pass without dead
+        // tuples) — nothing to remove.
         (*stats).num_index_tuples = meta.n_vectors as f64;
         return stats;
     };
 
-    // Snapshot the live ids before we start mutating idx (remove()
-    // does swap-remove, so iterating idx.slot_to_id() during
-    // mutation would skip / repeat slots).
-    let live_ids: Vec<u64> = idx.slot_to_id().to_vec();
-    let mut dead_count: i64 = 0;
-    for id in &live_ids {
+    // Pass 1: read the ids chain only (cheap — 8 bytes per row
+    // vs. stride_bytes for codes) and collect dead slot indices.
+    let ids = relfile::read_ids_only(index, &meta);
+    debug_assert_eq!(ids.len() as u64, meta.n_vectors);
+
+    let mut dead_slots: Vec<usize> = Vec::new();
+    for (slot, &id) in ids.iter().enumerate() {
         let mut tid = pg_sys::ItemPointerData::default();
-        pgrx::itemptr::u64_to_item_pointer(*id, &mut tid);
+        pgrx::itemptr::u64_to_item_pointer(id, &mut tid);
         let is_dead = (cb)(&mut tid as *mut _, callback_state);
         if is_dead {
-            idx.remove(*id);
-            dead_count += 1;
+            dead_slots.push(slot);
         }
     }
 
-    let n_after = idx.len() as u64;
+    let dead_count = dead_slots.len();
+    if dead_count == 0 {
+        // Nothing to remove. Don't bump am_version (no on-disk
+        // change) and don't rewrite the meta page — we want a
+        // pure read-only VACUUM pass to avoid emitting WAL.
+        (*stats).num_index_tuples = meta.n_vectors as f64;
+        return stats;
+    }
+
+    // Pass 2: swap-remove from the back. dead_slots is built in
+    // ascending order (we walked slot 0..n); reverse-iterate to
+    // process highest-index dead first. This invariant lets us
+    // copy from `alive - 1` (which is always either an unmoved
+    // original live row, or a row that was moved into a position
+    // still > current dead slot — either way the data is the
+    // canonical live data we want to preserve).
+    let mut alive: u64 = meta.n_vectors;
+    for &dead_slot in dead_slots.iter().rev() {
+        let s = dead_slot as u64;
+        let last = alive - 1;
+        if s != last {
+            // Codes chain.
+            relfile::copy_slot_in_chain(
+                index,
+                meta.codes_first,
+                meta.stride_bytes,
+                meta.rows_per_codes_page,
+                last,
+                s,
+            );
+            // Scales chain.
+            relfile::copy_slot_in_chain(
+                index,
+                meta.scales_first,
+                std::mem::size_of::<f32>() as u32,
+                meta.rows_per_scales_page,
+                last,
+                s,
+            );
+            // Ids chain. Updating the on-disk id at slot `s`
+            // matters for the next ambulkdelete pass: the
+            // callback walks ids chain -> ItemPointer -> heap
+            // tuple lookup.
+            relfile::copy_slot_in_chain(
+                index,
+                meta.ids_first,
+                std::mem::size_of::<u64>() as u32,
+                meta.rows_per_ids_page,
+                last,
+                s,
+            );
+        }
+        alive -= 1;
+    }
+    debug_assert_eq!(alive, meta.n_vectors - dead_count as u64);
+
+    // Pass 3: persist the new n_vectors via the meta page. The
+    // chain layout (codes_first / scales_first / ids_first /
+    // rows_per_*_page / stride_bytes) is preserved so the swap-
+    // removed slots remain at their on-disk positions for
+    // subsequent reads. Bump am_version so the per-backend cache
+    // (cache.rs) re-loads next scan.
+    let new_n = alive;
     let next_version = meta.am_version.saturating_add(1);
-    // `relfile::write_full` calls `RelationTruncate` itself when
-    // the new layout is smaller than the old one (Phase L
-    // hardening item 3), so a VACUUM that consolidates dead rows
-    // actually shrinks the on-disk file instead of leaving orphan
-    // trailing pages.
-    relfile::write_full(
-        index,
-        meta.bit_width,
-        meta.dim,
-        n_after,
-        idx.packed_codes(),
-        idx.scales(),
-        idx.slot_to_id(),
-        next_version,
-    );
+    relfile::write_meta_shrink_in_place(index, &meta, new_n, next_version);
+
+    // Pass 4: release trailing ids-chain pages that the shrink
+    // left orphaned. RelationTruncate emits XLOG_SMGR_TRUNCATE
+    // and is crash-safe.
+    let shrunk_meta = MetaPageData {
+        n_vectors: new_n,
+        ..meta
+    };
+    relfile::truncate_ids_tail(index, &shrunk_meta);
+
+    // Mirror count into the side-table for backwards-compat
+    // queries (`SELECT n_vectors FROM turbovec.am_storage`). The
+    // payload column stays empty under the relfile path.
     persist::save_empty_with_count(
         indexrelid,
         meta.bit_width as i32,
         meta.dim as i32,
-        n_after as i64,
+        new_n as i64,
     );
 
-    (*stats).num_index_tuples = n_after as f64;
+    (*stats).num_index_tuples = new_n as f64;
     (*stats).tuples_removed += dead_count as f64;
     stats
 }

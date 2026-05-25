@@ -413,12 +413,141 @@ impl TurboQuantIndex {
         }
     }
 
+    /// Build a `TurboQuantIndex` from raw parts AND pre-prepared
+    /// search caches. Skips the per-backend `pack::repack` and
+    /// Lloyd-Max codebook compute on the first call to
+    /// [`Self::search`].
+    ///
+    /// Embedders that persist the SIMD-blocked layout and the
+    /// codebook out-of-band (e.g. [`pg_turbovec`]'s relfile pages)
+    /// can hand them back here to make backend startup pay only
+    /// the cost of reading those bytes — no recomputation. See
+    /// [`Self::blocked_codes`] / [`Self::centroids`] /
+    /// [`Self::boundaries`] for how to capture them on the writer
+    /// side.
+    ///
+    /// `centroids.len()` must equal `1 << bit_width` and
+    /// `boundaries.len()` must equal `(1 << bit_width) - 1`. The
+    /// blocked-layout buffer is taken on faith — if it doesn't
+    /// match what `pack::repack(packed_codes, n_vectors,
+    /// bit_width, dim)` would produce, search results will be
+    /// silently wrong.
+    pub fn from_parts_with_prepared(
+        dim: Option<usize>,
+        bit_width: usize,
+        n_vectors: usize,
+        packed_codes: Vec<u8>,
+        scales: Vec<f32>,
+        blocked_codes: Vec<u8>,
+        n_blocks: usize,
+        centroids: Vec<f32>,
+        boundaries: Vec<f32>,
+    ) -> Self {
+        let s = Self {
+            dim,
+            bit_width,
+            n_vectors,
+            packed_codes,
+            scales,
+            rotation: OnceLock::new(),
+            centroids: OnceLock::new(),
+            boundaries: OnceLock::new(),
+            blocked: OnceLock::new(),
+        };
+        // Pre-fill the OnceLocks. `set` returns Err if already set;
+        // by construction the locks are fresh so it can't fail —
+        // ignore the result to keep the call site clean.
+        let _ = s.centroids.set(centroids);
+        let _ = s.boundaries.set(boundaries);
+        let _ = s.blocked.set(BlockedCache {
+            data: blocked_codes,
+            n_blocks,
+        });
+        s
+    }
+
+    /// Eagerly populate every search cache, the strict superset
+    /// of [`Self::prepare`]: rotation matrix, codebook centroids
+    /// **and boundaries**, and the SIMD-blocked layout.
+    ///
+    /// Distinct from `prepare` only in that it also primes the
+    /// `boundaries` cache, which is needed by callers that want
+    /// to read all four prepared parts back out via
+    /// [`Self::blocked_codes`] / [`Self::n_blocks`] /
+    /// [`Self::centroids`] / [`Self::boundaries`] for persistence.
+    pub fn prepare_eager(&self) {
+        self.prepare();
+        // `prepare` skips the boundaries cache because it isn't
+        // on the search hot path, but persistence-side callers
+        // need them too.
+        let bw = self.bit_width;
+        let Some(dim) = self.dim else { return };
+        self.boundaries.get_or_init(|| {
+            let (b, _) = codebook::codebook(bw, dim);
+            b
+        });
+    }
+
     pub fn packed_codes(&self) -> &[u8] {
         &self.packed_codes
     }
 
     pub fn scales(&self) -> &[f32] {
         &self.scales
+    }
+
+    /// Borrow the SIMD-blocked code layout (output of
+    /// [`pack::repack`]). [`prepare`] must have been called (or a
+    /// previous [`search`]) so the cache is populated; otherwise
+    /// this drives the cache itself, which can be expensive.
+    /// Same use case as [`Self::packed_codes`] — embedders that
+    /// page the prepared layout out to a custom storage substrate
+    /// to avoid the per-backend pack cost on cold scans.
+    pub fn blocked_codes(&self) -> &[u8] {
+        &self
+            .blocked
+            .get_or_init(|| {
+                let dim = self.dim.unwrap_or(0);
+                let (data, n_blocks) =
+                    pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
+                BlockedCache { data, n_blocks }
+            })
+            .data
+    }
+
+    /// Number of SIMD blocks in the prepared blocked layout.
+    /// Companion to [`Self::blocked_codes`].
+    pub fn n_blocks(&self) -> usize {
+        self.blocked
+            .get_or_init(|| {
+                let dim = self.dim.unwrap_or(0);
+                let (data, n_blocks) =
+                    pack::repack(&self.packed_codes, self.n_vectors, self.bit_width, dim);
+                BlockedCache { data, n_blocks }
+            })
+            .n_blocks
+    }
+
+    /// Borrow the Lloyd-Max codebook centroids. Forces the
+    /// codebook computation if it hasn't been cached yet.
+    pub fn centroids(&self) -> &[f32] {
+        let bw = self.bit_width;
+        let dim = self.dim.unwrap_or(0);
+        self.centroids.get_or_init(|| {
+            let (_, c) = codebook::codebook(bw, dim);
+            c
+        })
+    }
+
+    /// Borrow the Lloyd-Max codebook decision boundaries. Forces
+    /// the codebook computation if it hasn't been cached yet.
+    pub fn boundaries(&self) -> &[f32] {
+        let bw = self.bit_width;
+        let dim = self.dim.unwrap_or(0);
+        self.boundaries.get_or_init(|| {
+            let (b, _) = codebook::codebook(bw, dim);
+            b
+        })
     }
 
     /// Remove the vector at `idx` in O(1) by swapping with the last vector.

@@ -482,12 +482,15 @@ pub(crate) unsafe fn read_chain(
 }
 
 /// High-level helper: write a fully-built `IdMapIndex` to the
-/// relation, replacing any existing pages.
+/// relation, replacing any existing pages. Skips the prepared
+/// layout (no blocked chain, no inline codebook) — callers that
+/// need cold-scan acceleration should go through
+/// [`write_full_with_prepared`] instead.
 ///
-/// Strategy: rewrite leading blocks in place, fresh-extend the
-/// tail, and `RelationTruncate` if the new layout is smaller than
-/// the existing one. Every page write is wrapped in `GenericXLog`
-/// for crash recovery.
+/// Used today only by ambulkdelete's bookkeeping path; the build
+/// + commit-flush paths route through `write_full_with_prepared`
+/// so backends opening the index skip the per-backend
+/// `pack::repack` and Lloyd-Max compute (Phase P).
 ///
 /// # Safety
 ///
@@ -496,6 +499,7 @@ pub(crate) unsafe fn read_chain(
 /// both; aminsert and ambulkdelete take the heap-tuple lock,
 /// which is sufficient for the existing single-writer SPI path
 /// and remains so here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn write_full(
     rel: pg_sys::Relation,
     bit_width: u8,
@@ -506,10 +510,100 @@ pub(crate) unsafe fn write_full(
     slot_to_id: &[u64],
     am_version: u32,
 ) {
+    write_full_inner(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        packed_codes,
+        scales,
+        slot_to_id,
+        am_version,
+        None,
+    );
+}
+
+/// Prepared parts of an [`IdMapIndex`] required for Phase P's
+/// blocked-layout persistence.
+///
+/// `blocked_codes.len()` must equal the byte length of the output
+/// of `pack::repack(packed_codes, n_vectors, bit_width, dim)`,
+/// `n_blocks` the matching block count, and `centroids` /
+/// `boundaries` the Lloyd-Max codebook for `(bit_width, dim)`.
+/// All four come straight off `IdMapIndex` after a
+/// `prepare_eager()` call.
+pub(crate) struct PreparedParts<'a> {
+    pub blocked_codes: &'a [u8],
+    pub n_blocks: u32,
+    pub centroids: &'a [f32],
+    pub boundaries: &'a [f32],
+}
+
+/// High-level helper: write a fully-built `IdMapIndex` plus the
+/// prepared SIMD-blocked layout and inline codebook to the
+/// relation. Backends opening the resulting v2 index skip both
+/// `pack::repack` and the Lloyd-Max codebook compute on first
+/// scan — the headline Phase P win.
+///
+/// # Safety
+///
+/// Same constraints as [`write_full`]: caller holds an exclusive
+/// relation lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn write_full_with_prepared(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    scales: &[f32],
+    slot_to_id: &[u64],
+    am_version: u32,
+    prepared: PreparedParts<'_>,
+) {
+    write_full_inner(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        packed_codes,
+        scales,
+        slot_to_id,
+        am_version,
+        Some(prepared),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_full_inner(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    scales: &[f32],
+    slot_to_id: &[u64],
+    am_version: u32,
+    prepared: Option<PreparedParts<'_>>,
+) {
     assert_eq!(slot_to_id.len() as u64, n_vectors);
     assert_eq!(scales.len() as u64, n_vectors);
 
-    let meta = MetaPageData::plan(bit_width, dim, n_vectors, am_version);
+    let (blocked_bytes, n_blocks_blocked) = match &prepared {
+        Some(p) => (p.blocked_codes.len() as u64, p.n_blocks),
+        None => (0, 0),
+    };
+    let mut meta = MetaPageData::plan_with_blocked(
+        bit_width,
+        dim,
+        n_vectors,
+        am_version,
+        blocked_bytes,
+        n_blocks_blocked,
+    );
+    if let Some(p) = &prepared {
+        meta.set_codebook(p.centroids, p.boundaries);
+    }
     let new_total = meta.total_blocks().max(1);
 
     // Step 1: ensure the relation is at least `new_total` blocks
@@ -565,6 +659,24 @@ pub(crate) unsafe fn write_full(
             meta.rows_per_ids_page,
             n_vectors,
         );
+
+        // v2: prepared SIMD-blocked layout. Stored as a flat
+        // byte chain (stride = 1, rows_per_page = PAYLOAD_BYTES)
+        // since the blocked buffer doesn't have a meaningful
+        // per-row stride at this layer — the consumer
+        // (turbovec::search) treats it as opaque bytes.
+        if let Some(p) = &prepared {
+            if !p.blocked_codes.is_empty() {
+                write_chain_at(
+                    rel,
+                    meta.blocked_first,
+                    p.blocked_codes,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    p.blocked_codes.len() as u64,
+                );
+            }
+        }
     }
 
     // Step 3 — Phase L hardening (item 3): release any trailing
@@ -712,6 +824,21 @@ pub(crate) unsafe fn read_ids_only(rel: pg_sys::Relation, meta: &MetaPageData) -
 /// commit-time flush) re-plans from scratch, packing the chains
 /// tightly.
 ///
+/// **Phase P / v2 invariant:** the prepared SIMD-blocked chain
+/// (`blocked_first` / `blocked_count` / `blocked_bytes`) and the
+/// inline codebook (`codebook_n_levels` + `centroids` +
+/// `boundaries`) are *not* updated by the swap-remove pass; the
+/// blocked layout was derived from the old `packed_codes` and no
+/// longer matches the post-swap order. Leaving it on disk would
+/// give readers wrong search results until the next `REINDEX`.
+///
+/// We blank out the prepared-layout fields here so
+/// `MetaPageData::has_prepared_layout()` returns false and
+/// readers fall back to per-backend `pack::repack`. The on-disk
+/// blocked-chain pages are left where they are (mid-file gaps)
+/// to avoid having to re-extend the relation; the next
+/// `write_full_with_prepared` re-packs everything tight.
+///
 /// # Safety
 ///
 /// Caller must hold an exclusive relation lock.
@@ -727,6 +854,19 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
         codes_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_codes_page),
         scales_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_scales_page),
         ids_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_ids_page),
+        // Phase P: invalidate the prepared layout. The blocked
+        // chain on disk is now stale (old slot order); readers
+        // see has_prepared_layout() == false and fall back to
+        // per-backend repack until the next full rewrite. We
+        // bump version to VERSION so the meta page itself stays
+        // current (it's still v2-shaped on the wire).
+        blocked_first: 0,
+        blocked_count: 0,
+        blocked_bytes: 0,
+        n_blocks_blocked: 0,
+        codebook_n_levels: 0,
+        centroids: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS],
+        boundaries: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS - 1],
         ..*old
     };
     write_meta(rel, &new_meta);
@@ -800,4 +940,28 @@ pub(crate) unsafe fn read_full(
         .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect();
     (codes, scales, ids)
+}
+
+/// Read the prepared SIMD-blocked layout from the v2 chain.
+/// Returns the raw byte buffer; caller is expected to know
+/// `n_blocks` from the meta page.
+///
+/// Returns an empty vector for v1 indexes or empty v2 indexes
+/// (signalled by `meta.blocked_bytes == 0`); in either case the
+/// scan path falls back to per-backend `pack::repack`.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_blocked(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<u8> {
+    if meta.blocked_bytes == 0 || meta.blocked_first == 0 {
+        return Vec::new();
+    }
+    read_chain(
+        rel,
+        meta.blocked_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        meta.blocked_bytes,
+    )
 }

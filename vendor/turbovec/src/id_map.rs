@@ -280,6 +280,36 @@ impl IdMapIndex {
         self.inner.prepare();
     }
 
+    /// Eagerly populate every inner search cache including the
+    /// Lloyd-Max boundaries. See
+    /// [`TurboQuantIndex::prepare_eager`].
+    pub fn prepare_eager(&self) {
+        self.inner.prepare_eager();
+    }
+
+    /// Borrow the SIMD-blocked codes layout cached on the inner
+    /// index. See [`TurboQuantIndex::blocked_codes`].
+    pub fn blocked_codes(&self) -> &[u8] {
+        self.inner.blocked_codes()
+    }
+
+    /// Number of SIMD blocks in the prepared blocked layout.
+    pub fn n_blocks(&self) -> usize {
+        self.inner.n_blocks()
+    }
+
+    /// Borrow the Lloyd-Max codebook centroids. See
+    /// [`TurboQuantIndex::centroids`].
+    pub fn centroids(&self) -> &[f32] {
+        self.inner.centroids()
+    }
+
+    /// Borrow the Lloyd-Max codebook decision boundaries. See
+    /// [`TurboQuantIndex::boundaries`].
+    pub fn boundaries(&self) -> &[f32] {
+        self.inner.boundaries()
+    }
+
     /// Serialize to a `.tvim` file — the inner quantized index plus the
     /// id-map side-tables. Round-trips exactly through [`Self::load`].
     pub fn write(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
@@ -347,6 +377,49 @@ impl IdMapIndex {
         let dim_opt = if dim == 0 { None } else { Some(dim) };
         let inner =
             TurboQuantIndex::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales);
+        Self::finalise_from_inner(inner, slot_to_id)
+    }
+
+    /// Same as [`Self::from_id_map_parts`] but additionally takes
+    /// pre-prepared search caches — the SIMD-blocked layout (with
+    /// its `n_blocks` count) and the Lloyd-Max codebook (centroids
+    /// + boundaries). The first [`Self::search`] call on the
+    /// returned index does not run `pack::repack` or the codebook
+    /// computation; it reads the supplied buffers directly.
+    ///
+    /// Used by [`pg_turbovec`]'s relfile reader to skip the
+    /// per-backend ~26 s cold-scan startup cost on large indexes.
+    pub fn from_id_map_parts_with_prepared(
+        bit_width: usize,
+        dim: usize,
+        n_vectors: usize,
+        packed_codes: Vec<u8>,
+        scales: Vec<f32>,
+        slot_to_id: Vec<u64>,
+        blocked_codes: Vec<u8>,
+        n_blocks: usize,
+        centroids: Vec<f32>,
+        boundaries: Vec<f32>,
+    ) -> std::io::Result<Self> {
+        let dim_opt = if dim == 0 { None } else { Some(dim) };
+        let inner = TurboQuantIndex::from_parts_with_prepared(
+            dim_opt,
+            bit_width,
+            n_vectors,
+            packed_codes,
+            scales,
+            blocked_codes,
+            n_blocks,
+            centroids,
+            boundaries,
+        );
+        Self::finalise_from_inner(inner, slot_to_id)
+    }
+
+    fn finalise_from_inner(
+        inner: TurboQuantIndex,
+        slot_to_id: Vec<u64>,
+    ) -> std::io::Result<Self> {
         let id_to_slot: HashMap<u64, usize> = slot_to_id
             .iter()
             .enumerate()

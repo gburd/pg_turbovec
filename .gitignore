@@ -30,3 +30,6 @@ Cargo.lock.bak
 vendor/turbovec/.cargo-ok
 vendor/turbovec/.cargo_vcs_info.json
 vendor/turbovec/Cargo.toml.orig
+
+# vendor turbovec build artifacts (not part of the patch we ship)
+vendor/turbovec/target/

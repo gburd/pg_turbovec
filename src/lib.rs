@@ -672,6 +672,40 @@ mod tests {
         assert!(n_idx_path == Some(1) || n_idx_path == Some(2) || n_idx_path == Some(3));
     }
 
+    /// Wire-format-version stability contract (see
+    /// `docs/UPGRADING.md`): patch releases (X.Y.Z → X.Y.Z+1) MUST
+    /// NOT change the on-disk index format. The compiled `VERSION`
+    /// constant in `src/index/page.rs` is the single source of
+    /// truth; this test asserts it matches the value that v1.3.0
+    /// (the first stable release of the relfile-resident format)
+    /// emitted. Any future patch that changes it should fail this
+    /// test, the `scripts/drift-check.sh` script, and the
+    /// release-engineer's review — in that order.
+    ///
+    /// Bumping `VERSION` is allowed in minor / major releases. When
+    /// you do, update `EXPECTED_WIRE_FORMAT_VERSION` here AND add
+    /// the matching detection primitive (see
+    /// `relfile_legacy_v1_detection_primitive`) AND wire the
+    /// REINDEX `ERROR` in `ambeginscan` AND a row in
+    /// `docs/UPGRADING.md` migration matrix.
+    #[pg_test]
+    fn wire_format_version_is_stable() {
+        // The version emitted by v1.3.0. Bump this only as part of
+        // a deliberate minor/major release with a migration story.
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 2;
+        assert_eq!(
+            crate::index::page::VERSION,
+            EXPECTED_WIRE_FORMAT_VERSION,
+            "src/index/page.rs::VERSION changed from {} to {}; if intentional, update EXPECTED_WIRE_FORMAT_VERSION here, add a detection primitive, wire the REINDEX ERROR in ambeginscan, and add a row to docs/UPGRADING.md migration matrix. See docs/UPGRADING.md for the full release-engineering checklist.",
+            EXPECTED_WIRE_FORMAT_VERSION,
+            crate::index::page::VERSION,
+        );
+        assert!(
+            crate::index::page::MIN_DECODE_VERSION <= crate::index::page::VERSION,
+            "MIN_DECODE_VERSION must be <= VERSION"
+        );
+    }
+
     #[pg_test]
     fn search_k_guc_round_trip() {
         Spi::run("SET turbovec.search_k = 250").unwrap();

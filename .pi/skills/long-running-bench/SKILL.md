@@ -11,7 +11,7 @@ This skill encodes the heartbeat pattern that prevents the recurrence.
 
 ## The wrapper
 
-`bench/scripts/lib/with-heartbeat.sh` (~80 lines of bash) wraps any command. It:
+`benches/scripts/lib/with-heartbeat.sh` (~80 lines of bash) wraps any command. It:
 
 1. Writes a banner line to `<log>` listing the command + interval.
 2. Forks a background loop that appends `. [label HH:MM:SS elapsed]` to `<log>` every `$HEARTBEAT_SECS` (default 60).
@@ -28,33 +28,25 @@ When the dispatched task includes any single command expected to run > 60 second
 1. **Wrap with `with-heartbeat.sh`**:
 
    ```bash
-   ssh gburd@arnold 'nohup bash bench/scripts/lib/with-heartbeat.sh /scratch/install.log \
+   ssh gburd@arnold 'nohup bash benches/scripts/lib/with-heartbeat.sh /scratch/install.log \
         cargo pgrx install --release \
             --features "pg17 experimental_index_am relfile_storage" \
         > /dev/null 2>&1 &'
    ```
 
-2. **Poll the log's mtime, not the command itself**:
+2. **Poll via the companion `poll-heartbeat.sh`** — returns one of `STILL_RUNNING` (rc=1), `HUNG` (rc=2), or `DONE rc=N` (rc=N):
 
    ```bash
-   # Liveness check from the parent agent's perspective.
-   # If the log mtime hasn't moved in 3*HEARTBEAT_SECS, the
-   # wrapped command is hung; otherwise it's making progress.
-   ssh gburd@arnold 'stat -c %Y /scratch/install.log'
+   ssh gburd@arnold 'bash /scratch/pg_turbovec-bench/pg_turbovec/benches/scripts/poll-heartbeat.sh /scratch/install.log 60'
    ```
 
-3. **Read completion via the DONE line**:
-
-   ```bash
-   ssh gburd@arnold 'grep -E "^\[heartbeat\] DONE" /scratch/install.log'
-   # exits 0 with a line if done, exits 1 if still running.
-   ```
+3. **Drive the agent loop off the rc** — `STILL_RUNNING` keeps polling, `HUNG` triggers a steer / abort, `DONE` lets the agent move on with the wrapped command's exit code.
 
 ## Dispatch prompt template
 
 Insert this block into any prompt that dispatches a long-running command:
 
-> **Heartbeat convention.** Every command expected to run > 60 seconds MUST be wrapped in `bench/scripts/lib/with-heartbeat.sh <log-path> <cmd> <args...>`. The parent will poll `stat -c %Y <log-path>` to verify liveness; if mtime hasn't moved in 3 minutes the parent will assume hang and steer/abort. Set `HEARTBEAT_SECS` lower for noisier-but-quicker feedback (e.g. 30 for builds), higher for low-noise long jobs (e.g. 300 for an overnight ANN build).
+> **Heartbeat convention.** Every command expected to run > 60 seconds MUST be wrapped in `benches/scripts/lib/with-heartbeat.sh <log-path> <cmd> <args...>`. The parent will poll `stat -c %Y <log-path>` to verify liveness; if mtime hasn't moved in 3 minutes the parent will assume hang and steer/abort. Set `HEARTBEAT_SECS` lower for noisier-but-quicker feedback (e.g. 30 for builds), higher for low-noise long jobs (e.g. 300 for an overnight ANN build).
 
 ## Why mtime not tail
 

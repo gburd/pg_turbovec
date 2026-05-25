@@ -153,7 +153,7 @@ The first asserts:
   manager path actually went through shared_buffers).
 
 The second logs the timings via `eprintln!` (lost to PG's log on
-pgrx-test runs; the `bench/sql/phase_l_cold_scan.sql` script is
+pgrx-test runs; the `benches/sql/phase_l_cold_scan.sql` script is
 the practical timing harness — see below).
 
 ---
@@ -163,7 +163,7 @@ the practical timing harness — see below).
 **Cluster:** `~/.pgrx/install-pg16` (debug build, 32-shared-buffers
 default), running on a quiet workstation.
 
-**Corpus:** `bench/sql/phase_l_cold_scan.sql` builds a 2000-row /
+**Corpus:** `benches/sql/phase_l_cold_scan.sql` builds a 2000-row /
 384-d / 4-bit index, then times the first and second ORDER BY in
 the same backend.
 
@@ -194,12 +194,12 @@ To run the full bench:
 ```bash
 # install side-table build, time it
 cargo pgrx install --no-default-features --features "pg16 experimental_index_am"
-cargo pgrx run pg16   # then \i bench/sql/phase_l_cold_scan.sql
+cargo pgrx run pg16   # then \i benches/sql/phase_l_cold_scan.sql
 
 # install relfile build, time it
 cargo pgrx install --no-default-features \
     --features "pg16 experimental_index_am relfile_storage"
-cargo pgrx run pg16   # \i bench/sql/phase_l_cold_scan.sql
+cargo pgrx run pg16   # \i benches/sql/phase_l_cold_scan.sql
 ```
 
 (Caveat: `cargo pgrx install` with different feature sets may
@@ -231,7 +231,7 @@ Verification:
 - `relfile_wal_emit_and_truncate` pgrx-test asserts
   `pg_current_wal_lsn` advances over `ambuild`, `aminsert`, and
   `ambulkdelete`.
-- `bench/sql/phase_n_b_crash_recovery.sql` is the manual
+- `benches/sql/phase_n_b_crash_recovery.sql` is the manual
   e2e harness for `pg_ctl stop -m immediate` + restart.
 
 ### 2. `ambuildempty` for unlogged indexes — **DONE (v1.2.0 hardening)**
@@ -367,7 +367,7 @@ Verification:
     asymptotic win is in `O(deleted)` vs `O(total)` page writes).
 - pgrx tests can't run real `VACUUM` (it forbids tx blocks); the
   end-to-end `VACUUM`-after-`DELETE` path is exercised by
-  `bench/sql/phase_n_b_crash_recovery.sql` outside the harness.
+  `benches/sql/phase_n_b_crash_recovery.sql` outside the harness.
 
 ### 7. Large-corpus bench (`benches/recall.rs` extension)
 
@@ -399,7 +399,7 @@ src/index/scan.rs                   <-- L.5 ambeginscan branch
 src/index/vacuum.rs                 <-- L.6 ambulkdelete branch
 src/index/persist.rs                <-- new save_empty_with_count helper
 src/lib.rs                          <-- 2 new pgrx tests
-bench/sql/phase_l_cold_scan.sql (new) <-- timing harness
+benches/sql/phase_l_cold_scan.sql (new) <-- timing harness
 docs/PHASE_L_PROGRESS.md (this file)
 vendor/turbovec/src/id_map.rs       <-- 4 fields/methods made `pub`
 ```

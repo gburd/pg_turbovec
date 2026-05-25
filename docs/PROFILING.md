@@ -53,7 +53,7 @@ question.
 ```bash
 # Connect to a PG cluster with pg_turbovec installed and a
 # bench_dbpedia database holding the 1M corpus.
-bash bench/scripts/profile_warm_scan.sh
+bash benches/scripts/profile_warm_scan.sh
 ```
 
 Output:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench/scripts/profile_warm_scan.sh
+# benches/scripts/profile_warm_scan.sh
 #
 # Item 5 from the v1.2.0 audit proposal: profile the warm-scan path
 # to understand the 1.3-1.6× warm-p50 multiplier vs HNSW on
@@ -10,7 +10,7 @@
 # Usage (on arnold or another bench host with the bench_dbpedia
 # corpus loaded):
 #
-#   bash bench/scripts/profile_warm_scan.sh
+#   bash benches/scripts/profile_warm_scan.sh
 #
 # Produces:
 #   /tmp/turbovec-warm-scan.perf      # raw perf data

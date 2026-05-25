@@ -31,7 +31,7 @@ so two concurrent SQL clients are operating on **two separate
 mutexes**. To answer "would the mutex contend?" we therefore need
 two complementary benchmarks:
 
-1. **`bench/concurrent.sh`** — pgbench drives N concurrent backends
+1. **`benches/scripts/concurrent.sh`** — pgbench drives N concurrent backends
    against `turbovec.knn(...)` over the same table. Each backend
    has its own cache. This measures the *real* customer-visible
    QPS at concurrency N. It is dominated by per-backend SPI
@@ -118,7 +118,7 @@ roughly 100 × cheaper, which is not on any current roadmap.
 ## 4. Cross-backend bench: pgbench
 
 ```bash
-DURATION=10 bash bench/concurrent.sh
+DURATION=10 bash benches/scripts/concurrent.sh
 ```
 
 | Clients | TPS  | avg lat | speedup |
@@ -168,8 +168,8 @@ data point and within noise at N=8 (mutex is actually slightly
 
 What we did instead:
 
-- Committed `bench/concurrent.sh` and the pgbench script
-  (`bench/sql/knn_query.sql`) so future work has a reproducible
+- Committed `benches/scripts/concurrent.sh` and the pgbench script
+  (`benches/sql/knn_query.sql`) so future work has a reproducible
   cross-backend measurement.
 - Committed `benches/concurrent_knn.rs` with the `mutex` /
   `nolock` toggle so future work can re-run the contention
@@ -213,12 +213,12 @@ DURATION_S=5 MODE=nolock cargo bench --bench concurrent_knn \
 # Cross-backend bench.
 cargo pgrx install --release --features pg16 --no-default-features
 cargo pgrx start  pg16
-DURATION=10 bash bench/concurrent.sh
+DURATION=10 bash benches/scripts/concurrent.sh
 
 ls benches/results/
 ```
 
-`bench/concurrent.sh` accepts environment overrides:
+`benches/scripts/concurrent.sh` accepts environment overrides:
 
 | Var          | Default              | Meaning                                      |
 |--------------|----------------------|----------------------------------------------|

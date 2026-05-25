@@ -4,10 +4,10 @@
 -- Run with:
 --   # install both feature configurations into separate clusters
 --   cargo pgrx install --no-default-features --features "pg16 experimental_index_am" --release
---   cargo pgrx run pg16 -- -c "\\i bench/sql/phase_l_cold_scan.sql"
+--   cargo pgrx run pg16 -- -c "\\i benches/sql/phase_l_cold_scan.sql"
 --   # then under relfile:
 --   cargo pgrx install --no-default-features --features "pg16 experimental_index_am relfile_storage" --release
---   cargo pgrx run pg16 -- -c "\\i bench/sql/phase_l_cold_scan.sql"
+--   cargo pgrx run pg16 -- -c "\\i benches/sql/phase_l_cold_scan.sql"
 --
 -- The script:
 --   1. (re)builds the corpus + index in a fresh schema.

@@ -1,17 +1,13 @@
 //! Phase 4 — `turbovec` PostgreSQL index access method.
 //!
-//! **EXPERIMENTAL** — only built when the `experimental_index_am`
-//! Cargo feature is enabled. See `docs/INDEXAM.md` for the design
-//! and the test plan that gates promotion to v0.5 default-on.
-//!
 //! Module map:
 //! - `mod.rs` (this file) — `IndexAmRoutine` builder, the
 //!   `turbovec_index_handler` SQL function, and the `extension_sql!`
 //!   block that creates the access method and operator classes.
 //! - `options.rs` — `bit_width` / `dim` reloption parser
 //!   (`amoptions` callback).
-//! - `persist.rs` — SPI helpers backing the `turbovec.am_storage`
-//!   side table.
+//! - `page.rs` — meta-page byte layout for the relfile main fork.
+//! - `relfile.rs` — buffer-manager I/O for the relfile pages.
 //! - `build.rs` — `ambuild` / `ambuildempty`.
 //! - `insert.rs` — `aminsert`.
 //! - `scan.rs` — `ambeginscan` / `amrescan` / `amgettuple` /
@@ -40,10 +36,7 @@ mod build;
 mod cost;
 mod insert;
 mod options;
-#[cfg(feature = "relfile_storage")]
 pub(crate) mod page;
-pub(crate) mod persist;
-#[cfg(feature = "relfile_storage")]
 pub(crate) mod relfile;
 mod scan;
 pub(crate) mod vacuum;
@@ -183,38 +176,13 @@ extension_sql!(
 
 extension_sql!(
     r"
-    -- Side table backing the `turbovec` access method.
-    CREATE TABLE IF NOT EXISTS turbovec.am_storage (
-        indexrelid  oid PRIMARY KEY,
-        bit_width   int4 NOT NULL,
-        dim         int4 NOT NULL,
-        n_vectors   int8 NOT NULL,
-        payload     bytea NOT NULL,
-        version     int4 NOT NULL,
-        live_ids    bytea NOT NULL DEFAULT ''::bytea,
-        updated_at  timestamptz NOT NULL DEFAULT now()
-    );
-    -- Live u64 ids in little-endian; one row per index.
-    -- Backwards-compat: existing v0.x rows that lack this column
-    -- get an empty bytea, which means ambulkdelete falls back to
-    -- a no-op (same behaviour as v0.4..v0.14).
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'turbovec'
-              AND table_name = 'am_storage'
-              AND column_name = 'live_ids'
-        ) THEN
-            ALTER TABLE turbovec.am_storage
-                ADD COLUMN live_ids bytea NOT NULL DEFAULT ''::bytea;
-        END IF;
-    END$$;
-    -- payload can be very large; force out-of-line uncompressed
-    -- storage so we never accidentally PGLZ-compress turbovec's
-    -- already-quantised bytes.
-    ALTER TABLE turbovec.am_storage ALTER COLUMN payload SET STORAGE EXTERNAL;
-    ALTER TABLE turbovec.am_storage ALTER COLUMN live_ids SET STORAGE EXTERNAL;
+    -- Phase Q (v1.3.0): the side-table `turbovec.am_storage` is
+    -- gone. All index state lives in the index relation's main
+    -- fork via the relfile path (the only storage strategy).
+    -- Drop any leftover row from a v1.0.x..v1.2.0 install. Users
+    -- with existing turbovec indexes must `REINDEX INDEX <name>;`
+    -- after upgrade — `ambeginscan` errors loudly otherwise.
+    DROP TABLE IF EXISTS turbovec.am_storage CASCADE;
 
     -- Register the access method.
     CREATE ACCESS METHOD turbovec

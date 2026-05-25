@@ -1,6 +1,6 @@
 //! Backend-local cache of materialised `turbovec::IdMapIndex`
-//! instances, used by both `turbovec.knn()` and (when the
-//! `experimental_index_am` feature is on) the index AM scan path.
+//! instances, used by both `turbovec.knn()` and the index AM
+//! scan path.
 //!
 //! Cache keys are `(rel_oid, attnum_or_zero, bit_width, dim)`.
 //! `attnum = 0` is reserved for the index AM path (the index relation
@@ -9,24 +9,25 @@
 //!
 //! Invalidation is best-effort:
 //! * Each entry stores the relation's `pg_class.relfilenode` and
-//!   either `count(*)` (knn path) or the `am_storage.version`
-//!   (AM path) at load time. Relfile rewrites (CLUSTER, VACUUM
-//!   FULL, REINDEX, TRUNCATE) bump the relfilenode, and ordinary
-//!   DML changes the row count / bumps the version; either
-//!   mismatch forces a rebuild on the next lookup.
+//!   either `count(*)` (knn path) or the relfile meta page's
+//!   `am_version` (AM path) at load time. Relfile rewrites
+//!   (CLUSTER, VACUUM FULL, REINDEX, TRUNCATE) bump the
+//!   relfilenode, and ordinary DML changes the row count / bumps
+//!   the version; either mismatch forces a rebuild on the next
+//!   lookup.
 //! * Total cache size capped at `turbovec.cache_size_mb`. When the
 //!   cap is exceeded the LRU entry is evicted.
 //!
-//! ## Mutation (v1.1, AM path)
+//! ## Mutation (AM path)
 //!
 //! `aminsert` mutates the cached `IdMapIndex` in place under a
 //! `parking_lot::RwLock` write guard, then marks the entry dirty
 //! and bumps a per-entry `PersistState` mirror that tracks the
-//! side-table fields (`bit_width`, `dim`, `n_vectors`, `version`,
-//! `live_ids`). A transaction `PreCommit` callback drains every
-//! dirty entry and runs a single `persist::save` per index, then
-//! clears the dirty flag and updates the freshness slot to match
-//! the new on-disk version.
+//! relfile-meta-page fields (`bit_width`, `dim`, `n_vectors`,
+//! `version`, `live_ids`). A transaction `PreCommit` callback
+//! drains every dirty entry and runs a single relfile rewrite
+//! per index, then clears the dirty flag and updates the
+//! freshness slot to match the new on-disk `am_version`.
 //!
 //! Concurrency: PostgreSQL backends are single-threaded and our AM
 //! advertises `amcanparallel = false`, so the RwLock never sees
@@ -36,7 +37,7 @@
 //!
 //! Rollback: on `XACT_EVENT_ABORT` the dirty entries are evicted
 //! from the cache so the next access reloads the committed state
-//! from `am_storage`. We do not journal undo information.
+//! from the relfile pages. We do not journal undo information.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -58,10 +59,10 @@ pub struct CacheKey {
     pub dim: u32,
 }
 
-/// Mutable side-table state mirrored alongside an AM-path cache
-/// entry. Maintained by `aminsert` and flushed to `am_storage` by
-/// the `PreCommit` xact callback. `None` for the knn path
-/// (read-only snapshots).
+/// Mutable mirror of relfile meta-page state alongside an AM-path
+/// cache entry. Maintained by `aminsert` and flushed by the
+/// `PreCommit` xact callback. `None` for the knn path (read-only
+/// snapshots).
 #[derive(Clone)]
 pub struct PersistState {
     pub bit_width: i32,
@@ -84,19 +85,19 @@ struct Entry {
     /// (treated as "always stale" so the next lookup rebuilds).
     relfilenode: u32,
     /// Freshness signal. For the knn path this is `count(*)`; for
-    /// the AM path this is the persisted `am_storage.version` at
-    /// load time, advanced to `persist.version` after a successful
-    /// commit-time persist.
+    /// the AM path this is the relfile meta page's `am_version`
+    /// at load time, advanced to `persist.version` after a
+    /// successful commit-time persist.
     n_rows: i64,
     /// Insertion order for LRU eviction. Higher = more recently used.
     seq: u64,
     /// Set by `aminsert` once the in-memory index has been mutated
     /// past the persisted snapshot. Cleared by the `PreCommit` hook
-    /// after `persist::save` succeeds, or by `invalidate_dirty`
+    /// after the relfile rewrite succeeds, or by `invalidate_dirty`
     /// after `XACT_EVENT_ABORT`.
     dirty: bool,
-    /// AM-path mirror of the `am_storage` row. `None` for entries
-    /// installed by the read-only knn path.
+    /// AM-path mirror of the relfile meta-page fields. `None` for
+    /// entries installed by the read-only knn path.
     persist: Option<PersistState>,
 }
 
@@ -140,9 +141,9 @@ pub fn lookup(
 
 /// AM-mutation lookup: returns the cached entry whenever the
 /// `relfilenode` matches, regardless of the version freshness slot.
-/// `aminsert` uses this so a bulk insert doesn't pay an SPI
-/// `am_storage`-version SELECT per row — the in-backend cache is
-/// the authoritative copy for the duration of the transaction. The
+/// `aminsert` uses this so a bulk insert doesn't pay a meta-page
+/// version read per row — the in-backend cache is the
+/// authoritative copy for the duration of the transaction. The
 /// scan path keeps using [`lookup`] so cross-session committed
 /// inserts are visible to other backends.
 ///
@@ -180,8 +181,8 @@ pub fn am_lookup_for_mutation(
 
 /// AM-scan visibility lookup: find the dirty AM-path cache entry
 /// for `rel_oid` with `attnum = 0`, regardless of `bit_width` or
-/// `dim`. Used by the scan path when the on-disk side-table row
-/// is the `(dim = 0, n_vectors = 0)` sentinel written by
+/// `dim`. Used by the scan path when the relfile meta page is
+/// the `(dim = 0, n_vectors = 0)` sentinel written by
 /// `ambuildempty` — the in-memory mirror has the truthful
 /// `(bit_width, dim, n_vectors, version)` tuple. Returns the cache
 /// key and a snapshot of the persist-state mirror alongside the
@@ -231,7 +232,7 @@ pub fn insert(
 /// AM-path install: insert or replace the entry for `key` and
 /// attach the supplied `PersistState` mirror so subsequent
 /// `aminsert` calls can mutate the in-memory index and defer the
-/// `am_storage` write to commit time.
+/// relfile rewrite to commit time.
 pub fn am_install(
     key: CacheKey,
     index: IdMapIndex,
@@ -279,9 +280,10 @@ pub fn am_mark_dirty<F: FnOnce(&mut PersistState)>(key: CacheKey, f: F) -> bool 
 }
 
 /// Snapshot of a dirty AM-path entry that the `PreCommit` xact
-/// callback can flush to `am_storage`. We hand the caller the
-/// `Arc<RwLock<IdMapIndex>>` so it can take a read guard for the
-/// duration of `persist::save` without holding the cache mutex.
+/// callback can flush to the relfile main fork. We hand the caller
+/// the `Arc<RwLock<IdMapIndex>>` so it can take a read guard for
+/// the duration of the relfile rewrite without holding the cache
+/// mutex.
 pub struct DirtyEntry {
     pub key: CacheKey,
     pub index: Arc<RwLock<IdMapIndex>>,
@@ -290,7 +292,7 @@ pub struct DirtyEntry {
 
 /// Snapshot every currently-dirty AM-path entry. Does **not**
 /// clear the dirty flag — call [`clear_dirty`] after each
-/// `persist::save` succeeds, so a panic mid-flush leaves the
+/// relfile rewrite succeeds, so a panic mid-flush leaves the
 /// remaining entries dirty for the matching `Abort` callback to
 /// invalidate.
 pub fn drain_dirty() -> Vec<DirtyEntry> {
@@ -314,8 +316,8 @@ pub fn drain_dirty() -> Vec<DirtyEntry> {
 
 /// Mark `key`'s entry clean and advance its freshness slot to the
 /// current `persist.version`, so subsequent in-backend lookups hit
-/// without forcing another reload. Called after `persist::save`
-/// succeeds.
+/// without forcing another reload. Called after the relfile
+/// rewrite succeeds.
 pub fn clear_dirty(key: CacheKey) {
     let mut g = CACHE.lock();
     if let Some(entry) = g.get_mut(&key) {

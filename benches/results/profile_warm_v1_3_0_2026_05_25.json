@@ -1,0 +1,70 @@
+{
+  "head": "99e5dd7",
+  "build_profile": "release",
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9",
+  "extension_version": "1.3.0",
+  "corpus": "dbpedia-entities-openai-1M (1 000 000 x 1536-d)",
+  "index": "docs_tv_4bit (turbovec, bit_width=4, vec_cosine_ops)",
+  "session_settings": {
+    "enable_seqscan": "off",
+    "search_path": "turbovec, public",
+    "turbovec.search_k": 100,
+    "jit": "off"
+  },
+  "perf_settings": {
+    "frequency_hz": 999,
+    "sampling_duration_s": 10,
+    "n_queries_during_sampling": 50,
+    "kernel_perf_event_paranoid": "-1",
+    "perf_binary": "/nix/store/crhkqkbin51g2yg1czblsa4j3k9i48ji-perf-linux-7.0.9/bin/perf",
+    "call_graph": "fp (release build has no frame pointers; DWARF rejected by SELinux on hybrid PMU)",
+    "event": "cpu_atom/cycles/P (E-core PMU only; the backend ran on an E-core for the duration)",
+    "samples_total": 778,
+    "event_count_approx": 810076276
+  },
+  "top_5_hot_symbols": [
+    {
+      "symbol": "gemm_f64::microkernel::fma::f64::x2x6",
+      "self_pct": 64.77,
+      "where": "kernel-setup (rotation matrix QR decomposition via faer::Mat::<f64>::qr())"
+    },
+    {
+      "symbol": "crossbeam_epoch::default::with_handle::<...,Guard>",
+      "self_pct": 7.50,
+      "where": "kernel-setup (rayon worker-pool epoch reclamation around the QR matmul)"
+    },
+    {
+      "symbol": "<crossbeam_deque::deque::Stealer<rayon_core::job::JobRef>>::steal",
+      "self_pct": 2.24,
+      "where": "kernel-setup (rayon work-stealing during QR)"
+    },
+    {
+      "symbol": "gemm_common::gemm::gemm_basic_generic::<V3,f64,4,8,6,2,2,2,...>::{closure#4}",
+      "self_pct": 2.18,
+      "where": "kernel-setup (f64 gemm dispatch from QR)"
+    },
+    {
+      "symbol": "<crossbeam_epoch::internal::Global>::try_advance",
+      "self_pct": 1.82,
+      "where": "kernel-setup (rayon worker-pool synchronisation)"
+    }
+  ],
+  "totals_by_layer": {
+    "kernel_setup_f64_gemm_and_rayon": 81.0,
+    "scheduler_yield_and_futex_wait_kernel": 14.5,
+    "score_block_or_fast_scan_LUT": 0.0,
+    "cosine_distance_or_dot_product_recheck": 0.0,
+    "BufferGetPage_or_slot_getsomeattrs_executor": 0.0,
+    "comment": "Percent values are summed self_pct across distinguishable symbols. The kernel-setup row aggregates gemm_f64::microkernel x2x6/hx2x2, gemm_common pack_lhs/pack_rhs, gemm_basic_generic, faer triangular_solve, faer norm_l2, faer matref::to_owned, nano_gemm_f64 matmul_*, pulp::vectorize over those, plus rayon machinery (crossbeam_epoch, crossbeam_deque, rayon_core::sleep, find_work, wait_until_cold). The scheduler row aggregates __sched_yield, __schedule, schedule, sys_sched_yield, futex_wait, do_futex, pick_next_task. ZERO samples in the SIMD-LUT scoring kernel (turbovec::search::score_block_*, fast_scan, build_query_neon_lut), in any cosine_distance/dot_product call from the executor's reorder-orderby phase, or in BufferGetPage/slot_getsomeattrs/index_form_tuple."
+  },
+  "verdict": "K",
+  "verdict_reasoning": "The warm-scan profile is dominated (~81%) by f64 GEMM + rayon machinery, with the single hottest leaf being `gemm_f64::microkernel::fma::f64::x2x6` at 64.8% self. The only call-site in the codebase that produces an f64 GEMM is `turbovec::rotation::make_rotation_matrix`, which builds a `dim x dim` orthogonal matrix via `faer::Mat::<f64>::qr()`. The SIMD-LUT scoring kernel (`turbovec::search::score_block_*`, `fast_scan`, `build_query_neon_lut`) — what an internal design note predicted would dominate option K — does NOT appear in the top-100 symbols at all. Neither do the recheck-orderby f32 distance functions (option R) nor the executor's BufferGetPage / slot_getsomeattrs path (option E). So this is option K (the kernel), but the bottleneck is NOT the scoring loop the doc anticipated — it is the per-scan rotation-matrix QR construction in the kernel SETUP path. Empirically, EXPLAIN ANALYZE on a single backend gives ~100 ms warm latency per scan with the cache populated, but the perf samples show f64 QR work running across many of those scans rather than once per backend, suggesting the rotation `OnceLock` inside `TurboQuantIndex` is not surviving across scans the way `centroids` / `boundaries` / `blocked` are (those three are pre-filled by `from_id_map_parts_with_prepared` from the relfile, but `rotation` is left empty and re-derived from the QR seed on every fresh `IdMapIndex` instance).",
+  "next_phase_proposal": "Phase R-2: persist the rotation matrix in the relfile alongside the already-persisted prepared parts (centroids, boundaries, blocked layout). The rotation is a deterministic function of (dim, ROTATION_SEED), so on `ambuild` we run `make_rotation_matrix(dim)` once and write its `dim*dim` f32 buffer (about 9 MiB at 1536-d) into the meta-page chain. The scan-side `from_id_map_parts_with_prepared` then pre-fills the `rotation` `OnceLock` from those bytes the same way it already does for centroids/boundaries/blocked, eliminating the f64 QR cost from every scan path. Expected gain: closes the 1.16x gap to HNSW ef=40 outright. The QR is roughly 50-200 ms on a 1536-d index depending on rayon parallelism and is currently being paid on every scan that misses the per-backend cache (and possibly on every scan, pending a separate cache-hit-rate audit) — removing it should bring 4-bit warm p50 from ~71 ms to ~50-60 ms, putting pg_turbovec ahead of HNSW on warm latency at this corpus size. Risk: minor — adds about 9 MiB to the on-disk index footprint at 1536-d (negligible vs. the 1527 MiB blocked-layout body) and requires a v3 wire format bump (or a reserved-slot in the v2 meta page). The change is fully backward-compatible at read time: a v2 relfile with no rotation persisted simply falls back to the current QR-on-first-search path. A separate diagnostic question worth chasing before R-2 lands: confirm whether the rotation `OnceLock` is being torn down between scans (cache miss) or just being initialised once per backend (cache hit). Either way, persisting the rotation eliminates the symptom; but if the cache is missing every scan that is its own bug to fix in the same phase.",
+  "notes": [
+    "perf record with `-g` (FP unwinding) on a release build with no frame pointers leaves leaf attribution intact but parents resolve to addresses like `0x1` / `0x1401` / `0`. DWARF unwinding (`--call-graph dwarf,16384`) was rejected by SELinux on the hybrid Intel i9-12900H PMU even with kernel.perf_event_paranoid=-1 — perf tries to open events on both `cpu_core` and `cpu_atom` PMUs plus a `dummy:u` software event for the workload, and the policy denies one of them. LBR (`--call-graph lbr`) hit the same wall. Symbol-only (`-g none`) reporting is therefore what we have, which is enough for verdict but not for a precise caller breakdown.",
+    "The previous v1.2 baseline of 71 ms warm-p50 on this corpus was measured before this release; the v1.3.0 release-build re-measurement on the rebuilt index gives ~96-105 ms warm-p50 once the per-backend cache has been touched (1.3-1.5x slower than the v1.2 number, almost certainly the same rotation-matrix-cost issue this profile exposes). The 1.16x gap vs HNSW that the task framed as the question to answer is therefore an underestimate post-Phase Q — the gap on this measurement is closer to 1.6x.",
+    "The arnold script `benches/scripts/profile_warm_scan.sh` was updated in this commit so it works without further edits on the host: auto-detects the nix-store perf binary that matches the running kernel (skipping older incompatible versions), invokes perf with `env -u LD_LIBRARY_PATH` (the host's /lib64 LD path crashes nix-store dynamic loaders), drives a single long-lived backend via a FIFO so perf samples the same pid that runs the warm loop, sets `SET jit = off` to avoid the 33-second cost of `jit_optimize_above_cost` recompilation per scan, and falls back to the FlameGraph install at `/home/gburd/src/flamegraph` when `/opt/FlameGraph` is absent.",
+    "perf attached only to the main backend pid; rayon worker threads inherit the same TGID and are therefore included in the sample stream automatically. The `cpu_atom/cycles/P` event was the only PMU that opened cleanly under the SELinux policy on this host."
+  ]
+}

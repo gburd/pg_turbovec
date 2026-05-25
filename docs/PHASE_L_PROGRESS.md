@@ -212,53 +212,51 @@ why the numbers above were collected after `rm -f` of the .so.)
 
 ## Known gaps / Phase L follow-ups (in priority order)
 
-### 1. WAL / crash recovery — **not implemented**
+### 1. WAL / crash recovery — **DONE (v1.2.0 hardening)**
 
-`relfile::write_full` calls `MarkBufferDirty` but never
-`log_newpage_buffer`. After an immediate-shutdown crash the
-relfile may diverge from the WAL stream and the next scan reads
-empty / partial pages.
+`relfile::write_meta`, `relfile::write_chain_at`, and
+`relfile::extend_to` now wrap every page write in a
+`GenericXLogStart` / `GenericXLogRegisterBuffer(GENERIC_XLOG_FULL_IMAGE)` /
+`GenericXLogFinish` triplet. Chain writes are batched in groups of
+up to `MAX_GENERIC_XLOG_PAGES` (= 4) pages per WAL record. This is
+the standard pattern for custom AMs that don't define their own
+resource manager (matches pgvector's `hnswbuild.c`).
 
-**What to add:** after every `MarkBufferDirty` in
-`write_meta` / `write_chain_at`, call
-`log_newpage_buffer(buf, /*page_std=*/true)` to emit an
-`XLOG_FPI_FOR_HINT`-style record. Or use `GenericXLogStart` /
-`GenericXLogRegisterBuffer` / `GenericXLogFinish`, the
-recommended path for custom AMs (see pgvector's
-`hnswbuild.c::FlushPages`).
+For `RELPERSISTENCE_PERMANENT` relations this emits an
+`XLOG_GENERIC` record per batch; for unlogged / temp relations
+`GenericXLogFinish` skips WAL but still writes the page back to
+the buffer and marks it dirty.
 
-This is **the** blocker for flipping the default in v1.1.
+Verification:
+- `relfile_wal_emit_and_truncate` pgrx-test asserts
+  `pg_current_wal_lsn` advances over `ambuild`, `aminsert`, and
+  `ambulkdelete`.
+- `bench/sql/phase_n_b_crash_recovery.sql` is the manual
+  e2e harness for `pg_ctl stop -m immediate` + restart.
 
-### 2. `ambuildempty` for unlogged indexes — **stub**
+### 2. `ambuildempty` for unlogged indexes — **DONE (v1.2.0 hardening)**
 
-The relfile branch in `ambuildempty` is a no-op. PG calls this
-callback only for unlogged indexes, asking us to write the
-empty-index template into the **init fork** (`INIT_FORKNUM`).
-After a crash PG copies the init fork over the main fork. With
-the current stub, an unlogged `turbovec` index would survive a
-crash as zero blocks — i.e. would get rebuilt on next access from
-the heap, which is technically correct (PG calls `ambuild` again
-when nblocks==0, since we treat that as "empty index"). It works,
-but it's wasteful.
+`build::ambuildempty` now writes a single empty meta page to
+`INIT_FORKNUM` via `relfile::write_meta_in_fork`, WAL-logged via
+`GenericXLog`. After a crash PG copies the init fork over the
+main fork, restoring the index to a known-empty state instead of
+a corrupted partial relfile.
 
-**What to add:** factor `relfile::write_meta(rel, &meta)` to take
-a `ForkNumber`, write a single empty meta page to `INIT_FORKNUM`.
+Verification: `relfile_unlogged_has_init_fork` pgrx-test asserts
+`pg_relation_size(idx, 'init') >= 8192` after CREATE INDEX on an
+unlogged table.
 
-### 3. `RelationTruncate` after shrinking layouts — **not implemented**
+### 3. `RelationTruncate` after shrinking layouts — **DONE (v1.2.0 hardening)**
 
-`write_full` currently uses a "rewrite-in-place" strategy: extend
-the relation up to the new layout's `total_blocks()`, then
-overwrite blocks 0..total_blocks. **Trailing blocks from a larger
-prior layout become orphans** — unreachable through the meta
-header but still on disk until REINDEX. Harmless for the common
-monotonic-grow path (ambuild → aminsert → aminsert → ...);
-wasteful after `ambulkdelete` shrinks the index by half.
+`relfile::write_full` now compares the new layout's
+`total_blocks()` against the existing relation length and calls
+`pg_sys::RelationTruncate(rel, new_total)` when the new layout is
+smaller. This matters after `ambulkdelete` consolidates dead rows
+or after a shrinking REINDEX.
 
-**What to add:** after `write_full`, if the new
-`meta.total_blocks() < existing nblocks`, call
-`smgrtruncate(RelationGetSmgr(rel), MAIN_FORKNUM,
-meta.total_blocks())`. Watch out: `smgrtruncate2` in pg17+ has a
-different signature; gate on `cfg(feature = "pg17")`.
+Verification: `relfile_wal_emit_and_truncate` pgrx-test deletes
+most of a corpus, runs VACUUM, and asserts the post-VACUUM index
+file is strictly smaller than the post-build size.
 
 ### 4. `aminsert` deferred-commit batching (Phase K)
 

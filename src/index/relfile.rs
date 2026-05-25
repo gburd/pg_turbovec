@@ -17,11 +17,36 @@
 //!
 //! ## WAL
 //!
-//! **Not implemented.** Pages are written via `MarkBufferDirty` but
-//! we never call `log_newpage_buffer`. After an immediate-shutdown
-//! crash the index relfile may diverge from the WAL stream, in
-//! which case PG will silently scan an empty / partial index. The
-//! handoff doc tracks this as the Phase L follow-up.
+//! Phase L hardening (item 1): every page write is wrapped in a
+//! `GenericXLogStart` / `GenericXLogRegisterBuffer` /
+//! `GenericXLogFinish` triplet, which is the recommended pattern
+//! for custom AMs that don't define their own resource manager
+//! (see pgvector's `hnswbuild.c`). Pages are registered with
+//! `GENERIC_XLOG_FULL_IMAGE` because each write rewrites the
+//! entire 8 KB page from our private byte format — there's no
+//! useful diff, and the full-image flag skips the (otherwise
+//! pointless) delta computation. For `RELPERSISTENCE_PERMANENT`
+//! relations this emits an `XLOG_GENERIC` record; for unlogged /
+//! temp relations `GenericXLogFinish` skips WAL but still writes
+//! the modified page back to the buffer and marks it dirty.
+//!
+//! `GenericXLog` allows up to `MAX_GENERIC_XLOG_PAGES` (= 4)
+//! buffers per state, so chain writes are batched in groups of 4
+//! per record.
+//!
+//! ## Init fork (unlogged indexes)
+//!
+//! [`write_meta_in_fork`] accepts a `ForkNumber`. `ambuildempty`
+//! calls it with `INIT_FORKNUM` so PG can copy the init fork over
+//! the main fork after a crash, restoring the empty meta page
+//! (Phase L hardening item 2).
+//!
+//! ## Truncate after rebuild
+//!
+//! [`write_full`] calls `RelationTruncate` when the new layout is
+//! smaller than the old one (Phase L hardening item 3), so a
+//! shrinking REINDEX or `ambulkdelete` consolidation actually
+//! frees disk pages instead of leaving them as orphans.
 
 #![cfg(feature = "relfile_storage")]
 
@@ -29,6 +54,21 @@ use pgrx::pg_sys;
 use pgrx::prelude::*;
 
 use crate::index::page::{MetaPageData, BLCKSZ, META_BLKNO, PAGE_HEADER_BYTES};
+
+/// Maximum number of buffers we register with one `GenericXLog`
+/// state — PG hard-codes this at `XLR_NORMAL_MAX_BLOCK_ID = 4`.
+const GENERIC_XLOG_BATCH: usize = pg_sys::MAX_GENERIC_XLOG_PAGES as usize;
+
+/// True when the relation's persistence is `'p'` (PERMANENT). For
+/// unlogged / temp indexes `GenericXLogFinish` skips the WAL
+/// record but still writes the modified page back — we don't need
+/// to branch on this ourselves.
+#[allow(dead_code)]
+unsafe fn rel_needs_wal(rel: pg_sys::Relation) -> bool {
+    let rd_rel = (*rel).rd_rel;
+    !rd_rel.is_null()
+        && (*rd_rel).relpersistence as u8 == pg_sys::RELPERSISTENCE_PERMANENT
+}
 
 /// Convenience wrapper around `ReadBufferExtended` that
 /// `LockBuffer`s and returns both the buffer and the data-region
@@ -50,9 +90,20 @@ pub(crate) unsafe fn read_block(
     blkno: u32,
     exclusive: bool,
 ) -> pg_sys::Buffer {
+    read_block_in_fork(rel, pg_sys::ForkNumber::MAIN_FORKNUM, blkno, exclusive)
+}
+
+/// Same as [`read_block`] but takes a fork. Internal helper used by
+/// the init-fork path in `ambuildempty`.
+unsafe fn read_block_in_fork(
+    rel: pg_sys::Relation,
+    fork: pg_sys::ForkNumber::Type,
+    blkno: u32,
+    exclusive: bool,
+) -> pg_sys::Buffer {
     let buf = pg_sys::ReadBufferExtended(
         rel,
-        pg_sys::ForkNumber::MAIN_FORKNUM,
+        fork,
         blkno,
         pg_sys::ReadBufferMode::RBM_NORMAL,
         std::ptr::null_mut(),
@@ -83,14 +134,35 @@ pub(crate) unsafe fn page_data(buf: pg_sys::Buffer) -> *const u8 {
     page.cast::<u8>().add(PAGE_HEADER_BYTES) as *const u8
 }
 
-/// Mutable counterpart of [`page_data`].
+/// Mutable counterpart of [`page_data`]. Currently unused by
+/// live code — all writers go through `GenericXLog`-managed
+/// workspace pages — but kept for future direct-write callers.
 ///
 /// # Safety
 ///
 /// `buf` must be pinned and exclusive-locked.
+#[allow(dead_code)]
 pub(crate) unsafe fn page_data_mut(buf: pg_sys::Buffer) -> *mut u8 {
     let page = pg_sys::BufferGetPage(buf);
     page.cast::<u8>().add(PAGE_HEADER_BYTES)
+}
+
+/// PageInit + flag the entire data region as "used" so
+/// `GenericXLogFinish` doesn't zero it as a hole. PostgreSQL's
+/// generic-xlog machinery treats `[pd_lower, pd_upper)` as a free-
+/// space hole (`memset 0` on apply, omitted from WAL deltas).
+/// Standard AMs that use line pointers + tuples maintain
+/// `pd_lower` correctly as they grow; we use the data region as a
+/// private byte buffer, so we set `pd_lower = pd_upper` (the page
+/// has no free space — every byte is meaningful). SP-GiST does
+/// the same trick for its meta page; see `spgutils.c::SpGistInitMetapage`.
+unsafe fn page_init_no_hole(page: pg_sys::Page) {
+    pg_sys::PageInit(page, BLCKSZ, 0);
+    let hdr = page.cast::<pg_sys::PageHeaderData>();
+    // After PageInit: pd_lower = SizeOfPageHeaderData, pd_upper =
+    // pd_special = BLCKSZ. Lift pd_lower up to pd_upper so there
+    // is no hole.
+    (*hdr).pd_lower = (*hdr).pd_upper;
 }
 
 /// Initialise a freshly-extended page with `PageInit` so the
@@ -118,9 +190,20 @@ pub(crate) unsafe fn page_init(buf: pg_sys::Buffer) {
 /// Caller must hold a relation reference. The returned buffer must
 /// be released via `MarkBufferDirty` + `UnlockReleaseBuffer`.
 pub(crate) unsafe fn extend_block(rel: pg_sys::Relation) -> pg_sys::Buffer {
+    extend_block_in_fork(rel, pg_sys::ForkNumber::MAIN_FORKNUM)
+}
+
+/// Fork-aware extension. The returned buffer is pinned and
+/// exclusive-locked; the page contents are PG-`PageInit`'d but the
+/// caller is expected to overwrite them under a `GenericXLog`
+/// state to get crash-recovery for free.
+unsafe fn extend_block_in_fork(
+    rel: pg_sys::Relation,
+    fork: pg_sys::ForkNumber::Type,
+) -> pg_sys::Buffer {
     let buf = pg_sys::ReadBufferExtended(
         rel,
-        pg_sys::ForkNumber::MAIN_FORKNUM,
+        fork,
         pg_sys::InvalidBlockNumber,
         pg_sys::ReadBufferMode::RBM_NORMAL,
         std::ptr::null_mut(),
@@ -136,6 +219,12 @@ pub(crate) unsafe fn extend_block(rel: pg_sys::Relation) -> pg_sys::Buffer {
 /// Number of blocks currently in the index relation's main fork.
 pub(crate) unsafe fn nblocks(rel: pg_sys::Relation) -> u32 {
     pg_sys::RelationGetNumberOfBlocksInFork(rel, pg_sys::ForkNumber::MAIN_FORKNUM)
+}
+
+/// Number of blocks in an arbitrary fork. Used by the init-fork
+/// helpers in `ambuildempty`.
+unsafe fn nblocks_in_fork(rel: pg_sys::Relation, fork: pg_sys::ForkNumber::Type) -> u32 {
+    pg_sys::RelationGetNumberOfBlocksInFork(rel, fork)
 }
 
 /// Read the meta page (block 0). Returns `None` for an empty
@@ -160,8 +249,10 @@ pub(crate) unsafe fn read_meta(rel: pg_sys::Relation) -> Option<MetaPageData> {
     }
 }
 
-/// Write or rewrite the meta page (block 0). Extends the relation
-/// if it's empty; otherwise updates the existing block in place.
+/// Write or rewrite the meta page (block 0) of the main fork.
+/// Extends the relation if it's empty; otherwise updates the
+/// existing block in place. Wrapped in `GenericXLog` so the write
+/// is durable across crashes.
 ///
 /// # Safety
 ///
@@ -169,17 +260,42 @@ pub(crate) unsafe fn read_meta(rel: pg_sys::Relation) -> Option<MetaPageData> {
 /// guarantee no concurrent writers (ambuild always runs alone;
 /// aminsert serialises via the heap-tuple lock).
 pub(crate) unsafe fn write_meta(rel: pg_sys::Relation, meta: &MetaPageData) {
-    let buf = if nblocks(rel) == 0 {
-        extend_block(rel)
+    write_meta_in_fork(rel, pg_sys::ForkNumber::MAIN_FORKNUM, meta);
+}
+
+/// Fork-aware variant of [`write_meta`]. Phase L hardening (item
+/// 2): `ambuildempty` calls this with `INIT_FORKNUM` so unlogged
+/// indexes can be reset from the init fork after a crash.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_meta_in_fork(
+    rel: pg_sys::Relation,
+    fork: pg_sys::ForkNumber::Type,
+    meta: &MetaPageData,
+) {
+    let buf = if nblocks_in_fork(rel, fork) == 0 {
+        extend_block_in_fork(rel, fork)
     } else {
-        let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
-        page_init(buf); // re-init so partial old contents don't leak
-        buf
+        read_block_in_fork(rel, fork, META_BLKNO, /*exclusive=*/ true)
     };
-    let dst = page_data_mut(buf);
+
+    let state = pg_sys::GenericXLogStart(rel);
+    let page = pg_sys::GenericXLogRegisterBuffer(
+        state,
+        buf,
+        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+    );
+    // Re-init on the GenericXLog workspace page so partial old
+    // contents (e.g. a previous larger meta layout) don't leak.
+    // page_init_no_hole flags the data region as "used" so
+    // GenericXLogFinish doesn't zero it.
+    page_init_no_hole(page);
+    let dst = page.cast::<u8>().add(PAGE_HEADER_BYTES);
     let encoded = meta.encode();
     std::ptr::copy_nonoverlapping(encoded.as_ptr(), dst, encoded.len());
-    pg_sys::MarkBufferDirty(buf);
+    pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
 }
 
@@ -252,19 +368,54 @@ pub(crate) unsafe fn write_chain_at(
     debug_assert_eq!(chain_bytes.len() as u64, n_vectors * u64::from(stride));
 
     let bytes_per_full_page = (rows_per_page as usize) * (stride as usize);
+    let total = chain_bytes.len();
     let mut written = 0usize;
     let mut blkno = start_blkno;
+    let existing = nblocks(rel);
 
-    while written < chain_bytes.len() {
-        let buf = read_block(rel, blkno, /*exclusive=*/ true);
-        page_init(buf);
-        let take = bytes_per_full_page.min(chain_bytes.len() - written);
-        let src = chain_bytes.as_ptr().add(written);
-        std::ptr::copy_nonoverlapping(src, page_data_mut(buf), take);
-        pg_sys::MarkBufferDirty(buf);
-        pg_sys::UnlockReleaseBuffer(buf);
-        written += take;
-        blkno += 1;
+    // Process up to GENERIC_XLOG_BATCH pages per WAL record so we
+    // amortise the record-header overhead while staying under PG's
+    // hard cap on registered buffers per `GenericXLog` state.
+    while written < total {
+        let mut bufs: [pg_sys::Buffer; GENERIC_XLOG_BATCH] =
+            [pg_sys::InvalidBuffer as pg_sys::Buffer; GENERIC_XLOG_BATCH];
+        let state = pg_sys::GenericXLogStart(rel);
+        let mut n_in_batch = 0usize;
+
+        while n_in_batch < GENERIC_XLOG_BATCH && written < total {
+            // Fresh-extend trailing blocks; rewrite leading blocks
+            // in place. Both paths land us with a pinned +
+            // exclusive-locked buffer ready for GenericXLog.
+            let buf = if blkno < existing {
+                read_block(rel, blkno, /*exclusive=*/ true)
+            } else {
+                extend_block(rel)
+            };
+            let page = pg_sys::GenericXLogRegisterBuffer(
+                state,
+                buf,
+                pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+            );
+            // Re-init on the workspace page; old contents (from a
+            // bigger prior layout) don't leak through. page_init_no_hole
+            // flags the data region as "used" so GenericXLogFinish
+            // doesn't zero it.
+            page_init_no_hole(page);
+            let take = bytes_per_full_page.min(total - written);
+            let src = chain_bytes.as_ptr().add(written);
+            let dst = page.cast::<u8>().add(PAGE_HEADER_BYTES);
+            std::ptr::copy_nonoverlapping(src, dst, take);
+
+            bufs[n_in_batch] = buf;
+            n_in_batch += 1;
+            written += take;
+            blkno += 1;
+        }
+
+        pg_sys::GenericXLogFinish(state);
+        for buf in &bufs[..n_in_batch] {
+            pg_sys::UnlockReleaseBuffer(*buf);
+        }
     }
 }
 
@@ -277,8 +428,18 @@ pub(crate) unsafe fn write_chain_at(
 /// Caller must hold an exclusive relation lock.
 pub(crate) unsafe fn extend_to(rel: pg_sys::Relation, target: u32) {
     while nblocks(rel) < target {
+        // Wrap the extension in GenericXLog so a crash between
+        // extend and the eventual write_chain_at doesn't leave us
+        // with un-WAL'd zero pages on disk.
         let buf = extend_block(rel);
-        pg_sys::MarkBufferDirty(buf);
+        let state = pg_sys::GenericXLogStart(rel);
+        let page = pg_sys::GenericXLogRegisterBuffer(
+            state,
+            buf,
+            pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+        );
+        page_init_no_hole(page);
+        pg_sys::GenericXLogFinish(state);
         pg_sys::UnlockReleaseBuffer(buf);
     }
 }
@@ -321,12 +482,12 @@ pub(crate) unsafe fn read_chain(
 }
 
 /// High-level helper: write a fully-built `IdMapIndex` to the
-/// relation, replacing any existing pages. Implemented as
-/// "truncate + extend" — we read no old pages, just append the
-/// new ones starting at block 0 (meta) and 1.. (chains). When the
-/// relation already has more blocks than we need, the trailing
-/// blocks are left as orphans for now (Phase L follow-up will call
-/// `RelationTruncate`).
+/// relation, replacing any existing pages.
+///
+/// Strategy: rewrite leading blocks in place, fresh-extend the
+/// tail, and `RelationTruncate` if the new layout is smaller than
+/// the existing one. Every page write is wrapped in `GenericXLog`
+/// for crash recovery.
 ///
 /// # Safety
 ///
@@ -348,35 +509,24 @@ pub(crate) unsafe fn write_full(
     assert_eq!(slot_to_id.len() as u64, n_vectors);
     assert_eq!(scales.len() as u64, n_vectors);
 
-    // If the relfile already has >0 blocks, we're rewriting (REINDEX
-    // / aminsert / ambulkdelete). Truncate to zero first so block
-    // numbers in the new meta are stable.
-    let existing = nblocks(rel);
-    let _ = existing;
-    // Phase L follow-up: call RelationTruncate to release pages
-    // that fall past `meta.total_blocks()` in the new layout. The
-    // current rewrite strategy reuses leading blocks in place;
-    // any tail blocks from a larger prior layout become orphans
-    // until REINDEX.
-
     let meta = MetaPageData::plan(bit_width, dim, n_vectors, am_version);
+    let new_total = meta.total_blocks().max(1);
 
-    // Phase L stub: rewrite-in-place strategy.
+    // Step 1: ensure the relation is at least `new_total` blocks
+    // long. write_chain_at will rewrite leading blocks and extend
+    // the tail itself, but the meta page (block 0) has to exist
+    // before we call write_meta when the relation is empty —
+    // write_meta handles that case via extend_block_in_fork.
     //
-    //   1. Extend the relation up to `meta.total_blocks()` so every
-    //      block in the new layout exists physically.
-    //   2. Overwrite block 0 with the new meta header.
-    //   3. Overwrite the codes / scales / ids chain blocks at the
-    //      offsets the meta page advertises.
-    //
-    // Trailing blocks left over from a larger previous layout are
-    // *not* truncated. They become orphans — unreachable through
-    // the meta header, but still occupy disk pages until the next
-    // REINDEX. Phase L follow-up should call `RelationTruncate`
-    // here to release them. For an experimental feature on the
-    // common monotonic-grow path (ambuild + aminsert) this is
-    // harmless.
-    extend_to(rel, meta.total_blocks().max(1));
+    // For the in-place rewrite path (`existing >= new_total`) we
+    // skip extend_to entirely and rely on write_chain_at's
+    // in-place branch.
+    let existing_before = nblocks(rel);
+    if existing_before < new_total {
+        // Pre-extend so the chain offsets in the meta page are
+        // valid the moment readers see them.
+        extend_to(rel, new_total);
+    }
 
     write_meta(rel, &meta);
 
@@ -415,6 +565,18 @@ pub(crate) unsafe fn write_full(
             meta.rows_per_ids_page,
             n_vectors,
         );
+    }
+
+    // Step 3 — Phase L hardening (item 3): release any trailing
+    // blocks left over from a larger previous layout. This
+    // matters after a shrinking REINDEX or `ambulkdelete`
+    // consolidation; without it, dropped rows linger on disk as
+    // orphan pages until the next REINDEX. `RelationTruncate`
+    // emits its own WAL record (`XLOG_SMGR_TRUNCATE`) and is
+    // crash-safe.
+    let existing_after = nblocks(rel);
+    if existing_after > new_total {
+        pg_sys::RelationTruncate(rel, new_total);
     }
 }
 

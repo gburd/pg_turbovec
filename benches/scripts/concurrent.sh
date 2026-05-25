@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bench/concurrent.sh — measure pg_turbovec's backend-local cache
+# benches/scripts/concurrent.sh — measure pg_turbovec's backend-local cache
 # behaviour under concurrent `turbovec.knn(...)` queries.
 #
 # Method
@@ -11,7 +11,7 @@
 # 3. Pre-warm: run a single `turbovec.knn` so the next call into a
 #    fresh backend will hit the cache miss path once and then cache.
 # 4. For each thread count in CLIENTS (default 1 2 4 8 16) run pgbench
-#    for DURATION seconds against `bench/sql/knn_query.sql`, which
+#    for DURATION seconds against `benches/sql/knn_query.sql`, which
 #    randomly selects one of the 256 query vectors per transaction.
 #    `-C` is *not* set so each pgbench client uses a single
 #    persistent backend and the cache miss is paid once per client.
@@ -39,8 +39,8 @@
 #
 # Usage
 # -----
-#   ./bench/concurrent.sh                  # default settings
-#   CLIENTS="1 2 4" DURATION=5 ./bench/concurrent.sh
+#   ./benches/scripts/concurrent.sh                  # default settings
+#   CLIENTS="1 2 4" DURATION=5 ./benches/scripts/concurrent.sh
 #
 # Required env (matches README "Build / test setup"):
 #   PGRX_PG_CONFIG=/home/gburd/.pgrx/install-pg16/bin/pg_config

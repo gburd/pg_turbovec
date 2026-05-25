@@ -2138,7 +2138,7 @@ mod tests {
     /// Phase L cold-vs-warm timing inside a single backend on a
     /// 2000-row / 384-dim corpus. Logs the timings via eprintln!
     /// (lost to PG's log on pgrx-test runs; the practical timing
-    /// harness is `bench/sql/phase_l_cold_scan.sql`). Asserts only
+    /// harness is `benches/sql/phase_l_cold_scan.sql`). Asserts only
     /// that both timings are reasonable; the strong cold-vs-warm
     /// inequality is too noisy inside a transaction to assert.
     ///
@@ -2210,7 +2210,7 @@ mod tests {
     /// code paths reachable from inside a pgrx test (which runs
     /// inside a transaction, so `VACUUM` and the `ambulkdelete`
     /// truncate path are unreachable from here — see
-    /// `bench/sql/phase_n_b_crash_recovery.sql` for the manual
+    /// `benches/sql/phase_n_b_crash_recovery.sql` for the manual
     /// e2e harness that exercises ambulkdelete + RelationTruncate).
     ///
     /// Specifically asserts:
@@ -2321,7 +2321,7 @@ mod tests {
     /// every row) after deleting the table contents so each
     /// rewrite sees a stable (== current) `n_vectors`. We can't
     /// directly invoke ambulkdelete from here; the manual e2e
-    /// truncate check lives in `bench/sql/phase_n_b_crash_recovery.sql`.
+    /// truncate check lives in `benches/sql/phase_n_b_crash_recovery.sql`.
     /// Instead this test verifies the page-layout planning
     /// invariant via `MetaPageData::total_blocks()`.
     #[cfg(all(
@@ -2424,7 +2424,7 @@ mod tests {
     /// This is the same call the autovacuum launcher would make,
     /// minus the cross-transaction wrapping. The end-to-end
     /// `VACUUM`-after-DELETE path is exercised by
-    /// `bench/sql/phase_n_b_crash_recovery.sql` outside the test
+    /// `benches/sql/phase_n_b_crash_recovery.sql` outside the test
     /// harness.
     #[cfg(all(
         feature = "experimental_index_am",

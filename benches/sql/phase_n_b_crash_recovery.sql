@@ -1,4 +1,4 @@
--- bench/sql/phase_n_b_crash_recovery.sql
+-- benches/sql/phase_n_b_crash_recovery.sql
 --
 -- Phase L hardening (items 1, 2, 3) — manual crash-recovery
 -- verification harness. The pgrx-test harness can't perform a real

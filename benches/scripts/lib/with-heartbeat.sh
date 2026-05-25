@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench/scripts/lib/with-heartbeat.sh
+# benches/scripts/lib/with-heartbeat.sh
 #
 # Wrap a long-running command so it emits a heartbeat line to a
 # log file every $HEARTBEAT_SECS (default 60) seconds. The wrapped

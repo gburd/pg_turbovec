@@ -41,11 +41,22 @@ Actions is flipped on by hand, the GitHub mirror at
 
 ## Status
 
-- **GitHub mirror CI:** ✅ green (verified on commit `5dbe3aa`,
-  drift-check + 6 PG versions all pass).
-- **Codeberg Actions:** ⚠️ disabled at the repo level
-  (`has_actions: False` per the API). Manual flip required; workflow
-  is committed and ready to run once enabled.
+- **GitHub mirror CI:** ✅ green (verified on commits `5dbe3aa`, `a291219`,
+  `9046f2c`; drift-check + 6 PG versions pass on every push).
+- **Codeberg Actions:** ⚠️ enabled at the repo level (`has_actions: True`)
+  but the workflow run sits in `status: waiting` because no Forgejo
+  runner has picked it up. Codeberg's [shared runner pool](https://docs.codeberg.org/ci/actions/) is opt-in;
+  you can either:
+  - **Apply for shared-runner access** at <https://codeberg.org/Codeberg-CI/request-access>
+    (free, requires a brief review for abuse prevention).
+  - **Run your own runner.** Install the [`forgejo-runner`](https://code.forgejo.org/forgejo/runner/)
+    daemon on `arnold` or another machine, register it against
+    `https://codeberg.org/api/v1/repos/gregburd/pg_turbovec`. The
+    queued run will pick up automatically.
+
+  Until one of those lands, the GitHub mirror at `gburd/pg_turbovec`
+  carries the canonical green badge. Both workflows are kept in
+  lockstep by `scripts/drift-check.sh §10` so they don't diverge.
 
 ## What the workflows do
 

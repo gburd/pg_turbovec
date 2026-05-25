@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu_atom/cycles/P'
+# Event count (approx.): 2975325396
+#
+# Children      Self  Command   Shared Object         Symbol                                                                                                                                                                                                          
+# ........  ........  ........  ....................  ................................................................................................................................................................................................................
+#
+    37.08%     0.40%  postgres  postgres              [.] ReadBufferExtended
+    36.68%     0.00%  postgres  postgres              [.] ReadBuffer_common (inlined)
+    34.96%    12.42%  postgres  libc.so.6             [.] __memmove_avx_unaligned_erms
+    32.71%     0.48%  postgres  [kernel.kallsyms]     [.] asm_exc_page_fault
+    30.01%     0.00%  postgres  pg_turbovec.so        [.] cee_scape::asm_based::call_with_sigsetjmp::call_from_c_to_rust::<pgrx_pg_sys::submodules::ffi::pg_guard_ffi_boundary_impl<i32, pgrx_pg_sys::include::pg17::ReadBufferExtended::{closure#0}>::{closure#0}>
+    29.44%     0.24%  postgres  postgres              [.] WaitReadBuffers
+    28.16%     0.56%  postgres  postgres              [.] mdreadv
+    26.95%     0.40%  postgres  postgres              [.] FileReadV
+    26.79%     0.24%  postgres  libc.so.6             [.] __libc_pread
+    26.63%     0.24%  postgres  libc.so.6             [.] __internal_syscall_cancel
+    26.55%     0.00%  postgres  postgres              [.] pg_preadv (inlined)
+    26.55%     0.00%  postgres  postgres              [.] pread (inlined)
+    26.39%     0.00%  postgres  libc.so.6             [.] __syscall_cancel
+    21.79%    21.55%  postgres  pg_turbovec.so        [.] turbovec::search::search_multi_query_avx2
+    21.79%     0.00%  postgres  pg_turbovec.so        [.] turbovec::search::search::{closure#2}
+    21.79%     0.00%  postgres  [unknown]             [.] 0x0000000000000064
+    21.79%     0.00%  postgres  [unknown]             [.] 0x00007fffd7811570
+    19.89%     0.16%  postgres  [kernel.kallsyms]     [.] exc_page_fault
+    19.57%     0.56%  postgres  [kernel.kallsyms]     [.] do_user_addr_fault
+    18.76%     0.08%  postgres  [kernel.kallsyms]     [.] do_syscall_64
+    18.76%     0.00%  postgres  [kernel.kallsyms]     [.] entry_SYSCALL_64_after_hwframe
+    18.52%     0.00%  postgres  [kernel.kallsyms]     [.] __x64_sys_pread64
+    17.87%     0.24%  postgres  [kernel.kallsyms]     [.] vfs_read
+    17.24%     0.40%  postgres  [kernel.kallsyms]     [.] handle_mm_fault
+    16.74%     0.80%  postgres  [kernel.kallsyms]     [.] filemap_read
+    16.51%     0.56%  postgres  [kernel.kallsyms]     [.] __handle_mm_fault
+    15.47%     0.48%  postgres  [kernel.kallsyms]     [.] do_anonymous_page
+    12.18%    12.10%  postgres  [kernel.kallsyms]     [k] _copy_to_iter
+    12.18%     0.00%  postgres  [kernel.kallsyms]     [.] copy_page_to_iter
+    11.26%     0.08%  postgres  [kernel.kallsyms]     [.] alloc_anon_folio
+     8.79%     0.16%  postgres  [kernel.kallsyms]     [.] vma_alloc_folio_noprof
+     8.71%     0.16%  postgres  [kernel.kallsyms]     [.] alloc_pages_mpol
+     8.47%     0.80%  postgres  [kernel.kallsyms]     [.] __alloc_frozen_pages_noprof
+     7.60%     0.13%  postgres  [kernel.kallsyms]     [.] get_page_from_freelist
+     7.31%     0.00%  postgres  pg_turbovec.so        [.] cee_scape::asm_based::call_with_sigsetjmp::call_from_c_to_rust::<pgrx_pg_sys::submodules::ffi::pg_guard_ffi_boundary_impl<(), pgrx_pg_sys::include::pg17::LockBuffer::{closure#0}>::{closure#0}>
+     7.31%     5.95%  postgres  pg_turbovec.so        [.] <hashbrown::map::HashMap<u64, usize, std::hash::random::RandomState>>::insert
+     6.10%     0.64%  postgres  postgres              [.] StartReadBuffer
+     6.02%     0.00%  postgres  postgres              [.] PinBufferForBlock (inlined)
+     6.02%     0.00%  postgres  postgres              [.] StartReadBuffersImpl (inlined)
+     5.86%     0.00%  postgres  postgres              [.] BufferAlloc (inlined)
+     5.58%     0.08%  postgres  [kernel.kallsyms]     [.] post_alloc_hook
+     5.50%     5.50%  postgres  [kernel.kallsyms]     [k] kernel_init_pages
+     3.47%     0.00%  postgres  postgres              [.] GetVictimBuffer
+     2.89%     1.92%  postgres  [kernel.kallsyms]     [.] filemap_get_read_batch
+     2.89%     0.00%  postgres  [kernel.kallsyms]     [.] filemap_get_pages
+     2.59%     0.08%  postgres  postgres              [.] InvalidateVictimBuffer
+     2.51%     2.43%  postgres  postgres              [.] hash_search_with_hash_value
+     2.21%     0.08%  postgres  [kernel.kallsyms]     [.] __folio_batch_add_and_move
+     2.13%     0.44%  postgres  [kernel.kallsyms]     [k] folio_batch_move_lru
+     2.00%     2.00%  postgres  [kernel.kallsyms]     [k] __irqentry_text_end
+     1.90%     0.08%  postgres  [kernel.kallsyms]     [.] __mem_cgroup_charge
+     1.88%     0.12%  postgres  [kernel.kallsyms]     [k] rmqueue_pcplist
+     1.88%     0.00%  postgres  [kernel.kallsyms]     [.] rmqueue.isra.0
+     1.87%     0.00%  postgres  postgres              [.] BufTableDelete
+     1.61%     0.56%  postgres  [kernel.kallsyms]     [.] lock_vma_under_rcu
+     1.52%     0.32%  postgres  [kernel.kallsyms]     [.] __rmqueue_pcplist
+     1.45%     1.45%  postgres  [kernel.kallsyms]     [k] native_irq_return_iret
+     1.37%     0.40%  postgres  [kernel.kallsyms]     [k] charge_memcg
+     1.36%     0.24%  postgres  [kernel.kallsyms]     [.] lru_add
+     1.12%     0.72%  postgres  [kernel.kallsyms]     [.] lru_gen_add_folio
+     1.12%     1.12%  postgres  [kernel.kallsyms]     [k] __list_del_entry_valid_or_report
+     1.12%     0.24%  postgres  postgres              [.] LWLockAcquire
+     0.97%     0.97%  postgres  [kernel.kallsyms]     [k] mas_walk
+     0.96%     0.24%  postgres  pg_turbovec.so        [.] cee_scape::asm_based::call_with_sigsetjmp::call_from_c_to_rust::<pgrx_pg_sys::submodules::ffi::pg_guard_ffi_boundary_impl<(), pgrx_pg_sys::include::pg17::UnlockReleaseBuffer::{closure#0}>::{closure#0}>
+     0.96%     0.88%  postgres  [kernel.kallsyms]     [k] xas_load
+     0.96%     0.96%  postgres  postgres              [.] LockBufHdr
+     0.88%     0.88%  postgres  postgres              [.] LWLockAttemptLock
+     0.81%     0.81%  postgres  [kernel.kallsyms]     [k] entry_SYSRETQ_unsafe_stack
+     0.80%     0.48%  postgres  [kernel.kallsyms]     [k] count_memcg_events
+     0.80%     0.00%  postgres  postgres              [.] pg_atomic_compare_exchange_u32 (inlined)
+     0.72%     0.72%  postgres  postgres              [.] GetPrivateRefCountEntry
+     0.72%     0.00%  postgres  postgres              [.] pg_atomic_fetch_or_u32 (inlined)
+     0.72%     0.00%  postgres  postgres              [.] pg_atomic_fetch_or_u32_impl (inlined)
+     0.72%     0.00%  postgres  postgres              [.] BufTableLookup
+     0.65%     0.48%  postgres  ld-linux-x86-64.so.2  [.] __tls_get_addr
+     0.64%     0.24%  postgres  [kernel.kallsyms]     [k] lruvec_stat_mod_folio
+     0.64%     0.00%  postgres  [kernel.kallsyms]     [.] __folio_mod_stat
+     0.64%     0.00%  postgres  [kernel.kallsyms]     [.] folio_add_new_anon_rmap
+     0.64%     0.00%  postgres  [kernel.kallsyms]     [.] memcg1_commit_charge
+     0.64%     0.64%  postgres  [kernel.kallsyms]     [k] fdget
+     0.64%     0.32%  postgres  postgres              [.] StrategyGetBuffer
+     0.64%     0.00%  postgres  [kernel.kallsyms]     [.] asm_sysvec_apic_timer_interrupt
+     0.64%     0.00%  postgres  [kernel.kallsyms]     [.] sysvec_apic_timer_interrupt
+     0.64%     0.08%  postgres  [kernel.kallsyms]     [.] touch_atime
+     0.64%     0.64%  postgres  [kernel.kallsyms]     [k] _raw_spin_lock
+     0.64%     0.08%  postgres  postgres              [.] UnlockReleaseBuffer
+     0.64%     0.08%  postgres  [kernel.kallsyms]     [k] pte_offset_map_lock
+     0.57%     0.57%  postgres  [kernel.kallsyms]     [k] btrfs_file_read_iter
+     0.56%     0.08%  postgres  [kernel.kallsyms]     [.] rmqueue_bulk
+     0.56%     0.56%  postgres  postgres              [.] LWLockRelease
+     0.56%     0.00%  postgres  postgres              [.] pg_atomic_compare_exchange_u32_impl (inlined)
+     0.56%     0.08%  postgres  [kernel.kallsyms]     [.] atime_needs_update
+     0.55%     0.08%  postgres  pg_turbovec.so        [.] pg_turbovec::index::relfile::read_full
+     0.55%     0.48%  postgres  pg_turbovec.so        [.] cee_scape::asm_based::call_with_sigsetjmp::<pgrx_pg_sys::submodules::ffi::pg_guard_ffi_boundary_impl<(), pgrx_pg_sys::include::pg17::UnlockReleaseBuffer::{closure#0}>::{closure#0}>
+     0.48%     0.08%  postgres  [kernel.kallsyms]     [.] __folio_throttle_swaprate
+     0.48%     0.00%  postgres  [kernel.kallsyms]     [.] __hrtimer_run_queues
+     0.48%     0.00%  postgres  [kernel.kallsyms]     [.] __sysvec_apic_timer_interrupt
+     0.48%     0.00%  postgres  [kernel.kallsyms]     [.] hrtimer_interrupt
+     0.48%     0.24%  postgres  pg_turbovec.so        [.] pg_turbovec::index::relfile::read_rotation
+     0.41%     0.33%  postgres  [kernel.kallsyms]     [.] blk_cgroup_congested
+     0.40%     0.40%  postgres  [kernel.kallsyms]     [k] mod_node_page_state
+     0.40%     0.32%  postgres  [kernel.kallsyms]     [k] entry_SYSCALL_64
+     0.40%     0.40%  postgres  postgres              [.] hash_bytes
+     0.40%     0.24%  postgres  [kernel.kallsyms]     [k] current_time
+     0.40%     0.00%  postgres  postgres              [.] BufTableInsert
+     0.40%     0.40%  postgres  [kernel.kallsyms]     [k] error_entry
+     0.39%     0.39%  postgres  libc.so.6             [.] __memcmp_avx2_movbe
+     0.36%     0.32%  postgres  pg_turbovec.so        [.] pgrx_pg_sys::submodules::thread_check::check_active_thread
+     0.33%     0.24%  postgres  [kernel.kallsyms]     [k] handle_pte_fault

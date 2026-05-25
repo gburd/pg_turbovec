@@ -752,6 +752,98 @@ the convention every other PG index AM follows.
 - [`benches/results/recall_relfile_phase_p_cold_scan_2026_05_25.json`](../benches/results/recall_relfile_phase_p_cold_scan_2026_05_25.json)
 - Per-sample TSV: [`recall_relfile_phase_p_cold_scan_2026_05_25.cold.tsv`](../benches/results/recall_relfile_phase_p_cold_scan_2026_05_25.cold.tsv)
 
+## 2.5 Warm-scan latency: persisted rotation (Phase R-2, v1.4.0, commit 9046f2c)
+
+**The warm-scan fix that wasn't.** Phase R’s perf snapshot of
+v1.3.0 found `gemm_f64::microkernel::fma::f64::x2x6` at 64.77%
+self on the warm-scan path — the 1536×1536 QR decomposition
+that builds the rotation matrix, running on first scan per
+backend (and apparently leaking out of the per-backend
+`OnceLock` on subsequent scans). Phase R-2 (commit `9046f2c`,
+v1.4.0, wire format v3) persists that rotation matrix in the
+relfile at `ambuild` time so backends read it once at
+`from_id_map_parts_with_prepared` and never compute the QR at
+scan time.
+
+**Re-measured on arnold** (Intel i9-12900H, 32 GiB, PG 17.9,
+release build, 1 M × 1536-d dbpedia-1M, single warm psql
+session, 2 untimed warmups against qid=1, 50 timed queries via
+`bench_one_query_tv(qid)` for qid=1..50; same methodology as
+§ 2.2 / Phase J / Phase O-3, `shared_buffers=512MB` matching
+§ 2.4):
+
+| metric | Phase J (v1.1.0 side-table) | Phase O-3 (v1.3.0 relfile) | **Phase R-3 (v1.4.0 + persisted rotation)** |
+|---|---:|---:|---:|
+| min | 48.1 ms | 85.0 ms | 86.5 ms |
+| **p50** | **70.5 ms** | **87.4 ms** | **90.3 ms** |
+| p95 | 91.3 ms | 99.4 ms | 103.9 ms |
+| max | 101.9 ms | 111.1 ms | 108.1 ms |
+| mean | 71.2 ms | 89.6 ms | 91.7 ms |
+
+**Verdict: phase\_r2\_not\_enough\_more\_work\_needed.** The fix
+worked at the symbol level — the post-Phase-R-2 perf profile
+(`benches/results/profile_v1_4_0_symbols.txt`) shows `gemm_f64`
+dropped from 64.77% self to absent in the top 100 symbols. But
+the headline warm p50 stayed flat (90.3 ms vs 87.4 ms is
+within the run-to-run noise this contended laptop carries).
+What now dominates the warm-scan profile:
+
+```
+  ReadBufferExtended ............... 37.08 % children
+  ReadBuffer_common (inlined) ...... 36.68 % children
+  __memmove_avx_unaligned_erms ..... 34.96 % children, 12.42 % self
+  asm_exc_page_fault ............... 32.71 % children
+  WaitReadBuffers .................. 29.44 % children
+  mdreadv / FileReadV / pread ..... ~27 % children
+  turbovec::search::search_multi_query_avx2 .. 21.79 % children, 21.55 % self
+  _copy_to_iter (kernel) ........... 12.18 % self
+```
+
+The 1.5 GB on-disk index does not fit in 512 MB
+`shared_buffers`, so each warm scan re-pulls touched pages
+from the OS page cache via `pread` → kernel `_copy_to_iter`
+→ `__memmove_avx_unaligned_erms` into the buffer manager.
+That’s ~50–60 ms per scan and was always there in v1.3.0—
+just dwarfed by the QR cost. Removing the QR exposed it.
+The SIMD scoring kernel itself (`search_multi_query_avx2`)
+is only 21.55% self; ~65% of warm-scan time is now PG
+buffer-manager I/O against a too-small `shared_buffers`.
+
+**Index growth and build cost** — within Phase R prediction:
+
+| metric | v1.3.0 (Phase O-3) | v1.4.0 (Phase R-3) | delta |
+|---|---:|---:|---:|
+| build time | 170 s | 234 s | +64 s (eager rotation chain) |
+| size on disk | 793 MB (payload) | 1 536 MB (full relfile) | mostly relfile/heap-fork accounting; rotation chain alone is ~9 MiB |
+
+*Build setting note*: the v1.4.0 build was run with
+`maintenance_work_mem=512MB`, `max_parallel_maintenance_workers=0`,
+and `shared_buffers=128MB` during build (Phase O-3 used 512MB);
+the two prior build attempts at 4GB / 16 workers and 512MB / 0
+workers were OOM-killed by the kernel because this 32 GiB host
+was already paging (7 GiB swap used) when the run started.
+`shared_buffers` was raised back to 512 MB before the warm
+sweep so the bench-time configuration matches Phase O-3 exactly.
+
+**Two follow-on directions for closing the warm gap:**
+
+1. **Raise `shared_buffers` to ≥2 GB** so the entire
+   `docs_tv_4bit` fits hot. Knob change, not code change, but
+   it requires a host with that much spare memory.
+2. **Per-backend `mmap`-resident view of the blocked layout**
+   that bypasses the PG buffer manager on warm scans. This is
+   essentially a re-run of the Phase L design conversation:
+   the buffer manager is in the way for read-only quantized
+   data that wants to behave like an OS-page-cache-resident
+   artefact, not like a row-oriented heap.
+
+**Source data**
+- [`benches/results/recall_warm_phase_r3_2026_05_25.json`](../benches/results/recall_warm_phase_r3_2026_05_25.json)
+- Per-sample TSV (clock-stamped, primary): [`warm_phase_r3_clock.tsv`](../benches/results/warm_phase_r3_clock.tsv)
+- Per-sample TSV (EXPLAIN ANALYZE secondary): [`warm_phase_r3.tsv`](../benches/results/warm_phase_r3.tsv)
+- Post-fix perf profile: [`profile_v1_4_0_symbols.txt`](../benches/results/profile_v1_4_0_symbols.txt) and [`profile_v1_4_0_flame.svg`](../benches/results/profile_v1_4_0_flame.svg)
+- Reproducer scripts: [`benches/scripts/warm_phase_r3.sh`](../benches/scripts/warm_phase_r3.sh), [`warm_phase_r3_clock.sh`](../benches/scripts/warm_phase_r3_clock.sh), [`migrate_index_v1_4_0.sh`](../benches/scripts/migrate_index_v1_4_0.sh)
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

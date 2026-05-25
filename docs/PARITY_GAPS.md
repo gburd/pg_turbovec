@@ -14,7 +14,8 @@ close.
 |---|---:|---:|---|
 | Storage | 1 953 MiB | 195 MiB (4-bit) | ✅ we win 10× |
 | Build time | 8 m 13 s | 33 s | ✅ we win 15× |
-| Warm scan p50 | 100 ms | 22 ms | ✅ we win 5× |
+| Warm scan p50 (1 M × 384-d, GloVe) | 100 ms | 22 ms (v1.0.0) | ✅ we win 5× |
+| **Warm scan p50 (1 M × 1536-d, dbpedia-1M ada-002)** | 61 ms (ef=40) / 115 ms (ef=200) | **90 ms (v1.4.0, post-Phase-R-2)** | ⚠️ **between HNSW ef=40 and ef=200** at R@10=1.000. v1.1.0 was 70 ms; v1.3.0 (relfile, Phase P) was 87 ms; v1.4.0 (persisted rotation, Phase R-2) is 90 ms. Persisted rotation eliminated `gemm_f64` from the warm profile but exposed PG buffer-manager I/O (`ReadBufferExtended` + `mdreadv` + `__memmove_avx_unaligned_erms` ~65% children) as the new dominant cost; the 1.5 GB index does not fit in the bench's 512 MB `shared_buffers`. See `docs/RECALL.md` §2.5. |
 | Cold scan p50 (after backend restart) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38) | ⚠️ **21× speedup vs. pre-fix v1.0.x side-table path**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. The relfile-resident format is the only storage strategy as of v1.3.0; the side-table path is gone. |
 | INSERT throughput (per row, into a 1 M-row index) | ~0.5 ms (HNSW O(log n)) | ~200 ms (full re-serialise per row) | ❌ **we lose ~400×** |
 | Recall on uniform-random | 0.03 | 1.000 | ✅ (but synthetic; real-world recall varies) |

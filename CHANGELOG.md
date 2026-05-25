@@ -4,6 +4,81 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-05-25
+
+### Phase L hardening complete (5 of 6 items)
+
+The relfile-resident page format introduced as a preview in
+1.1.0 (`--features relfile_storage`) is now production-grade
+on five of the six hardening items from
+an internal design note:
+
+1. **WAL via `GenericXLog`** — every relfile page write is now
+   logged via `GenericXLogStart` / `RegisterBuffer` / `Finish`.
+   A crash before checkpoint correctly replays via standard PG
+   WAL. (Phase N-B, commit `9ee405d`)
+
+2. **`ambuildempty` initialises `INIT_FORKNUM`** for unlogged
+   indexes; recovery now produces a queryable empty index
+   without an `ERROR`. (Phase N-B)
+
+3. **`RelationTruncate`** is called after a shrinking REINDEX
+   or `ambulkdelete` consolidation. (Phase N-B)
+
+4. **Phase K's deferred-commit pattern applied to the relfile
+   path.** `aminsert_relfile` now mutates the cached
+   `Arc<RwLock<IdMapIndex>>` in memory and defers the relfile
+   page write to the `PreCommit` xact callback. Bulk INSERT of
+   1 k rows: was minutes (full-rewrite per row) → now < 5 s.
+   (Phase N-C, commit `d4a469b`)
+
+5. **v1.0.x → v1.2 migration HINT** in `ambeginscan`. When a
+   `relfile_storage`-built binary opens an index whose main
+   fork is empty but the side-table has `n_vectors > 0`, emit
+   a `NOTICE` with `HINT: Run REINDEX INDEX <name>;`. Without
+   this users would silently see zero rows. (Phase N-C)
+
+### Phase L hardening remaining (1 of 6)
+
+6. **`ambulkdelete` walks pages instead of rebuilding.** Today's
+   `ambulkdelete_relfile` reads all pages, filters dead ids,
+   writes everything back — O(n) per VACUUM. Walk-and-mark would
+   bring this to O(deleted_rows). Tracked for v1.3 in
+   `an internal design note § 6`.
+
+### Drift cleanup
+
+`docs/ARCHITECTURE.md` rewritten to v1.1.0 reality: status
+banner updated, future-tense "Phase 2 will…" stubs replaced
+with past-tense shipped-state prose, crate-layout section
+extended with one-liners for new modules. (Phase N-A, commit
+`48faeba`)
+
+an internal design note grew a "Shipped in 1.0.x / 1.1.0"
+section between "Skipped" and "Where future work would pay
+off". (Phase N-A)
+
+an internal design note annotated as superseded by
+1.2.0; retained for historical context. (Phase N-A)
+
+### Tests
+
+94/94 default + `experimental_index_am` (unchanged).
+104/104 with `+ relfile_storage` (was 100, +3 WAL/init-fork
+tests from Phase N-B, +1 deferred-commit bulk-insert test
+from Phase N-C).
+
+All six PG versions (pg13.23, pg14.22, pg15.17, pg16.13,
+pg17.9, pg18.3) verified — default+`experimental_index_am`
+path green; `relfile_storage` path verified on pg16.
+
+### Status of `relfile_storage` default
+
+Still gated behind `--features relfile_storage`, default OFF.
+v1.3 may flip the default once item 6 lands and a 1 M-row
+arnold cold-scan validation confirms the architectural
+speedup measured locally at small scale.
+
 ## [1.1.0] — 2026-05-24
 
 ### Phase J — real-embedding head-to-head on dbpedia-1M

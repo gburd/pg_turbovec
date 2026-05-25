@@ -222,15 +222,39 @@ unsafe extern "C-unwind" fn build_callback(
 /// can be reset after a crash. Logged indexes (the common case)
 /// never invoke this callback — PG calls `ambuild` instead.
 ///
-/// Phase L stub: for the relfile path we *do not* write to the
-/// init fork yet (that requires `RBM_NORMAL` reads against
-/// `INIT_FORKNUM` and a small init-fork meta page). Unlogged
-/// `turbovec` indexes therefore degrade to "rebuilds-from-scratch
-/// after every crash", which is correct but expensive. Logged
-/// indexes (PG's default) are unaffected.
+/// Phase L hardening (item 2): under the relfile feature we
+/// allocate a single empty meta page in `INIT_FORKNUM` and WAL-log
+/// it via `GenericXLog`. After a crash PG copies the init fork
+/// over the main fork, restoring the index to a known-empty
+/// state. This matches pgvector's `HnswBuildEmpty` pattern. The
+/// SPI side-table marker is still written so existing tests that
+/// grep `turbovec.am_storage` keep working.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Relation) {
-    let (bw, _dim) = options::read(index_relation);
+    #[cfg_attr(not(feature = "relfile_storage"), allow(unused_variables))]
+    let (bw, dim) = options::read(index_relation);
     let indexrelid = (*index_relation).rd_id;
+
+    #[cfg(feature = "relfile_storage")]
+    {
+        // Plan an empty layout. dim may be 0 if the user didn't
+        // pin it via reloptions — the meta page records 0/0/0,
+        // which our reader handles as "empty index".
+        let dim_u32 = if dim > 0 { dim as u32 } else { 0 };
+        if dim_u32 % 8 == 0 {
+            let meta = crate::index::page::MetaPageData::plan(
+                bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
+            );
+            relfile::write_meta_in_fork(
+                index_relation,
+                pg_sys::ForkNumber::INIT_FORKNUM,
+                &meta,
+            );
+        }
+        // If dim was supplied as a non-multiple-of-8 we silently
+        // skip the init-fork write; the next ambuild will error
+        // with a more informative message.
+    }
+
     persist::save_empty(indexrelid, bw, 0);
 }

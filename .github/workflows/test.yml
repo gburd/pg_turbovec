@@ -30,6 +30,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          # Don't deny warnings; vendor/turbovec/ has pre-existing
+          # upstream warnings (see vendor/turbovec/PATCH_NOTES.md)
+          # that we don't own.
+          rustflags: ""
 
       - name: install build deps
         run: |

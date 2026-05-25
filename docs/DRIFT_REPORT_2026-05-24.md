@@ -1,5 +1,10 @@
 # pg_turbovec docs drift report — 2026-05-24
 
+> **Superseded by 1.1.0** — the ARCHITECTURE.md and
+> ROADMAP_DECISIONS.md drift items flagged below were resolved in
+> the same commit that adds this note. Retained for historical
+> context.
+
 First run of the new `.pi/skills/drift-check/SKILL.md` against the
 live tree at commit `2753e22` (post-v1.0.1).
 

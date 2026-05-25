@@ -102,7 +102,7 @@ or 128-bit perceptual hashes (image dedup, near-duplicate
 detection), pgvector's `bit_hamming_ops` HNSW index is genuinely
 the right tool and there is no reason to use pg_turbovec there.
 
-## Shipped in 1.0.x / 1.1.0
+## Shipped in 1.0.x / 1.1.0 / 1.2.0 / 1.3.0
 
 What actually landed on the way from the 1.0 design freeze
 (captured by the "Skipped" section above) to today's `main`.
@@ -191,60 +191,75 @@ benchmark runs; the existing arnold numbers remain pg17.
   All six AM callbacks ported. 100/100 tests green with
   `--features "... relfile_storage pg_test"`.
 
-**Not done.** Phase L is gated, not default-on. The hardening
-checklist before the 1.2 flip lives in
-[`docs/PHASE_L_PROGRESS.md`](PHASE_L_PROGRESS.md). Two
-concurrency caveats remain on the side-table path: two backends
-racing their commit-time `persist::save` (last writer wins) and
-`PREPARE TRANSACTION` skipping the `PreCommit` callback
+### 5. v1.2.0 — Phase L hardening + Phase P cold-scan win
+
+**Done.**
+
+- **Phase L hardening (items 1–6 complete).** Every relfile
+  page write goes through `GenericXLog`; `ambuildempty`
+  populates `INIT_FORKNUM`; shrinking REINDEX truncates
+  trailing pages via `RelationTruncate`; deferred-commit
+  `aminsert` extended to the relfile path; migration `NOTICE`
+  in `ambeginscan` for v1.0.x indexes opened under
+  `relfile_storage`; `ambulkdelete` walks pages in-place
+  instead of rebuilding (O(deleted) vs. O(total)).
+- **Phase P — pre-baked SIMD-blocked layout + Lloyd-Max
+  codebook.** `ambuild` persists the blocked codes chain and
+  the codebook centroids/boundaries into the relfile meta page
+  + a v2 chain. Backends opening the index for the first time
+  read the prepared parts off disk via
+  `IdMapIndex::from_id_map_parts_with_prepared` and skip the
+  per-backend `pack::repack` (~12–15 s on dbpedia-1M) and
+  Lloyd-Max compute (~5–8 s). Cold p50 on dbpedia-1M dropped
+  from ~26.5 s (Phase L preview) to **1.26 s** — a 21×
+  speedup vs. the v1.0.x side-table baseline (Phase O-3,
+  commit `25ea5c8`).
+
+### 6. v1.3.0 — Phase Q: side-table storage retired
+
+**Done.**
+
+- `src/index/persist.rs` deleted; `aminsert_sidetable` /
+  `ambulkdelete_sidetable` deleted; the `turbovec.am_storage`
+  table dropped from the install SQL.
+- `relfile_storage` and `experimental_index_am` Cargo
+  features retired (default-on for many releases; the
+  flags were stale).
+- All `#[cfg(feature = ...)]` gates around the index AM and
+  storage paths removed.
+- Migration boundary: `ambeginscan` raises `ERROR` on a
+  v1.0.x..v1.2 index, with a clear `REINDEX INDEX <name>;`
+  hint. The previous `NOTICE` was too easy to miss.
+- Test count: 109/109 across pg13..pg18 (was 94/94 default
+  + 104/104 `relfile_storage` in 1.2.0; the gates collapse).
+
+**Not done.** None remaining — Phase Q (v1.3.0) closed the
+last item by retiring the side-table path entirely. Two
+concurrency caveats remain on the relfile path: two backends
+racing their commit-time relfile rewrite (last writer wins)
+and `PREPARE TRANSACTION` skipping the `PreCommit` callback
 (parallel-worker inserts already blocked by
 `amcanparallel = false`).
 
 ## Where future work would pay off (in priority order)
 
-### 1. Relfile-resident page format for the index AM (the cold-path fix)
+### 1. ~~Relfile-resident page format for the index AM (the cold-path fix).~~ **Shipped in v1.2.0; default-on in v1.3.0.**
 
-**Status:** preview shipped in 1.1.0 under
-`--features relfile_storage` (default OFF); flip to default-on
-targeted for 1.2 once the hardening items in
-[`docs/PHASE_L_PROGRESS.md`](PHASE_L_PROGRESS.md) are closed.
-**Measured cost it would save (still on the default side-table
-path):** ~6.8 s → ~tens of ms on the first AM scan in any fresh
-backend on a 1 M × 384-d 4-bit corpus.
+**Status:** The relfile-resident page format with persisted
+SIMD-blocked layout + Lloyd-Max codebook is the only storage
+strategy as of v1.3.0 (Phase Q). Cold-scan p50 on dbpedia-1M
+is **1.26 s** (post-Phase-P, commit a801f38), a 21× speedup
+over the v1.0.x side-table baseline. The pre-Phase-Q section
+on the SPI side-table is preserved in `git log` for context;
+the story below covers what would close the remaining gap to
+pgvector HNSW (~1.2 s vs. ~100 ms cold p50).
 
-**The story.** v1.0 stores the serialised index in a side-table
-(`turbovec.am_storage`, a regular heap with a `bytea payload`
-column). On the cold path, every fresh backend pays:
-
-  1. SPI fetch of ~195 MiB of TOASTed bytea (must detoast +
-     decompress every chunk through the buffer manager);
-  2. parse the magic / header / packed codes / scales / id table
-     via the `Read`-based deserialiser;
-  3. construct a `HashMap<u64, usize>` slot → id for the 1 M
-     entries.
-
-Measured on arnold (1 M × 384-d, release build):
-
-| commit | cold p50 | warm p50 | comment |
-|---|---:|---:|---|
-| `cca1ddc` (1.0.0) | 6 786 ms | 22.16 ms | Phase G baseline. |
-| `0c42f55` (in-memory deserialiser) | 6 802 ms | 22.0 ms | Phase H. tmpfile dance gone; cold path unchanged because step 1 (SPI fetch) and step 3 (HashMap construct) dominate. |
-
-Closing the gap requires moving the serialised payload into the
-index relation's main fork - the index AM's `relfilenode` - so
-shared buffers caches it cluster-wide rather than re-reading +
-rebuilding per backend. That is genuinely a Phase 5/Phase 6
-rewrite (callbacks for `ambuild`, `aminsertcleanup`,
-`ambuildempty`, the bgwriter / checkpointer integration, plus a
-page format that's amenable to mmap) and is the right shape for
-1.1 rather than 1.0.x.
-
-The HashMap rebuild is independently addressable: store the
-`slot_to_id` table sorted by slot, drop the inverse map
-(`id_to_slot`) entirely, and resolve `id` lookups in
-`ambulkdelete` via binary search instead. Trade O(log n) lookup
-for zero allocation on the cold path. Worth ~half a second on
-our corpus per the rough back-of-envelope.
+**Next lever:** cluster-wide caching of `IdMapIndex` parts via
+a shared-memory `dsm` segment so the per-backend
+`from_id_map_parts_with_prepared` cost (~1 s on dbpedia-1M
+reading codes + scales + ids + blocked chains off disk) is
+paid once per cluster instead of once per backend. Tracked
+as a follow-up; not a 1.3 gating item.
 
 1. **Real-world recall measurement vs. pgvector HNSW and
    pgvectorscale StreamingDiskANN.** We have synthetic random-vector

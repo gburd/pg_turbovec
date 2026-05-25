@@ -83,17 +83,19 @@ export RUSTFLAGS="-L $(find /nix/store -maxdepth 3 -name 'openblas-0.3.30' -type
 cargo build --no-default-features --features pg16
 cargo pgrx test pg16
 
-# Including the experimental index access method.
-cargo build --no-default-features --features pg16,experimental_index_am
-cargo pgrx test pg16 --features experimental_index_am
+# Stripped-down build (no index AM, no .so footprint for the AM):
+cargo build --no-default-features --features pg16
 ```
 
-## 6. Verified outcomes (this session)
+(As of v1.3.0 / Phase Q the `experimental_index_am` and
+`relfile_storage` Cargo features have been retired. The index
+AM and the relfile-resident storage path are default-on; there
+is no opt-in flag.)
+
+## 6. Verified outcomes
 
 ```
-default features:           28 passed; 0 failed
-experimental_index_am:      28 passed; 0 failed   (includes
-                                                   index_am_create_and_query)
+default features (pg16 + index AM):    109 passed; 0 failed
 ```
 
 ## 7. Why so much manual setup?

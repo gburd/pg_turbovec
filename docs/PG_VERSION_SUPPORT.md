@@ -4,19 +4,26 @@
 
 | Version | Tested patch | Status | Tests | Notes |
 |---|---|---|---|---|
-| 13.23 | ✅ | Supported | 92/92 | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.22 | ✅ | Supported | 92/92 | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.17 | ✅ | Supported | 92/92 | Same shape as 14. |
-| 16.13 | ✅ | Supported | 92/92 | Reference platform during development. |
-| 17.9  | ✅ | Supported | 92/92 | Benchmark platform (`arnold`). |
-| 18.3  | ✅ | Supported | 92/92 | `relopt_parse_elt` gained `isset_offset`. |
+| 13.23 | ✅ | Supported | 109/109 | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.22 | ✅ | Supported | 109/109 | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.17 | ✅ | Supported | 109/109 | Same shape as 14. |
+| 16.14 | ✅ | Supported | 109/109 | Reference platform during development. |
+| 17.9  | ✅ | Supported | 109/109 | Benchmark platform (`arnold`). |
+| 18.3  | ✅ | Supported | 109/109 | `relopt_parse_elt` gained `isset_offset`. |
 
 ## How tests are run
 
+As of v1.3.0 (Phase Q), the `experimental_index_am` and
+`relfile_storage` Cargo features are gone; the only build knob
+is `pg<N>`:
+
 ```bash
 cargo pgrx test pg<N> --no-default-features \
-    --features "pg<N> experimental_index_am pg_test"
+    --features "pg<N> pg_test"
 ```
+
+(Or simply `cargo pgrx test pg<N>` if you're happy with the
+default feature set, which already enables `pg16`.)
 
 For each supported version, the test suite drives every type
 (`vector`, `halfvec`, `sparsevec`, `bitvec`), every distance

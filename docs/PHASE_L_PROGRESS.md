@@ -1,63 +1,38 @@
-# Phase L progress — relfile-resident page format
+# Phase L progress — relfile-resident page format (historical)
 
-**Branch:** `pi-agent-phase-l-relfile`
-**Base:** `2c45824 ci+skill: cross-version test matrix, project-local drift-check skill`
-**Build status:** green on `pg16` for all three feature configurations
-**Test status:** 92/92 default, 92/92 SPI-only, 99/99 SPI + relfile
+> **Status: closed in v1.3.0 (Phase Q).** All six Phase L items
+> shipped (items 1–5 in v1.2.0, item 6 in v1.2.0). Phase P
+> (v1.2.0) closed the cold-scan gap that was the last blocker on
+> default-on. Phase Q (v1.3.0) retired the side-table path
+> entirely — the relfile-resident format is now the only storage
+> strategy, and the `relfile_storage` Cargo feature is gone.
+>
+> This document is preserved as a historical reference for the
+> per-item design decisions. The post-Phase-Q architecture is in
+> [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) § 4, § 7.
 
-This doc summarises a 2-day Phase L spike: move the serialised
-`turbovec` index from the `turbovec.am_storage` SPI side-table into
-the index relation's main fork, accessed via PostgreSQL's buffer
-manager. The architectural goal is to eliminate the 6.8 s cold-cache
-penalty per fresh backend (Phase H finding) and let `shared_buffers`
-cache the index cluster-wide.
+**Branch:** `pi-agent-phase-l-relfile` (merged into `main`)
+**Build status (post-Q):** green on pg13..pg18, no feature flags
+**Test status (post-Q):** 109/109 across pg13, pg16, pg18.
 
 ---
 
-## TL;DR
+## TL;DR (final)
 
 | Phase | Scope | Status |
 |-------|----------------------------------------|---|
-| L.1   | Page layout types (`src/index/page.rs`) | **DONE** — round-trip tested, 5 unit tests |
-| L.2   | `ambuildempty` (init fork)             | **STUB** — falls back to side-table marker; logged indexes unaffected |
-| L.3   | `ambuild` writes pages                  | **DONE** — `relfile::write_full` + 92 pgrx tests pass under feature |
-| L.4   | `aminsert` writes pages                 | **DONE (correct, not optimised)** — full-rewrite per insert; same big-O as side-table; Phase K's deferred-commit pattern still TODO |
-| L.5   | `ambeginscan` / `amgettuple` reads      | **DONE** — `relfile::read_meta` + `read_full` + cache integration; new `relfile_cold_scan_does_not_repeat_load` test passes |
-| L.6   | `ambulkdelete`                          | **DONE (correct, not optimised)** — full-rewrite via VACUUM; matches Phase 15 semantics |
+| L.1   | Page layout types (`src/index/page.rs`) | **DONE** — v2 layout (Phase P) supersedes the v1 preview; legacy v1 buffers still decode for migration detection. |
+| L.2   | `ambuildempty` (init fork)              | **DONE** — unlogged indexes get a populated `INIT_FORKNUM` (Phase L hardening item 2). |
+| L.3   | `ambuild` writes pages                  | **DONE** — `relfile::write_full_with_prepared` persists the SIMD-blocked layout + Lloyd-Max codebook (Phase P). |
+| L.4   | `aminsert` writes pages                 | **DONE** — deferred-commit pattern via `cache.rs` + `xact.rs`; one relfile rewrite per transaction. |
+| L.5   | `ambeginscan` / `amgettuple` reads      | **DONE** — reads prepared parts off disk; legacy v1 indexes raise `ERROR` with `REINDEX` hint. |
+| L.6   | `ambulkdelete`                          | **DONE** — in-place page walk + swap-remove; O(deleted) instead of O(total). |
 
-The full Phase L scope (L.1 .. L.6) is **functionally complete** in
-this branch. None of it ships in the default build — everything is
-gated behind the new `relfile_storage` Cargo feature, which itself
-implies `experimental_index_am`. The side-table path stays the
-default; flip it later in v1.1.0 once the WAL / unlogged-init / page
-truncation gaps below are closed.
-
-```bash
-# Default build (side-table, unchanged):
-cargo build
-
-# Phase L relfile build (new):
-cargo build --no-default-features \
-    --features "pg16 experimental_index_am relfile_storage"
-
-# pgrx tests under the relfile feature:
-cargo pgrx test pg16 --no-default-features \
-    --features "pg16 experimental_index_am relfile_storage"
-# → 99 passed; 0 failed
-```
-
----
-
-## What landed
-
-### `Cargo.toml`
-
-New feature `relfile_storage` (default OFF) gated under
-`experimental_index_am`. Adding this feature switches the AM's
-`ambuild`, `aminsert`, `ambeginscan` and `ambulkdelete`
-implementations to the relfile path; the SPI side-table path
-remains compileable and is selected when the feature is absent.
-**It is a build-time choice, not a runtime one** — per the brief.
+The original Phase L preview (v1.1.0) was gated behind the
+`relfile_storage` feature flag. v1.2.0 closed all six hardening
+items and added Phase P's pre-baked layout. v1.3.0 (Phase Q)
+retired the flag and the side-table path; what's left is what
+you see in `src/index/{build,insert,scan,vacuum,relfile,page}.rs`.
 
 ### Vendor patch (`vendor/turbovec`)
 

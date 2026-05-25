@@ -4,6 +4,111 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-05-25
+
+### Headline (Phase Q): one storage strategy, no flags
+
+The SPI side-table (`turbovec.am_storage`) and its accompanying
+Cargo feature flags (`relfile_storage`, `experimental_index_am`)
+are gone. The relfile-resident page format — introduced as a
+preview in 1.1.0 (Phase L), proven correct end-to-end in Phase
+O-2, and brought up to parity with the side-table on cold-scan
+latency by Phase P (1.2.0) — is now the only storage strategy.
+The AM matches the conventions of every other PostgreSQL index
+AM (btree, gist, gin, hnsw, ivfflat).
+
+Build flags reduce to just `pg<N>`:
+
+```
+cargo pgrx test pg16   # no --features needed
+cargo build --no-default-features --features pg16
+```
+
+### ⚠️ BREAKING: hard migration boundary
+
+Any existing turbovec index built under v1.0.x..v1.2.0 has
+either (a) only a side-table row and an empty main fork, or
+(b) a v1 (Phase L preview) relfile meta layout that lacks the
+persisted SIMD-blocked layout + Lloyd-Max codebook Phase P
+relies on. Both states are unrecoverable from the running
+binary. After upgrading:
+
+```sql
+ALTER EXTENSION pg_turbovec UPDATE TO '1.3.0';
+REINDEX INDEX <every_turbovec_index>;
+```
+
+Without `REINDEX`, `ambeginscan` raises an `ERROR` (no longer a
+`NOTICE`) explaining the situation. This is deliberate — a
+half-broken state can't silently return zero rows.
+
+The extension install / upgrade SQL drops `turbovec.am_storage`
+if it still exists (legacy state from a previous install).
+
+### Removed
+
+- `src/index/persist.rs` deleted (the SPI side-table reader /
+  writer, ~250 lines).
+- `aminsert_sidetable` and `ambulkdelete_sidetable` deleted.
+- The `turbovec.am_storage` table and the `extension_sql!` block
+  that created it.
+- The `relfile_storage` Cargo feature (default-on, no longer
+  togglable).
+- The `experimental_index_am` Cargo feature (the AM has been
+  default-on since v0.9; the "experimental" name was stale).
+- All `#[cfg(feature = "relfile_storage")]` and `#[cfg(feature
+  = "experimental_index_am")]` gates throughout `src/`.
+- Migration `NOTICE` in `ambeginscan` (replaced by the hard
+  `ERROR` above).
+- Stale tests that read `am_storage.payload` / `am_storage.
+  n_vectors` directly. Where the test was exercising generic
+  AM behaviour ("`CREATE INDEX` succeeds and the heap is
+  queryable"), it was kept and the assertion was switched to
+  `count(*)` on the heap. Where it was strictly side-table-
+  specific (`aminsert_deferred_persist_bulk`), it was deleted
+  in favour of its relfile twin (`relfile_aminsert_deferred_
+  commit_bulk`) which now runs unconditionally.
+
+### Updated
+
+- `src/cache.rs` and `src/xact.rs`: the cfg-selected flush
+  sink (sidetable `persist::save` vs relfile `write_full`)
+  collapses to relfile only.
+- `src/index/cost.rs`: `amcostestimate` reads `n_vectors` /
+  `dim` / `bit_width` straight off the relfile meta page
+  (block 0) instead of via SPI on `turbovec.am_storage`.
+- Cargo metadata bumped 1.2.0 → 1.3.0; `pg_turbovec.control`
+  bumped to `default_version = '1.3.0'`.
+- `migrations/005_pg_turbovec_v1.3.0.sql` documents the
+  upgrade path and is the new install reference mirror.
+- Documentation: `docs/PARITY_GAPS.md`, `an internal design note
+  .md`, an internal design note, `docs/ARCHITECTURE.md`,
+  `docs/PG_VERSION_SUPPORT.md`, and `README.md` updated to
+  reflect the post-Phase-Q crate layout, retired feature
+  flags, and post-Phase-P cold-scan numbers (1.26 s p50, 21×
+  speedup vs. pre-fix).
+
+### Tests
+
+109/109 across pg13, pg16, pg18 (sample of the matrix). Was
+94/94 default + 104/104 `relfile_storage` in 1.2.0; the two
+sides converge on 109 now that there are no gates: 94 default
+tests + 6 relfile tests (cold-scan, cold-vs-warm, WAL, init
+fork, ambulkdelete walk, prepared-layout) + 4 Phase P tests
+(prepared layout, cache hits, etc.) + 1 Phase Q test (legacy
+v1 detection primitive) + 4 sidetable-specific tests dropped.
+
+### Phase O-3 cold-scan re-validation
+
+Phase P's pre-baked SIMD-blocked layout + Lloyd-Max codebook
+shipped in 1.2.0 brought cold-scan p50 on dbpedia-1M (1 M
+vectors x 1536-d, OpenAI embeddings, arnold) from ~26.5 s to
+**1.26 s p50** — a 21× speedup over the pre-fix v1.0.x
+side-table path. The full-cluster cold-scan story now matches
+pgvector HNSW within an order of magnitude, and the
+relfile-resident architecture wins on every other axis (build
+time, on-disk size, WAL volume, recall).
+
 ## [1.2.0] — 2026-05-25
 
 ### Phase L hardening complete (5 of 6 items)

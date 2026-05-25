@@ -67,8 +67,6 @@
 //!   `log_newpage_buffer`. Phase L stub skips WAL entirely; the
 //!   handoff doc lists this as a known gap.
 
-#![cfg(feature = "relfile_storage")]
-
 use core::mem::size_of;
 
 /// 4-byte file magic. "TurboVec RelMain".

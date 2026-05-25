@@ -1,33 +1,33 @@
-# Implementing the `turbovec` Index Access Method
+# The `turbovec` Index Access Method (design doc)
 
-> **Status:** Phase 4 scaffold. Builds only when the experimental
-> Cargo feature is enabled; *not* exercised by the v0.3 test suite.
-> Pick this up in a session that has access to a running Postgres
-> dev cluster.
+> **Status (v1.3.0):** the `turbovec` index AM is default-on
+> and the relfile-resident page format is the only storage
+> strategy. The `experimental_index_am` and `relfile_storage`
+> Cargo features were retired in Phase Q; the historical bits
+> below are preserved for context but the build instructions
+> have been brought up to date.
 
 ## TL;DR
 
 ```bash
-# Default build excludes the AM scaffold:
+# Default build includes the AM:
 cargo build
 
-# Enable the experimental AM:
-cargo build --features experimental_index_am
-
 # Test it (requires cargo-pgrx):
-cargo pgrx test pg17 --features experimental_index_am
+cargo pgrx test pg<N>
+
+# Stripped-down build without the AM (no .so footprint for AM
+# scan/insert/build code):
+cargo build --no-default-features --features pg<N>
 ```
 
-## Why a Cargo feature gate?
+## Historical note: why a Cargo feature gate (and why it's gone)
 
-The IndexAmRoutine implementation is several hundred lines of
-`unsafe extern "C-unwind"` FFI. It interacts with Postgres lock
-manager, snapshot machinery, and memory contexts — failure modes
-include backend crashes and (worst case) heap-page corruption. The
-v0.3 default build deliberately excludes this code so:
-
-- Continuous integration stays green on every push.
-- Users who don't opt in cannot accidentally `CREATE INDEX ... USING
+The `IndexAmRoutine` implementation is several hundred lines of
+`unsafe extern "C-unwind"` FFI. It interacts with the Postgres
+lock manager, snapshot machinery, and memory contexts. v0.3..v0.8
+shipped it behind a Cargo feature so users couldn't accidentally
+`CREATE INDEX ... USING
   turbovec` and trip an unfinished code path.
 - The code is still in tree, reviewable, and ready to enable as soon
   as it is validated against a real cluster.

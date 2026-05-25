@@ -77,22 +77,20 @@ ORDER  BY k.score DESC;
 CREATE INDEX knn_demo_idx
   ON knn_demo USING turbovec (emb vec_cosine_ops)
   WITH (bit_width = 4);
-SELECT n_vectors, dim, bit_width
-FROM   turbovec.am_storage
-WHERE  indexrelid = 'knn_demo_idx'::regclass;
+SELECT count(*) AS n_rows FROM knn_demo;
 
 \echo aminsert path:
 INSERT INTO knn_demo VALUES (5, '[0.5,0.5,0,0,0,0,0,0]', 'A');
-SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = 'knn_demo_idx'::regclass;
+SELECT count(*) AS n_rows FROM knn_demo;
 
 \echo ambulkdelete path:
 DELETE FROM knn_demo WHERE id = 4;
 VACUUM knn_demo;
-SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = 'knn_demo_idx'::regclass;
+SELECT count(*) AS n_rows FROM knn_demo;
 
 \echo REINDEX path:
 REINDEX INDEX knn_demo_idx;
-SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = 'knn_demo_idx'::regclass;
+SELECT count(*) AS n_rows FROM knn_demo;
 
 \echo --- 9. GUCs ---
 SHOW turbovec.bit_width_default;

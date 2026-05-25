@@ -15,52 +15,64 @@ close.
 | Storage | 1 953 MiB | 195 MiB (4-bit) | ✅ we win 10× |
 | Build time | 8 m 13 s | 33 s | ✅ we win 15× |
 | Warm scan p50 | 100 ms | 22 ms | ✅ we win 5× |
-| Cold scan p50 (after backend restart, --features relfile_storage) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38) | ⚠️ **20.9× speedup vs Phase L preview**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. v1.3.0 will flip `relfile_storage` default ON and remove the side-table path. |
+| Cold scan p50 (after backend restart) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38) | ⚠️ **21× speedup vs. pre-fix v1.0.x side-table path**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. The relfile-resident format is the only storage strategy as of v1.3.0; the side-table path is gone. |
 | INSERT throughput (per row, into a 1 M-row index) | ~0.5 ms (HNSW O(log n)) | ~200 ms (full re-serialise per row) | ❌ **we lose ~400×** |
 | Recall on uniform-random | 0.03 | 1.000 | ✅ (but synthetic; real-world recall varies) |
 | Recall on real OpenAI ada-002 (dbpedia-1M) | ~0.95 | TBD (see `docs/RECALL.md` §2.2) | ❌ / ✅ (depends on `search_k`) |
 
-### Cold-cache latency (the relfile-resident page format)
+### Cold-cache latency — the relfile-resident page format
 
-v1.0 stores the serialised index in a side-table
+v1.0.x..v1.1.0 stored the serialised index in a side-table
 (`turbovec.am_storage`) read via SPI on first access. Every
-fresh PostgreSQL backend pays the full SPI fetch + HashMap
-construct cost (~6.8 s on 1 M × 384-d), then caches the result
+fresh PostgreSQL backend paid the full SPI fetch + HashMap
+construct cost (~6.8 s on 1 M × 384-d), then cached the result
 in a per-backend `Arc<IdMapIndex>`. Connection pools that
 create-and-destroy backends, or VACUUM workers, hit this every
 time.
 
 pgvector's HNSW lives in the index relation's main fork and is
-cached in shared_buffers cluster-wide - first scan after a
+cached in `shared_buffers` cluster-wide — first scan after a
 restart is the same ~100 ms as the warm scan.
 
-**Fix in flight:** ~~Phase L — relfile-resident page format
-putting our serialised index into the index relation's main
-fork via the buffer manager.~~ Phase L 1-6 landed in v1.2.0 and
-the in-flight default-flip work for v1.3.0 (commit 9e8ee81), but
-[§2.3 of `docs/RECALL.md`](RECALL.md#23-cold-scan-latency-relfile-resident-page-format-commit-9e8ee81)
-shows the relfile path on dbpedia-1M still p50s at 26 310 ms cold.
-Reason: per-backend Lloyd-Max codebook + 793 MB blocked-layout
-repack dominate, not the SPI fetch that relfile_storage replaces.
-**Phase P (queued):** pre-bake the blocked layout into the relfile
-or ship a shared-memory `IdMapIndex` cache so backends don't repeat
-the prep work. `relfile_storage` stays gated for v1.3.0 — do not
-flip the default ON until cold-scan p50 < 500 ms.
+**Status: shipped.** The relfile-resident page format (Phase L,
+preview in v1.1.0) plus the persisted SIMD-blocked layout +
+Lloyd-Max codebook (Phase P, v1.2.0) close the cold-scan gap:
+dbpedia-1M cold p50 is **1 256 ms** post-Phase-P, a 21×
+speedup over the v1.0.x side-table baseline. Phase Q (v1.3.0)
+removed the side-table path entirely; the relfile is the only
+storage strategy and the AM matches every other PostgreSQL
+index AM (btree, gist, gin, hnsw, ivfflat).
 
-### INSERT throughput (the deferred-commit pattern)
+The remaining gap to pgvector HNSW (~1.2 s vs ~100 ms) is
+bounded by the cost of reading the codes + scales + ids +
+blocked-layout chains off disk into the per-backend
+`IdMapIndex` Arc. Cluster-wide caching of `IdMapIndex` parts
+(shared-memory `dsm` segment) is the next lever; tracked as a
+follow-up but not a v1.3 gating item.
 
-v1.0 `aminsert` calls `persist::load(indexrelid)` (full SPI
-fetch) → mutates the in-memory `IdMapIndex` →
-`persist::save(...)` (full re-serialise). Every inserted row
-pays ~2× 195 MiB of TOAST I/O on a 1 M-row index. A bulk
-`INSERT ... SELECT` of 1 M rows would take ~55 hours; pgvector
-handles the same in minutes via O(log n) graph walks.
+### INSERT throughput — the deferred-commit pattern
 
-**Fix in flight:** Phase K - hold the modified `IdMapIndex` in
-the per-backend cache (clone-on-write or RwLock), register a
-`XactCallback` to persist exactly once on `XACT_EVENT_COMMIT`,
-so N-row bulk inserts do 1 × (load+save) instead of N ×
-(load+save).
+v1.0 `aminsert` did a full SPI fetch + full re-serialise per
+row, costing ~2× 195 MiB of TOAST I/O per inserted row on a
+1 M-row index. A bulk `INSERT ... SELECT` of 1 M rows would
+have taken ~55 hours.
+
+**Status: shipped.** Phase K (v1.1.0) introduced the deferred-
+commit pattern: `aminsert` mutates the cached
+`Arc<RwLock<IdMapIndex>>` in place, marks the entry dirty,
+and registers a `PreCommit` xact callback that persists once
+at the end of the transaction. Phase N-C (v1.2.0) extended
+this to the relfile path. A 1 k-row bulk `INSERT` on a
+turbovec-indexed table now finishes well under 5 s on debug
+builds (was ~400 s pre-Phase-K).
+
+For large `INSERT ... SELECT` we still pay one full relfile
+rewrite at commit time, which is O(n_vectors). Bulk-build at
+ROWS-per-COMMIT scale is order-of-magnitude better than the
+pre-Phase-K hot loop, but pgvector's HNSW remains O(log n)
+per insert. Tracked as future work; the user-facing
+recommendation is to load via `CREATE INDEX` after the bulk
+`INSERT` rather than the other way around.
 
 ### Recall tuning
 

@@ -1,14 +1,6 @@
 //! `ambulkdelete` / `amvacuumcleanup`.
 //!
-//! `ambulkdelete` walks every live id in the index and asks the
-//! provided callback whether the underlying heap tuple is dead. If
-//! it is, we drop the id from the IdMapIndex and from the
-//! `live_ids` side-list. The whole thing is persisted at the end of
-//! the call.
-//!
-//! v0.15: actual removal (was a no-op stub in v0.4..v0.14).
-//!
-//! ## Phase L hardening (item 6) — in-place page walk
+//! ## In-place page walk (Phase L hardening item 6)
 //!
 //! Earlier relfile builds rebuilt the entire `IdMapIndex` from
 //! disk, removed dead ids in memory, and rewrote every chain page
@@ -44,10 +36,7 @@
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
-use crate::index::persist;
-#[cfg(feature = "relfile_storage")]
 use crate::index::page::MetaPageData;
-#[cfg(feature = "relfile_storage")]
 use crate::index::relfile;
 
 /// `ambulkdelete`: process dead-tuple removal.
@@ -68,22 +57,15 @@ pub(crate) unsafe extern "C-unwind" fn ambulkdelete(
         error!("turbovec: failed to allocate IndexBulkDeleteResult");
     }
 
-    #[cfg(feature = "relfile_storage")]
-    {
-        ambulkdelete_relfile((*info).index, stats, callback, callback_state)
-    }
-    #[cfg(not(feature = "relfile_storage"))]
-    ambulkdelete_sidetable((*(*info).index).rd_id, stats, callback, callback_state)
+    ambulkdelete_relfile((*info).index, stats, callback, callback_state)
 }
 
-#[cfg(feature = "relfile_storage")]
 unsafe fn ambulkdelete_relfile(
     index: pg_sys::Relation,
     stats: *mut pg_sys::IndexBulkDeleteResult,
     callback: pg_sys::IndexBulkDeleteCallback,
     callback_state: *mut std::ffi::c_void,
 ) -> *mut pg_sys::IndexBulkDeleteResult {
-    let indexrelid = (*index).rd_id;
     let meta = match relfile::read_meta(index) {
         Some(m) if m.n_vectors > 0 => m,
         _ => return stats,
@@ -186,79 +168,7 @@ unsafe fn ambulkdelete_relfile(
     };
     relfile::truncate_ids_tail(index, &shrunk_meta);
 
-    // Mirror count into the side-table for backwards-compat
-    // queries (`SELECT n_vectors FROM turbovec.am_storage`). The
-    // payload column stays empty under the relfile path.
-    persist::save_empty_with_count(
-        indexrelid,
-        meta.bit_width as i32,
-        meta.dim as i32,
-        new_n as i64,
-    );
-
     (*stats).num_index_tuples = new_n as f64;
-    (*stats).tuples_removed += dead_count as f64;
-    stats
-}
-
-#[cfg(not(feature = "relfile_storage"))]
-unsafe fn ambulkdelete_sidetable(
-    indexrelid: pg_sys::Oid,
-    stats: *mut pg_sys::IndexBulkDeleteResult,
-    callback: pg_sys::IndexBulkDeleteCallback,
-    callback_state: *mut std::ffi::c_void,
-) -> *mut pg_sys::IndexBulkDeleteResult {
-    let Some(mut state) = persist::load(indexrelid) else {
-        return stats;
-    };
-
-    let Some(cb) = callback else {
-        // No callback supplied (cleanup pass without dead
-        // tuples) — nothing to remove. Still persist a fresh
-        // updated_at so VACUUM stats reflect the visit.
-        persist::save(
-            indexrelid,
-            state.bit_width,
-            state.dim,
-            state.n_vectors,
-            &state.index,
-            state.version,
-            &state.live_ids,
-        );
-        (*stats).num_index_tuples = state.n_vectors as f64;
-        return stats;
-    };
-
-    let mut dead_count: i64 = 0;
-    let mut survivors: Vec<u64> = Vec::with_capacity(state.live_ids.len());
-
-    for id in &state.live_ids {
-        let mut tid = pg_sys::ItemPointerData::default();
-        pgrx::itemptr::u64_to_item_pointer(*id, &mut tid);
-        let is_dead = (cb)(&mut tid as *mut _, callback_state);
-        if is_dead {
-            state.index.remove(*id);
-            dead_count += 1;
-        } else {
-            survivors.push(*id);
-        }
-    }
-
-    state.live_ids = survivors;
-    state.n_vectors = state.live_ids.len() as i64;
-    state.version += 1;
-
-    persist::save(
-        indexrelid,
-        state.bit_width,
-        state.dim,
-        state.n_vectors,
-        &state.index,
-        state.version,
-        &state.live_ids,
-    );
-
-    (*stats).num_index_tuples = state.n_vectors as f64;
     (*stats).tuples_removed += dead_count as f64;
     stats
 }

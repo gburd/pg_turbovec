@@ -48,8 +48,6 @@
 //! shrinking REINDEX or `ambulkdelete` consolidation actually
 //! frees disk pages instead of leaving them as orphans.
 
-#![cfg(feature = "relfile_storage")]
-
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 

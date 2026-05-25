@@ -11,9 +11,7 @@ use pgrx::prelude::*;
 use turbovec::IdMapIndex;
 
 use crate::guc;
-#[cfg(feature = "relfile_storage")]
-use crate::index::relfile;
-use crate::index::{options, persist};
+use crate::index::{options, relfile};
 use crate::kernels;
 use crate::vec::Vector;
 
@@ -103,10 +101,21 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     );
     state.heap_seen = n_seen as u64;
 
-    // If the heap was empty and dim was not pinned, persist an empty
-    // marker so subsequent aminserts have a row to update.
+    // If the heap was empty and dim was not pinned, write an
+    // empty meta page so subsequent aminserts have stable state
+    // to extend.
     let Some(dim) = state.dim else {
-        persist::save_empty(indexrelid, cfg_bit_width, 0);
+        relfile::write_full(
+            index_relation,
+            cfg_bit_width as u8,
+            /*dim=*/ 0,
+            /*n_vectors=*/ 0,
+            &[],
+            &[],
+            &[],
+            /*am_version=*/ 1,
+        );
+        let _ = indexrelid;
         (*result).heap_tuples = state.heap_seen as f64;
         (*result).index_tuples = 0.0;
         return result;
@@ -120,66 +129,49 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     }
 
     let n_vectors = state.ids.len() as i64;
-    #[cfg(feature = "relfile_storage")]
-    {
-        // Phase P: pre-bake the SIMD-blocked layout and the
-        // Lloyd-Max codebook now, while we own the freshly-built
-        // index. Persisting them alongside the row-major codes
-        // means every backend opening this index for the first
-        // time skips the per-backend ~12–15 s `pack::repack` and
-        // ~5–8 s codebook compute. The prepare step is not free
-        // here, but ambuild is the right place to pay it: it
-        // already runs once per index and at the only point
-        // where we definitively know n_vectors won't change
-        // until the next mutation.
-        if n_vectors > 0 {
-            idx.prepare_eager();
-            let prepared = relfile::PreparedParts {
-                blocked_codes: idx.blocked_codes(),
-                n_blocks: idx.n_blocks() as u32,
-                centroids: idx.centroids(),
-                boundaries: idx.boundaries(),
-            };
-            relfile::write_full_with_prepared(
-                index_relation,
-                cfg_bit_width as u8,
-                dim as u32,
-                n_vectors as u64,
-                idx.packed_codes(),
-                idx.scales(),
-                idx.slot_to_id(),
-                1,
-                prepared,
-            );
-        } else {
-            // Empty index: no prepared layout to persist.
-            relfile::write_full(
-                index_relation,
-                cfg_bit_width as u8,
-                dim as u32,
-                0,
-                idx.packed_codes(),
-                idx.scales(),
-                idx.slot_to_id(),
-                1,
-            );
-        }
-        // We still write a side-table marker row so existing
-        // tests that grep `turbovec.am_storage` for `n_vectors`
-        // keep passing. Marked payload-empty so the SPI loader
-        // would fail-loud if anything ever tried to use it.
-        persist::save_empty_with_count(indexrelid, cfg_bit_width, dim as i32, n_vectors);
+    // Phase P: pre-bake the SIMD-blocked layout and the
+    // Lloyd-Max codebook now, while we own the freshly-built
+    // index. Persisting them alongside the row-major codes
+    // means every backend opening this index for the first
+    // time skips the per-backend ~12–15 s `pack::repack` and
+    // ~5–8 s codebook compute. The prepare step is not free
+    // here, but ambuild is the right place to pay it: it
+    // already runs once per index and at the only point
+    // where we definitively know n_vectors won't change
+    // until the next mutation.
+    if n_vectors > 0 {
+        idx.prepare_eager();
+        let prepared = relfile::PreparedParts {
+            blocked_codes: idx.blocked_codes(),
+            n_blocks: idx.n_blocks() as u32,
+            centroids: idx.centroids(),
+            boundaries: idx.boundaries(),
+        };
+        relfile::write_full_with_prepared(
+            index_relation,
+            cfg_bit_width as u8,
+            dim as u32,
+            n_vectors as u64,
+            idx.packed_codes(),
+            idx.scales(),
+            idx.slot_to_id(),
+            1,
+            prepared,
+        );
+    } else {
+        // Empty index: no prepared layout to persist.
+        relfile::write_full(
+            index_relation,
+            cfg_bit_width as u8,
+            dim as u32,
+            0,
+            idx.packed_codes(),
+            idx.scales(),
+            idx.slot_to_id(),
+            1,
+        );
     }
-    #[cfg(not(feature = "relfile_storage"))]
-    persist::save(
-        indexrelid,
-        cfg_bit_width,
-        dim as i32,
-        n_vectors,
-        &idx,
-        1,
-        &state.ids,
-    );
+    let _ = indexrelid;
 
     (*result).heap_tuples = state.heap_seen as f64;
     (*result).index_tuples = n_vectors as f64;
@@ -249,39 +241,30 @@ unsafe extern "C-unwind" fn build_callback(
 /// can be reset after a crash. Logged indexes (the common case)
 /// never invoke this callback — PG calls `ambuild` instead.
 ///
-/// Phase L hardening (item 2): under the relfile feature we
-/// allocate a single empty meta page in `INIT_FORKNUM` and WAL-log
-/// it via `GenericXLog`. After a crash PG copies the init fork
-/// over the main fork, restoring the index to a known-empty
-/// state. This matches pgvector's `HnswBuildEmpty` pattern. The
-/// SPI side-table marker is still written so existing tests that
-/// grep `turbovec.am_storage` keep working.
+/// Phase L hardening (item 2): we allocate a single empty meta
+/// page in `INIT_FORKNUM` and WAL-log it via `GenericXLog`.
+/// After a crash PG copies the init fork over the main fork,
+/// restoring the index to a known-empty state. This matches
+/// pgvector's `HnswBuildEmpty` pattern.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Relation) {
-    #[cfg_attr(not(feature = "relfile_storage"), allow(unused_variables))]
     let (bw, dim) = options::read(index_relation);
-    let indexrelid = (*index_relation).rd_id;
 
-    #[cfg(feature = "relfile_storage")]
-    {
-        // Plan an empty layout. dim may be 0 if the user didn't
-        // pin it via reloptions — the meta page records 0/0/0,
-        // which our reader handles as "empty index".
-        let dim_u32 = if dim > 0 { dim as u32 } else { 0 };
-        if dim_u32 % 8 == 0 {
-            let meta = crate::index::page::MetaPageData::plan(
-                bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
-            );
-            relfile::write_meta_in_fork(
-                index_relation,
-                pg_sys::ForkNumber::INIT_FORKNUM,
-                &meta,
-            );
-        }
-        // If dim was supplied as a non-multiple-of-8 we silently
-        // skip the init-fork write; the next ambuild will error
-        // with a more informative message.
+    // Plan an empty layout. dim may be 0 if the user didn't
+    // pin it via reloptions — the meta page records 0/0/0,
+    // which our reader handles as "empty index".
+    let dim_u32 = if dim > 0 { dim as u32 } else { 0 };
+    if dim_u32 % 8 == 0 {
+        let meta = crate::index::page::MetaPageData::plan(
+            bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
+        );
+        relfile::write_meta_in_fork(
+            index_relation,
+            pg_sys::ForkNumber::INIT_FORKNUM,
+            &meta,
+        );
     }
-
-    persist::save_empty(indexrelid, bw, 0);
+    // If dim was supplied as a non-multiple-of-8 we silently
+    // skip the init-fork write; the next ambuild will error
+    // with a more informative message.
 }

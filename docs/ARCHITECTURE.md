@@ -4,11 +4,14 @@
 > writing code. When in doubt, prefer the design here over what
 > `pgvector` does; we intentionally diverge in places.
 
-**Status:** v1.1.0 shipped. Type, operators, aggregates, casts,
-the `turbovec` index AM (default-on via `experimental_index_am`),
+**Status:** v1.3.0 shipped. The `vector` type, distance
+operators + functions, aggregates, casts, the `turbovec` index
+AM (default-on; the `experimental_index_am` and
+`relfile_storage` Cargo features were retired in Phase Q),
 halfvec / sparsevec / bitvec types, deferred-commit `aminsert`,
-and a gated relfile-resident page-format preview
-(`relfile_storage`, default OFF) all live in `main`. The roadmap
+and the relfile-resident page format with persisted SIMD-
+blocked layout + Lloyd-Max codebook (Phase P) all live in
+`main`. The relfile is the only storage strategy. The roadmap
 history below is truncated; the canonical per-version log is
 [`CHANGELOG.md`](../CHANGELOG.md).
 **Target Postgres:** 13–18 (all six tested in CI; see
@@ -44,11 +47,14 @@ locally vendored under `vendor/turbovec/` with a small patch (see
 5. **Filtered search** that pushes the predicate into the SIMD
    kernel via `IdMapIndex::search_with_allowlist` (shipped in
    v0.10 through `turbovec.knn(..., allowed bigint[])`).
-6. **Honest about limits**: the v1.0 index AM persists into a
-   side table (`turbovec.am_storage`) and caches a deserialised
-   `IdMapIndex` per backend. The v1.1 `relfile_storage` preview
-   moves the payload into the index relfile so shared_buffers
-   caches it cluster-wide; default-off pending the 1.2 flip.
+6. **Honest about limits**: the `turbovec` index AM persists
+   into the index relation's main fork via PostgreSQL's buffer
+   manager, the same mechanism every other PG index AM uses.
+   Per-backend `IdMapIndex` cache + `shared_buffers` cache the
+   relfile pages cluster-wide. Phase P's pre-baked SIMD-blocked
+   layout + Lloyd-Max codebook bring cold-scan p50 to ~1.26 s on
+   dbpedia-1M; remaining gap to pgvector HNSW (~100 ms cold) is
+   bounded by the per-backend `IdMapIndex` reconstruction cost.
 
 ### 1.2 Non-goals
 
@@ -133,19 +139,19 @@ pg_turbovec/
 │   │   ├── vacuum.rs           # ambulkdelete / amvacuumcleanup
 │   │   ├── cost.rs             # amcostestimate (informed model)
 │   │   ├── validate.rs         # amvalidate (opclass support fns)
-│   │   ├── persist.rs          # SPI-backed turbovec.am_storage I/O
-│   │   ├── page.rs             # Phase L: relfile page layouts (gated)
-│   │   └── relfile.rs          # Phase L: bufmgr-backed I/O (gated)
+│   │   ├── page.rs             # relfile meta-page byte layout (v2: blocked + codebook)
+│   │   └── relfile.rs          # bufmgr-backed page I/O + WAL via GenericXLog
 │   └── bin/pgrx_embed.rs
 ├── benches/                    # criterion + recall harnesses
 └── tests/                      # psql regression scripts
 ```
 
 `src/index/` was introduced in v0.4 as the experimental index AM
-and promoted to default-on in v0.9. The Phase L preview
-(`page.rs` + `relfile.rs`) is gated behind the `relfile_storage`
-Cargo feature (default OFF) and is documented in
-[an internal design note](an internal design note).
+and promoted to default-on in v0.9. The relfile-resident format
+(`page.rs` + `relfile.rs`) was introduced as a Phase L preview
+in v1.1.0 and made the only storage strategy in v1.3.0 (Phase Q,
+see [an internal design note](an internal design note) for the
+historical record).
 
 ---
 
@@ -376,12 +382,17 @@ Three options were considered:
 | Option | Pros | Cons | Phase |
 |--------|------|------|-------|
 | Rebuild on every scan | Trivial; correct | Rebuild cost dominates | discarded |
-| Side table `turbovec.am_storage`, backend-local LRU | Reuses existing varlena infra; survives crash via WAL of the side table | Whole-index rewrite on each commit; lock contention; large `payload` is TOASTed | **Phase 2** |
-| Relfile-resident pages, WAL-logged | Crash-safe, incremental, vacuumable | Need a real page format; lots of new code | **Phase 3** |
+| Side table `turbovec.am_storage`, backend-local LRU | Reuses existing varlena infra; survives crash via WAL of the side table | Whole-index rewrite on each commit; lock contention; large `payload` is TOASTed | shipped in v1.0.x..v1.2.0 (preview), retired in v1.3.0 |
+| Relfile-resident pages, WAL-logged | Crash-safe, incremental, vacuumable, integrates with `shared_buffers` | Need a real page format; lots of new code | **shipped in v1.3.0** (Phase L + Phase P) |
 
-Phase 2 picks option B:
+v1.3.0 (Phase Q) ships option C — relfile-resident pages with
+persisted SIMD-blocked layout + Lloyd-Max codebook. The on-disk
+layout is sketched in [`src/index/page.rs`](../src/index/page.rs);
+the v0.4..v1.2 side-table layout shown below is preserved here as
+historical context only.
 
 ```sql
+-- Pre-Phase-Q (v1.0.x..v1.2.0); no longer used.
 CREATE TABLE turbovec.am_storage (
     indexrelid  oid PRIMARY KEY,
     bit_width   int4 NOT NULL,
@@ -393,24 +404,24 @@ CREATE TABLE turbovec.am_storage (
 );
 ```
 
-`payload` is the output of `IdMapIndex::write` (file format `TVIM`).
 A backend-local LRU keyed by `(indexrelid, version)` caches
-deserialised `IdMapIndex` instances; total cache size is bounded by
-`turbovec.cache_size_mb`.
+deserialised `IdMapIndex` instances; total cache size is bounded
+by `turbovec.cache_size_mb`. The cache is shared with the
+`turbovec.knn(...)` function path.
 
 ### 6.5 Callback responsibilities (Phase 2 sketch)
 
 | Callback              | Action                                                                 |
 |-----------------------|------------------------------------------------------------------------|
-| `ambuild`             | Heap-scan the column, normalise (if GUC on), build `IdMapIndex`, write payload to `am_storage` |
+| `ambuild`             | Heap-scan the column, normalise (if GUC on), build `IdMapIndex`, persist to the relfile via `relfile::write_full_with_prepared` (codes/scales/ids/blocked chains + meta page) |
 | `ambuildempty`        | INSERT empty payload row                                              |
-| `aminsert`            | Lazy-load index from `am_storage` into cache, `add_with_ids`, mark dirty; flush on commit hook |
+| `aminsert`            | Lazy-load `IdMapIndex` from relfile pages into cache, `add_with_ids`, mark dirty; `PreCommit` xact callback flushes via `relfile::write_full_with_prepared` once per transaction |
 | `ambeginscan`         | Resolve opclass strategy, attach query datum slot                      |
 | `amrescan`            | Materialise the query `vector`; if `WHERE` predicate yielded a TID set, build u64 allowlist |
 | `amgettuple`          | Run `IdMapIndex::search` (or `search_with_allowlist`) on first call, then drain cached results |
 | `amendscan`           | Drop scan state                                                       |
 | `ambulkdelete`        | For each dead CTID, `IdMapIndex::remove(ctid_to_u64)`; mark dirty     |
-| `amvacuumcleanup`     | Flush dirty payload to `am_storage`; emit stats                       |
+| `amvacuumcleanup`     | No-op — `ambulkdelete` already wrote the new meta page and truncated trailing pages |
 | `amcostestimate`      | Cost ≈ `n_vectors * dim * bit_width / 8 / SIMD_WIDTH * limit`         |
 | `amoptions`           | Validate reloptions                                                   |
 | `amvalidate`          | Verify opclass support functions resolve                              |
@@ -461,19 +472,20 @@ index AM is still on the roadmap:
   invalidate the SIMD-blocked cache. Mutation is routed through a
   per-`indexrelid` `parking_lot::RwLock` in `src/cache.rs`; Phase
   K's deferred-commit `aminsert` mutates under a write guard and
-  defers the `am_storage` flush to a `PreCommit` xact callback.
-- Crash safety on the default side-table path derives entirely
-  from WAL on the `turbovec.am_storage` table; an interrupted
-  `INSERT` simply rolls back, leaving the cached `IdMapIndex` to
-  be discarded on the next cache invalidation. **A crash during a
-  long ambuild that has not yet committed will leave the index
-  empty until rebuilt** — acceptable because Postgres expects
-  that of `CREATE INDEX`.
-- The `relfile_storage` preview (gated, default OFF; see
-  [an internal design note](an internal design note)) moves the
-  payload into the index relfile with full WAL coverage through
-  the standard buffer manager. The 1.2 default-on flip depends
-  on the hardening checklist there.
+  defers the relfile rewrite to a `PreCommit` xact callback.
+- Crash safety derives from WAL on the index relation's main
+  fork: every page write goes through `GenericXLog`
+  (`GenericXLogStart` / `RegisterBuffer` / `Finish`), and
+  `RelationTruncate` after a shrinking `ambulkdelete` emits
+  `XLOG_SMGR_TRUNCATE`. An interrupted `INSERT` rolls back,
+  leaving the cached `IdMapIndex` to be discarded on the next
+  cache invalidation. **A crash during a long ambuild that has
+  not yet committed will leave the index empty until rebuilt**
+  — acceptable because Postgres expects that of `CREATE INDEX`.
+- Unlogged indexes ship with a populated `INIT_FORKNUM`
+  ([an internal design note](an internal design note) item 2)
+  so crash recovery copies the init fork over the main fork,
+  restoring an empty queryable index.
 
 ---
 
@@ -483,7 +495,7 @@ index AM is still on the roadmap:
 |----------------------------------|------|---------|----------------|-------|
 | `turbovec.bit_width_default`     | int  | 4       | 2..=4          | applied when `WITH (bit_width)` is omitted |
 | `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      | 0 disables cache (forces rebuild on every scan) |
-| `turbovec.warn_on_rebuild`       | bool | true    | -              | emit `NOTICE` when a Phase 2 index is rematerialised from `am_storage` |
+| `turbovec.warn_on_rebuild`       | bool | true    | -              | emit `NOTICE` when a per-backend `IdMapIndex` is reconstructed from the relfile pages |
 | `turbovec.search_concurrency`    | int  | 1       | 1..=128        | caps rayon fan-out inside a single batched search |
 | `turbovec.normalize_on_insert`   | bool | true    | -              | unit-normalise vectors before passing to `add_with_ids` |
 
@@ -521,10 +533,22 @@ short version of the path from 0.1 to 1.1:
   `dbpedia-entities-openai-1M`, deferred-commit `aminsert`
   (~3000× bulk-INSERT speedup) plus latent
   codebook-recompute and `costestimate` fixes, and the
-  relfile-resident page-format preview gated under
-  `--features relfile_storage` (default OFF). See
-  [an internal design note](an internal design note) for the
-  hardening checklist before the 1.2 default flip.
+  relfile-resident page-format preview
+  (`--features relfile_storage`, default OFF in v1.1).
+- **v1.2.0** — **Phase L hardening + Phase P**: all six Phase L
+  items closed (WAL, init fork, truncate, deferred-commit,
+  migration NOTICE, in-place ambulkdelete walk); Phase P
+  pre-bakes the SIMD-blocked layout + Lloyd-Max codebook into
+  the relfile so backends opening the index for the first time
+  skip the per-backend `pack::repack` and codebook compute.
+  Cold-scan p50 on dbpedia-1M dropped from ~26.5 s to 1.26 s.
+- **v1.3.0** — **Phase Q**: side-table storage retired. The
+  relfile-resident format is the only storage strategy; the
+  `experimental_index_am` and `relfile_storage` Cargo features
+  are gone. Hard migration boundary: `ambeginscan` raises
+  `ERROR` on a v1.0.x..v1.2 index and asks the user to
+  `REINDEX`. See [an internal design note](an internal design note)
+  for the per-item record.
 
 ---
 
@@ -582,12 +606,16 @@ search latency, and on-disk size.
    thing transparently. Users who turn this off and feed non-
    unit-norm vectors get measurably worse recall — we should emit a
    `NOTICE` on `CREATE INDEX` when the GUC is off.
-5. **Multi-tenant isolation.** `am_storage` is a regular table;
-   row-level security applies. We do *not* attempt to encrypt
-   payloads at rest beyond what the underlying tablespace provides.
-6. **Cross-version migration.** Dump/restore must reload `am_storage`
-   payloads as opaque bytea; we declare the column with `STORAGE
-   EXTERNAL` so it never gets compressed or sliced incorrectly.
+5. **Multi-tenant isolation.** The relfile pages live in the
+   index relation's main fork; standard PG ACLs and
+   row-level-security on the *underlying heap* apply. We do not
+   encrypt page payloads at rest beyond what the underlying
+   tablespace provides.
+6. **Cross-version migration.** Dump/restore preserves the
+   index relation. The on-disk wire format is versioned in the
+   meta page (currently v2, Phase P). Pre-Phase-P (v1) indexes
+   are detected at scan time and the user is asked to `REINDEX`
+   (the v1.3.0 hard migration boundary).
 7. **Concurrency of `parking_lot::Mutex` inside a Postgres backend.**
    Postgres backends are single-process / single-thread. We use the
    mutex defensively because `rayon` from `turbovec` may spawn

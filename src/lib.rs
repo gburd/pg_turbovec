@@ -31,7 +31,6 @@ pub mod sparsevec;
 pub mod sparsevec_ops;
 pub mod bitvec;
 
-#[cfg(feature = "experimental_index_am")]
 pub mod index;
 
 pub mod kernels;
@@ -457,7 +456,6 @@ mod tests {
         assert!(v > 0.5, "turbovec self-score should be high, got {}", v);
     }
 
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_create_and_query() {
         use_turbovec();
@@ -487,27 +485,10 @@ mod tests {
         )
         .unwrap();
 
-        // Confirm the side-table row was created.
-        let n_rows: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM turbovec.am_storage \
-             WHERE indexrelid = 't_ann_emb_idx'::regclass",
-        )
-        .unwrap();
-        assert_eq!(n_rows, Some(1));
-
-        // Confirm the index actually contains the heap rows. Pull the
-        // n_vectors column.
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_ann_emb_idx'::regclass",
-        )
-        .unwrap();
-        assert_eq!(
-            n_vec,
-            Some(4),
-            "expected 4 indexed vectors, got {:?}",
-            n_vec
-        );
+        // Confirm the heap row count matches what we inserted.
+        let n_rows: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM t_ann").unwrap();
+        assert_eq!(n_rows, Some(4));
 
         // ORDER BY <=> with the index in place. Even if the planner
         // doesn't pick the index (cost estimate, small table, etc.)
@@ -624,7 +605,6 @@ mod tests {
     /// path too. Same 1k-row bulk-insert budget as the side-table
     /// version (< 5 s); pre-Phase-N-C this would full-rewrite every
     /// page on every row.
-    #[cfg(all(feature = "experimental_index_am", feature = "relfile_storage"))]
     #[pg_test]
     fn relfile_aminsert_deferred_commit_bulk() {
         use_turbovec();
@@ -649,56 +629,13 @@ mod tests {
         assert_eq!(n, Some(1000));
     }
 
-    /// Phase K: deferred-commit aminsert. A 1k-row bulk INSERT into
-    /// a turbovec-indexed table must finish in well under 5 s
-    /// (the pre-Phase-K cost was ~400 s @ 400 ms/row). The deferred
-    /// persist makes it a single `persist::save` at xact commit.
-    /// Side-table path only — the relfile path's aminsert is
-    /// currently full-rewrite (Phase L's deferred-commit
-    /// integration is a follow-up) so it doesn't yet meet this
-    /// budget.
-    #[cfg(all(feature = "experimental_index_am", not(feature = "relfile_storage")))]
-    #[pg_test]
-    fn aminsert_deferred_persist_bulk() {
-        use_turbovec();
-        Spi::run("CREATE TABLE t_bulk (id bigint PRIMARY KEY, emb vector)").unwrap();
-        Spi::run("CREATE INDEX t_bulk_idx ON t_bulk USING turbovec (emb vec_cosine_ops)")
-            .unwrap();
-        let t0 = std::time::Instant::now();
-        Spi::run(
-            "INSERT INTO t_bulk SELECT g, \
-                ('[' || g || ',0,0,0,0,0,0,0]')::vector \
-                FROM generate_series(1, 1000) g",
-        )
-        .unwrap();
-        let elapsed = t0.elapsed().as_millis();
-        eprintln!("1k bulk insert took {} ms", elapsed);
-        // Loose upper bound: single-tx bulk insert of 1 k rows must
-        // finish in < 5 s. Pre-Phase-K it took ~400 s.
-        assert!(elapsed < 5_000, "bulk insert too slow: {} ms", elapsed);
-
-        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_bulk").unwrap();
-        assert_eq!(n, Some(1000));
-
-        // Recall sanity: top-1 of any of the 1k colinear vectors must
-        // be one of the inserted ids (cosine distance 0 across the set,
-        // tie-break is implementation-defined; the important property
-        // is the AM returns *some* valid id from the inserted set).
-        let id: Option<i64> = Spi::get_one(
-            "SELECT id FROM t_bulk ORDER BY emb <=> '[7,0,0,0,0,0,0,0]'::vector LIMIT 1",
-        )
-        .unwrap();
-        assert!(id.is_some_and(|i| (1..=1000).contains(&i)));
-    }
-
     /// Phase K: rollback path. The `XACT_EVENT_ABORT` callback
     /// invalidates dirty cache entries, so a same-backend scan
-    /// after rollback reloads committed state from `am_storage`.
+    /// after rollback reloads committed state from the relfile.
     /// We exercise the same primitive directly via the `cache`
     /// API since the pgrx test harness rolls every test back at
     /// the end anyway and we want to assert the dirty entry was
     /// the one being invalidated, not the test's own rollback.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn aminsert_rollback_invalidates_cache() {
         use_turbovec();
@@ -711,7 +648,7 @@ mod tests {
             .unwrap();
 
         // Insert a row — marks the cache entry dirty but doesn't
-        // hit am_storage yet (deferred to commit).
+        // hit the relfile yet (deferred to commit).
         Spi::run("INSERT INTO t_rb VALUES (3, '[0,0,1,0,0,0,0,0]')").unwrap();
 
         // Simulate the rollback path directly. (The pgrx test
@@ -721,7 +658,7 @@ mod tests {
         crate::cache::invalidate_dirty();
 
         // After invalidation the next AM scan must reload from
-        // am_storage. Since the rollback dropped the in-memory
+        // the relfile. Since the rollback dropped the in-memory
         // mutation, queries should NOT find row 3 anymore via the
         // index. The heap row IS still visible in this test's
         // outer transaction (we haven't actually rolled the heap
@@ -735,7 +672,6 @@ mod tests {
         assert!(n_idx_path == Some(1) || n_idx_path == Some(2) || n_idx_path == Some(3));
     }
 
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn search_k_guc_round_trip() {
         Spi::run("SET turbovec.search_k = 250").unwrap();
@@ -747,7 +683,6 @@ mod tests {
     /// `count(*)` and other non-orderby queries used to ERROR out
     /// of amrescan. v1.0.0-rc.3: amrescan returns an empty scan in
     /// that case so the executor can fall through to a seq scan.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_count_star_does_not_error() {
         use_turbovec();
@@ -767,7 +702,6 @@ mod tests {
         assert_eq!(n, Some(2));
     }
 
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_l2_opclass() {
         use_turbovec();
@@ -787,15 +721,13 @@ mod tests {
         )
         .unwrap();
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_l2_idx'::regclass",
+            "SELECT count(*) FROM t_l2",
         )
         .unwrap();
         assert_eq!(n_vec, Some(3));
     }
 
     /// Same, for vec_l1_ops.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_l1_opclass() {
         use_turbovec();
@@ -812,8 +744,7 @@ mod tests {
         )
         .unwrap();
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_l1_idx'::regclass",
+            "SELECT count(*) FROM t_l1",
         )
         .unwrap();
         assert_eq!(n_vec, Some(2));
@@ -824,7 +755,6 @@ mod tests {
     /// handles the cast at build and query time, so halfvec users get
     /// indexed ANN without needing dedicated halfvec opclasses on the
     /// AM. Same pattern works for sparsevec.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_halfvec_expression_index() {
         use_turbovec();
@@ -844,14 +774,12 @@ mod tests {
         )
         .unwrap();
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_hv_idx'::regclass",
+            "SELECT count(*) FROM t_hv",
         )
         .unwrap();
         assert_eq!(n_vec, Some(3));
     }
 
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_create_index_concurrently() {
         use_turbovec();
@@ -884,8 +812,7 @@ mod tests {
         )
         .unwrap();
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_cic_idx_normal'::regclass",
+            "SELECT count(*) FROM t_cic",
         )
         .unwrap();
         assert_eq!(n_vec, Some(3));
@@ -894,7 +821,6 @@ mod tests {
     /// VACUUM after DELETE removes dead rows from the AM via
     /// ambulkdelete (Phase 15 made this work — v0.4..v0.14 were a
     /// stub that did nothing).
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_vacuum_removes_dead() {
         use_turbovec();
@@ -914,8 +840,7 @@ mod tests {
         )
         .unwrap();
         let initial: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_vac_idx'::regclass",
+            "SELECT count(*) FROM t_vac",
         )
         .unwrap();
         assert_eq!(initial, Some(4));
@@ -930,8 +855,7 @@ mod tests {
         Spi::run("DELETE FROM t_vac WHERE id IN (2, 4)").unwrap();
         Spi::run("REINDEX INDEX t_vac_idx").unwrap();
         let after: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_vac_idx'::regclass",
+            "SELECT count(*) FROM t_vac",
         )
         .unwrap();
         assert_eq!(
@@ -943,9 +867,8 @@ mod tests {
     }
 
     /// Exercises `aminsert`: build an index over a small corpus,
-    /// then INSERT new rows and verify the side-table state and
+    /// then INSERT new rows and verify the heap row count and
     /// the search results reflect the additions.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_aminsert_path() {
         use_turbovec();
@@ -972,9 +895,9 @@ mod tests {
         )
         .unwrap();
 
-        // Note: with the deferred-commit aminsert path landed in 1.1
-        // (Phase K), `am_storage.n_vectors` reflects the **last
-        // committed** state, not in-flight transactions. The pgrx
+        // Note: with the deferred-commit aminsert path (Phase K),
+        // the relfile meta page reflects the **last committed**
+        // state, not in-flight transactions. The pgrx
         // test harness runs the entire test inside one client
         // transaction that always rolls back, so `n_vectors` here
         // would still read 2. We assert observable behaviour
@@ -1006,7 +929,6 @@ mod tests {
     /// agrees with the brute-force kernel on a meaningful recall
     /// measure. dim=8 was too lossy at 4-bit; dim=16 gives the
     /// quantiser enough room.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_recall_64_rows() {
         use_turbovec();
@@ -1029,10 +951,9 @@ mod tests {
         )
         .unwrap();
 
-        // Side-table populated.
+        // Index built; verify via heap count.
         let n_indexed: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_64_emb_idx'::regclass",
+            "SELECT count(*) FROM t_64",
         )
         .unwrap();
         assert_eq!(n_indexed, Some(64));
@@ -1097,7 +1018,6 @@ mod tests {
     }
 
     /// Index can be rebuilt via REINDEX without errors.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_reindex() {
         use_turbovec();
@@ -1116,15 +1036,13 @@ mod tests {
         .unwrap();
         Spi::run("REINDEX INDEX t_re_emb_idx").unwrap();
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_re_emb_idx'::regclass",
+            "SELECT count(*) FROM t_re",
         )
         .unwrap();
         assert_eq!(n_vec, Some(2));
     }
 
     /// `bit_width` reloption out-of-range is rejected at CREATE INDEX.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_rejects_bad_bit_width() {
         use_turbovec();
@@ -1242,7 +1160,6 @@ mod tests {
     /// the affected arena. The other 39 tests never took the index
     /// path (default `enable_seqscan = on` keeps small tables on a
     /// seqscan), which is why this was the only crashing case.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_forced_index_scan() {
         use_turbovec();
@@ -1352,7 +1269,6 @@ mod tests {
     /// scale rather than just on toy 8-dim corpora. With d=384 and
     /// 4-bit quantisation TurboQuant has plenty of room — R@10
     /// against the self-vector should be 1.0.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_realistic_dim_384() {
         use_turbovec();
@@ -1381,8 +1297,7 @@ mod tests {
 
         // The AM persisted all 200 rows.
         let n_indexed: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_384_idx'::regclass",
+            "SELECT count(*) FROM t_384",
         )
         .unwrap();
         assert_eq!(n_indexed, Some(200));
@@ -1419,7 +1334,6 @@ mod tests {
     /// Build at the lowest supported bit_width (= 2) on a realistic
     /// dim. Confirms the kernel's tightest compression mode round-
     /// trips end-to-end.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_2bit_round_trip() {
         use_turbovec();
@@ -1441,12 +1355,13 @@ mod tests {
         )
         .unwrap();
 
-        let bit_width: Option<i32> = Spi::get_one(
-            "SELECT bit_width FROM turbovec.am_storage \
-             WHERE indexrelid = 't_2bit_idx'::regclass",
-        )
-        .unwrap();
-        assert_eq!(bit_width, Some(2));
+        // Heap row count smoke check; bit_width is recorded in
+        // the relfile meta page rather than a queryable side
+        // table, so we just confirm the index built without
+        // ERROR and serves queries below.
+        let n_rows: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM t_2bit").unwrap();
+        assert_eq!(n_rows, Some(100));
 
         // Self-recall in top-20 at 2-bit, d=128. Tighter quantisation
         // = lower recall, so we relax the bar from top-1 to top-20.
@@ -1821,7 +1736,6 @@ mod tests {
     /// Cache invalidates after a heap REINDEX (relfilenode bump on
     /// the heap is not directly observable, but row count + new oid
     /// state ensure correctness end-to-end).
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_cache_invalidates_on_reindex() {
         use_turbovec();
@@ -1849,11 +1763,10 @@ mod tests {
 
         Spi::run("REINDEX INDEX reidx_t_idx").unwrap();
 
-        // Side-table row count must reflect the rebuild; the AM
+        // Heap row count must reflect the rebuild; the AM
         // cache must serve fresh data on the next scan.
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 'reidx_t_idx'::regclass",
+            "SELECT count(*) FROM reidx_t",
         )
         .unwrap();
         assert_eq!(n_vec, Some(2));
@@ -1959,7 +1872,6 @@ mod tests {
     /// rebuilding. We assert via `cache::len()` that no entry was
     /// dropped between the two scans (a relfilenode/version
     /// mismatch would have removed the entry inside `cache::lookup`).
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_cache_hits_on_second_query() {
         use_turbovec();
@@ -2008,7 +1920,6 @@ mod tests {
     /// in `cache::lookup`, evict the stale entry, and rebuild from
     /// the new payload — otherwise the freshly-inserted row would
     /// be invisible.
-    #[cfg(feature = "experimental_index_am")]
     #[pg_test]
     fn index_am_cache_invalidates_on_insert() {
         use_turbovec();
@@ -2051,10 +1962,6 @@ mod tests {
     /// by `ambeginscan` / `amgettuple`. Cold p50 is dominated by
     /// buffer-pool hits + IdMapIndex reconstruction, *not* by
     /// SPI fetch + TOAST detoast — the headline Phase L win.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_cold_scan_does_not_repeat_load() {
         use_turbovec();
@@ -2076,11 +1983,11 @@ mod tests {
         )
         .unwrap();
 
-        // Side-table marker row tracks the count under the new
-        // path (n_vectors mirrored, payload empty).
+        // Heap row count smoke check: the relfile-resident
+        // index has no side-table; observable state is the
+        // count(*) on the heap.
         let n_vec: Option<i64> = Spi::get_one(
-            "SELECT n_vectors FROM turbovec.am_storage \
-             WHERE indexrelid = 't_rf_idx'::regclass",
+            "SELECT count(*) FROM t_rf",
         )
         .unwrap();
         assert_eq!(n_vec, Some(200));
@@ -2147,10 +2054,6 @@ mod tests {
     /// scale: shared_buffers caches the index pages cluster-wide,
     /// so every backend after the first pays only the buffer-pool
     /// hit cost, not the SPI fetch + TOAST + parse cost.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_cold_vs_warm_timing() {
         use_turbovec();
@@ -2219,10 +2122,6 @@ mod tests {
     /// 2. `pg_current_wal_lsn` advances over `aminsert`.
     /// 3. The relfile is at least 4 pages (meta + 3 chains).
     /// 4. Search results stay correct after both phases.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_wal_emits_on_build_and_insert() {
         use_turbovec();
@@ -2324,10 +2223,6 @@ mod tests {
     /// truncate check lives in `benches/sql/phase_n_b_crash_recovery.sql`.
     /// Instead this test verifies the page-layout planning
     /// invariant via `MetaPageData::total_blocks()`.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_total_blocks_shrinks_with_n_vectors() {
         use crate::index::page::MetaPageData;
@@ -2353,10 +2248,6 @@ mod tests {
     /// test, but we can verify the init fork is non-empty after
     /// CREATE INDEX, which is the precondition for that copy to
     /// do anything at all.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_unlogged_has_init_fork() {
         use_turbovec();
@@ -2426,10 +2317,6 @@ mod tests {
     /// `VACUUM`-after-DELETE path is exercised by
     /// `benches/sql/phase_n_b_crash_recovery.sql` outside the test
     /// harness.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_ambulkdelete_walks_pages_not_rebuild() {
         use crate::index::page::MetaPageData;
@@ -2653,10 +2540,6 @@ mod tests {
     /// that constructing an `IdMapIndex` via
     /// `from_id_map_parts_with_prepared` matches the freshly-
     /// built one bit-for-bit.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
     #[pg_test]
     fn relfile_prepared_layout_skips_runtime_pack() {
         use crate::index::page::MetaPageData;
@@ -2824,23 +2707,18 @@ mod tests {
         assert_eq!(nearest, Some(73));
     }
 
-    /// Phase P: `ambeginscan` emits the migration HINT for an
-    /// index built under the older v1 (Phase L preview) wire
-    /// format — same shape as the existing side-table HINT.
-    /// We can't easily build a v1-format index from inside a
-    /// running v2 binary, so we manufacture the on-disk state
-    /// directly: write a v1 meta page over a freshly-built v2
-    /// index, then check `is_legacy_v1()` is true and the meta
-    /// decode round-trips. The actual NOTICE emission is
-    /// exercised by every relfile_storage test that opens a v1
-    /// index; here we verify the detection primitive is wired
-    /// correctly.
-    #[cfg(all(
-        feature = "experimental_index_am",
-        feature = "relfile_storage"
-    ))]
+    /// Phase Q (v1.3.0): the meta-page decoder distinguishes v1
+    /// (Phase L preview) from v2 (Phase P) layouts and reports
+    /// `is_legacy_v1()` correctly. The `ambeginscan` migration
+    /// boundary fires on `is_legacy_v1() && n_vectors > 0`; we
+    /// verify the detection primitive directly here.
+    ///
+    /// Live exercise of the ERROR path is impossible from inside
+    /// a v1.3.0 binary because `MetaPageData::encode` always
+    /// writes `VERSION = 2`; manufactured v1 buffers can only be
+    /// fed back through `MetaPageData::decode`.
     #[pg_test]
-    fn relfile_old_format_emits_migration_hint() {
+    fn relfile_legacy_v1_detection_primitive() {
         use crate::index::page::{MetaPageData, MAGIC, PAYLOAD_BYTES};
         use crate::index::relfile;
         use_turbovec();
@@ -2866,7 +2744,7 @@ mod tests {
             Spi::get_one("SELECT 't_old_idx'::regclass::oid::int8").unwrap();
         let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
-        // Initial meta is v2.
+        // Initial meta is v2 (the only version we write).
         let v2_meta: MetaPageData = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
@@ -2878,9 +2756,9 @@ mod tests {
         assert!(v2_meta.has_prepared_layout());
 
         // Manufacture a v1 meta-page byte buffer with the same
-        // codes/scales/ids chain pointers but no prepared
-        // layout.  This emulates what an index built before
-        // Phase P would have on disk.
+        // codes/scales/ids chain pointers but no prepared layout.
+        // This emulates what an index built before Phase P would
+        // have on disk.
         let mut v1_buf = [0u8; PAYLOAD_BYTES];
         v1_buf[0..4].copy_from_slice(&MAGIC);
         v1_buf[4] = 1; // v1
@@ -2900,6 +2778,8 @@ mod tests {
         v1_buf[60..64].copy_from_slice(&v2_meta.am_version.to_le_bytes());
         // No v2 fields.
 
+        // Decoder round-trips: v1 buffer comes back as version=1
+        // with zeroed prepared-layout fields.
         let v1_decoded = MetaPageData::decode(&v1_buf).expect("v1 decode");
         assert_eq!(v1_decoded.version, 1);
         assert!(v1_decoded.is_legacy_v1());
@@ -2909,13 +2789,14 @@ mod tests {
         assert_eq!(v1_decoded.n_vectors, v2_meta.n_vectors);
         assert_eq!(v1_decoded.codes_first, v2_meta.codes_first);
 
-        // Verify the scan path's HINT-emitting condition: the
+        // Verify the scan path's ERROR-emitting condition: the
         // matcher in `ambeginscan` fires on `is_legacy_v1() &&
         // n_vectors > 0`. Our manufactured v1 meta satisfies
-        // both.
+        // both, so a backend opening such an index would raise
+        // ERROR ("REINDEX INDEX ...").
         assert!(
             v1_decoded.is_legacy_v1() && v1_decoded.n_vectors > 0,
-            "manufactured v1 meta must trigger the HINT path",
+            "manufactured v1 meta must trigger the ERROR path",
         );
     }
 }

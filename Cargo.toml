@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -29,7 +29,7 @@ name = "pgrx_embed_pg_turbovec"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]
-default = ["pg16", "experimental_index_am"]
+default = ["pg16"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
@@ -37,19 +37,13 @@ pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 pg_test = []
-# Cargo feature gating the `turbovec` index access method (Rust
-# IndexAmRoutine + opclasses + side-table storage). Default-on as
-# of v0.9 (was experimental v0.4..v0.8). Build without it for a
-# smaller .so when the AM isn't needed:
-#   cargo build --no-default-features --features pg16
-experimental_index_am = []
-# Cargo feature gating Phase L: relfile-resident page format.
-# Replaces the `turbovec.am_storage` SPI side-table with pages
-# written into the index relation's main fork via the buffer
-# manager. Default-OFF: still experimental as of v1.0.x. Enables
-# only with `experimental_index_am`.
-#   cargo build --features "experimental_index_am relfile_storage"
-relfile_storage = ["experimental_index_am"]
+# v1.3.0 (Phase Q) retired the `experimental_index_am` and
+# `relfile_storage` Cargo feature flags. The `turbovec` index
+# access method has been default-on since v0.9 and the
+# relfile-resident storage path (Phase L preview, Phase P
+# persisted layout) is now the only storage strategy. There is
+# no longer a side-table fallback to disable. Build flags reduce
+# to just `pg<N>`.
 
 [dependencies]
 pgrx = "=0.17.0"

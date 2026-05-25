@@ -46,7 +46,7 @@ pub(crate) mod persist;
 #[cfg(feature = "relfile_storage")]
 pub(crate) mod relfile;
 mod scan;
-mod vacuum;
+pub(crate) mod vacuum;
 mod validate;
 
 /// Strategy number for the order-by operator inside both

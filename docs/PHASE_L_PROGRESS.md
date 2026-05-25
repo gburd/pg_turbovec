@@ -314,14 +314,60 @@ if relfile::nblocks((*scan).indexRelation) == 0 {
 }
 ```
 
-### 6. `ambulkdelete` should walk pages, not rebuild
+### 6. `ambulkdelete` should walk pages, not rebuild — **DONE (v1.3.0 hardening)**
 
-Same shape as `aminsert`. The Phase 15 implementation enumerates
-`live_ids` and removes dead ones in-place. The relfile version
-does the same logically but pays `O(n_vectors)` per VACUUM. For
-big indexes this is fine (VACUUM is rare); the optimisation would
-be page-level dead-id batching identical to Phase K's insert
-hook.
+Earlier relfile builds (v1.0..v1.2) handled VACUUM by reading
+every chain page into RAM, reconstructing an `IdMapIndex`,
+calling `IdMapIndex::remove` for each dead id, and rewriting the
+entire chain via `relfile::write_full`. That was correct and
+WAL-safe but cost O(n_vectors) of disk I/O on every VACUUM
+regardless of how many rows actually died — a single dead row
+in a 1 M-vector index rewrote ~200 MiB.
+
+The v1.3.0 implementation walks the chain pages in place and
+swap-removes dead rows analogously to the in-memory
+`IdMapIndex::remove`:
+
+1. Read the ids chain only (~8 MiB on 1 M rows) and ask the
+   VACUUM callback for each id; collect dead slot indices.
+2. Sort dead slots **descending** and process from the back.
+   For each dead slot `s` with `last = alive_count - 1`:
+   - if `s == last`: nothing to copy, just decrement.
+   - else: copy slot `last` → slot `s` on each of the codes /
+     scales / ids chains (3 page writes per swap, each WAL-
+     logged via `GenericXLog`), then decrement.
+   Descending order guarantees the source `last` row is always
+   a still-live row whose data hasn't been moved by an earlier
+   iteration of the same pass.
+3. Rewrite the meta page with the smaller `n_vectors` and a
+   bumped `am_version`. Layout fields (`codes_first`,
+   `scales_first`, `ids_first`, `rows_per_*_page`,
+   `stride_bytes`) are preserved so survivor rows keep their
+   on-disk positions.
+4. `RelationTruncate` to release trailing ids-chain pages that
+   the shrink left orphaned. Mid-file gaps between the codes /
+   scales / ids chains are left in place; the next `write_full`
+   (build / aminsert commit-time flush) re-packs and reclaims.
+
+Cost: `O(deleted)` page writes + 1 meta write + 1 truncate, vs.
+the old `O(total)` full rewrite. WAL volume scales the same way.
+
+Verification:
+- `relfile_ambulkdelete_walks_pages_not_rebuild` pgrx-test (105
+  total under `relfile_storage`) builds a 1 000-row index, calls
+  `ambulkdelete` directly via FFI with a synthetic dead-id
+  callback marking 5 rows dead, asserts:
+  - 995 surviving ids returned, no duplicates, none of the dead
+    ids leak through;
+  - `am_version` bumped on the meta page;
+  - file size does not grow (may shrink via `RelationTruncate`);
+  - completes in well under 500 ms (debug build, observed
+    ~424 µs vs ~565 µs for the old rebuild path on the same
+    corpus — modest constant-factor win at 1k rows; the
+    asymptotic win is in `O(deleted)` vs `O(total)` page writes).
+- pgrx tests can't run real `VACUUM` (it forbids tx blocks); the
+  end-to-end `VACUUM`-after-`DELETE` path is exercised by
+  `bench/sql/phase_n_b_crash_recovery.sql` outside the harness.
 
 ### 7. Large-corpus bench (`benches/recall.rs` extension)
 

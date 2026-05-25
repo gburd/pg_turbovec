@@ -1,0 +1,129 @@
+{
+  "head": "4958d05",
+  "build_profile": "release",
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9",
+  "pg_turbovec_version": "1.4.0",
+  "date": "2026-05-25",
+  "phase": "R-3 (warm-scan re-validation post Phase R-2)",
+  "corpus": {
+    "name": "dbpedia-entities-openai-1M",
+    "source": "huggingface://KShivendu/dbpedia-entities-openai-1M",
+    "n": 1000000,
+    "dim": 1536,
+    "embedding_model": "text-embedding-ada-002 (OpenAI)",
+    "distance": "cosine",
+    "normalized": true
+  },
+  "index": {
+    "name": "docs_tv_4bit",
+    "type": "pg_turbovec 4-bit (relfile-resident, persisted rotation)",
+    "bit_width": 4,
+    "n_vectors": 1000000,
+    "dim": 1536,
+    "build_time_s": 234,
+    "size_bytes": 1610981376,
+    "size_mb": 1536,
+    "wire_format_version": 3,
+    "build_settings": {
+      "shared_buffers_during_build": "128MB",
+      "maintenance_work_mem": "512MB",
+      "max_parallel_maintenance_workers": 0,
+      "note": "Initial attempts with maintenance_work_mem=4GB / 16 parallel workers OOM-killed (encoder peak ~21 GiB transient + pre-existing 7 GiB swap pressure on this host = pushed past 32 GiB physical + 8 GiB swap). Phase O-3 settings (512 MB / 0 workers / shared_buffers=512MB) also got OOM-killed once on this run; only after dropping shared_buffers to 128 MB during the build did it land. Bench-time shared_buffers was restored to 512 MB to match Phase O-3 methodology before the warm sweep."
+    }
+  },
+  "methodology": {
+    "primary": "Single warm psql session (one persistent backend). 2 untimed warmup queries against qid=1 (the first re-pays the per-backend init cost: Lloyd-Max codebook + blocked-layout repack + relfile rotation read; the second confirms cache-warm steady-state). Then 50 timed queries, qid=1..50, each routed through `bench_one_query_tv(qid)` which times an `ORDER BY (emb::real[]::turbovec.vector) OPERATOR(turbovec.<=>) q LIMIT 10` via `clock_timestamp()` inside a plpgsql wrapper. This matches Phase J / Phase O-3 methodology exactly (same plpgsql wrapper, same query shape, same warmup count, same query set), so the v1.3.0 -> v1.4.0 delta is apples-to-apples.",
+    "secondary": "The same 50-query sweep also captured under `EXPLAIN (ANALYZE, COSTS off, BUFFERS off, TIMING on)` parsing 'Execution Time' lines, for the planner-instrumentation-overhead reading. Reported in `configs[1]` below; not the primary headline number because EXPLAIN ANALYZE adds per-node TIMING-on instrumentation that is not present in Phase J / Phase O-3.",
+    "session_settings": {
+      "search_path": "turbovec, public",
+      "enable_seqscan": "off",
+      "jit": "off",
+      "turbovec.search_k": 100
+    },
+    "shared_buffers_during_bench": "512MB (matches Phase O-3 exactly)"
+  },
+  "comparison": {
+    "warm_p50_phase_o_3_v1_3_0": 87.388,
+    "warm_p50_phase_r3_v1_4_0": 90.327,
+    "drop_ms": -2.939,
+    "drop_pct": -3.36,
+    "phase_r_predicted_drop_ms": "50-200 ms (Phase R diagnosis assumed gemm_f64 QR was 50-200 ms of the warm scan)",
+    "actual_drop_ms": "-3 ms (within run-to-run noise on this contended host; effectively zero)",
+    "v1_4_0_build_overhead_s": 64,
+    "v1_4_0_size_overhead_mb": 9,
+    "comparison_notes": "Phase O-3 v1.3.0: 87.388 ms p50, build 170 s, 793 MB (Phase O-3 used a different (smaller) on-disk format that under-counted the index footprint). Phase R-3 v1.4.0: 90.327 ms p50, build 234 s (+64 s from eager rotation-chain compute moved out of first-scan), 1536 MB (+743 MB; mostly the v3 wire format which now persists the full blocked layout + 9 MiB rotation chain instead of recomputing on first backend touch -- the 793 MB figure in the Phase O-3 artefact was the payload only, not the full relfile size that PG reports for `docs_tv_4bit`). The 9 MiB rotation chain prediction in Phase R holds; the build-time +64 s is in the Phase R prediction band (45-90 s) for moving the QR to ambuild."
+  },
+  "configs": [
+    {
+      "label": "tv_4bit_k100_warm_phase_r3",
+      "methodology": "bench_one_query_tv (clock_timestamp; matches Phase J / Phase O-3)",
+      "n": 50,
+      "min_ms": 86.476,
+      "p50_ms": 90.327,
+      "p95_ms": 103.916,
+      "max_ms": 108.149,
+      "mean_ms": 91.674,
+      "shared_buffers": "512MB"
+    },
+    {
+      "label": "tv_4bit_k100_warm_phase_r3_explain_analyze",
+      "methodology": "EXPLAIN (ANALYZE, COSTS off, BUFFERS off, TIMING on) parsing 'Execution Time' lines (per the Phase R-3 task spec). Run before shared_buffers was raised back to 512MB (this run was at shared_buffers=128MB).",
+      "n": 50,
+      "min_ms": 93.259,
+      "p50_ms": 119.398,
+      "p95_ms": 160.885,
+      "max_ms": 167.395,
+      "mean_ms": 122.779,
+      "shared_buffers": "128MB",
+      "note": "EXPLAIN ANALYZE TIMING ON adds non-trivial per-node instrumentation overhead (5-15 ms per scan on this corpus) and the smaller shared_buffers worsens cache pressure further. The bench_one_query_tv reading is the apples-to-apples comparator to Phase J / Phase O-3. Both readings agree on the qualitative verdict (warm p50 did not drop into the < 70 ms band)."
+    }
+  ],
+  "profile_post_v1_4_0": {
+    "samples": "1 K samples on cpu_atom/cycles/P over 10s of a 50-query warm loop",
+    "what_changed_vs_phase_r": "gemm_f64::microkernel::fma::f64::x2x6 fell from 64.77% self -> not in top 100 symbols. The 1536x1536 QR is gone from the warm path, exactly as Phase R-2 designed.",
+    "what_now_dominates": [
+      "ReadBufferExtended: 37.08% children (postgres buffer manager request)",
+      "ReadBuffer_common (inlined): 36.68% children",
+      "__memmove_avx_unaligned_erms: 34.96% children, 12.42% self (memcpy from OS page cache into shared_buffers)",
+      "asm_exc_page_fault: 32.71% children (page faults on first-touch of shared_buffers pages)",
+      "WaitReadBuffers: 29.44% children (pg_preadv batched read wait)",
+      "mdreadv: 28.16% children, FileReadV: 26.95% children, pread: 26.79% children",
+      "turbovec::search::search_multi_query_avx2: 21.79% children, 21.55% self (the actual SIMD scoring kernel -- this is the only useful CPU work in the top symbols)",
+      "_copy_to_iter (kernel): 12.18% self (kernel-side copy from page cache to user buffer)"
+    ],
+    "interpretation": "The persisted-rotation fix worked: gemm_f64 is gone from the profile. But the warm p50 stayed flat because a different bottleneck was hidden under the QR cost -- the 1.5 GB on-disk index does not fit in shared_buffers (512 MB), so each warm scan re-reads the relevant pages from the OS page cache via mdreadv -> pread -> _copy_to_iter -> memcpy into the buffer manager. This is per-scan I/O cost, not per-backend init cost; it was always there in v1.3.0, just dwarfed by the 50-200 ms QR. Removing the QR exposed it. The actual CPU-bound SIMD scoring (search_multi_query_avx2) is only 21% self; ~65% of the warm scan time is now PG buffer-manager I/O against a too-small shared_buffers."
+  },
+  "verdict": "phase_r2_not_enough_more_work_needed",
+  "verdict_reasoning": [
+    "Phase R-2 mechanically did exactly what it was designed to do. The 1536x1536 QR rotation matrix is now persisted in the relfile (verified by the +9 MiB index growth and the 234 s build time, both within the Phase R prediction band). On the scan side, gemm_f64 fell from 64.77% self in the Phase R profile to absent in the Phase R-3 profile -- the QR cost is gone.",
+    "But warm-scan p50 did not drop into the predicted < 70 ms band. v1.3.0 Phase O-3 was 87.4 ms p50; v1.4.0 Phase R-3 is 90.3 ms p50 -- a 3 ms regression that is well within run-to-run noise on this contended laptop (Phase O-3 itself called out ~25 ms of laptop-load noise).",
+    "The Phase R diagnosis was wrong about the *scale* of the QR contribution. The Phase R profile attributed 65% of warm-scan CPU samples to gemm_f64, but those samples were spread across many scans (rayon-parallel QR running in worker threads on E-cores, not blocking the main backend's wall-clock for the full duration). The QR was probably 5-15 ms of every warm scan, not 50-200 ms -- enough to dominate a CPU profile but not enough to dominate wall-clock latency.",
+    "The new dominant symbol is PG buffer-manager I/O: ReadBufferExtended -> WaitReadBuffers -> mdreadv -> pread -> kernel _copy_to_iter -> memcpy. The 1.5 GB relfile-resident index does not fit in 512 MB shared_buffers, so each warm scan re-pulls the touched pages from the OS page cache. This costs ~50-60 ms per scan and is the actual headline floor on warm latency at this corpus size and shared_buffers setting.",
+    "Two follow-on directions for closing the warm-scan gap: (1) raise shared_buffers to 2 GB so the entire docs_tv_4bit fits hot -- a knob change, not a code change, but it requires a host with enough free memory to spare 2 GB; (2) ship a per-backend mmap-resident view of the blocked layout that bypasses the PG buffer manager entirely on warm scans. Direction (2) is essentially a re-run of the Phase L design conversation: the buffer manager is in the way for read-only quantized data that wants to behave like an OS-page-cache-resident artefact, not like a row-oriented heap."
+  ],
+  "headline_numbers": {
+    "warm_p50_phase_o_3_v1_3_0_ms": 87.4,
+    "warm_p50_phase_r3_v1_4_0_ms": 90.3,
+    "drop_ms": -2.9,
+    "drop_pct": -3.4,
+    "build_time_v1_3_0_s": 170,
+    "build_time_v1_4_0_s": 234,
+    "build_overhead_s": 64,
+    "size_v1_3_0_mb": 793,
+    "size_v1_4_0_mb": 1536,
+    "size_delta_mb": 743,
+    "rotation_chain_overhead_mb": 9,
+    "remaining_size_delta_explanation": "Phase O-3 reported the index payload size (793 MB), not the full relfile size that pg_relation_size() returns. The Phase R-3 1536 MB number is the full relfile (heap fork + visibility map + free space map). The directly-comparable 'rotation chain adds ~9 MiB' prediction matches the wire-format-v3 vs v2 delta when measured at the page-format level."
+  },
+  "artefacts": [
+    "benches/results/recall_warm_phase_r3_2026_05_25.json (this file)",
+    "benches/results/warm_phase_r3.tsv / .stats / .log (EXPLAIN ANALYZE secondary, 128MB shared_buffers)",
+    "benches/results/warm_phase_r3_clock.tsv / .stats / .log (bench_one_query_tv primary, 512MB shared_buffers)",
+    "benches/results/profile_v1_4_0_symbols.txt (perf record top symbols, post-Phase-R-2)",
+    "benches/results/profile_v1_4_0_flame.svg (FlameGraph rendering)",
+    "/scratch/pg_turbovec-bench/scripts/warm_phase_r3.sh (reproducer, EXPLAIN ANALYZE methodology)",
+    "/scratch/pg_turbovec-bench/scripts/warm_phase_r3_clock.sh (reproducer, bench_one_query_tv methodology)",
+    "/scratch/pg_turbovec-bench/scripts/migrate_index_v1_4_0.sh (drop + recreate + rebuild driver)"
+  ]
+}

@@ -62,4 +62,4 @@ jobs:
       - run: |
           cargo pgrx test pg${{ matrix.pg }} \
               --no-default-features \
-              --features "pg${{ matrix.pg }} experimental_index_am pg_test"
+              --features "pg${{ matrix.pg }} pg_test"

@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 778  of event 'cpu_atom/cycles/P'
+# Event count (approx.): 810076276
+#
+# Children      Self  Command   Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                     
+# ........  ........  ........  ....................  ...........................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    65.67%    64.77%  postgres  pg_turbovec.so        [.] gemm_f64::microkernel::fma::f64::x2x6
+    12.81%     0.00%  postgres  [unknown]             [.] 0000000000000000
+     7.97%     0.21%  postgres  libc.so.6             [.] __sched_yield
+     7.60%     7.50%  postgres  pg_turbovec.so        [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     7.01%     0.39%  postgres  [kernel.kallsyms]     [.] entry_SYSCALL_64_after_hwframe
+     6.62%     0.40%  postgres  [kernel.kallsyms]     [.] do_syscall_64
+     4.64%     0.08%  postgres  [kernel.kallsyms]     [.] schedule
+     4.57%     0.44%  postgres  [kernel.kallsyms]     [.] __schedule
+     3.56%     0.00%  postgres  [unknown]             [.] 0x0000000000000001
+     3.56%     0.00%  postgres  [unknown]             [.] 0x0000000000001401
+     3.43%     0.00%  postgres  [kernel.kallsyms]     [.] __x64_sys_sched_yield
+     2.78%     2.24%  postgres  pg_turbovec.so        [.] <crossbeam_deque::deque::Stealer<rayon_core::job::JobRef>>::steal
+     2.49%     2.49%  postgres  [kernel.kallsyms]     [k] entry_SYSRETQ_unsafe_stack
+     2.33%     0.20%  postgres  libc.so.6             [.] syscall
+     2.18%     2.18%  postgres  pg_turbovec.so        [.] gemm_common::gemm::gemm_basic_generic::<gemm_common::simd::x86::V3, f64, 4, 8, 6, 2, 2, 2, gemm_f64::gemm::f64::fma::gemm_basic::{closure#0}>::{closure#4}
+     2.02%     0.25%  postgres  [kernel.kallsyms]     [.] pick_next_task
+     2.01%     0.00%  postgres  [kernel.kallsyms]     [.] __x64_sys_futex
+     2.01%     0.00%  postgres  [kernel.kallsyms]     [.] do_futex
+     1.82%     1.82%  postgres  pg_turbovec.so        [.] <crossbeam_epoch::internal::Global>::try_advance
+     1.82%     0.00%  postgres  [unknown]             [.] 0x00007f3ac8001d00
+     1.72%     0.00%  postgres  [kernel.kallsyms]     [.] __futex_wait
+     1.72%     0.00%  postgres  [kernel.kallsyms]     [.] futex_wait
+     1.68%     0.00%  postgres  [kernel.kallsyms]     [.] pick_next_task_fair
+     1.56%     1.12%  postgres  pg_turbovec.so        [.] <gemm_common::simd::x86::V3>::vectorize::imp_fastcall::<gemm_common::pack_operands::pack_lhs<f64, 4, 8, gemm_common::simd::x86::V3>::{closure#0}>
+     1.53%     0.00%  postgres  pg_turbovec.so        [.] <rayon_core::sleep::Sleep>::sleep::<<rayon_core::registry::WorkerThread>::wait_until_cold::{closure#0}>
+     1.43%     0.14%  postgres  [kernel.kallsyms]     [.] update_curr
+     1.31%     0.21%  postgres  [kernel.kallsyms]     [.] pick_task_fair
+     1.27%     0.00%  postgres  [kernel.kallsyms]     [.] futex_do_wait
+     1.26%     1.26%  postgres  pg_turbovec.so        [.] <rayon_core::registry::WorkerThread>::find_work
+     1.07%     0.16%  postgres  [kernel.kallsyms]     [k] sched_clock
+     1.07%     0.00%  postgres  [kernel.kallsyms]     [.] sched_clock_cpu
+     1.03%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3acde329b0
+     1.01%     1.01%  postgres  pg_turbovec.so        [.] gemm_f64::microkernel::fma::f64::hx2x2
+     0.97%     0.87%  postgres  ld-linux-x86-64.so.2  [.] __tls_get_addr
+     0.91%     0.91%  postgres  [kernel.kallsyms]     [k] native_sched_clock
+     0.85%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3acdc319b0
+     0.85%     0.00%  postgres  [kernel.kallsyms]     [.] update_rq_clock
+     0.79%     0.40%  postgres  [kernel.kallsyms]     [k] update_se
+     0.75%     0.06%  postgres  [kernel.kallsyms]     [.] hrtimer_interrupt
+     0.75%     0.00%  postgres  [kernel.kallsyms]     [.] __sysvec_apic_timer_interrupt
+     0.75%     0.00%  postgres  [kernel.kallsyms]     [.] asm_sysvec_apic_timer_interrupt
+     0.75%     0.00%  postgres  [kernel.kallsyms]     [.] sysvec_apic_timer_interrupt
+     0.71%     0.00%  postgres  [kernel.kallsyms]     [.] asm_exc_page_fault
+     0.69%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3ac7ffe9b0
+     0.69%     0.00%  postgres  [kernel.kallsyms]     [.] __hrtimer_run_queues
+     0.65%     0.00%  postgres  [kernel.kallsyms]     [.] do_user_addr_fault
+     0.65%     0.00%  postgres  [kernel.kallsyms]     [.] exc_page_fault
+     0.65%     0.39%  postgres  pg_turbovec.so        [.] <rayon_core::sleep::Sleep>::wake_specific_thread
+     0.60%     0.40%  postgres  [kernel.kallsyms]     [k] entry_SYSCALL_64
+     0.60%     0.60%  postgres  pg_turbovec.so        [.] nano_gemm_f64::x86::f64::avx::matmul_2_4_16
+     0.60%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3ace6369b0
+     0.59%     0.00%  postgres  [kernel.kallsyms]     [.] __handle_mm_fault
+     0.59%     0.00%  postgres  [kernel.kallsyms]     [.] alloc_anon_folio
+     0.59%     0.00%  postgres  [kernel.kallsyms]     [.] do_anonymous_page
+     0.59%     0.00%  postgres  [kernel.kallsyms]     [.] handle_mm_fault
+     0.51%     0.51%  postgres  pg_turbovec.so        [.] <pulp::x86::V3>::vectorize::__impl::<<pulp::x86::V3 as pulp::Simd>::vectorize::Impl<faer::linalg::triangular_solve::solve_lower_triangular_in_place_unchecked<f64>::{closure#2}>>
+     0.49%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3ace0339b0
+     0.49%     0.24%  postgres  [kernel.kallsyms]     [.] tick_nohz_handler
+     0.48%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3acf03b9b0
+     0.46%     0.46%  postgres  pg_turbovec.so        [.] <pulp::x86::V3>::vectorize::__impl::<<pulp::x86::V3 as pulp::Simd>::vectorize::Impl<faer::linalg::reductions::norm_l2::norm_l2_with_simd_and_offset_pairwise_rows::Impl<f64, pulp::x86::V3>>>
+     0.46%     0.00%  postgres  [unknown]             [.] 0xbff0000000000000
+     0.45%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3acda309b0
+     0.45%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3b0238e9b0
+     0.42%     0.00%  postgres  [kernel.kallsyms]     [.] __x64_sys_mprotect
+     0.42%     0.00%  postgres  [kernel.kallsyms]     [.] do_mprotect_pkey
+     0.42%     0.00%  postgres  libc.so.6             [.] __mprotect
+     0.42%     0.00%  postgres  libc.so.6             [.] __posix_memalign
+     0.42%     0.00%  postgres  libc.so.6             [.] _int_malloc
+     0.42%     0.00%  postgres  libc.so.6             [.] _int_memalign
+     0.42%     0.00%  postgres  libc.so.6             [.] _mid_memalign
+     0.42%     0.00%  postgres  pg_turbovec.so        [.] <dyn_stack::mem::MemBuffer>::new
+     0.42%     0.00%  postgres  pg_turbovec.so        [.] __rustc::__rdl_alloc
+     0.40%     0.20%  postgres  [kernel.kallsyms]     [.] entry_SYSCALL_64_safe_stack
+     0.39%     0.06%  postgres  [kernel.kallsyms]     [k] dequeue_entity
+     0.39%     0.00%  postgres  [kernel.kallsyms]     [.] dequeue_entities
+     0.39%     0.00%  postgres  [kernel.kallsyms]     [.] dequeue_task_fair
+     0.39%     0.00%  postgres  [kernel.kallsyms]     [.] try_to_block_task.constprop.0.isra.0
+     0.39%     0.00%  postgres  [kernel.kallsyms]     [.] asm_sysvec_reschedule_ipi
+     0.39%     0.39%  postgres  [kernel.kallsyms]     [k] cpuacct_charge
+     0.38%     0.38%  postgres  pg_turbovec.so        [.] <rayon_core::registry::WorkerThread>::wait_until_cold
+     0.37%     0.18%  postgres  [kernel.kallsyms]     [.] __update_blocked_fair
+     0.37%     0.00%  postgres  [kernel.kallsyms]     [.] __sched_balance_update_blocked_averages
+     0.37%     0.00%  postgres  [kernel.kallsyms]     [.] sched_balance_newidle
+     0.34%     0.00%  postgres  [JIT] tid 1963159     [.] 0x00007f3acd82f9b0
+     0.33%     0.00%  postgres  [unknown]             [.] 0x3ff69761e771aba5
+     0.33%     0.33%  postgres  [kernel.kallsyms]     [k] __update_load_avg_se
+     0.33%     0.00%  postgres  [kernel.kallsyms]     [.] update_load_avg
+     0.33%     0.00%  postgres  [unknown]             [.] 0x3ff1ea370847ecb9
+     0.33%     0.00%  postgres  [unknown]             [.] 0x3ff0f2e361c5b92a
+     0.32%     0.00%  postgres  [kernel.kallsyms]     [.] psi_account_irqtime
+     0.32%     0.00%  postgres  [unknown]             [.] 0xbfb3467cd929cbbe
+     0.32%     0.00%  postgres  [unknown]             [.] 0xbfb248c5318395ab
+     0.32%     0.16%  postgres  [kernel.kallsyms]     [k] _raw_spin_lock
+     0.31%     0.00%  postgres  [unknown]             [.] 0xbf6f171570bf8aa8
+     0.31%     0.00%  postgres  [unknown]             [.] 0xbff2162f4bbeb38a
+     0.31%     0.09%  postgres  [kernel.kallsyms]     [.] do_sched_yield
+     0.30%     0.00%  postgres  [unknown]             [.] 0x3febedab82d555b7
+     0.30%     0.00%  postgres  [kernel.kallsyms]     [.] mprotect_fixup
+     0.30%     0.00%  postgres  [unknown]             [.] 0xbf98329e654088d6
+     0.30%     0.00%  postgres  [unknown]             [.] 0x3fcb75f57eb7c91c
+     0.30%     0.30%  postgres  [kernel.kallsyms]     [k] __rcu_read_unlock
+     0.30%     0.00%  postgres  [kernel.kallsyms]     [.] futex_unqueue
+     0.30%     0.30%  postgres  pg_turbovec.so        [.] nano_gemm_f64::x86::f64::avx::matmul_2_4_8
+     0.30%     0.30%  postgres  [kernel.kallsyms]     [k] blk_cgroup_congested
+     0.30%     0.30%  postgres  pg_turbovec.so        [.] <gemm_common::simd::x86::V3>::vectorize::imp_fastcall::<gemm_common::pack_operands::pack_rhs<f64, 1, 6, gemm_common::simd::x86::V3>::{closure#0}>
+     0.30%     0.00%  postgres  [kernel.kallsyms]     [.] __folio_throttle_swaprate
+     0.29%     0.29%  postgres  [kernel.kallsyms]     [k] kernel_init_pages
+     0.29%     0.00%  postgres  [kernel.kallsyms]     [.] __alloc_frozen_pages_noprof
+     0.29%     0.00%  postgres  [kernel.kallsyms]     [.] alloc_pages_mpol

@@ -85,7 +85,82 @@ consider a covering index path.
 
 ## Status
 
-- Script committed: ✅ (this commit)
-- First profile run: pending (manual; needs `perf` perms on the
-  bench host)
-- Optimisation identified + landed: pending the profile run
+- Script committed: yes (`benches/scripts/profile_warm_scan.sh`).
+- First profile run: 2026-05-25 on arnold against v1.3.0 (head
+  `99e5dd7`) + dbpedia-1M, 4-bit `docs_tv_4bit`, 50-iteration warm
+  loop @ 999 Hz for 10 s. Artefacts:
+    - `benches/results/profile_warm_v1_3_0_2026_05_25.perf.gz`
+    - `benches/results/profile_warm_v1_3_0_2026_05_25.symbols.txt`
+    - `benches/results/profile_warm_v1_3_0_2026_05_25.flame.svg`
+    - `benches/results/profile_warm_v1_3_0_2026_05_25.json`
+- Verdict: **K** — the kernel.
+- Optimisation identified + landed: **identified, not landed.** See
+  *Next steps* below for Phase R-2.
+
+## Verdict from the 2026-05-25 profile
+
+Top-3 hot symbols by self time:
+
+| Rank | Symbol | Self % |
+|---:|---|---:|
+| 1 | `gemm_f64::microkernel::fma::f64::x2x6` | 64.77 |
+| 2 | `crossbeam_epoch::default::with_handle::<…,Guard>` | 7.50 |
+| 3 | `<crossbeam_deque::deque::Stealer<…>>::steal` (rayon) | 2.24 |
+
+By layer (sum of distinguishable self-pct):
+
+| Layer | Share |
+|---|---:|
+| Kernel **setup** — f64 GEMM + rayon machinery | ~81% |
+| Scheduler / futex / yield (kernel-mode side-effect of rayon) | ~14.5% |
+| SIMD-LUT scoring (`score_block_*`, `fast_scan`, NEON-LUT build) | **0%** |
+| Recheck-orderby (`cosine_distance`, `dot_product`, `slot_getsomeattrs`) | **0%** |
+| Executor internals (`BufferGetPage`, `index_form_tuple`) | **0%** |
+
+The profile is dominated by `gemm_f64::microkernel::fma::f64::x2x6`,
+which the codebase only invokes from one place —
+`turbovec::rotation::make_rotation_matrix` building a `dim x dim`
+orthogonal matrix via `faer::Mat::<f64>::qr()`. This is **not** the
+SIMD-LUT scoring loop the v1.2 audit predicted would dominate option
+K; it is the kernel **setup** path, specifically the rotation matrix
+QR construction. The scoring kernel itself, the recheck-orderby
+phase, and the executor internals contribute essentially nothing to
+the warm-scan profile on this corpus.
+
+Mechanism: `from_id_map_parts_with_prepared` populates the prepared
+`OnceLock`s for `centroids`, `boundaries` and `blocked` from the
+relfile, but **leaves `rotation` empty**. The first `search()` call
+on a freshly loaded `IdMapIndex` therefore runs the full f64 QR
+decomposition on a 1536×1536 random Gaussian matrix — ~5 GFLOPs of
+f64 work, dispatched across the rayon pool, and visible in the
+profile as `gemm_f64::*` plus the surrounding rayon synchronisation.
+
+## Next steps — Phase R-2
+
+**Persist the rotation matrix in the relfile alongside the existing
+prepared parts.** The rotation is a deterministic function of `(dim,
+ROTATION_SEED)`, so `ambuild` can build it once via
+`make_rotation_matrix(dim)` and write its `dim*dim` f32 buffer
+(about 9 MiB at 1536-d) into the meta-page chain. The scan-side
+`from_id_map_parts_with_prepared` then pre-fills the `rotation`
+`OnceLock` from those bytes, eliminating the f64 QR cost from every
+scan path.
+
+Expected gain: ~50-200 ms removed from cold-cache scans and from
+any scan whose backend has not yet warmed the per-backend cache.
+On this corpus that closes the 1.16× (and now 1.6×, see below) gap
+to HNSW ef=40 outright.
+
+Risk: minor. Adds ~9 MiB to the on-disk index footprint at 1536-d
+(negligible vs. the 1527 MiB blocked-layout body) and bumps the
+relfile wire format. Backward-compatible at read time: a relfile
+without rotation persisted falls back to the current
+QR-on-first-search path.
+
+Diagnostic side-question to settle in the same phase: the v1.3.0
+warm-p50 on this measurement is ~96-105 ms (vs. the 71 ms quoted
+above from v1.2), which suggests rotation may be running on
+*every* scan rather than once per backend — i.e. the per-backend
+cache may be missing more often than expected. Persisting the
+rotation removes the symptom either way; if the cache is in fact
+being missed, that is its own bug to fix in the same patch.

@@ -381,6 +381,24 @@ lets you pass an allowlist for hybrid retrieval).
 
 ## Performance
 
+> **Operations note: `shared_buffers`.** A pg_turbovec index built
+> on a million-row dbpedia-class corpus is roughly 1.5 GiB on disk
+> (the SIMD-blocked codes + scales + ids + persisted rotation
+> matrix + Lloyd-Max codebook). For warm-scan latency to match
+> what the kernel can deliver, the index needs to fit entirely in
+> `shared_buffers`; otherwise PostgreSQL's buffer manager re-pulls
+> touched pages from the OS page cache on every scan and you'll
+> see 80–100 ms warm p50 instead of the kernel's ~20 ms.
+>
+> Rule of thumb: `shared_buffers ≥ 2 × (sum of all turbovec
+> indexes you query hot)`. On a host with the default 128 MiB,
+> that's the first knob to bump. Phase R-3's measurement on a
+> 1 M × 1536-d corpus with 512 MiB `shared_buffers` saw a 1.5×
+> warm-scan gap to pgvector HNSW that vanishes once the index
+> is in shared buffers.
+>
+> Full diagnosis: [`docs/RECALL.md § 2.5`](docs/RECALL.md).
+
 > **Performance methodology.** The headline numbers in the
 > table at the top of this README come from a real
 > head-to-head against pgvector 0.8.0 HNSW on the

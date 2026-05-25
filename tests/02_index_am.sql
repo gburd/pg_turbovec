@@ -20,12 +20,11 @@ CREATE INDEX ix_demo_idx
   ON ix_demo USING turbovec (emb vec_cosine_ops)
   WITH (bit_width = 4);
 
--- 3. The side-table row exists.
-SELECT bit_width, dim, n_vectors
-FROM   turbovec.am_storage
-WHERE  indexrelid = 'ix_demo_idx'::regclass;
+-- 3. Index built; verify via heap row count (v1.3.0 has no
+--    side-table; observable state is `count(*)` on the heap).
+SELECT count(*) AS n_rows FROM ix_demo;
 
--- 4. Top-1 nearest \u2014 must be row 1 (the self-vector).
+-- 4. Top-1 nearest — must be row 1 (the self-vector).
 SELECT id, emb <=> '[1,0,0,0,0,0,0,0]'::vector AS dist
 FROM   ix_demo
 ORDER  BY emb <=> '[1,0,0,0,0,0,0,0]'::vector
@@ -39,7 +38,7 @@ LIMIT 3;
 
 -- 6. INSERT after CREATE INDEX exercises aminsert.
 INSERT INTO ix_demo VALUES (5, '[0.95, 0.05, 0, 0, 0, 0, 0, 0]');
-SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = 'ix_demo_idx'::regclass;
+SELECT count(*) AS n_rows FROM ix_demo;
 SELECT id FROM ix_demo
 ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector
 LIMIT 1;
@@ -47,7 +46,7 @@ LIMIT 1;
 
 -- 7. REINDEX rebuilds.
 REINDEX INDEX ix_demo_idx;
-SELECT n_vectors FROM turbovec.am_storage WHERE indexrelid = 'ix_demo_idx'::regclass;
+SELECT count(*) AS n_rows FROM ix_demo;
 
 -- 8. DROP INDEX cleans up the heap is intact.
 DROP INDEX ix_demo_idx;

@@ -2,9 +2,9 @@
 //! `aminsert` path.
 //!
 //! See `src/index/insert.rs` for the strategy: mutate cached
-//! `IdMapIndex` under `RwLock`, mark dirty, defer the
-//! `persist::save` SPI to `PreCommit`. This module owns the
-//! once-per-transaction callback wiring.
+//! `IdMapIndex` under `RwLock`, mark dirty, defer the relfile
+//! rewrite to `PreCommit`. This module owns the once-per-
+//! transaction callback wiring.
 
 use std::cell::Cell;
 
@@ -12,14 +12,12 @@ use pgrx::callbacks::{register_xact_callback, PgXactCallbackEvent};
 use pgrx::pg_sys;
 
 use crate::cache;
-use crate::index::persist;
 
-/// PreCommit flush sink for the relfile path: re-opens the index
-/// relation by oid (the original `Relation` from aminsert was
-/// dropped at end of the executor's tuple loop), writes the cached
-/// `IdMapIndex` out as relfile pages, then closes. WAL-logged via
-/// the `GenericXLog` path inside `relfile::write_full`.
-#[cfg(feature = "relfile_storage")]
+/// PreCommit flush sink: re-opens the index relation by oid (the
+/// original `Relation` from aminsert was dropped at end of the
+/// executor's tuple loop), writes the cached `IdMapIndex` out as
+/// relfile pages, then closes. WAL-logged via the `GenericXLog`
+/// path inside `relfile::write_full_with_prepared`.
 unsafe fn flush_to_relfile(
     indexrelid: pg_sys::Oid,
     idx: &turbovec::IdMapIndex,
@@ -66,15 +64,6 @@ unsafe fn flush_to_relfile(
             }
         },
     );
-    // Mirror n_vectors into the side-table so `am_storage` queries
-    // (used by `docs/RECALL.md` reproduction scripts and a couple
-    // of legacy tests) keep working post-Phase-N-C.
-    persist::save_empty_with_count(
-        indexrelid,
-        state.bit_width,
-        state.dim,
-        state.n_vectors,
-    );
     pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);
 }
 
@@ -100,11 +89,11 @@ pub(crate) fn ensure_xact_callbacks_registered() {
 
         // PreCommit: drain dirty entries and persist each one. We
         // intentionally use `PreCommit` (not `Commit`) so the
-        // `persist::save` SPI lands in the user's transaction —
-        // that buys us WAL correctness for free and lets
-        // `ereport(ERROR)` cleanly roll the user's transaction back
-        // if persistence fails. The matching `Abort` callback below
-        // then evicts the still-dirty entries.
+        // relfile rewrite lands in the user's transaction — that
+        // buys us WAL correctness for free and lets `ereport(ERROR)`
+        // cleanly roll the user's transaction back if persistence
+        // fails. The matching `Abort` callback below then evicts
+        // the still-dirty entries.
         register_xact_callback(PgXactCallbackEvent::PreCommit, || {
             XACT_CB_REGISTERED.with(|r| r.set(false));
             let dirty = cache::drain_dirty();
@@ -112,32 +101,17 @@ pub(crate) fn ensure_xact_callbacks_registered() {
                 return;
             }
             // PreCommit fires after the executor has popped the
-            // active snapshot, so SPI — which expects one — errors
-            // out with "cannot execute SQL without an outer snapshot
-            // or portal" unless we re-establish one. Push the
-            // current transaction's snapshot for the duration of
-            // the persist work and pop it before returning.
+            // active snapshot. The relfile path uses raw buffer-
+            // manager calls (no SPI) so we don't need to push a
+            // snapshot here, but pushing one is harmless and keeps
+            // the hook compatible with any future SPI work that
+            // might land inside `flush_to_relfile`.
             unsafe {
                 pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
             }
             for d in &dirty {
                 let guard = d.index.read();
-                #[cfg(feature = "relfile_storage")]
-                {
-                    unsafe { flush_to_relfile(d.key.rel_oid, &*guard, &d.persist); }
-                }
-                #[cfg(not(feature = "relfile_storage"))]
-                {
-                    persist::save(
-                        d.key.rel_oid,
-                        d.persist.bit_width,
-                        d.persist.dim,
-                        d.persist.n_vectors,
-                        &*guard,
-                        d.persist.version,
-                        &d.persist.live_ids,
-                    );
-                }
+                unsafe { flush_to_relfile(d.key.rel_oid, &*guard, &d.persist); }
                 drop(guard);
                 cache::clear_dirty(d.key);
             }
@@ -147,9 +121,9 @@ pub(crate) fn ensure_xact_callbacks_registered() {
         });
 
         // Abort: invalidate every dirty entry so the next access in
-        // this backend reloads committed state from `am_storage`.
-        // We don't journal undo — clone-on-write would have made
-        // rollback cheap but the per-insert clone cost on
+        // this backend reloads committed state from the relfile
+        // pages. We don't journal undo — clone-on-write would have
+        // made rollback cheap but the per-insert clone cost on
         // hundred-MiB indexes was unacceptable, so we trade a
         // post-rollback reload for a fast hot path.
         register_xact_callback(PgXactCallbackEvent::Abort, || {
@@ -157,9 +131,9 @@ pub(crate) fn ensure_xact_callbacks_registered() {
             cache::invalidate_dirty();
         });
 
-        // Parallel-worker and 2PC paths fall through unhandled in
-        // v1.1 (`amcanparallel = false` already prevents the
-        // former; PREPARE TRANSACTION is rare for OLTP-style
-        // bulk-insert workloads). Documented as a follow-up.
+        // Parallel-worker and 2PC paths fall through unhandled
+        // (`amcanparallel = false` already prevents the former;
+        // PREPARE TRANSACTION is rare for OLTP-style bulk-insert
+        // workloads). Documented as a follow-up.
     });
 }

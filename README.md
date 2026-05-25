@@ -28,11 +28,12 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.2.0 — 94/94 `#[pg_test]` cases pass on the
-> default + `experimental_index_am` build, 104/104 on
-> `+ relfile_storage` (Phase L preview), against PostgreSQL
-> 13, 14, 15, 16, 17, and 18. See
-> [`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md)
+> **Status:** v1.3.0 — 109/109 `#[pg_test]` cases pass against
+> PostgreSQL 13, 14, 15, 16, 17, and 18 with the default build
+> flags (the relfile-resident page format and the `turbovec`
+> index AM are now default-on; the `experimental_index_am` and
+> `relfile_storage` Cargo features were retired in Phase Q).
+> See [`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md)
 > for what we deliberately skipped, and
 > [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
 > for the honest scoreboard of every metric vs pgvector.
@@ -160,7 +161,7 @@ git clone https://codeberg.org/gregburd/pg_turbovec
 cd pg_turbovec
 cargo pgrx install --release   # default features include the index AM
 
-# Or build a stripped-down variant without the experimental index AM:
+# Or build a stripped-down variant without the index AM:
 cargo pgrx install --release --no-default-features --features pg16
 ```
 
@@ -260,7 +261,7 @@ INSERT INTO items (id, embedding) VALUES (1, '[1,2,3,4,5,6,7,8]')
 
 ### Distance operators
 
-| Op    | Meaning                            | Indexed (with `experimental_index_am`)? |
+| Op    | Meaning                            | Indexed (turbovec AM)? |
 |-------|------------------------------------|------------------------------------------|
 | `<->` | Euclidean (L2) distance            | exact only                               |
 | `<#>` | negative inner product             | yes — `vec_ip_ops` (default)         |
@@ -312,8 +313,10 @@ SELECT '[1, 2.5, -3]'::jsonb::vector;             -- → vector
 
 ## Indexing
 
-`pg_turbovec` ships an index access method named `turbovec`, included
-in the default build via the `experimental_index_am` Cargo feature.
+`pg_turbovec` ships an index access method named `turbovec`,
+included in the default build (the `experimental_index_am` and
+`relfile_storage` Cargo features were retired in v1.3.0; the
+relfile-resident storage path is now the only strategy).
 
 ```sql
 -- Cosine-distance ordering (most common for semantic search):
@@ -370,14 +373,16 @@ JOIN   items d USING (id)
 ORDER  BY k.score DESC;
 ```
 
-The function-driven `turbovec.knn(...)` API is recommended for
-production filtered ANN today; the `experimental_index_am` route
-is fully supported but the AM scan path is newer.
+The function-driven `turbovec.knn(...)` API and the
+`turbovec` index AM share the same TurboQuant kernel and the
+same backend-local cache; pick whichever fits your query
+shape (the AM integrates with `ORDER BY ... LIMIT`; `knn(...)`
+lets you pass an allowlist for hybrid retrieval).
 
 ## Performance
 
-> **Performance methodology.** As of v1.2.0 the headline numbers
-> in the table at the top of this README come from a real
+> **Performance methodology.** The headline numbers in the
+> table at the top of this README come from a real
 > head-to-head against pgvector 0.8.0 HNSW on the
 > [`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)
 > corpus (1 M Wikipedia/DBpedia entities × 1536-d OpenAI

@@ -2,14 +2,20 @@
 //! ANN scan so it can compare against alternative plans (Sort over
 //! Seq Scan, Bitmap Heap Scan, etc.).
 //!
-//! v0.16 reads the actual `n_vectors` and `dim` from
-//! `turbovec.am_storage` and computes a cost proportional to the
-//! SIMD work the kernel will do for one batched search. Phase 17
-//! will fold in `loop_count` for nested-loop join estimation.
+//! v1.3.0 reads the actual `n_vectors`, `dim`, and `bit_width`
+//! straight off the relfile meta page (block 0 of the index's
+//! main fork) and computes a cost proportional to the SIMD work
+//! the kernel will do for one batched search. The previous
+//! versions read these out of the SPI side-table; that's gone in
+//! v1.3.0. The relfile read is cheap — one buffer-pool hit on a
+//! pinned shared-buffer page \u2014 and avoids the SPI round-trip
+//! that would otherwise re-enter the executor mid-plan.
 
 use pgrx::pg_sys;
 #[allow(unused_imports)]
 use pgrx::prelude::*;
+
+use crate::index::relfile;
 
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amcostestimate(
@@ -34,27 +40,24 @@ pub(crate) unsafe extern "C-unwind" fn amcostestimate(
         None
     };
 
-    // Pull n_vectors and dim from am_storage. We catch any error
-    // (table not yet created, row missing) and fall back to a
-    // pessimistic estimate.
+    // Read n_vectors / dim / bit_width straight off the relfile
+    // meta page. AccessShareLock is the lightest lock we can take
+    // (compatible with everything except AccessExclusive); a
+    // failed open or an empty meta page falls through to the
+    // pessimistic default below so the planner doesn't crash on
+    // partially-built indexes.
     let (n_vectors, dim, bit_width): (i64, i32, i32) = if let Some(oid) = indexrelid {
-        let row = pgrx::Spi::connect(|client| {
-            let sql = "SELECT n_vectors, dim, bit_width FROM turbovec.am_storage \
-                 WHERE indexrelid = $1";
-            let mut iter = match client.select(sql, Some(1), &[oid.into()]) {
-                Ok(t) => t,
-                Err(_) => return None,
+        let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+        if rel.is_null() {
+            (1_000, 384, 4)
+        } else {
+            let v = match relfile::read_meta(rel) {
+                Some(m) => (m.n_vectors as i64, m.dim as i32, m.bit_width as i32),
+                None => (1_000, 384, 4),
             };
-            let row = iter.next()?;
-            let nv: Option<i64> = row.get(1).ok().flatten();
-            let dim: Option<i32> = row.get(2).ok().flatten();
-            let bw: Option<i32> = row.get(3).ok().flatten();
-            match (nv, dim, bw) {
-                (Some(nv), Some(dim), Some(bw)) => Some((nv, dim, bw)),
-                _ => None,
-            }
-        });
-        row.unwrap_or((1_000, 384, 4))
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            v
+        }
     } else {
         (1_000, 384, 4)
     };

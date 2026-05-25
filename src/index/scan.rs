@@ -1,4 +1,4 @@
-//! `ambeginscan` / `amrescan` / `amgettuple` / `amendscan` — the
+//! `ambeginscan` / `amrescan` / `amgettuple` / `amendscan` - the
 //! query path. Lazily loads the persisted IdMapIndex on first
 //! `amgettuple`, runs a single batch search, then drains results
 //! one TID per call.
@@ -12,9 +12,6 @@ use turbovec::IdMapIndex;
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
-#[cfg(not(feature = "relfile_storage"))]
-use crate::index::persist;
-#[cfg(feature = "relfile_storage")]
 use crate::index::relfile;
 use crate::kernels;
 use crate::vec::Vector;
@@ -23,7 +20,7 @@ use crate::vec::Vector;
 /// by `palloc0` so all fields start zeroed).
 #[repr(C)]
 pub(crate) struct ScanOpaque {
-    /// Cached query vector — set by `amrescan`, consumed by the
+    /// Cached query vector - set by `amrescan`, consumed by the
     /// first `amgettuple`.
     query: Vec<f32>,
     /// Search results, populated lazily on first `amgettuple`.
@@ -51,62 +48,37 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         error!("turbovec: RelationGetIndexScan returned null");
     }
 
-    // Migration HINT (Phase L hardening item 5 + Phase P): when
-    // the running binary has --features relfile_storage but is
-    // opening an index that was either:
-    //   (a) built under the older side-table path — main fork
-    //       meta page is empty / never initialised; or
-    //   (b) built under the v1 relfile preview — meta page is
-    //       valid but lacks the prepared SIMD-blocked chain and
-    //       inline codebook that Phase P relies on for fast
-    //       cold scans.
-    // In both cases the scan still works (the v1 path falls
-    // through to per-backend `pack::repack`), but we surface a
-    // NOTICE pointing the user at REINDEX so they can pick up
-    // the persisted layout and skip the ~26 s cold-scan cost.
-    #[cfg(feature = "relfile_storage")]
+    // Phase Q (v1.3.0): hard migration boundary. We refuse to
+    // serve scans against an index built under any pre-Phase-P
+    // wire format. Two cases:
+    //   (a) main fork is empty / never initialised — the index
+    //       was built under v1.0.x..v1.1 (side-table only) or
+    //       under a v1.2 binary that bailed before writing the
+    //       relfile.
+    //   (b) main fork is populated but the meta page is the v1
+    //       (Phase L preview) layout that lacks the persisted
+    //       SIMD-blocked chain + Lloyd-Max codebook Phase P
+    //       relies on.
+    // Both are unrecoverable from the running binary; require
+    // the user to REINDEX. We emit ERROR (not NOTICE) so a
+    // half-broken state can't silently return zero rows.
     {
-        let indexrelid = (*index_relation).rd_id;
-        let relfile_meta = crate::index::relfile::read_meta(index_relation);
+        let relfile_meta = relfile::read_meta(index_relation);
         match &relfile_meta {
             None => {
-                // Empty relfile — fall back to side-table
-                // detection (case (a)).
-                if let Some(legacy) = crate::index::persist::load_meta(indexrelid) {
-                    if legacy.n_vectors > 0 {
-                        pgrx::ereport!(
-                            pgrx::PgLogLevel::NOTICE,
-                            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                            "turbovec index appears to be in the legacy side-table format",
-                            "This binary was built with --features relfile_storage but the index uses the v1.0.x / v1.1.0 side-table layout. The scan will return no rows. Run `REINDEX INDEX <name>;` to migrate."
-                        );
-                    }
-                }
-            }
-            Some(m) if m.dim == 0 && m.n_vectors == 0 => {
-                // Stub meta page (only ambuildempty ran). Same
-                // side-table check as before.
-                if let Some(legacy) = crate::index::persist::load_meta(indexrelid) {
-                    if legacy.n_vectors > 0 {
-                        pgrx::ereport!(
-                            pgrx::PgLogLevel::NOTICE,
-                            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                            "turbovec index appears to be in the legacy side-table format",
-                            "This binary was built with --features relfile_storage but the index uses the v1.0.x / v1.1.0 side-table layout. The scan will return no rows. Run `REINDEX INDEX <name>;` to migrate."
-                        );
-                    }
-                }
+                ereport!(
+                    PgLogLevel::ERROR,
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "turbovec index has an empty main fork (built under pg_turbovec ≤ 1.2)",
+                    "Run `REINDEX INDEX <name>;` to migrate the index to the v1.3.0 wire format."
+                );
             }
             Some(m) if m.is_legacy_v1() && m.n_vectors > 0 => {
-                // Case (b): populated v1 relfile. Scan will
-                // succeed via per-backend repack, but cold
-                // latency is ~26 s on 1 M × 1536-d. Recommend
-                // REINDEX so the prepared layout gets baked in.
-                pgrx::ereport!(
-                    pgrx::PgLogLevel::NOTICE,
-                    pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    "turbovec index uses an older relfile layout (v1) without the prepared SIMD-blocked cache",
-                    "This index was built before Phase P and lacks the persisted SIMD-blocked layout + Lloyd-Max codebook. Cold scans will pay ~12-15 s of pack::repack and ~5-8 s of codebook compute per fresh backend. Run `REINDEX INDEX <name>;` to migrate to the v2 layout."
+                ereport!(
+                    PgLogLevel::ERROR,
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)",
+                    "This index lacks the persisted SIMD-blocked layout + Lloyd-Max codebook required by pg_turbovec ≥ 1.3.0. Run `REINDEX INDEX <name>;` to migrate."
                 );
             }
             _ => {}
@@ -238,12 +210,10 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     if !(*opaque).fetched {
         let indexrelid = (*(*scan).indexRelation).rd_id;
 
-        // Phase L: when relfile storage is enabled we read the
-        // meta page directly from the index relation's main fork
-        // via the buffer manager. shared_buffers caches it
-        // cluster-wide; subsequent backends pay only the buffer-
-        // pool hit cost, not the SPI fetch + TOAST + parse cost.
-        #[cfg(feature = "relfile_storage")]
+        // Read the meta page directly from the index relation's
+        // main fork via the buffer manager. shared_buffers caches
+        // it cluster-wide; subsequent backends pay only the
+        // buffer-pool hit cost.
         let (bit_width_u8, dim_u32, n_vectors_u64, am_version_u32) = {
             let m = match relfile::read_meta((*scan).indexRelation) {
                 Some(m) => m,
@@ -254,41 +224,18 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             };
             (m.bit_width, m.dim, m.n_vectors, m.am_version)
         };
-        #[cfg(not(feature = "relfile_storage"))]
-        let (bit_width_u8, dim_u32, n_vectors_u64, am_version_u32) = {
-            // Cheap metadata-only fetch: lets us build the cache
-            // key and compute a freshness signal without dragging
-            // the (possibly hundreds-of-MiB) payload bytea across
-            // SPI on every query.
-            let meta = match persist::load_meta(indexrelid) {
-                Some(m) => m,
-                None => {
-                    (*opaque).fetched = true;
-                    return false;
-                }
-            };
-            (
-                meta.bit_width as u8,
-                meta.dim as u32,
-                meta.n_vectors.max(0) as u64,
-                meta.version as u32,
-            )
-        };
 
         let dim = dim_u32 as usize;
         let n_in_index = n_vectors_u64 as usize;
 
-        // Deferred-commit fallback: an aminsert in the same xact has
-        // mutated the in-memory cache but the side-table reflects
-        // the pre-mutation state. If the on-disk meta says empty
-        // (or doesn't match our query dim) but the cache holds a
-        // dirty mirror, use that instead.
-        #[cfg(not(feature = "relfile_storage"))]
+        // Deferred-commit fallback: an aminsert in the same xact
+        // mutated the in-memory cache but the relfile meta page
+        // reflects the pre-mutation state. If the on-disk meta
+        // says empty (or doesn't match our query dim) but the
+        // cache holds a dirty mirror, use that instead.
         let dirty_fallback = (n_in_index == 0 || dim != (*opaque).query.len())
             .then(|| cache::am_find_dirty_by_rel(indexrelid))
             .flatten();
-        #[cfg(feature = "relfile_storage")]
-        let dirty_fallback: Option<(crate::cache::CacheKey, Arc<parking_lot::RwLock<IdMapIndex>>, crate::cache::PersistState)> = None;
 
         if dirty_fallback.is_none() {
             if (*opaque).query.len() != dim {
@@ -317,7 +264,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             bit_width: bit_width_u8,
             dim: dim_u32,
         };
-        let relfile_node = cache::current_relfilenode(indexrelid);
+        let relfile_node = cache::relfilenode_from_relation((*scan).indexRelation);
         let version_as_i64 = am_version_u32 as i64;
 
         let arc: Arc<parking_lot::RwLock<IdMapIndex>> = match dirty_fallback {
@@ -325,7 +272,6 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             None => match cache::lookup(key, relfile_node, version_as_i64) {
             Some(a) => a,
             None => {
-                #[cfg(feature = "relfile_storage")]
                 let stored_index = {
                     let meta = relfile::read_meta((*scan).indexRelation)
                         .expect("meta disappeared mid-scan");
@@ -373,14 +319,6 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         ),
                     }
                 };
-                #[cfg(not(feature = "relfile_storage"))]
-                let stored_index = match persist::load(indexrelid) {
-                    Some(s) => s.index,
-                    None => {
-                        (*opaque).fetched = true;
-                        return false;
-                    }
-                };
                 let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
                 let total_bytes = bytes_per_vec * (n_in_index.max(1));
                 cache::insert(key, stored_index, total_bytes, relfile_node, version_as_i64)
@@ -395,7 +333,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // The K knob: how many candidates to fetch per scan. v1.0
         // shipped a hard 1024 which made every ORDER BY on a million-
         // row index ~17 s. Default lowered to 100 (turbovec.search_k
-        // GUC) — tune up for high LIMITs or higher recall, down for
+        // GUC) - tune up for high LIMITs or higher recall, down for
         // sub-ms latency.
         let k_pref = crate::guc::SEARCH_K.get() as usize;
         let k = k_pref.min(n_live.max(1)).max(1);
@@ -429,8 +367,8 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     // against the recomputed exact distance and `elog(ERROR,
     // "index returned tuples in wrong order")` if the recomputed
     // value is *less than* what we claimed. To be robust across
-    // every operator class — cosine (range [0, 2]), inner-product
-    // (-dot, unbounded) and any future addition — we advertise
+    // every operator class - cosine (range [0, 2]), inner-product
+    // (-dot, unbounded) and any future addition - we advertise
     // `f64::NEG_INFINITY`, a universal lower bound. This forces
     // every tuple onto the reorder queue and drains it in exact
     // order at end-of-scan. The performance cost is negligible
@@ -442,7 +380,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     }
     let _ = dist;
 
-    // Force the executor to recheck — our quantised distance is
+    // Force the executor to recheck - our quantised distance is
     // approximate. The recheck recomputes the orderby expression
     // against the heap tuple, restoring exact distances.
     (*scan).xs_recheckorderby = true;
@@ -450,7 +388,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     true
 }
 
-/// `amendscan`: nothing to do — palloc'd memory is freed by the scan
+/// `amendscan`: nothing to do - palloc'd memory is freed by the scan
 /// memory context teardown.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}

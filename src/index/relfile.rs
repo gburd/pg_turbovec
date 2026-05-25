@@ -580,6 +580,183 @@ pub(crate) unsafe fn write_full(
     }
 }
 
+/// In-place swap-remove on a single chain: copy the row at slot
+/// `from` to slot `to`, leaving the contents of slot `from` as
+/// dead-but-still-on-disk bytes. The caller is expected to lower
+/// `n_vectors` (in the meta page) so the now-trailing slot is no
+/// longer addressed.
+///
+/// Both same-page (one buffer, intra-page byte copy) and cross-
+/// page (one source-read + one destination-write) cases are
+/// handled. The destination write is wrapped in a `GenericXLog`
+/// state so the page change is WAL-logged. The source page is not
+/// dirtied — its bytes at `from_slot` are simply ignored once the
+/// meta page commits the smaller `n_vectors`.
+///
+/// `from_slot` and `to_slot` are 0-based slot indices over the
+/// whole chain (page index = slot / rows_per_page,
+/// intra-page offset = (slot mod rows_per_page) * stride).
+/// `from_slot == to_slot` is a no-op.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock and have ensured
+/// the chain extends at least up to `max(from_slot, to_slot) + 1`
+/// rows. Both slots must be within the existing chain length.
+pub(crate) unsafe fn copy_slot_in_chain(
+    rel: pg_sys::Relation,
+    first_blkno: u32,
+    stride: u32,
+    rows_per_page: u32,
+    from_slot: u64,
+    to_slot: u64,
+) {
+    if from_slot == to_slot {
+        return;
+    }
+    debug_assert!(rows_per_page > 0);
+    debug_assert!(stride > 0);
+
+    let rpp = u64::from(rows_per_page);
+    let stride_us = stride as usize;
+
+    let src_page_idx = (from_slot / rpp) as u32;
+    let dst_page_idx = (to_slot / rpp) as u32;
+    let src_off = ((from_slot % rpp) as usize) * stride_us;
+    let dst_off = ((to_slot % rpp) as usize) * stride_us;
+    let src_blkno = first_blkno + src_page_idx;
+    let dst_blkno = first_blkno + dst_page_idx;
+
+    if src_blkno == dst_blkno {
+        // Same page: register once, ptr::copy (handles overlap),
+        // finish. Cheaper than a separate read.
+        let buf = read_block(rel, src_blkno, /*exclusive=*/ true);
+        let state = pg_sys::GenericXLogStart(rel);
+        let page = pg_sys::GenericXLogRegisterBuffer(
+            state,
+            buf,
+            pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+        );
+        let data = page.cast::<u8>().add(PAGE_HEADER_BYTES);
+        std::ptr::copy(data.add(src_off), data.add(dst_off), stride_us);
+        pg_sys::GenericXLogFinish(state);
+        pg_sys::UnlockReleaseBuffer(buf);
+        return;
+    }
+
+    // Different pages: copy out of the source under a shared
+    // lock (no modification, no WAL), then register the
+    // destination under an exclusive lock and overwrite the
+    // single row. We deliberately avoid registering both buffers
+    // in a single GenericXLog state because (a) the source isn't
+    // dirty and would force an unnecessary FPW, (b) it keeps the
+    // batch slot count comfortably under MAX_GENERIC_XLOG_PAGES.
+    let mut row = vec![0u8; stride_us];
+    let src_buf = read_block(rel, src_blkno, /*exclusive=*/ false);
+    let src_data = page_data(src_buf);
+    std::ptr::copy_nonoverlapping(src_data.add(src_off), row.as_mut_ptr(), stride_us);
+    pg_sys::UnlockReleaseBuffer(src_buf);
+
+    let dst_buf = read_block(rel, dst_blkno, /*exclusive=*/ true);
+    let state = pg_sys::GenericXLogStart(rel);
+    let page = pg_sys::GenericXLogRegisterBuffer(
+        state,
+        dst_buf,
+        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+    );
+    // NOTE: do NOT call page_init_no_hole here. The destination
+    // page was previously written via write_chain_at, which set
+    // pd_lower = pd_upper. PageInit would reset that and zero
+    // every byte we're trying to preserve.
+    let dst_data = page.cast::<u8>().add(PAGE_HEADER_BYTES);
+    std::ptr::copy_nonoverlapping(row.as_ptr(), dst_data.add(dst_off), stride_us);
+    pg_sys::GenericXLogFinish(state);
+    pg_sys::UnlockReleaseBuffer(dst_buf);
+}
+
+/// Read the ids chain (only) into a `Vec<u64>`. Cheaper than
+/// `read_full` for the ambulkdelete callback walk, which only
+/// needs ids to feed into the dead-tuple callback. ~8 MiB on a
+/// 1 M-row index versus ~200 MiB for the full read.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_ids_only(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<u64> {
+    if meta.n_vectors == 0 {
+        return Vec::new();
+    }
+    let ids_bytes = read_chain(
+        rel,
+        meta.ids_first,
+        std::mem::size_of::<u64>() as u32,
+        meta.rows_per_ids_page,
+        meta.n_vectors,
+    );
+    ids_bytes
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+        .collect()
+}
+
+/// Rewrite the meta page in place with a smaller `n_vectors` and
+/// a bumped `am_version`. Used by `ambulkdelete` after walking the
+/// page chains and swap-removing dead rows. The chain offsets
+/// (`codes_first`, `scales_first`, `ids_first`, `rows_per_*_page`,
+/// `stride_bytes`) are preserved so existing on-disk row positions
+/// remain valid for survivors.
+///
+/// `*_count` fields are recomputed from the new `n_vectors` for
+/// consistency, but readers ignore them — they walk the chain by
+/// `n_vectors` only. The next `write_full` (build / aminsert
+/// commit-time flush) re-plans from scratch, packing the chains
+/// tightly.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_meta_shrink_in_place(
+    rel: pg_sys::Relation,
+    old: &MetaPageData,
+    new_n_vectors: u64,
+    new_am_version: u32,
+) {
+    let new_meta = MetaPageData {
+        n_vectors: new_n_vectors,
+        am_version: new_am_version,
+        codes_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_codes_page),
+        scales_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_scales_page),
+        ids_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_ids_page),
+        ..*old
+    };
+    write_meta(rel, &new_meta);
+}
+
+/// Truncate trailing pages of the ids chain after a shrink. The
+/// ids chain is the last chain in the file layout (block order:
+/// meta, codes, scales, ids), so any pages past the new ids tail
+/// are pure garbage and can be safely released.
+///
+/// Pages between the now-shorter codes / scales chains and the
+/// ids chain remain in place — moving the ids chain backward
+/// would defeat the whole "don't rewrite the file" point. They'll
+/// be reclaimed at the next `write_full` (which re-packs).
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn truncate_ids_tail(rel: pg_sys::Relation, meta: &MetaPageData) {
+    if meta.n_vectors == 0 && meta.ids_first == 0 {
+        return;
+    }
+    let new_ids_count = MetaPageData::pages_needed(meta.n_vectors, meta.rows_per_ids_page);
+    let new_total = meta.ids_first + new_ids_count;
+    let cur = nblocks(rel);
+    if cur > new_total {
+        pg_sys::RelationTruncate(rel, new_total);
+    }
+}
+
 /// Read every chain back into Rust-owned buffers. Returns
 /// `(packed_codes, scales, slot_to_id)`.
 ///

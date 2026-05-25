@@ -118,36 +118,7 @@ unsafe fn aminsert_relfile(
     value: Vector,
     id: u64,
 ) -> bool {
-    use turbovec::IdMapIndex;
-
-    // Phase L stub: full-rewrite per insert. Same asymptotic cost
-    // as today's SPI path — we read every page back into RAM,
-    // mutate the IdMapIndex, then rewrite every page. Phase K's
-    // deferred-commit batching will turn this into a per-tx
-    // append; for now correctness > throughput.
-    let mut idx_index = match relfile::read_meta(index_relation) {
-        Some(meta) if meta.n_vectors > 0 => {
-            let (codes, scales, ids) = relfile::read_full(index_relation, &meta);
-            IdMapIndex::from_id_map_parts(
-                meta.bit_width as usize,
-                meta.dim as usize,
-                meta.n_vectors as usize,
-                codes,
-                scales,
-                ids,
-            )
-            .unwrap_or_else(|e| error!("turbovec aminsert: corrupt relfile pages: {}", e))
-        }
-        _ => IdMapIndex::new(dim, bit_width as usize),
-    };
-
-    if idx_index.dim() != 0 && idx_index.dim() != dim {
-        error!(
-            "turbovec aminsert: dim mismatch — index expects {}, row has {}",
-            idx_index.dim(),
-            dim
-        );
-    }
+    use crate::cache::{self, CacheKey, PersistState};
 
     let buf = if normalise {
         kernels::normalise_to_vec(value.as_slice())
@@ -155,39 +126,97 @@ unsafe fn aminsert_relfile(
         value.as_slice().to_vec()
     };
 
-    if let Err(e) = idx_index.add_with_ids(&buf, &[id]) {
-        let msg = format!("{:?}", e);
-        if msg.contains("IdAlreadyPresent") {
-            idx_index.remove(id);
-            if let Err(e2) = idx_index.add_with_ids(&buf, &[id]) {
-                error!("turbovec aminsert: re-add after remove failed: {:?}", e2);
+    let key = CacheKey {
+        rel_oid: indexrelid,
+        attnum: 0,
+        bit_width: bit_width as u8,
+        dim: dim as u32,
+    };
+
+    let relfile_node = cache::relfilenode_from_relation(index_relation);
+    let arc = match cache::am_lookup_for_mutation(key, relfile_node) {
+        Some(a) => a,
+        None => {
+            // First mutation in this tx: load from relfile pages.
+            let (idx_index, n_vectors_existing, version_existing) =
+                match relfile::read_meta(index_relation) {
+                    Some(meta) if meta.n_vectors > 0 => {
+                        let (codes, scales, ids) = relfile::read_full(index_relation, &meta);
+                        let idx = IdMapIndex::from_id_map_parts(
+                            meta.bit_width as usize,
+                            meta.dim as usize,
+                            meta.n_vectors as usize,
+                            codes,
+                            scales,
+                            ids,
+                        )
+                        .unwrap_or_else(|e| {
+                            error!("turbovec aminsert: corrupt relfile pages: {}", e)
+                        });
+                        (idx, meta.n_vectors as i64, meta.am_version as i32)
+                    }
+                    _ => (IdMapIndex::new(dim, bit_width as usize), 0, 0),
+                };
+            let bytes_per_vec = (dim * bit_width as usize) / 8 + 4 + 64;
+            let total_bytes = bytes_per_vec * n_vectors_existing.max(1) as usize;
+            let live_ids = idx_index.slot_to_id().to_vec();
+            let persist_state = PersistState {
+                bit_width,
+                dim: dim as i32,
+                n_vectors: n_vectors_existing,
+                version: version_existing,
+                live_ids,
+            };
+            cache::am_install(
+                key,
+                idx_index,
+                total_bytes,
+                relfile_node,
+                version_existing as i64,
+                persist_state,
+            )
+        }
+    };
+
+    let mut id_already_present = false;
+    {
+        let mut guard = arc.write();
+        if guard.dim() != 0 && guard.dim() != dim {
+            error!(
+                "turbovec aminsert: dim mismatch — index expects {}, row has {}",
+                guard.dim(),
+                dim
+            );
+        }
+        match guard.add_with_ids(&buf, &[id]) {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                if msg.contains("IdAlreadyPresent") {
+                    guard.remove(id);
+                    if let Err(e2) = guard.add_with_ids(&buf, &[id]) {
+                        error!("turbovec aminsert: re-add after remove failed: {:?}", e2);
+                    }
+                    id_already_present = true;
+                } else {
+                    error!("turbovec aminsert: add_with_ids failed: {:?}", e);
+                }
             }
-        } else {
-            error!("turbovec aminsert: add_with_ids failed: {:?}", e);
         }
     }
 
-    let n_vectors = idx_index.len() as u64;
-    // Bump am_version on every commit so the per-backend cache
-    // invalidates. Read the previous meta to compute next version;
-    // when the index was empty before, restart at 1.
-    let next_version =
-        relfile::read_meta(index_relation).map_or(1, |m| m.am_version.saturating_add(1));
+    let updated = cache::am_mark_dirty(key, |p| {
+        if !id_already_present {
+            p.live_ids.push(id);
+            p.n_vectors += 1;
+        }
+        p.version += 1;
+    });
+    if !updated {
+        error!("turbovec aminsert: cache entry vanished between install and mark_dirty");
+    }
 
-    relfile::write_full(
-        index_relation,
-        bit_width as u8,
-        dim as u32,
-        n_vectors,
-        idx_index.packed_codes(),
-        idx_index.scales(),
-        idx_index.slot_to_id(),
-        next_version,
-    );
-
-    // Mirror the n_vectors counter into the SPI side-table so
-    // existing tests / queries that read it keep working.
-    persist::save_empty_with_count(indexrelid, bit_width, dim as i32, n_vectors as i64);
+    crate::xact::ensure_xact_callbacks_registered();
 
     true
 }

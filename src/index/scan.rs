@@ -48,9 +48,9 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         error!("turbovec: RelationGetIndexScan returned null");
     }
 
-    // Phase Q (v1.3.0): hard migration boundary. We refuse to
-    // serve scans against an index built under any pre-Phase-P
-    // wire format. Two cases:
+    // Phase Q (v1.3.0) + Phase R-2 (v1.4.0): hard migration
+    // boundary. We refuse to serve scans against an index built
+    // under any pre-Phase-R-2 wire format. Three cases:
     //   (a) main fork is empty / never initialised — the index
     //       was built under v1.0.x..v1.1 (side-table only) or
     //       under a v1.2 binary that bailed before writing the
@@ -59,9 +59,12 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
     //       (Phase L preview) layout that lacks the persisted
     //       SIMD-blocked chain + Lloyd-Max codebook Phase P
     //       relies on.
-    // Both are unrecoverable from the running binary; require
-    // the user to REINDEX. We emit ERROR (not NOTICE) so a
-    // half-broken state can't silently return zero rows.
+    //   (c) main fork is populated as v2 (Phase P, v1.3.x) but
+    //       lacks the persisted rotation chain Phase R-2
+    //       relies on. The lazy QR was the warm-scan hotspot.
+    // All three are unrecoverable from the running binary;
+    // require the user to REINDEX. We emit ERROR (not NOTICE)
+    // so a half-broken state can't silently return zero rows.
     {
         let relfile_meta = relfile::read_meta(index_relation);
         match &relfile_meta {
@@ -70,7 +73,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
                     PgLogLevel::ERROR,
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                     "turbovec index has an empty main fork (built under pg_turbovec ≤ 1.2)",
-                    "Run `REINDEX INDEX <name>;` to migrate the index to the v1.3.0 wire format."
+                    "Run `REINDEX INDEX <name>;` to migrate the index to the v1.4.0 wire format."
                 );
             }
             Some(m) if m.is_legacy_v1() && m.n_vectors > 0 => {
@@ -79,6 +82,14 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                     "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)",
                     "This index lacks the persisted SIMD-blocked layout + Lloyd-Max codebook required by pg_turbovec ≥ 1.3.0. Run `REINDEX INDEX <name>;` to migrate."
+                );
+            }
+            Some(m) if m.is_legacy_v2() && m.n_vectors > 0 => {
+                ereport!(
+                    PgLogLevel::ERROR,
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "turbovec index built under pg_turbovec ≤ 1.3 cannot be scanned by pg_turbovec 1.4+",
+                    "Run `REINDEX INDEX <name>;` to migrate. See docs/UPGRADING.md for details."
                 );
             }
             _ => {}
@@ -277,11 +288,14 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         .expect("meta disappeared mid-scan");
                     let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
 
-                    // Phase P: when the v2 layout is populated,
-                    // skip the per-backend `pack::repack` + Lloyd-
-                    // Max compute by reading the prepared parts
-                    // off disk and feeding them back into the
-                    // OnceLocks via from_id_map_parts_with_prepared.
+                    // Phase P + Phase R-2: when the v3 layout
+                    // is populated, skip the per-backend
+                    // `pack::repack` + Lloyd-Max compute + QR
+                    // decomposition by reading the prepared
+                    // parts (blocked codes, codebook, rotation
+                    // matrix) off disk and feeding them back
+                    // into the OnceLocks via
+                    // `from_id_map_parts_with_prepared`.
                     let load_result = if meta.has_prepared_layout() {
                         let blocked = relfile::read_blocked(
                             (*scan).indexRelation,
@@ -289,6 +303,12 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         );
                         let centroids = meta.centroids_slice().to_vec();
                         let boundaries = meta.boundaries_slice().to_vec();
+                        let rotation = relfile::read_rotation(
+                            (*scan).indexRelation,
+                            &meta,
+                        );
+                        let rotation_opt =
+                            if rotation.is_empty() { None } else { Some(rotation) };
                         IdMapIndex::from_id_map_parts_with_prepared(
                             meta.bit_width as usize,
                             meta.dim as usize,
@@ -300,6 +320,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                             meta.n_blocks_blocked as usize,
                             centroids,
                             boundaries,
+                            rotation_opt,
                         )
                     } else {
                         IdMapIndex::from_id_map_parts(

@@ -61,6 +61,30 @@ embedder doesn't have a persisted prepared layout).
 
 All upstream tests (`cargo test -p turbovec`) still pass.
 
+### Phase R-2 follow-up: persisted rotation matrix
+
+The rotation matrix (`rotation::make_rotation_matrix(dim)`) is
+a deterministic function of `(dim, ROTATION_SEED)` produced by
+QR decomposition of a `dim x dim` Gaussian random matrix. At
+`dim = 1536` the QR alone is the dominant warm-scan hotspot
+on a fresh backend (~64% self time on the dbpedia-1M profile;
+see `benches/results/profile_warm_v1_3_0_2026_05_25.json`).
+Phase R-2 in `pg_turbovec` persists the matrix in the relfile
+so the OnceLock comes back pre-populated when a backend opens
+the index.
+
+| Location | Added |
+|---|---|
+| `src/lib.rs` | `TurboQuantIndex::rotation() -> &[f32]` accessor that drives the existing `rotation` `OnceLock` and returns the prepared matrix. Mirrors `centroids()` / `boundaries()` / `blocked_codes()`. |
+| `src/lib.rs` | `TurboQuantIndex::rotation_size(dim) -> usize` const helper (`dim * dim`) so callers can preallocate the on-disk chain without instantiating an index. |
+| `src/lib.rs` | `TurboQuantIndex::from_parts_with_prepared(…)` extended with a final `rotation: Option<Vec<f32>>` parameter. `Some(buf)` pre-fills the rotation `OnceLock`; `None` falls back to the lazy QR (existing behaviour, used during `ambuild` when the matrix isn't yet on disk). |
+| `src/id_map.rs` | `IdMapIndex` thin wrappers: `rotation`, `rotation_size`, and the matching `rotation: Option<Vec<f32>>` parameter on `from_id_map_parts_with_prepared`. |
+
+This is a follow-up to upstream PR #70 (Phase P prepared
+caches). Existing callers that pass `None` for `rotation` see
+no behaviour change; the lazy QR runs on first search exactly
+as before.
+
 ## Upstreaming plan
 
 We intend to submit the same diff as a PR to

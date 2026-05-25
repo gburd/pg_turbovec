@@ -521,20 +521,24 @@ pub(crate) unsafe fn write_full(
     );
 }
 
-/// Prepared parts of an [`IdMapIndex`] required for Phase P's
-/// blocked-layout persistence.
+/// Prepared parts of an [`IdMapIndex`] required for Phase P /
+/// Phase R-2's blocked-layout + rotation persistence.
 ///
 /// `blocked_codes.len()` must equal the byte length of the output
 /// of `pack::repack(packed_codes, n_vectors, bit_width, dim)`,
-/// `n_blocks` the matching block count, and `centroids` /
-/// `boundaries` the Lloyd-Max codebook for `(bit_width, dim)`.
-/// All four come straight off `IdMapIndex` after a
-/// `prepare_eager()` call.
+/// `n_blocks` the matching block count, `centroids` /
+/// `boundaries` the Lloyd-Max codebook for `(bit_width, dim)`,
+/// and `rotation` the row-major `dim * dim` `f32` orthogonal
+/// rotation matrix produced by
+/// `turbovec::rotation::make_rotation_matrix(dim)`. All five
+/// come straight off `IdMapIndex` after a `prepare_eager()` +
+/// `rotation()` call.
 pub(crate) struct PreparedParts<'a> {
     pub blocked_codes: &'a [u8],
     pub n_blocks: u32,
     pub centroids: &'a [f32],
     pub boundaries: &'a [f32],
+    pub rotation: &'a [f32],
 }
 
 /// High-level helper: write a fully-built `IdMapIndex` plus the
@@ -587,9 +591,13 @@ unsafe fn write_full_inner(
     assert_eq!(slot_to_id.len() as u64, n_vectors);
     assert_eq!(scales.len() as u64, n_vectors);
 
-    let (blocked_bytes, n_blocks_blocked) = match &prepared {
-        Some(p) => (p.blocked_codes.len() as u64, p.n_blocks),
-        None => (0, 0),
+    let (blocked_bytes, n_blocks_blocked, rotation_bytes) = match &prepared {
+        Some(p) => (
+            p.blocked_codes.len() as u64,
+            p.n_blocks,
+            std::mem::size_of_val(p.rotation) as u64,
+        ),
+        None => (0, 0, 0),
     };
     let mut meta = MetaPageData::plan_with_blocked(
         bit_width,
@@ -598,6 +606,7 @@ unsafe fn write_full_inner(
         am_version,
         blocked_bytes,
         n_blocks_blocked,
+        rotation_bytes,
     );
     if let Some(p) = &prepared {
         meta.set_codebook(p.centroids, p.boundaries);
@@ -672,6 +681,27 @@ unsafe fn write_full_inner(
                     1,
                     crate::index::page::PAYLOAD_BYTES as u32,
                     p.blocked_codes.len() as u64,
+                );
+            }
+
+            // v3: persisted rotation matrix. Same flat-byte
+            // chain shape as `blocked`. The consumer
+            // (`turbovec::IdMapIndex::from_id_map_parts_with_prepared`)
+            // pre-fills the rotation `OnceLock` from these bytes
+            // and skips the per-backend QR decomposition that
+            // dominates warm-scan latency at large dim.
+            if !p.rotation.is_empty() {
+                let rotation_bytes_buf: &[u8] = std::slice::from_raw_parts(
+                    p.rotation.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(p.rotation),
+                );
+                write_chain_at(
+                    rel,
+                    meta.rotation_first,
+                    rotation_bytes_buf,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    rotation_bytes_buf.len() as u64,
                 );
             }
         }
@@ -857,7 +887,7 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
         // see has_prepared_layout() == false and fall back to
         // per-backend repack until the next full rewrite. We
         // bump version to VERSION so the meta page itself stays
-        // current (it's still v2-shaped on the wire).
+        // current (it's still v3-shaped on the wire).
         blocked_first: 0,
         blocked_count: 0,
         blocked_bytes: 0,
@@ -865,6 +895,11 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
         codebook_n_levels: 0,
         centroids: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS],
         boundaries: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS - 1],
+        // Phase R-2: the rotation chain is a deterministic
+        // function of `(dim, ROTATION_SEED)` and survives row
+        // shuffles, so we keep the existing rotation_first /
+        // rotation_count / rotation_dim intact. Readers still
+        // get the persisted rotation back even after a vacuum.
         ..*old
     };
     write_meta(rel, &new_meta);
@@ -962,4 +997,40 @@ pub(crate) unsafe fn read_blocked(rel: pg_sys::Relation, meta: &MetaPageData) ->
         crate::index::page::PAYLOAD_BYTES as u32,
         meta.blocked_bytes,
     )
+}
+
+/// Read the persisted rotation matrix from the v3 chain.
+/// Returns a row-major `dim * dim` `Vec<f32>` ready to feed
+/// straight into
+/// `turbovec::IdMapIndex::from_id_map_parts_with_prepared`.
+///
+/// Returns an empty vector for v1 / v2 indexes or empty v3
+/// indexes (signalled by `meta.rotation_count == 0`); in those
+/// cases the scan path lets the rotation `OnceLock` initialise
+/// itself lazily on first search.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_rotation(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Vec<f32> {
+    if meta.rotation_count == 0 || meta.rotation_first == 0 || meta.rotation_dim == 0 {
+        return Vec::new();
+    }
+    let n_elems = (meta.rotation_dim as usize) * (meta.rotation_dim as usize);
+    let n_bytes = (n_elems * std::mem::size_of::<f32>()) as u64;
+    let bytes = read_chain(
+        rel,
+        meta.rotation_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        n_bytes,
+    );
+    debug_assert_eq!(bytes.len(), n_bytes as usize);
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }

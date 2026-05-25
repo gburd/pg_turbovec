@@ -61,7 +61,7 @@ fn main() {
     let prep = turbovec::IdMapIndex::from_id_map_parts_with_prepared(
         bit_width_inner, dim_inner, n_inner,
         codes, scales, slot_to_id,
-        blocked, n_blocks, centroids, boundaries,
+        blocked, n_blocks, centroids, boundaries, None,
     ).unwrap();
     let prep_ctor_us = t3.elapsed().as_micros();
 

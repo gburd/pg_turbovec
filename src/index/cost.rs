@@ -76,6 +76,27 @@ pub(crate) unsafe extern "C-unwind" fn amcostestimate(
     // 0.0025 per row-op).
     let cpu_cost = (total_nanos / 1_000_000_000.0) / 0.0025;
     let startup_cost = 1.0 + (n_vectors as f64).log2().max(1.0);
+
+    // If the planner is considering this index without any
+    // ORDER BY operator (e.g. a `count(*)` or a non-distance
+    // restriction qual), we can't actually serve the scan — our
+    // `amrescan` short-circuits to an empty result set in that
+    // case. Advertise a cost large enough to lose every realistic
+    // alternative so the planner picks a seq scan or a btree
+    // primary-key scan instead. Without this, a 1 k-row INSERT
+    // can pick our AM for self-checks like `SELECT count(*)` and
+    // see zero rows, which surfaces as the bulk-insert
+    // "committed-but-invisible" symptom.
+    let has_orderby = !path.is_null() && !(*path).indexorderbys.is_null();
+    if !has_orderby {
+        *index_startup_cost = pg_sys::disable_cost;
+        *index_total_cost = pg_sys::disable_cost;
+        *index_selectivity = 1.0;
+        *index_correlation = 0.0;
+        *index_pages = 1.0;
+        return;
+    }
+
     *index_startup_cost = startup_cost;
     *index_total_cost = startup_cost + cpu_cost;
 

@@ -214,17 +214,32 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         };
 
         let dim = dim_u32 as usize;
-        if (*opaque).query.len() != dim {
-            error!(
-                "turbovec amgettuple: query dim {} != index dim {}",
-                (*opaque).query.len(),
-                dim
-            );
-        }
         let n_in_index = n_vectors_u64 as usize;
-        if n_in_index == 0 {
-            (*opaque).fetched = true;
-            return false;
+
+        // Deferred-commit fallback: an aminsert in the same xact has
+        // mutated the in-memory cache but the side-table reflects
+        // the pre-mutation state. If the on-disk meta says empty
+        // (or doesn't match our query dim) but the cache holds a
+        // dirty mirror, use that instead.
+        #[cfg(not(feature = "relfile_storage"))]
+        let dirty_fallback = (n_in_index == 0 || dim != (*opaque).query.len())
+            .then(|| cache::am_find_dirty_by_rel(indexrelid))
+            .flatten();
+        #[cfg(feature = "relfile_storage")]
+        let dirty_fallback: Option<(crate::cache::CacheKey, Arc<parking_lot::RwLock<IdMapIndex>>, crate::cache::PersistState)> = None;
+
+        if dirty_fallback.is_none() {
+            if (*opaque).query.len() != dim {
+                error!(
+                    "turbovec amgettuple: query dim {} != index dim {}",
+                    (*opaque).query.len(),
+                    dim
+                );
+            }
+            if n_in_index == 0 {
+                (*opaque).fetched = true;
+                return false;
+            }
         }
 
         // Cache lookup. The AM path uses `attnum = 0` by convention
@@ -243,7 +258,9 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let relfile_node = cache::current_relfilenode(indexrelid);
         let version_as_i64 = am_version_u32 as i64;
 
-        let arc: Arc<IdMapIndex> = match cache::lookup(key, relfile_node, version_as_i64) {
+        let arc: Arc<parking_lot::RwLock<IdMapIndex>> = match dirty_fallback {
+            Some((_, a, _)) => a,
+            None => match cache::lookup(key, relfile_node, version_as_i64) {
             Some(a) => a,
             None => {
                 #[cfg(feature = "relfile_storage")]
@@ -278,7 +295,12 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 let total_bytes = bytes_per_vec * (n_in_index.max(1));
                 cache::insert(key, stored_index, total_bytes, relfile_node, version_as_i64)
             }
-        };
+        }};
+        let n_live = arc.read().len();
+        if n_live == 0 {
+            (*opaque).fetched = true;
+            return false;
+        }
 
         // The K knob: how many candidates to fetch per scan. v1.0
         // shipped a hard 1024 which made every ORDER BY on a million-
@@ -286,8 +308,8 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // GUC) — tune up for high LIMITs or higher recall, down for
         // sub-ms latency.
         let k_pref = crate::guc::SEARCH_K.get() as usize;
-        let k = k_pref.min(n_in_index).max(1);
-        let (scores, ids) = arc.search(&(*opaque).query, k);
+        let k = k_pref.min(n_live.max(1)).max(1);
+        let (scores, ids) = arc.read().search(&(*opaque).query, k);
         let dists: Vec<f64> = scores
             .iter()
             .map(|s| (1.0 - f64::from(*s)).clamp(0.0, 2.0))

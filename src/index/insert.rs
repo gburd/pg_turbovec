@@ -8,8 +8,6 @@
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
-#[cfg(not(feature = "relfile_storage"))]
-use turbovec::IdMapIndex;
 
 use crate::guc;
 #[cfg(feature = "relfile_storage")]
@@ -17,6 +15,7 @@ use crate::index::relfile;
 use crate::index::{options, persist};
 use crate::kernels;
 use crate::vec::Vector;
+use turbovec::IdMapIndex;
 
 /// `aminsert` callback. Returns `true` if the index now contains the
 /// row; `false` if we deliberately skipped it. We never skip in v0.4
@@ -105,7 +104,7 @@ unsafe fn aminsert_impl(
 
     #[cfg(not(feature = "relfile_storage"))]
     {
-        aminsert_sidetable(indexrelid, bit_width, dim, normalise, value, id)
+        aminsert_sidetable(index_relation, indexrelid, bit_width, dim, normalise, value, id)
     }
 }
 
@@ -195,6 +194,7 @@ unsafe fn aminsert_relfile(
 
 #[cfg(not(feature = "relfile_storage"))]
 unsafe fn aminsert_sidetable(
+    index_relation: pg_sys::Relation,
     indexrelid: pg_sys::Oid,
     bit_width: i32,
     dim: usize,
@@ -202,25 +202,7 @@ unsafe fn aminsert_sidetable(
     value: Vector,
     id: u64,
 ) -> bool {
-    let mut state = persist::load(indexrelid).unwrap_or_else(|| {
-        // No row yet — happens on the first insert after
-        // `ambuildempty`. Build a fresh, empty IdMapIndex now.
-        persist::StoredIndex {
-            bit_width,
-            dim: dim as i32,
-            n_vectors: 0,
-            index: IdMapIndex::new(dim, bit_width as usize),
-            version: 1,
-            live_ids: Vec::new(),
-        }
-    });
-
-    if state.dim as usize != dim {
-        error!(
-            "turbovec aminsert: dim mismatch — index expects {}, row has {}",
-            state.dim, dim
-        );
-    }
+    use crate::cache::{self, CacheKey, PersistState};
 
     let buf = if normalise {
         kernels::normalise_to_vec(value.as_slice())
@@ -228,43 +210,85 @@ unsafe fn aminsert_sidetable(
         value.as_slice().to_vec()
     };
 
-    if let Err(e) = state.index.add_with_ids(&buf, &[id]) {
-        let msg = format!("{:?}", e);
-        if msg.contains("IdAlreadyPresent") {
-            state.index.remove(id);
-            // live_ids already contains this id (CIC-validate or
-            // HOT-update path) — don't push it again. n_vectors
-            // unchanged.
-            if let Err(e2) = state.index.add_with_ids(&buf, &[id]) {
-                error!("turbovec aminsert: re-add after remove failed: {:?}", e2);
-            }
-            state.version += 1;
-            persist::save(
-                indexrelid,
-                state.bit_width,
-                state.dim,
-                state.n_vectors,
-                &state.index,
-                state.version,
-                &state.live_ids,
-            );
-            return true;
-        }
-        error!("turbovec aminsert: add_with_ids failed: {:?}", e);
-    }
-    state.live_ids.push(id);
-    state.n_vectors += 1;
-    state.version += 1;
+    let key = CacheKey {
+        rel_oid: indexrelid,
+        attnum: 0,
+        bit_width: bit_width as u8,
+        dim: dim as u32,
+    };
 
-    persist::save(
-        indexrelid,
-        state.bit_width,
-        state.dim,
-        state.n_vectors,
-        &state.index,
-        state.version,
-        &state.live_ids,
-    );
+    let relfile = cache::relfilenode_from_relation(index_relation);
+    let arc = match cache::am_lookup_for_mutation(key, relfile) {
+        Some(a) => a,
+        None => {
+            let stored = persist::load(indexrelid).unwrap_or_else(|| persist::StoredIndex {
+                bit_width,
+                dim: dim as i32,
+                n_vectors: 0,
+                index: IdMapIndex::new(dim, bit_width as usize),
+                version: 1,
+                live_ids: Vec::new(),
+            });
+            let effective_dim = if stored.dim == 0 { dim as i32 } else { stored.dim };
+            if (effective_dim as usize) != dim {
+                error!(
+                    "turbovec aminsert: dim mismatch — index expects {}, row has {}",
+                    effective_dim, dim
+                );
+            }
+            let bytes_per_vec = (dim * bit_width as usize) / 8 + 4 + 64;
+            let total_bytes = bytes_per_vec * stored.n_vectors.max(1) as usize;
+            let persist_state = PersistState {
+                bit_width: stored.bit_width,
+                dim: effective_dim,
+                n_vectors: stored.n_vectors,
+                version: stored.version,
+                live_ids: stored.live_ids,
+            };
+            let freshness = stored.version as i64;
+            cache::am_install(
+                key,
+                stored.index,
+                total_bytes,
+                relfile,
+                freshness,
+                persist_state,
+            )
+        }
+    };
+
+    let mut id_already_present = false;
+    {
+        let mut guard = arc.write();
+        match guard.add_with_ids(&buf, &[id]) {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                if msg.contains("IdAlreadyPresent") {
+                    guard.remove(id);
+                    if let Err(e2) = guard.add_with_ids(&buf, &[id]) {
+                        error!("turbovec aminsert: re-add after remove failed: {:?}", e2);
+                    }
+                    id_already_present = true;
+                } else {
+                    error!("turbovec aminsert: add_with_ids failed: {:?}", e);
+                }
+            }
+        }
+    }
+
+    let updated = cache::am_mark_dirty(key, |p| {
+        if !id_already_present {
+            p.live_ids.push(id);
+            p.n_vectors += 1;
+        }
+        p.version += 1;
+    });
+    if !updated {
+        error!("turbovec aminsert: cache entry vanished between install and mark_dirty");
+    }
+
+    crate::xact::ensure_xact_callbacks_registered();
 
     true
 }

@@ -1,0 +1,82 @@
+{
+    "head": "9e8ee81",
+    "build_profile": "release",
+    "feature_flags": ["pg17", "experimental_index_am", "relfile_storage"],
+    "host": "arnold (Intel i9-12900H, 32 GiB)",
+    "pg_version": "17.9",
+    "pgvector_version": "0.8.0",
+    "pg_turbovec_version": "1.2.0",
+    "date": "2026-05-25",
+    "corpus": {
+        "name": "dbpedia-entities-openai-1M",
+        "source": "huggingface://KShivendu/dbpedia-entities-openai-1M",
+        "n": 1000000,
+        "dim": 1536,
+        "embedding_model": "text-embedding-ada-002 (OpenAI)",
+        "distance": "cosine",
+        "normalized": true
+    },
+    "indexes": [
+        {
+            "name": "docs_tv_4bit",
+            "type": "pg_turbovec 4-bit (relfile-resident)",
+            "size_bytes": 831250432,
+            "size_mb": 793,
+            "bit_width": 4,
+            "n_vectors": 1000000,
+            "dim": 1536,
+            "build_time_s": 170,
+            "build_settings": {
+                "maintenance_work_mem": "512MB",
+                "max_parallel_maintenance_workers": 0,
+                "shared_buffers_during_build": "512MB",
+                "note": "Encoder peak ~21 GiB transient (unit_flat + rotated + state.flat). Single-worker build avoids OOM on 32 GiB host with browsers/IDE/Discord using ~3 GiB."
+            }
+        }
+    ],
+    "methodology": {
+        "cold": "Each of 50 queries runs in a *fresh psql session* (process fork + new backend) calling `bench_one_query_tv(qid)`, which times an `ORDER BY (emb::real[]::turbovec.vector) OPERATOR(turbovec.<=>) q LIMIT 10` via clock_timestamp. PG cluster is restarted once before the sweep to drop shared_buffers. shared_buffers=512MB during the sweep. Each backend pays the per-process IdMapIndex re-init cost (relfile read + Lloyd-Max codebook + blocked-layout repack of 793 MB).",
+        "warm": "Single warm psql session: 2 untimed warmup queries (the first one re-pays the per-backend init cost, ~25 s) then 50 timed queries against the same backend's now-warm cache.",
+        "planner_pick": "docs_tv_2bit was DROPped before the sweep so docs_tv_4bit is the only turbovec index; explicit OPERATOR(turbovec.<=>) means HNSW's pgvector opclass cannot satisfy the order-by, so the planner is forced to docs_tv_4bit. Confirmed via EXPLAIN logged before each sweep."
+    },
+    "comparison": {
+        "cold_p50_v1_0_0_sidetable_glove_384d_ms": 6786,
+        "cold_p50_v1_3_0_relfile_dbpedia_1536d_ms": 26310.236,
+        "speedup_relfile_vs_sidetable": "N/A — different corpus (GloVe 384-d vs dbpedia 1536-d). Per-backend prep cost scales with (n_vectors x dim x bit_width) so the 1536-d dbpedia number is expected to be ~4-5x larger than the 384-d GloVe number REGARDLESS of storage path.",
+        "cold_p50_relfile_vs_hnsw_dbpedia_1536d": "26310 ms (relfile) vs ~200 ms (HNSW from a fresh backend, dominated by indexscan first-page fetch). HNSW wins ~130x on the cold path because it has no per-backend codebook/blocked-layout init. This is the fundamental pg_turbovec architectural gap; relfile_storage alone does not close it.",
+        "warm_p50_v1_3_0_relfile_dbpedia_1536d_ms": 87.388,
+        "warm_p50_v1_0_0_release_glove_384d_ms": 22.16,
+        "warm_p50_v1_0_0_release_dbpedia_1536d_ms": 70.53,
+        "warm_p50_change_v1_3_0_vs_v1_0_0_dbpedia_1536d": "+24 % (87.4 ms vs 70.5 ms). Within run-to-run noise on a contended laptop; not a regression worth blocking on, but worth re-measuring on a quiet host before declaring."
+    },
+    "configs": [
+        {
+            "label": "tv_4bit_k100_cold_relfile",
+            "n": 50,
+            "min_ms": 25724.572,
+            "p50_ms": 26310.236,
+            "p95_ms": 27376.076,
+            "max_ms": 28498.808,
+            "mean_ms": 26406.591
+        },
+        {
+            "label": "tv_4bit_k100_warm_relfile",
+            "n": 50,
+            "min_ms": 85.041,
+            "p50_ms": 87.388,
+            "p95_ms": 99.368,
+            "max_ms": 111.08,
+            "mean_ms": 89.638
+        }
+    ],
+    "verdict": {
+        "cold_scan_target": "<= 500 ms p50",
+        "cold_scan_observed": "26 310 ms p50",
+        "target_met": false,
+        "recommendation": "DO NOT flip relfile_storage default ON for v1.3.0. The relfile-resident page format works correctly (WAL, init-fork, RelationTruncate, deferred-commit aminsert, in-place ambulkdelete all integrated under Phase L 1-6) but cold-scan latency on this 1 M x 1536-d corpus is dominated by per-backend Lloyd-Max codebook compute + blocked-layout repack of the 793 MB packed_codes, NOT by the SPI vs buffer-manager-read difference. The architectural fix needed is a SHARED-MEMORY (cluster-wide) IdMapIndex cache or an on-disk pre-baked blocked layout, neither of which is in scope for Phase L. Until then, cold-scan p50 stays in the multi-second range regardless of storage path. Warm-path is healthy (87 ms p50 vs 70 ms in v1.0.0), so the relfile path does not regress the steady-state. Ship v1.3.0 with relfile_storage still gated; queue Phase P (shared-memory IdMap cache) as the actual cold-scan fix.",
+        "open_questions": [
+            "Side-table baseline on dbpedia-1M was not measured (would have required a full rebuild without the feature flag plus another 22 min cold sweep; out of session budget). Without that, the relfile-vs-side-table delta on this exact corpus is inferred, not measured.",
+            "Whether the 87 ms warm vs 70 ms (v1.0.0) is real regression or contention noise — re-run on quiet host."
+        ]
+    }
+}

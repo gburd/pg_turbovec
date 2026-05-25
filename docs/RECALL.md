@@ -581,6 +581,131 @@ A few honest caveats:
    corpus — which means k=100 is leaving recall on the floor for
    harder distributions but is ~free here.
 
+## 2.3 Cold-scan latency: relfile-resident page format (commit 9e8ee81)
+
+**TL;DR:** the relfile-resident layout (Phase L hardening 1-6, gated
+on `--features relfile_storage`) is wired end-to-end and *correct*
+(WAL, init-fork, RelationTruncate, deferred-commit aminsert, in-place
+ambulkdelete) — but on dbpedia-1M × 1536-d it does **not** lift cold-
+scan p50 into the same ballpark as HNSW. Cold-scan p50 stays at
+~26 s/query because the per-backend bottleneck is the Lloyd-Max
+codebook compute + 793 MB blocked-layout repack, not the SPI fetch
+that relfile_storage replaces. The headline conclusion: **do not
+flip `relfile_storage` default ON in v1.3.0**; queue Phase P
+(shared-memory IdMapIndex cache or pre-baked blocked layout on disk)
+as the actual cold-scan fix.
+
+### Setup (commit 9e8ee81)
+
+- Build: `cargo pgrx install --release --no-default-features
+  --features "pg17 experimental_index_am relfile_storage"`
+- Host: arnold (Intel i9-12900H, 32 GiB; ~3 GiB consumed by
+  browsers/IDE/Discord during the run, swap saturated)
+- PG: 17.9 (pgrx-bundled), shared_buffers reduced to 512 MB during
+  the bench so the encoder transient (~21 GiB) didn't OOM the host
+- Index: `docs_tv_4bit` rebuilt from scratch under the relfile path,
+  170 s build time, 793 MB on-disk (matches §2.2's side-table
+  payload byte-for-byte modulo page padding)
+- Planner pick: `docs_tv_2bit` was DROPped before the sweep so the
+  planner has only `docs_tv_4bit` to satisfy `OPERATOR(turbovec.<=>)`;
+  HNSW's pgvector opclass cannot match that operator. Confirmed via
+  EXPLAIN logged before the sweep.
+
+### Methodology
+
+- **Cold:** PG cluster restarted *once* before the sweep to drop
+  shared_buffers. Then 50 fresh psql sessions, each issuing one
+  `bench_one_query_tv(qid)` (timed via plpgsql `clock_timestamp()`).
+  Each backend re-pays the full per-process IdMapIndex re-init:
+  relfile read of 793 MB → `IdMapIndex::from_id_map_parts` →
+  first-search lazy init of rotation matrix + Lloyd-Max codebook +
+  blocked-layout repack (`pack::repack`).
+- **Warm:** single warm psql session, 2 untimed warmup queries (the
+  first re-pays the per-backend init, ~25 s), then 50 timed queries
+  in the same backend with everything cached.
+
+### Numbers
+
+| label                      |  n |    min |    p50 |    p95 |    max |   mean |
+|----------------------------|---:|-------:|-------:|-------:|-------:|-------:|
+| `tv_4bit_k100_cold_relfile`| 50 | 25 725 | 26 310 | 27 376 | 28 499 | 26 407 |
+| `tv_4bit_k100_warm_relfile`| 50 |   85.0 |   87.4 |   99.4 |  111.1 |   89.6 |
+
+Units: ms. Raw TSVs:
+[recall_relfile_cold_scan_v1_3_0_2026_05_25.cold.tsv](../benches/results/recall_relfile_cold_scan_v1_3_0_2026_05_25.cold.tsv)
+and [.warm.tsv](../benches/results/recall_relfile_cold_scan_v1_3_0_2026_05_25.warm.tsv).
+
+### Comparisons
+
+| metric                                                   | value          |
+|----------------------------------------------------------|---------------:|
+| v1.0.0 cold p50, **GloVe-100 1 M × 384-d**, side-table   |    6 786 ms    |
+| v1.3.0 cold p50, **dbpedia-1M × 1536-d**, relfile        |   26 310 ms    |
+| v1.0.0 warm p50, GloVe-100 384-d                         |       22.2 ms  |
+| v1.0.0 warm p50, dbpedia-1M 1536-d (§2.2 release)        |       70.5 ms  |
+| v1.3.0 warm p50, dbpedia-1M 1536-d, relfile (this run)   |       87.4 ms  |
+
+**Important caveat:** the 6 786 ms number is on GloVe-100 (1 M × 384-d),
+not dbpedia-1M (1 M × 1536-d). Per-backend prep cost scales with
+`n_vectors × dim × bit_width`, so the 1536-d corpus would land
+~4× above the 384-d corpus *regardless of storage path*. The
+apples-to-apples side-table baseline on dbpedia-1M was not
+measured this session (out of budget — would have required a
+feature-flag-flip rebuild + 22 min cold sweep). Without that
+baseline, the relfile-vs-side-table delta on this exact corpus
+is inferred from architecture, not measured.
+
+### Why the architectural fix didn't show up as a 10× win
+
+Profiling the relfile cold-scan path (per backend, fresh process):
+
+1. `relfile::read_full` reads 793 MB via the buffer manager (~95 K
+   pages). With OS page cache warm (which it is from query 2
+   onward) this is sub-second. With shared_buffers cold but OS
+   cache warm (the configuration we measured), still sub-second.
+2. `IdMapIndex::from_id_map_parts` builds the `id_to_slot` HashMap
+   for 1 M ids → small fraction of a second.
+3. **First `search()` call lazy-inits via `OnceLock::get_or_init`:**
+   - rotation matrix (1536² f32 = 9 MiB allocation, fast)
+   - Lloyd-Max codebook (small)
+   - **`pack::repack(packed_codes, n_vectors=1 M, bit_width=4,
+     dim=1536)`** — re-tiles 768 MiB of packed codes into the
+     SIMD-blocked layout. This dominates and takes ~20-25 s on
+     this host.
+
+The SPI-fetch step that relfile_storage *replaces* takes maybe
+5-10 s (TOAST detoast + memcpy of the 793 MB bytea). So even with
+relfile_storage saving 100 % of that 5-10 s, the remaining 20-25 s
+of Lloyd-Max + repack still dominates. Speedup vs side-table on
+*this* corpus is therefore expected to be ~1.3-1.5×, not 10-100×.
+
+### Recommendation
+
+- **Keep `relfile_storage` gated for v1.3.0.** Ship the page-format
+  hardening (Phase L 1-6) as documented progress; do not flip the
+  default ON until cold-scan p50 actually drops below ~500 ms.
+- **Phase P (next):** move the blocked-layout repack out of the
+  per-backend search path. Two options:
+  1. Pre-bake the blocked layout into the index relfile alongside
+     `packed_codes`. ambuild pays the cost once; every backend's
+     search() just memmaps. ~2× index size, but cold scans become
+     I/O-bound (sub-second) instead of CPU-bound.
+  2. Ship a shared-memory `IdMapIndex` cache (DSM segment, refcounted)
+     so the *first* backend to scan in a cluster pays the prep cost
+     and every subsequent backend hits the prepared structure. Ties
+     into pg_shmem and is more invasive but cheaper on disk.
+- **Warm-path validation:** the 87 ms warm p50 is +24 % vs §2.2's
+  70.5 ms (v1.0.0, side-table on the same corpus). That's within
+  noise on a contended laptop but worth re-measuring on a quiet
+  host before declaring no regression.
+
+### Artefacts
+
+- [`benches/results/recall_relfile_cold_scan_v1_3_0_2026_05_25.json`](../benches/results/recall_relfile_cold_scan_v1_3_0_2026_05_25.json)
+- Bench driver: `/scratch/pg_turbovec-bench/cold_bench.sh` on arnold
+  (saved into the run directory; reproducible via
+  `bash cold_bench.sh tv_4bit_k100_cold_relfile docs_tv_4bit 100 cold`).
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

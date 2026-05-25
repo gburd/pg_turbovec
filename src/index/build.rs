@@ -122,21 +122,48 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     let n_vectors = state.ids.len() as i64;
     #[cfg(feature = "relfile_storage")]
     {
-        // Phase L: write pages directly into the index relation's
-        // main fork. The SPI side-table remains untouched
-        // (compile-time choice; users opt in via the cargo
-        // feature). am_version starts at 1 and bumps on every
-        // mutation so the cache freshness check still works.
-        relfile::write_full(
-            index_relation,
-            cfg_bit_width as u8,
-            dim as u32,
-            n_vectors as u64,
-            idx.packed_codes(),
-            idx.scales(),
-            idx.slot_to_id(),
-            1,
-        );
+        // Phase P: pre-bake the SIMD-blocked layout and the
+        // Lloyd-Max codebook now, while we own the freshly-built
+        // index. Persisting them alongside the row-major codes
+        // means every backend opening this index for the first
+        // time skips the per-backend ~12–15 s `pack::repack` and
+        // ~5–8 s codebook compute. The prepare step is not free
+        // here, but ambuild is the right place to pay it: it
+        // already runs once per index and at the only point
+        // where we definitively know n_vectors won't change
+        // until the next mutation.
+        if n_vectors > 0 {
+            idx.prepare_eager();
+            let prepared = relfile::PreparedParts {
+                blocked_codes: idx.blocked_codes(),
+                n_blocks: idx.n_blocks() as u32,
+                centroids: idx.centroids(),
+                boundaries: idx.boundaries(),
+            };
+            relfile::write_full_with_prepared(
+                index_relation,
+                cfg_bit_width as u8,
+                dim as u32,
+                n_vectors as u64,
+                idx.packed_codes(),
+                idx.scales(),
+                idx.slot_to_id(),
+                1,
+                prepared,
+            );
+        } else {
+            // Empty index: no prepared layout to persist.
+            relfile::write_full(
+                index_relation,
+                cfg_bit_width as u8,
+                dim as u32,
+                0,
+                idx.packed_codes(),
+                idx.scales(),
+                idx.slot_to_id(),
+                1,
+            );
+        }
         // We still write a side-table marker row so existing
         // tests that grep `turbovec.am_storage` for `n_vectors`
         // keep passing. Marked payload-empty so the SPI loader

@@ -36,7 +36,7 @@ unsafe fn flush_to_relfile(
         // already the user's stated intent.
         return;
     }
-    crate::index::relfile::write_full(
+    crate::index::relfile::write_full_with_prepared(
         rel,
         state.bit_width as u8,
         state.dim as u32,
@@ -45,6 +45,26 @@ unsafe fn flush_to_relfile(
         idx.scales(),
         idx.slot_to_id(),
         state.version as u32,
+        {
+            // Pre-bake the SIMD-blocked layout and codebook so
+            // backends opening the post-commit relfile in the
+            // future don't pay the per-backend ~12–15 s
+            // `pack::repack` and ~5–8 s Lloyd-Max compute.
+            // Phase P; mirrors the ambuild path. Single-row
+            // aminserts pay this on every commit — in the
+            // existing rewrite-everything model that's an
+            // acceptable cost (we already rewrite all chains
+            // here), and the deferred-commit batching in
+            // cache.rs amortises it across all the rows in one
+            // transaction.
+            idx.prepare_eager();
+            crate::index::relfile::PreparedParts {
+                blocked_codes: idx.blocked_codes(),
+                n_blocks: idx.n_blocks() as u32,
+                centroids: idx.centroids(),
+                boundaries: idx.boundaries(),
+            }
+        },
     );
     // Mirror n_vectors into the side-table so `am_storage` queries
     // (used by `docs/RECALL.md` reproduction scripts and a couple

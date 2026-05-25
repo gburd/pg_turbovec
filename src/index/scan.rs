@@ -51,29 +51,65 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         error!("turbovec: RelationGetIndexScan returned null");
     }
 
-    // Migration HINT (Phase L hardening item 5): when the running
-    // binary has --features relfile_storage but is opening an
-    // index that was built under the older side-table path, the
-    // main fork's meta page is empty / never initialised.
-    // Emit a NOTICE pointing the user at REINDEX so they can
-    // convert without silently falling through to a confusing
-    // "empty index" result.
+    // Migration HINT (Phase L hardening item 5 + Phase P): when
+    // the running binary has --features relfile_storage but is
+    // opening an index that was either:
+    //   (a) built under the older side-table path — main fork
+    //       meta page is empty / never initialised; or
+    //   (b) built under the v1 relfile preview — meta page is
+    //       valid but lacks the prepared SIMD-blocked chain and
+    //       inline codebook that Phase P relies on for fast
+    //       cold scans.
+    // In both cases the scan still works (the v1 path falls
+    // through to per-backend `pack::repack`), but we surface a
+    // NOTICE pointing the user at REINDEX so they can pick up
+    // the persisted layout and skip the ~26 s cold-scan cost.
     #[cfg(feature = "relfile_storage")]
     {
         let indexrelid = (*index_relation).rd_id;
         let relfile_meta = crate::index::relfile::read_meta(index_relation);
-        if relfile_meta.is_none() || relfile_meta.as_ref().is_some_and(|m| m.dim == 0 && m.n_vectors == 0) {
-            // Fall back to side-table to see if a row exists there.
-            if let Some(legacy) = crate::index::persist::load_meta(indexrelid) {
-                if legacy.n_vectors > 0 {
-                    pgrx::ereport!(
-                        pgrx::PgLogLevel::NOTICE,
-                        pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                        "turbovec index appears to be in the legacy side-table format",
-                        "This binary was built with --features relfile_storage but the index uses the v1.0.x / v1.1.0 side-table layout. The scan will return no rows. Run `REINDEX INDEX <name>;` to migrate."
-                    );
+        match &relfile_meta {
+            None => {
+                // Empty relfile — fall back to side-table
+                // detection (case (a)).
+                if let Some(legacy) = crate::index::persist::load_meta(indexrelid) {
+                    if legacy.n_vectors > 0 {
+                        pgrx::ereport!(
+                            pgrx::PgLogLevel::NOTICE,
+                            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            "turbovec index appears to be in the legacy side-table format",
+                            "This binary was built with --features relfile_storage but the index uses the v1.0.x / v1.1.0 side-table layout. The scan will return no rows. Run `REINDEX INDEX <name>;` to migrate."
+                        );
+                    }
                 }
             }
+            Some(m) if m.dim == 0 && m.n_vectors == 0 => {
+                // Stub meta page (only ambuildempty ran). Same
+                // side-table check as before.
+                if let Some(legacy) = crate::index::persist::load_meta(indexrelid) {
+                    if legacy.n_vectors > 0 {
+                        pgrx::ereport!(
+                            pgrx::PgLogLevel::NOTICE,
+                            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            "turbovec index appears to be in the legacy side-table format",
+                            "This binary was built with --features relfile_storage but the index uses the v1.0.x / v1.1.0 side-table layout. The scan will return no rows. Run `REINDEX INDEX <name>;` to migrate."
+                        );
+                    }
+                }
+            }
+            Some(m) if m.is_legacy_v1() && m.n_vectors > 0 => {
+                // Case (b): populated v1 relfile. Scan will
+                // succeed via per-backend repack, but cold
+                // latency is ~26 s on 1 M × 1536-d. Recommend
+                // REINDEX so the prepared layout gets baked in.
+                pgrx::ereport!(
+                    pgrx::PgLogLevel::NOTICE,
+                    pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "turbovec index uses an older relfile layout (v1) without the prepared SIMD-blocked cache",
+                    "This index was built before Phase P and lacks the persisted SIMD-blocked layout + Lloyd-Max codebook. Cold scans will pay ~12-15 s of pack::repack and ~5-8 s of codebook compute per fresh backend. Run `REINDEX INDEX <name>;` to migrate to the v2 layout."
+                );
+            }
+            _ => {}
         }
     }
 
@@ -294,14 +330,42 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     let meta = relfile::read_meta((*scan).indexRelation)
                         .expect("meta disappeared mid-scan");
                     let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
-                    match IdMapIndex::from_id_map_parts(
-                        meta.bit_width as usize,
-                        meta.dim as usize,
-                        meta.n_vectors as usize,
-                        codes,
-                        scales,
-                        ids,
-                    ) {
+
+                    // Phase P: when the v2 layout is populated,
+                    // skip the per-backend `pack::repack` + Lloyd-
+                    // Max compute by reading the prepared parts
+                    // off disk and feeding them back into the
+                    // OnceLocks via from_id_map_parts_with_prepared.
+                    let load_result = if meta.has_prepared_layout() {
+                        let blocked = relfile::read_blocked(
+                            (*scan).indexRelation,
+                            &meta,
+                        );
+                        let centroids = meta.centroids_slice().to_vec();
+                        let boundaries = meta.boundaries_slice().to_vec();
+                        IdMapIndex::from_id_map_parts_with_prepared(
+                            meta.bit_width as usize,
+                            meta.dim as usize,
+                            meta.n_vectors as usize,
+                            codes,
+                            scales,
+                            ids,
+                            blocked,
+                            meta.n_blocks_blocked as usize,
+                            centroids,
+                            boundaries,
+                        )
+                    } else {
+                        IdMapIndex::from_id_map_parts(
+                            meta.bit_width as usize,
+                            meta.dim as usize,
+                            meta.n_vectors as usize,
+                            codes,
+                            scales,
+                            ids,
+                        )
+                    };
+                    match load_result {
                         Ok(idx) => idx,
                         Err(e) => error!(
                             "turbovec relfile: corrupt page chain for {:?}: {}",

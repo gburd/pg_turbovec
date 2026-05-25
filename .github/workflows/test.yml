@@ -10,6 +10,14 @@ on:
 # canonical CI; the GitHub copy is best-effort.
 
 jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: bash scripts/drift-check.sh
+
   test:
     runs-on: ubuntu-latest
     strategy:

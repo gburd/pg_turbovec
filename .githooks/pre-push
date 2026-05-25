@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — drift-check before any push
+#
+# Installed via `bash scripts/install-hooks.sh`. Skips on
+# `git push --no-verify`.
+
+set -euo pipefail
+exec bash "$(git rev-parse --show-toplevel)/scripts/drift-check.sh"

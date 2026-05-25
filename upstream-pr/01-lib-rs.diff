@@ -1,0 +1,96 @@
+--- /home/gburd/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/turbovec-0.5.0/src/lib.rs	2006-07-23 21:21:28.000000000 -0400
++++ vendor/turbovec/src/lib.rs	2026-05-24 19:46:43.332697829 -0400
+@@ -86,6 +86,14 @@
+     // never need to be invalidated.
+     rotation: OnceLock<Vec<f32>>,
+     centroids: OnceLock<Vec<f32>>,
++    /// Codebook decision boundaries cached alongside `centroids`.
++    /// `add()` previously recomputed the full Lloyd-Max codebook on
++    /// every call, which dominated single-row insert cost (~47 ms
++    /// per call at bit_width=4 / dim=8). Cache the boundaries here
++    /// so the second and subsequent `add()` calls reuse the result.
++    /// Like `centroids`, this is a deterministic function of
++    /// `(bit_width, dim)` so it never needs invalidation.
++    boundaries: OnceLock<Vec<f32>>,
+     blocked: OnceLock<BlockedCache>,
+ }
+ 
+@@ -122,6 +130,7 @@
+             scales: Vec::new(),
+             rotation: OnceLock::new(),
+             centroids: OnceLock::new(),
++            boundaries: OnceLock::new(),
+             blocked: OnceLock::new(),
+         }
+     }
+@@ -139,6 +148,7 @@
+             scales: Vec::new(),
+             rotation: OnceLock::new(),
+             centroids: OnceLock::new(),
++            boundaries: OnceLock::new(),
+             blocked: OnceLock::new(),
+         }
+     }
+@@ -160,14 +170,31 @@
+         let rotation = self
+             .rotation
+             .get_or_init(|| rotation::make_rotation_matrix(dim));
+-        let (boundaries, centroids) = codebook::codebook(self.bit_width, dim);
++        // Cache the codebook so a hot single-row `add` loop doesn't
++        // re-run Lloyd-Max iteration each call. Both halves of the
++        // codebook are pure functions of `(bit_width, dim)`. We
++        // initialise `centroids` first — already cached by
++        // `search` in pre-existing code — and reuse the matching
++        // boundaries from the same codebook call when initialising
++        // `boundaries` for the first time.
++        let bit_width = self.bit_width;
++        // Compute (or reuse) the codebook once. If `centroids` is
++        // already populated (via a prior `search`), we still need
++        // boundaries; cheaply recomputing them once is far less
++        // costly than running Lloyd-Max on every subsequent `add`.
++        let boundaries = self
++            .boundaries
++            .get_or_init(|| codebook::codebook(bit_width, dim).0);
++        let centroids = self
++            .centroids
++            .get_or_init(|| codebook::codebook(bit_width, dim).1);
+         let (packed, scales) = encode::encode(
+             vectors,
+             n,
+             dim,
+             rotation,
+-            &boundaries,
+-            &centroids,
++            boundaries,
++            centroids,
+             self.bit_width,
+         );
+ 
+@@ -366,7 +393,7 @@
+         Ok(Self::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales))
+     }
+ 
+-    pub(crate) fn from_parts(
++    pub fn from_parts(
+         dim: Option<usize>,
+         bit_width: usize,
+         n_vectors: usize,
+@@ -381,15 +408,16 @@
+             scales,
+             rotation: OnceLock::new(),
+             centroids: OnceLock::new(),
++            boundaries: OnceLock::new(),
+             blocked: OnceLock::new(),
+         }
+     }
+ 
+-    pub(crate) fn packed_codes(&self) -> &[u8] {
++    pub fn packed_codes(&self) -> &[u8] {
+         &self.packed_codes
+     }
+ 
+-    pub(crate) fn scales(&self) -> &[f32] {
++    pub fn scales(&self) -> &[f32] {
+         &self.scales
+     }
+ 

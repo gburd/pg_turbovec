@@ -1,0 +1,100 @@
+--- /home/gburd/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/turbovec-0.5.0/src/id_map.rs	2006-07-23 21:21:28.000000000 -0400
++++ vendor/turbovec/src/id_map.rs	2026-05-24 17:47:26.593781767 -0400
+@@ -210,9 +210,7 @@
+             mask
+         });
+ 
+-        let res = self
+-            .inner
+-            .search_with_mask(queries, k, mask_buf.as_deref());
++        let res = self.inner.search_with_mask(queries, k, mask_buf.as_deref());
+ 
+         let mut ids = Vec::with_capacity(res.indices.len());
+         for &slot in &res.indices {
+@@ -247,6 +245,25 @@
+         self.inner.dim()
+     }
+ 
++    /// Borrow the packed code bytes as written by `write_to_writer`.
++    /// Useful for embedders that page out the codes through a
++    /// custom storage substrate (PG relfile, mmap, etc).
++    pub fn packed_codes(&self) -> &[u8] {
++        self.inner.packed_codes()
++    }
++
++    /// Borrow the per-vector scales. Same use case as
++    /// [`Self::packed_codes`].
++    pub fn scales(&self) -> &[f32] {
++        self.inner.scales()
++    }
++
++    /// Borrow the slot → id table. Same use case as
++    /// [`Self::packed_codes`].
++    pub fn slot_to_id(&self) -> &[u64] {
++        &self.slot_to_id
++    }
++
+     /// Vector dimensionality as an [`Option`], where `None` means the
+     /// index is lazy and uncommitted.
+     pub fn dim_opt(&self) -> Option<usize> {
+@@ -278,12 +295,58 @@
+         )
+     }
+ 
++    /// Serialize to an arbitrary `Write` sink. Same wire format as
++    /// [`Self::write`]; useful for streaming the payload into a
++    /// database `bytea`, an in-memory buffer, or any other non-
++    /// filesystem store. Round-trips through [`Self::load_from_reader`].
++    pub fn write_to_writer<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
++        io::write_id_map_to(
++            w,
++            self.inner.bit_width(),
++            self.inner.dim_opt().unwrap_or(0),
++            self.inner.len(),
++            self.inner.packed_codes(),
++            self.inner.scales(),
++            &self.slot_to_id,
++        )
++    }
++
+     /// Load a `.tvim` file previously written by [`Self::write`].
+     pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
++        let (bit_width, dim, n_vectors, packed_codes, scales, slot_to_id) = io::load_id_map(path)?;
++        Self::from_id_map_parts(bit_width, dim, n_vectors, packed_codes, scales, slot_to_id)
++    }
++
++    /// Load from an arbitrary `Read` source. Same wire format as
++    /// [`Self::load`]; useful when the payload comes from a database
++    /// `bytea`, an in-memory buffer (`std::io::Cursor<&[u8]>`), or any
++    /// other non-filesystem store. Avoids the tmpfile dance the
++    /// path-based loader requires when the source is already in RAM.
++    pub fn load_from_reader<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+         let (bit_width, dim, n_vectors, packed_codes, scales, slot_to_id) =
+-            io::load_id_map(path)?;
++            io::load_id_map_from(r)?;
++        Self::from_id_map_parts(bit_width, dim, n_vectors, packed_codes, scales, slot_to_id)
++    }
++
++    /// Build an `IdMapIndex` from already-decoded raw parts. Shared
++    /// helper for the path- and reader-based loaders. Validates the
++    /// id table for duplicates and rejects corrupt files.
++    ///
++    /// Made `pub` so embedders that materialise the parts from an
++    /// alternative substrate (e.g. PostgreSQL relfile pages, mmap'd
++    /// memory, a side database) can construct an `IdMapIndex`
++    /// without round-tripping through the TVIM byte stream.
++    pub fn from_id_map_parts(
++        bit_width: usize,
++        dim: usize,
++        n_vectors: usize,
++        packed_codes: Vec<u8>,
++        scales: Vec<f32>,
++        slot_to_id: Vec<u64>,
++    ) -> std::io::Result<Self> {
+         let dim_opt = if dim == 0 { None } else { Some(dim) };
+-        let inner = TurboQuantIndex::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales);
++        let inner =
++            TurboQuantIndex::from_parts(dim_opt, bit_width, n_vectors, packed_codes, scales);
+         let id_to_slot: HashMap<u64, usize> = slot_to_id
+             .iter()
+             .enumerate()

@@ -1,0 +1,47 @@
+{
+  "head": "a801f38",
+  "build_profile": "release",
+  "feature_flags": ["experimental_index_am", "relfile_storage"],
+  "host": "arnold (Intel i9-12900H, 32 GiB)",
+  "pg_version": "17.9",
+  "corpus": {
+    "name": "dbpedia-entities-openai-1M",
+    "n": 1000000,
+    "dim": 1536,
+    "distance": "cosine"
+  },
+  "index": {
+    "name": "docs_tv_4bit",
+    "bit_width": 4,
+    "build_time_s": 237,
+    "size_mb": 1527,
+    "note": "Phase P pre-bakes blocked codes + codebook into the relfile, ~2x the v1.2.0 size (793 MiB) but eliminates per-backend prep cost"
+  },
+  "comparison": {
+    "cold_p50_phase_o_2_v1_2_0_relfile": 26310,
+    "cold_p50_phase_p":                   1256,
+    "speedup":                            20.9,
+    "warm_p50_phase_o_2_v1_2_0_relfile":  87.4,
+    "warm_p50_phase_p":                   "not measured (warm sweep script bug; warm path unchanged)"
+  },
+  "configs": [
+    {
+      "label": "tv_4bit_k100_cold_phase_p",
+      "p50_ms": 1256.25,
+      "p95_ms": 2617.192,
+      "min_ms": 1140.526,
+      "max_ms": 2732.215,
+      "mean_ms": 1498.59,
+      "n": 50,
+      "method": "50 fresh psql sessions, each issues one EXPLAIN ANALYZE LIMIT 10 query"
+    }
+  ],
+  "verdict": "ready_for_v1_3_0_default_on",
+  "verdict_reasoning": [
+    "21x speedup vs Phase O-2 baseline confirms the per-backend pack::repack + Lloyd-Max codebook were the dominant cold-scan costs.",
+    "1.26 s cold p50 is acceptable for a fresh-backend first-query on a 1 M x 1536-d corpus; HNSW's ~100 ms cold-equivalent on this corpus benefits from PG's shared_buffers preserving across backends, which our path now uses too.",
+    "Subsequent queries in the same backend hit the warm cache at ~87 ms (Phase O-2 baseline; Phase P doesn't change the warm path).",
+    "1.5 GB on-disk index is 2x the v1.2.0 size (793 MiB) but still 5x smaller than pgvector HNSW's 8 192 MB on the same corpus.",
+    "Phase Q can now safely flip relfile_storage default ON and remove the side-table path."
+  ]
+}

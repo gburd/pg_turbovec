@@ -1,15 +1,15 @@
-# Roadmap decisions — what we're shipping in 1.0 and what we're not
+# Roadmap decisions - what we're shipping in 1.0 and what we're not
 
 This file documents which roadmap items we deliberately skipped on
 the way to 1.0, and the reasoning. The honest engineering answer
 matters more than a long backlog.
 
-## Skipped — explicit non-goals for 1.0
+## Skipped - explicit non-goals for 1.0
 
 ### Binary-compatible varlena layout for `vector`
 
 **What it would have done.** Replace our CBOR-derived `tvector`
-varlena (a serde-encoded `f32` vector with ~10–15 % overhead from
+varlena (a serde-encoded `f32` vector with ~10-15 % overhead from
 varint dim headers and serde tags) with the pgvector-byte-compatible
 `[i32 vl_len_, i16 dim, i16 unused, f32[dim]]` layout. Casts to and
 from `pgvector.vector` would become a single memcpy, and
@@ -24,7 +24,7 @@ against `turbovec.vector` without re-encoding.
    not a hot path.
 2. Most apps insert via SQL text or parameterised queries, not
    `COPY BINARY`. The wire-protocol benefit is real but narrow.
-3. The 10–15 % varlena overhead is dwarfed by the **16×**
+3. The 10-15 % varlena overhead is dwarfed by the **16×**
    compression we get from 4-bit TurboQuant quantization (1536-dim:
    pgvector 6 144 B → our `am_storage` payload ≈ 388 B/row). The
    storage win comes from quantization, not varlena layout.
@@ -57,7 +57,7 @@ turbovec (b bit_hamming_ops)` would index bitvec columns and serve
 **Why we skipped it.** The TurboQuant kernel is a scalar quantizer
 for **dense, unit-norm `f32`** vectors. It is not a Hamming-space
 ANN index. Supporting indexed bit-Hamming queries would require a
-fundamentally different kernel — locality-sensitive hashing,
+fundamentally different kernel - locality-sensitive hashing,
 multi-index hashing, or graph-based binary search. That is a
 separate research project.
 
@@ -81,7 +81,7 @@ embeddings:
 | FP16 (`halfvec`) | 3 072 | ≈ 1.00 |
 | **TurboQuant 4-bit (`turbovec` index)** | **388** | **≈ 0.95** |
 | **TurboQuant 2-bit (`turbovec` index)** | **196** | **≈ 0.85** |
-| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65–0.75 |
+| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65-0.75 |
 
 For the *workload that drives users to bitvec ANN*, our 2-bit mode
 is a strict improvement: similar storage, materially better recall.
@@ -102,36 +102,138 @@ or 128-bit perceptual hashes (image dedup, near-duplicate
 detection), pgvector's `bit_hamming_ops` HNSW index is genuinely
 the right tool and there is no reason to use pg_turbovec there.
 
+## Shipped in 1.0.x / 1.1.0
+
+What actually landed on the way from the 1.0 design freeze
+(captured by the "Skipped" section above) to today's `main`.
+One-liner per release; the canonical per-version log is
+[`CHANGELOG.md`](../CHANGELOG.md).
+
+### 1. v1.0.0 — pgvector parity surface + the `turbovec` AM
+
+**Done.**
+
+- `vector` SQL type, text + array casts + jsonb round-trip,
+  the four distance operators (`<-> <#> <=> <+>`), element-wise
+  arithmetic, and `f64`-accumulator `avg(vector)` / `sum(vector)`
+  aggregates.
+- `halfvec` (f16), `sparsevec`, and `bitvec` SQL types with
+  matching distance operators, casts, and aggregates.
+- The `turbovec` index access method on `vector`, with three
+  operator classes (`vec_ip_ops`, `vec_cosine_ops`, plus the
+  exact-only `<->` / `<+>` paths through the heap), and
+  CIC / aminsert / ambulkdelete / REINDEX all functional.
+- `turbovec.knn(...)` function path with optional
+  `bigint[]` allowlist (filtered search inside the SIMD kernel).
+- `turbovec.*` GUC namespace.
+
+**Not done in 1.0.0.** Cold-scan latency on a fresh backend was
+still dominated by SPI fetch + tmpfile-roundtrip deserialisation
+of the side-table payload — see § 1 of "Where future work
+would pay off" below.
+
+### 2. v1.0.0 (rc.2 → final) — the three arnold-driven fixes
+
+**Done.** Real-hardware million-row run on `arnold` drove three
+cumulative fixes that ship together as `1.0.0` proper:
+
+- `turbovec.search_k` GUC (default 100) replaced the hard-coded
+  `K=1024` per-scan candidate fan-out; tunable per session.
+- `amrescan` tolerates non-orderby plans (`SELECT count(*)`
+  no longer trips `index scan requires an ORDER BY <operator>`).
+- Backend-local `Arc<RwLock<IdMapIndex>>` cache from
+  `src/cache.rs` is now wired into `src/index/scan.rs` (it had
+  previously only served the `turbovec.knn()` function path).
+  Intra-backend warm-cache speedup measured at ~9.7× on the
+  arnold corpus.
+
+### 3. v1.0.1 — pg13 / pg14 / pg15 / pg18 build compatibility
+
+**Done.** Three `#[cfg]` gates around AM-callback fields that
+moved across PG releases (`amsummarizing`, `amadjustmembers`,
+`relopt_parse_elt::isset_offset`), plus a split of `aminsert`
+into two `cfg`-selected wrappers around a shared inner
+implementation (the `indexUnchanged` HOT-elision flag arrived
+in PG 14). All six PG versions green: 92/92 tests on each.
+
+**Not done.** pg18 is built and tested but not yet covered by
+benchmark runs; the existing arnold numbers remain pg17.
+
+### 4. v1.1.0 — Phase J + K + L
+
+**Done.**
+
+- **Phase J — dbpedia-1M head-to-head.** README headline now
+  cites the canonical pgvector benchmark corpus,
+  `dbpedia-entities-openai-1M`, measured on arnold. There is no
+  (recall, storage, latency) corner where pgvector HNSW wins on
+  this corpus; pg_turbovec 2-bit at `search_k=100` is
+  Pareto-dominant.
+- **Phase K — deferred-commit `aminsert`** (~3000× bulk-INSERT
+  speedup). `aminsert` now mutates the cached `IdMapIndex` in
+  memory under a `RwLock` write guard, marks dirty, and defers
+  the `am_storage` write to a `PreCommit` xact callback (see
+  `src/xact.rs`). N-row bulk inserts pay one `persist::load`
+  plus one `persist::save` instead of N of each.
+- **Latent bugs uncovered during Phase K and fixed.**
+  `IdMapIndex::add_with_ids` was recomputing the Lloyd-Max
+  codebook boundaries on every call (now cached on
+  `TurboQuantIndex`; see `vendor/turbovec/PATCH_NOTES.md`).
+  `amcostestimate` was returning a normal cost on non-orderby
+  plans, letting the planner accidentally pick our AM for
+  `count(*)`; it now returns `disable_cost`.
+- **Phase L — relfile-resident page format preview.** New
+  Cargo feature `relfile_storage` (default OFF) moves the
+  serialised index from the SPI side-table to the index
+  relation's main fork, accessed through PG's standard buffer
+  manager. shared_buffers caches the index cluster-wide; cold
+  scans across fresh backends pay only buffer-pool hit cost.
+  All six AM callbacks ported. 100/100 tests green with
+  `--features "... relfile_storage pg_test"`.
+
+**Not done.** Phase L is gated, not default-on. The hardening
+checklist before the 1.2 flip lives in
+[`docs/PHASE_L_PROGRESS.md`](PHASE_L_PROGRESS.md). Two
+concurrency caveats remain on the side-table path: two backends
+racing their commit-time `persist::save` (last writer wins) and
+`PREPARE TRANSACTION` skipping the `PreCommit` callback
+(parallel-worker inserts already blocked by
+`amcanparallel = false`).
+
 ## Where future work would pay off (in priority order)
 
 ### 1. Relfile-resident page format for the index AM (the cold-path fix)
 
-**Status:** earmarked for 1.1. **Measured cost it would save:** ~6.8 s
-→ ~tens of ms on the first AM scan in any fresh backend
-on a 1 M × 384-d 4-bit corpus.
+**Status:** preview shipped in 1.1.0 under
+`--features relfile_storage` (default OFF); flip to default-on
+targeted for 1.2 once the hardening items in
+[`docs/PHASE_L_PROGRESS.md`](PHASE_L_PROGRESS.md) are closed.
+**Measured cost it would save (still on the default side-table
+path):** ~6.8 s → ~tens of ms on the first AM scan in any fresh
+backend on a 1 M × 384-d 4-bit corpus.
 
 **The story.** v1.0 stores the serialised index in a side-table
 (`turbovec.am_storage`, a regular heap with a `bytea payload`
 column). On the cold path, every fresh backend pays:
 
-  1. SPI fetch of ~195 MiB of TOASTed bytea (must detoast +
+  1. SPI fetch of ~195 MiB of TOASTed bytea (must detoast +
      decompress every chunk through the buffer manager);
   2. parse the magic / header / packed codes / scales / id table
      via the `Read`-based deserialiser;
-  3. construct a `HashMap<u64, usize>` slot → id for the 1 M
+  3. construct a `HashMap<u64, usize>` slot → id for the 1 M
      entries.
 
-Measured on arnold (1 M × 384-d, release build):
+Measured on arnold (1 M × 384-d, release build):
 
 | commit | cold p50 | warm p50 | comment |
 |---|---:|---:|---|
-| `cca1ddc` (1.0.0) | 6 786 ms | 22.16 ms | Phase G baseline. |
-| `0c42f55` (in-memory deserialiser) | 6 802 ms | 22.0 ms | Phase H. tmpfile dance gone; cold path unchanged because step 1 (SPI fetch) and step 3 (HashMap construct) dominate. |
+| `cca1ddc` (1.0.0) | 6 786 ms | 22.16 ms | Phase G baseline. |
+| `0c42f55` (in-memory deserialiser) | 6 802 ms | 22.0 ms | Phase H. tmpfile dance gone; cold path unchanged because step 1 (SPI fetch) and step 3 (HashMap construct) dominate. |
 
 Closing the gap requires moving the serialised payload into the
-index relation's main fork — the index AM's `relfilenode` — so
-shared buffers caches it cluster-wide rather than re-reading +
-rebuilding per backend. That is genuinely a Phase 5/Phase 6
+index relation's main fork - the index AM's `relfilenode` - so
+shared buffers caches it cluster-wide rather than re-reading +
+rebuilding per backend. That is genuinely a Phase 5/Phase 6
 rewrite (callbacks for `ambuild`, `aminsertcleanup`,
 `ambuildempty`, the bgwriter / checkpointer integration, plus a
 page format that's amenable to mmap) and is the right shape for
@@ -140,7 +242,7 @@ page format that's amenable to mmap) and is the right shape for
 The HashMap rebuild is independently addressable: store the
 `slot_to_id` table sorted by slot, drop the inverse map
 (`id_to_slot`) entirely, and resolve `id` lookups in
-`ambulkdelete` via binary search instead. Trade O(log n) lookup
+`ambulkdelete` via binary search instead. Trade O(log n) lookup
 for zero allocation on the cold path. Worth ~half a second on
 our corpus per the rough back-of-envelope.
 
@@ -149,7 +251,7 @@ our corpus per the rough back-of-envelope.
    numbers in `docs/RECALL.md`; we do not have head-to-head numbers
    on GloVe-200 / OpenAI ada-002 / OpenAI text-embedding-3-large at
    matched bit budgets. This is the single most important deliverable
-   that gates a defensible "use pg_turbovec because …" claim. The
+   that gates a defensible "use pg_turbovec because ..." claim. The
    `TURBOVEC_FIXTURE_PATH` env hook in `benches/recall.rs` is ready
    to consume the fixtures; we just need to publish the table.
 2. **Concurrent query throughput.** Our backend-local cache uses a
@@ -178,13 +280,13 @@ our corpus per the rough back-of-envelope.
 
 ## Index of related docs
 
-- [`docs/PARITY_GAPS.md`](PARITY_GAPS.md) — feature-by-feature
+- [`docs/PARITY_GAPS.md`](PARITY_GAPS.md) - feature-by-feature
   pgvector comparison.
-- [`docs/PHASE19_PROGRESS.md`](PHASE19_PROGRESS.md) — handoff for
+- [`docs/PHASE19_PROGRESS.md`](PHASE19_PROGRESS.md) - handoff for
   the binary-compat varlena work, if a future session picks it up.
-- [`docs/INDEXAM.md`](INDEXAM.md) — index access method
+- [`docs/INDEXAM.md`](INDEXAM.md) - index access method
   implementation guide.
-- [`docs/RECALL.md`](RECALL.md) — recall-benchmark methodology and
+- [`docs/RECALL.md`](RECALL.md) - recall-benchmark methodology and
   the synthetic numbers we have today.
-- [`docs/MIGRATING_FROM_PGVECTOR.md`](MIGRATING_FROM_PGVECTOR.md) —
+- [`docs/MIGRATING_FROM_PGVECTOR.md`](MIGRATING_FROM_PGVECTOR.md) -
   hands-on migration cookbook.

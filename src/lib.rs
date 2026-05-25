@@ -690,9 +690,9 @@ mod tests {
     /// `docs/UPGRADING.md` migration matrix.
     #[pg_test]
     fn wire_format_version_is_stable() {
-        // The version emitted by v1.3.0. Bump this only as part of
+        // The version emitted by v1.4.0. Bump this only as part of
         // a deliberate minor/major release with a migration story.
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 2;
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 3;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,
@@ -2615,7 +2615,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(meta.version, 2, "new index must use the v2 wire format");
+        assert_eq!(meta.version, 3, "new index must use the v3 wire format");
         assert!(
             meta.has_prepared_layout(),
             "meta must record blocked + codebook: blocked_bytes={} cb_levels={}",
@@ -2646,17 +2646,21 @@ mod tests {
         // un-prepared `from_id_map_parts` followed by
         // `prepare_eager` pays the codebook compute (which on a
         // debug build is still ~milliseconds even at dim=16).
-        let (codes, scales, ids, blocked, n_blocks, centroids, boundaries) = unsafe {
+        let (codes, scales, ids, blocked, n_blocks, centroids, boundaries, rotation) = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             let (c, s, i) = relfile::read_full(rel, &m);
             let b = relfile::read_blocked(rel, &m);
             let cents = m.centroids_slice().to_vec();
             let bnds = m.boundaries_slice().to_vec();
+            let rot = relfile::read_rotation(rel, &m);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
-            (c, s, i, b, m.n_blocks_blocked as usize, cents, bnds)
+            (c, s, i, b, m.n_blocks_blocked as usize, cents, bnds, rot)
         };
         assert_eq!(blocked.len() as u64, meta.blocked_bytes);
+        // Phase R-2: rotation chain must be a `dim*dim` `f32`
+        // matrix (`16*16 = 256` elements at this corpus).
+        assert_eq!(rotation.len(), (meta.dim as usize) * (meta.dim as usize));
 
         // Construct two indexes from the same parts: one with
         // prepared, one without. Both must agree on top-1 for a
@@ -2673,6 +2677,7 @@ mod tests {
             n_blocks,
             centroids,
             boundaries,
+            Some(rotation),
         )
         .expect("prepared parts");
         let prep_ctor_us = t0.elapsed().as_micros();
@@ -2778,16 +2783,17 @@ mod tests {
             Spi::get_one("SELECT 't_old_idx'::regclass::oid::int8").unwrap();
         let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
-        // Initial meta is v2 (the only version we write).
-        let v2_meta: MetaPageData = unsafe {
+        // Initial meta is v3 (the only version we write today).
+        let v_current_meta: MetaPageData = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v2_meta.version, 2);
-        assert!(!v2_meta.is_legacy_v1());
-        assert!(v2_meta.has_prepared_layout());
+        assert_eq!(v_current_meta.version, 3);
+        assert!(!v_current_meta.is_legacy_v1());
+        assert!(!v_current_meta.is_legacy_v2());
+        assert!(v_current_meta.has_prepared_layout());
 
         // Manufacture a v1 meta-page byte buffer with the same
         // codes/scales/ids chain pointers but no prepared layout.
@@ -2796,32 +2802,34 @@ mod tests {
         let mut v1_buf = [0u8; PAYLOAD_BYTES];
         v1_buf[0..4].copy_from_slice(&MAGIC);
         v1_buf[4] = 1; // v1
-        v1_buf[5] = v2_meta.bit_width;
-        v1_buf[8..12].copy_from_slice(&v2_meta.dim.to_le_bytes());
-        v1_buf[12..20].copy_from_slice(&v2_meta.n_vectors.to_le_bytes());
-        v1_buf[20..24].copy_from_slice(&v2_meta.codes_first.to_le_bytes());
-        v1_buf[24..28].copy_from_slice(&v2_meta.codes_count.to_le_bytes());
-        v1_buf[28..32].copy_from_slice(&v2_meta.scales_first.to_le_bytes());
-        v1_buf[32..36].copy_from_slice(&v2_meta.scales_count.to_le_bytes());
-        v1_buf[36..40].copy_from_slice(&v2_meta.ids_first.to_le_bytes());
-        v1_buf[40..44].copy_from_slice(&v2_meta.ids_count.to_le_bytes());
-        v1_buf[44..48].copy_from_slice(&v2_meta.rows_per_codes_page.to_le_bytes());
-        v1_buf[48..52].copy_from_slice(&v2_meta.rows_per_scales_page.to_le_bytes());
-        v1_buf[52..56].copy_from_slice(&v2_meta.rows_per_ids_page.to_le_bytes());
-        v1_buf[56..60].copy_from_slice(&v2_meta.stride_bytes.to_le_bytes());
-        v1_buf[60..64].copy_from_slice(&v2_meta.am_version.to_le_bytes());
-        // No v2 fields.
+        v1_buf[5] = v_current_meta.bit_width;
+        v1_buf[8..12].copy_from_slice(&v_current_meta.dim.to_le_bytes());
+        v1_buf[12..20].copy_from_slice(&v_current_meta.n_vectors.to_le_bytes());
+        v1_buf[20..24].copy_from_slice(&v_current_meta.codes_first.to_le_bytes());
+        v1_buf[24..28].copy_from_slice(&v_current_meta.codes_count.to_le_bytes());
+        v1_buf[28..32].copy_from_slice(&v_current_meta.scales_first.to_le_bytes());
+        v1_buf[32..36].copy_from_slice(&v_current_meta.scales_count.to_le_bytes());
+        v1_buf[36..40].copy_from_slice(&v_current_meta.ids_first.to_le_bytes());
+        v1_buf[40..44].copy_from_slice(&v_current_meta.ids_count.to_le_bytes());
+        v1_buf[44..48].copy_from_slice(&v_current_meta.rows_per_codes_page.to_le_bytes());
+        v1_buf[48..52].copy_from_slice(&v_current_meta.rows_per_scales_page.to_le_bytes());
+        v1_buf[52..56].copy_from_slice(&v_current_meta.rows_per_ids_page.to_le_bytes());
+        v1_buf[56..60].copy_from_slice(&v_current_meta.stride_bytes.to_le_bytes());
+        v1_buf[60..64].copy_from_slice(&v_current_meta.am_version.to_le_bytes());
+        // No v2/v3 fields.
 
         // Decoder round-trips: v1 buffer comes back as version=1
         // with zeroed prepared-layout fields.
         let v1_decoded = MetaPageData::decode(&v1_buf).expect("v1 decode");
         assert_eq!(v1_decoded.version, 1);
         assert!(v1_decoded.is_legacy_v1());
+        assert!(v1_decoded.is_legacy_v2());
         assert!(!v1_decoded.has_prepared_layout());
         assert_eq!(v1_decoded.blocked_bytes, 0);
         assert_eq!(v1_decoded.codebook_n_levels, 0);
-        assert_eq!(v1_decoded.n_vectors, v2_meta.n_vectors);
-        assert_eq!(v1_decoded.codes_first, v2_meta.codes_first);
+        assert_eq!(v1_decoded.rotation_count, 0);
+        assert_eq!(v1_decoded.n_vectors, v_current_meta.n_vectors);
+        assert_eq!(v1_decoded.codes_first, v_current_meta.codes_first);
 
         // Verify the scan path's ERROR-emitting condition: the
         // matcher in `ambeginscan` fires on `is_legacy_v1() &&
@@ -2831,6 +2839,247 @@ mod tests {
         assert!(
             v1_decoded.is_legacy_v1() && v1_decoded.n_vectors > 0,
             "manufactured v1 meta must trigger the ERROR path",
+        );
+    }
+
+    /// Phase R-2 (v1.4.0): the meta-page decoder distinguishes v2
+    /// (Phase P, v1.3.x) from v3 (Phase R-2, v1.4.0) layouts and
+    /// reports `is_legacy_v2()` correctly. The `ambeginscan`
+    /// migration boundary fires on `is_legacy_v2() && n_vectors >
+    /// 0`; we verify the detection primitive directly here, the
+    /// same shape as the legacy_v1 test.
+    ///
+    /// Live exercise of the ERROR path is impossible from inside
+    /// a v1.4.0 binary because `MetaPageData::encode` always
+    /// writes `VERSION = 3`; manufactured v2 buffers can only
+    /// be fed back through `MetaPageData::decode`.
+    #[pg_test]
+    fn relfile_legacy_v2_detection_primitive() {
+        use crate::index::page::{MetaPageData, MAGIC, PAYLOAD_BYTES};
+        use crate::index::relfile;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_old2 (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_old2 \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, 50) AS gs(i), \
+                  generate_series(1, 16) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_old2_idx ON t_old2 USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        let indexrelid_u32: Option<i64> =
+            Spi::get_one("SELECT 't_old2_idx'::regclass::oid::int8").unwrap();
+        let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
+
+        let v3_meta: MetaPageData = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            m
+        };
+        assert_eq!(v3_meta.version, 3);
+        assert!(!v3_meta.is_legacy_v1());
+        assert!(!v3_meta.is_legacy_v2());
+
+        // Manufacture a v2 meta-page byte buffer with the same
+        // chain pointers + plausible Phase P prepared layout but
+        // no rotation chain. This emulates what an index built
+        // by pg_turbovec 1.3.x would have on disk.
+        let mut v2_buf = [0u8; PAYLOAD_BYTES];
+        v2_buf[0..4].copy_from_slice(&MAGIC);
+        v2_buf[4] = 2; // v2
+        v2_buf[5] = v3_meta.bit_width;
+        v2_buf[8..12].copy_from_slice(&v3_meta.dim.to_le_bytes());
+        v2_buf[12..20].copy_from_slice(&v3_meta.n_vectors.to_le_bytes());
+        v2_buf[20..24].copy_from_slice(&v3_meta.codes_first.to_le_bytes());
+        v2_buf[24..28].copy_from_slice(&v3_meta.codes_count.to_le_bytes());
+        v2_buf[28..32].copy_from_slice(&v3_meta.scales_first.to_le_bytes());
+        v2_buf[32..36].copy_from_slice(&v3_meta.scales_count.to_le_bytes());
+        v2_buf[36..40].copy_from_slice(&v3_meta.ids_first.to_le_bytes());
+        v2_buf[40..44].copy_from_slice(&v3_meta.ids_count.to_le_bytes());
+        v2_buf[44..48].copy_from_slice(&v3_meta.rows_per_codes_page.to_le_bytes());
+        v2_buf[48..52].copy_from_slice(&v3_meta.rows_per_scales_page.to_le_bytes());
+        v2_buf[52..56].copy_from_slice(&v3_meta.rows_per_ids_page.to_le_bytes());
+        v2_buf[56..60].copy_from_slice(&v3_meta.stride_bytes.to_le_bytes());
+        v2_buf[60..64].copy_from_slice(&v3_meta.am_version.to_le_bytes());
+        // v2 prepared-layout fields (ported straight from the
+        // current index's metadata so the buffer is plausible).
+        v2_buf[64..68].copy_from_slice(&v3_meta.blocked_first.to_le_bytes());
+        v2_buf[68..72].copy_from_slice(&v3_meta.blocked_count.to_le_bytes());
+        v2_buf[72..80].copy_from_slice(&v3_meta.blocked_bytes.to_le_bytes());
+        v2_buf[80..84].copy_from_slice(&v3_meta.n_blocks_blocked.to_le_bytes());
+        v2_buf[84..88].copy_from_slice(&v3_meta.codebook_n_levels.to_le_bytes());
+        for (i, c) in v3_meta.centroids.iter().enumerate() {
+            let off = 88 + i * 4;
+            v2_buf[off..off + 4].copy_from_slice(&c.to_le_bytes());
+        }
+        for (i, b) in v3_meta.boundaries.iter().enumerate() {
+            let off = 88 + 16 * 4 + i * 4;
+            v2_buf[off..off + 4].copy_from_slice(&b.to_le_bytes());
+        }
+        // No v3 (rotation) fields — they stay zero.
+
+        let v2_decoded = MetaPageData::decode(&v2_buf).expect("v2 decode");
+        assert_eq!(v2_decoded.version, 2);
+        assert!(!v2_decoded.is_legacy_v1());
+        assert!(v2_decoded.is_legacy_v2(), "v2 must trip is_legacy_v2");
+        assert_eq!(v2_decoded.rotation_first, 0);
+        assert_eq!(v2_decoded.rotation_count, 0);
+        assert_eq!(v2_decoded.rotation_dim, 0);
+        // has_prepared_layout requires the rotation chain too —
+        // a v2 index returns false even though blocked + codebook
+        // are present.
+        assert!(!v2_decoded.has_prepared_layout());
+        assert_eq!(v2_decoded.n_vectors, v3_meta.n_vectors);
+
+        // Verify the scan path's ERROR-emitting condition: the
+        // matcher in `ambeginscan` fires on `is_legacy_v2() &&
+        // n_vectors > 0`. Our manufactured v2 meta satisfies
+        // both, so a backend opening such an index would raise
+        // ERROR ("pg_turbovec 1.4+ … REINDEX INDEX ...").
+        assert!(
+            v2_decoded.is_legacy_v2() && v2_decoded.n_vectors > 0,
+            "manufactured v2 meta must trigger the ERROR path",
+        );
+    }
+
+    /// Phase R-2 (v1.4.0): `ambuild` writes the rotation matrix
+    /// into the relfile so a fresh backend reading the index
+    /// pre-fills the rotation `OnceLock` from disk instead of
+    /// running QR on first search. We can't reach across
+    /// backends from inside a pgrx test, but we *can* (a) verify
+    /// the rotation chain is on disk and (b) verify that
+    /// constructing an `IdMapIndex` via
+    /// `from_id_map_parts_with_prepared` with `Some(rotation)`
+    /// answers a top-1 query in well under 100 ms on a 100-row
+    /// corpus — a proxy that the lazy QR did not run on the
+    /// search path. (Pre-Phase-R-2 the QR alone took >100 ms on
+    /// a debug build at small dim, so this fence catches
+    /// regressions cleanly.)
+    #[pg_test]
+    fn relfile_rotation_persisted() {
+        use crate::index::page::MetaPageData;
+        use crate::index::relfile;
+        use std::time::Instant;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_rot (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_rot \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, 100) AS gs(i), \
+                  generate_series(1, 16) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_rot_idx ON t_rot USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        let indexrelid_u32: Option<i64> =
+            Spi::get_one("SELECT 't_rot_idx'::regclass::oid::int8").unwrap();
+        let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
+
+        // (1) Meta page must be v3 with a populated rotation
+        // chain: rotation_first > meta.blocked_first,
+        // rotation_count >= 1, rotation_dim == meta.dim.
+        let (meta, codes, scales, ids, blocked, centroids, boundaries, rotation): (
+            MetaPageData,
+            Vec<u8>,
+            Vec<f32>,
+            Vec<u64>,
+            Vec<u8>,
+            Vec<f32>,
+            Vec<f32>,
+            Vec<f32>,
+        ) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let (c, s, i) = relfile::read_full(rel, &m);
+            let b = relfile::read_blocked(rel, &m);
+            let cents = m.centroids_slice().to_vec();
+            let bnds = m.boundaries_slice().to_vec();
+            let rot = relfile::read_rotation(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (m, c, s, i, b, cents, bnds, rot)
+        };
+        assert_eq!(meta.version, 3);
+        assert!(meta.has_prepared_layout());
+        assert_eq!(meta.rotation_dim, meta.dim);
+        assert!(meta.rotation_count >= 1);
+        assert!(
+            meta.rotation_first > meta.blocked_first,
+            "rotation chain must follow the blocked chain on disk",
+        );
+
+        // (2) Rotation buffer is the right shape (`dim*dim`
+        // f32s) and is a plausible orthogonal matrix — each
+        // column has unit L2 norm to within float roundoff.
+        let dim = meta.dim as usize;
+        assert_eq!(rotation.len(), dim * dim);
+        for j in 0..dim {
+            let mut sumsq = 0.0f64;
+            for i in 0..dim {
+                let v = f64::from(rotation[i * dim + j]);
+                sumsq += v * v;
+            }
+            assert!(
+                (sumsq - 1.0).abs() < 1e-3,
+                "column {} has |.|^2 = {} (expected ~1)",
+                j,
+                sumsq,
+            );
+        }
+
+        // (3) Build an IdMapIndex from prepared parts including
+        // the persisted rotation. A top-1 query on a 100-row
+        // corpus must finish well under 100 ms; pre-Phase-R-2
+        // the lazy QR alone exceeded that budget on debug.
+        let n_blocks = meta.n_blocks_blocked as usize;
+        let idx_with_rot = turbovec::IdMapIndex::from_id_map_parts_with_prepared(
+            meta.bit_width as usize,
+            dim,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+            blocked,
+            n_blocks,
+            centroids,
+            boundaries,
+            Some(rotation),
+        )
+        .expect("prepared+rotation parts");
+
+        let query_vec: Vec<f32> = (0..16)
+            .map(|k| ((u32::wrapping_mul(7, k as u32 + 13)) % 2000) as f32 / 1000.0 - 1.0)
+            .collect();
+        let t0 = Instant::now();
+        let (_, ids_top) = idx_with_rot.search(&query_vec, 1);
+        let elapsed_us = t0.elapsed().as_micros();
+        assert_eq!(ids_top.len(), 1);
+        assert!(
+            elapsed_us < 100_000,
+            "prepared+rotation first-search took {} us, expected < 100_000 us (100 ms); \
+             rotation OnceLock probably ran QR on the search path",
+            elapsed_us,
+        );
+        eprintln!(
+            "phase-r2 first-search with persisted rotation (debug, 100x16 4-bit): {} us",
+            elapsed_us,
         );
     }
 }

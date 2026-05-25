@@ -116,6 +116,41 @@ if [ -d vendor ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 7. Wire-format VERSION constant: must not change in patch releases.
+# ----------------------------------------------------------------------
+#
+# Patch releases (X.Y.Z → X.Y.Z+1) are forbidden from changing the
+# on-disk index format. The single source of truth is the `VERSION`
+# constant in `src/index/page.rs`. This check compares the working
+# tree's VERSION against the most recent tag's VERSION and fails if:
+#
+#   - The working-tree Cargo.toml is at the same X.Y as the latest
+#     tag (i.e. you're shipping a patch on the current minor line),
+#   - AND the VERSION constant differs between the working tree and
+#     the tag.
+#
+# Out-of-tree work (between tags) is allowed to bump freely; the
+# gate is on the version-bump-vs-VERSION-bump alignment.
+
+last_tag=$(git tag --list 'v*' --sort=-creatordate | head -1)
+if [ -n "$last_tag" ]; then
+    last_tag_xy=$(printf '%s' "$last_tag" | sed 's/^v//; s/\([0-9]\+\)\.\([0-9]\+\)\..*/\1.\2/')
+    cargo_xy=$(printf '%s' "$cargo_ver" | sed 's/\([0-9]\+\)\.\([0-9]\+\)\..*/\1.\2/')
+    if [ "$last_tag_xy" = "$cargo_xy" ]; then
+        # Same minor line. VERSION must not have moved.
+        wt_version=$(grep -E '^pub const VERSION: u8 = ' src/index/page.rs \
+                     | sed -E 's/.*= +([0-9]+).*/\1/' | head -1)
+        tag_version=$(git show "$last_tag:src/index/page.rs" 2>/dev/null \
+                      | grep -E '^pub const VERSION: u8 = ' \
+                      | sed -E 's/.*= +([0-9]+).*/\1/' | head -1)
+        if [ -n "$wt_version" ] && [ -n "$tag_version" ] \
+           && [ "$wt_version" != "$tag_version" ]; then
+            fail "src/index/page.rs::VERSION ($wt_version) differs from last tag $last_tag ($tag_version), but Cargo.toml is on the same X.Y line ($cargo_xy). Patch releases must not change the on-disk format. See docs/UPGRADING.md."
+        fi
+    fi
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

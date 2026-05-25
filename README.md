@@ -28,7 +28,7 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.1.0 — 94/94 `#[pg_test]` cases pass against
+> **Status:** v1.2.0 — 94/94 `#[pg_test]` cases pass against
 > PostgreSQL 13, 14, 15, 16, 17, and 18 on the default + index-AM
 > path; 100/100 with the Phase L `relfile_storage` preview
 > enabled. See [`docs/ROADMAP_DECISIONS.md`](docs/ROADMAP_DECISIONS.md)
@@ -375,7 +375,7 @@ is fully supported but the AM scan path is newer.
 
 ## Performance
 
-> **Performance methodology.** As of v1.1.0 the headline numbers
+> **Performance methodology.** As of v1.2.0 the headline numbers
 > in the table at the top of this README come from a real
 > head-to-head against pgvector 0.8.0 HNSW on the
 > [`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)

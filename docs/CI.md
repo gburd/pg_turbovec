@@ -49,10 +49,21 @@ Actions is flipped on by hand, the GitHub mirror at
   you can either:
   - **Apply for shared-runner access** at <https://codeberg.org/Codeberg-CI/request-access>
     (free, requires a brief review for abuse prevention).
-  - **Run your own runner.** Install the [`forgejo-runner`](https://code.forgejo.org/forgejo/runner/)
-    daemon on `arnold` or another machine, register it against
-    `https://codeberg.org/api/v1/repos/gregburd/pg_turbovec`. The
-    queued run will pick up automatically.
+  - **Run your own runner.** One-token install via the new
+    `scripts/install-forgejo-runner.sh`:
+
+    ```bash
+    # 1. Visit https://codeberg.org/gregburd/pg_turbovec/settings/actions/runners
+    # 2. Click "Create new runner" → copy the token.
+    # 3. ssh to the runner host (arnold is a good pick) and run:
+    export FORGEJO_RUNNER_TOKEN=<paste-the-token>
+    bash scripts/install-forgejo-runner.sh
+    ```
+
+    Idempotent. Drops a static `forgejo-runner` binary into
+    `~/.local/share/forgejo-runner/`, registers it against the
+    repo, and creates a systemd user unit so it auto-starts on
+    boot. Next push to `origin/main` triggers CI.
 
   Until one of those lands, the GitHub mirror at `gburd/pg_turbovec`
   carries the canonical green badge. Both workflows are kept in

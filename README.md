@@ -381,7 +381,7 @@ lets you pass an allowlist for hybrid retrieval).
 
 ## Performance
 
-> **Operations note: `shared_buffers`.** As of v1.5.0 (Phase
+> **Operations note: `shared_buffers`.** As of v1.5.1 (Phase
 > R-3), the bulk of a pg_turbovec index — the persisted
 > SIMD-blocked codes, the rotation matrix, and the inline
 > codebook — is read from disk via per-backend
@@ -404,7 +404,7 @@ lets you pass an allowlist for hybrid retrieval).
 >
 > Full diagnosis: [`docs/RECALL.md § 2.5`](docs/RECALL.md) (the
 > v1.4.0 buffer-manager-bound profile) and
-> [`docs/RECALL.md § 2.6`](docs/RECALL.md) (the v1.5.0 mmap
+> [`docs/RECALL.md § 2.6`](docs/RECALL.md) (the v1.5.1 mmap
 > fix); architecture +
 > isolation contract:
 > [`docs/ARCHITECTURE.md § 8.1`](docs/ARCHITECTURE.md#81-index-am--mmap-isolation-contract).

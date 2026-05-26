@@ -4,6 +4,40 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] — 2026-05-26
+
+### Fix — stale rows in the parity scoreboard, plus drift-check tightening
+
+No code changes in this release. Wire format unchanged from
+1.4.0; no `REINDEX` needed.
+
+- **`docs/PARITY_GAPS.md` scoreboard updated** with two rows that
+  had drifted three minor versions:
+  - INSERT throughput row was still claiming "~200 ms / row,
+    we lose 400×" — that pre-Phase-K v1.0.x number. Phase K
+    landed in v1.1.0 with the deferred-commit pattern that
+    delivers ~0.13 ms/row (4× *faster* than HNSW). Row is now
+    accurate.
+  - Recall on real ada-002 dbpedia-1M row was still "TBD".
+    Phase J measured R@10 = 1.000 in v1.1.0; the row is now
+    populated with the actual number.
+- **`scripts/drift-check.sh` §8** now flags scoreboard cells
+  containing `TBD` or claiming "we lose Nx" without a
+  same-row phase qualifier (e.g. "post-Phase-K", "shipped
+  in v1.1.0"). Verified by synthesising both failure modes
+  on top of the v1.4.0 scoreboard. The drift-check script
+  also keeps its existing v1.3.0 wire-format check (§7).
+- **`RELEASING.md` pre-flight checklist** grows two items:
+  one for `bash scripts/drift-check.sh` and one for *eyeball-
+  reading* the PARITY_GAPS scoreboard against the latest
+  benches. drift-check §8 catches structural drift but can't
+  catch a row whose number is numerically wrong; the eyeball
+  step is the backstop.
+
+All guards aligned: `Cargo.toml = 1.4.1`, `VERSION = 3` (no
+change from 1.4.0), `EXPECTED_WIRE_FORMAT_VERSION = 3`,
+drift-check clean.
+
 ## [1.4.0] — 2026-05-25
 
 ### Headline (Phase R-2): rotation matrix persisted in the relfile

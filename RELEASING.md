@@ -36,8 +36,26 @@ Before tagging:
   --features pg16 --no-run` — benches still compile.
 * [ ] `cargo bench --bench recall   --no-default-features
   --features pg16 --no-run` — recall bench still compiles.
+* [ ] `bash scripts/drift-check.sh` — zero drift; the script
+  enforces version alignment, PG-version-matrix consistency,
+  bench-result references, broken-link detection, vendor patch
+  notes presence, wire-format-version compatibility for patch
+  releases, and PARITY_GAPS scoreboard freshness.
+* [ ] **Read `docs/PARITY_GAPS.md` § "Performance gaps" line by
+  line.** drift-check §8 catches `TBD` and "we lose Nx" without a
+  phase qualifier, but it cannot catch a row whose number is
+  numerically wrong (e.g. "~70 ms" when the latest measurement is
+  90 ms). Eyeball every row's number against the most recent
+  bench JSON in `benches/results/`. If a row hasn't been
+  re-measured since the relevant phase landed, either re-measure
+  or annotate the row with the bench commit it last reflected.
+* [ ] **Read `README.md` table at the top.** Same eyeball test for
+  the headline numbers; the README is what users see first.
 * [ ] `CHANGELOG.md` entry written with phase label, summary,
   highlights, and a `[<version>]` link at the bottom.
+* [ ] If this is a minor or major bump that changed the on-disk
+  format, the CHANGELOG entry has a Migration section and
+  `docs/UPGRADING.md` has a new row in its migration matrix.
 * [ ] `README.md` status banner updated to reflect the new state
   (test count, known limitations, RC vs final).
 * [ ] Any GUC range or default that changed in this release is

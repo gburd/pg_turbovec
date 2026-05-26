@@ -4,6 +4,46 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] — 2026-05-26
+
+### Bench-results-only release. Wire format unchanged from 1.5.0; no REINDEX needed.
+
+- **Phase U-1: cache works correctly.** A debug-only tracepoint in
+  `cache::lookup` confirmed 50/50 hits across a 50-query warm sweep
+  (zero misses of any class). The Phase S agent's hypothesis that
+  the per-backend cache misses on every warm scan was wrong; what
+  they saw in `perf` was the one-shot `finalise_from_inner` build
+  during the cold-cache install, amortised over the sampling
+  window. Tracepoint reverted before the build that produced the
+  Phase U-2 measurements.
+- **Phase U-2: Phase S delivers no win on RAM-rich hosts.** On `meh`
+  (24 cores, 125 GiB RAM), warm p50 is **26.8 ms mmap=on, 26.7 ms
+  mmap=off** (delta 0.15 ms = noise) at `shared_buffers = 512 MB`,
+  `search_k = 100`. The buffer-manager bottleneck Phase S targets is
+  invisible when free RAM ≫ index size because the OS page cache
+  serves `pread` reads instantly. Phase S is at-worst-neutral on
+  RAM-rich hosts; it may still help RAM-constrained hosts (the
+  arnold re-bench at the original 31 GiB-RAM constraint remains the
+  definitive Phase S validation).
+- **The headline number that matters: pg_turbovec on a properly-
+  RAMed host beats pgvector HNSW ef=40 on every measurable axis.**
+  meh's 26.8 ms warm p50 is 2.3× faster than HNSW ef=40's 61 ms,
+  at 5× less storage and R@10 = 1.000 on the dbpedia-1M corpus.
+  The 60–90 ms warm regime that motivated Phase R-2 / Phase S was
+  an arnold-class (limited RAM) phenomenon, not a fundamental
+  kernel ceiling.
+
+### Artefacts
+
+- `benches/results/recall_warm_meh_v1_5_0_2026_05_26.json` — full
+  structured run with both configs + verdict.
+- `benches/results/u2_meh_tv_4bit_warm_mmap_{on,off}.tsv` — raw 50-
+  sample TSVs.
+- an internal design note — full method + result of the cache-
+  miss tracepoint experiment.
+- `docs/RECALL.md § 2.6` extended with the meh comparison.
+- `docs/PARITY_GAPS.md` warm-scan row updated.
+
 ## [1.5.0] — unreleased
 
 ### Added — mmap-based reads of the relfile's static regions (Phase R-3)

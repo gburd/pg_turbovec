@@ -54,7 +54,8 @@ pub fn turbovec_self_score(v: Vector, bit_width: i32) -> f64 {
         );
     }
     let dim = v.dim();
-    let mut idx = IdMapIndex::new(dim, bit_width as usize);
+    let mut idx = IdMapIndex::new(dim, bit_width as usize)
+        .expect("turbovec_self_score: invalid (dim, bit_width) for IdMapIndex::new");
     if let Err(e) = idx.add_with_ids(v.as_slice(), &[1u64]) {
         error!("turbovec_self_score: add_with_ids failed: {:?}", e);
     }

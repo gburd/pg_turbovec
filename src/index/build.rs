@@ -121,7 +121,8 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         return result;
     };
 
-    let mut idx = IdMapIndex::new(dim, cfg_bit_width as usize);
+    let mut idx = IdMapIndex::new(dim, cfg_bit_width as usize)
+        .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new");
     if !state.ids.is_empty() {
         if let Err(e) = idx.add_with_ids(&state.flat, &state.ids) {
             error!("turbovec ambuild: add_with_ids failed: {:?}", e);

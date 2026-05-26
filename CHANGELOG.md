@@ -4,6 +4,71 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — unreleased
+
+### Added — mmap-based reads of the relfile's static regions (Phase R-3)
+
+Wire format unchanged from 1.4.x (`MetaPageData::version = 3`);
+**no `REINDEX` needed** to upgrade. v1.5.0 is a scan-side change
+only.
+
+- **New code path: `src/index/mmap_static.rs`.** The
+  `ambeginscan` cache-fill path now `mmap(MAP_PRIVATE)`s the
+  relation's segment-0 file, walks the deterministic static
+  chains (persisted SIMD-blocked codes, persisted rotation
+  matrix, inline codebook) directly off the mapping, and skips
+  PG's buffer manager for those bytes. Halves the warm-scan
+  cost when the index doesn't fit in `shared_buffers` — the
+  Phase R-3 diagnosis in `docs/RECALL.md § 2.5`.
+- **New GUC: `turbovec.mmap_static_blocked` (default `on`).**
+  Set `off` per session to revert to the v1.4.x
+  buffer-manager-only read path. See `docs/ARCHITECTURE.md §
+  8.1` for the isolation contract.
+- **Cache machinery extension: `cache::insert_with_mmap`.** The
+  `Mmap` handle is colocated on the `Entry` with the
+  `Arc<RwLock<IdMapIndex>>` and dropped only after the index
+  has been freed (drop order enforced by struct field order).
+  Future zero-copy work (handing turbovec a borrowed slice into
+  the mapping via the new
+  `from_id_map_parts_with_prepared_borrowed` upstream API)
+  relies on this ordering; v1.5.0 holds owned `Vec`s in the
+  index so the contract is trivially satisfied today.
+- **Upstream turbovec fork bump.** `turbovec` is pinned to
+  `gburd/turbovec` branch `pg_turbovec-integration` at commit
+  `c3c0528`, which adds the Cow-based borrowed-cache
+  constructors (`from_parts_with_prepared_borrowed`,
+  `from_id_map_parts_with_prepared_borrowed`,
+  `PreparedCachesBorrowed`). Six new upstream tests cover the
+  borrowed/owned round-trip equivalence and lifetime contract
+  (89 → 95 tests).
+- **Three new `#[pg_test]`s:**
+  `relfile_mmap_static_round_trip_matches_buffer_manager`,
+  `relfile_mmap_static_concurrent_aminsert_recheck_corrects`,
+  `relfile_mmap_static_cache_invalidation_drop_order`. Test
+  count 113 → 116.
+- **Docs:** `docs/RECALL.md § 2.6` for the post-fix
+  performance story; `docs/ARCHITECTURE.md § 8.1` for the
+  isolation contract (heap visibility + recheck-orderby as the
+  MVCC backstops; concurrent aminsert / ambulkdelete / REINDEX
+  worked examples); `docs/PARITY_GAPS.md` warm-scan row updated
+  to reference v1.5.0 with arnold re-bench pending;
+  `docs/UPGRADING.md` migration matrix gets a `1.4.x → 1.5.0`
+  no-op row; `README.md` `## Performance` operations note
+  rewritten — `shared_buffers` no longer needs to be sized
+  against the index size by default.
+
+### Dependency added
+
+- `memmap2 = "0.9"` for the `MAP_PRIVATE` RO mapping. No other
+  dependency churn.
+
+### Wire format
+
+- **No change.** `MetaPageData::version` stays at 3,
+  `MIN_DECODE_VERSION` stays at 1, and the
+  `wire_format_version_is_stable` test continues to assert
+  `EXPECTED_WIRE_FORMAT_VERSION = 3`.
+
 ## [1.4.1] — 2026-05-26
 
 ### Fix — stale rows in the parity scoreboard, plus drift-check tightening

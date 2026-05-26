@@ -995,6 +995,167 @@ v1.4.x indexes scan under v1.5.0 with no REINDEX.
   `finalise_from_inner` build during warmup1, not a per-query
   rebuild.
 
+## 2.7 Scaling: 10 M × 1536-d (Phase V, 2026-05-26)
+
+**The 10× scaling check.** Phase J / U covered 1 M × 1536-d on
+real ada-002 (`dbpedia-entities-openai-1M`); Phase V takes the
+same index AM up to **10 M × 1536-d** on `meh` (24 cores, 125
+GiB RAM, NixOS) to confirm nothing falls over at the dbpedia-
+10× scale and that the per-backend cache's `enforce_cap`
+`len() > 1` retain rule still holds the (now ~15 GiB) entry
+resident at the default `cache_size_mb = 256`.
+
+**Corpus is synthetic random unit-norm vectors**, not a real
+embedding distribution. A 10 M × 1536-d real fixture (Cohere
+wikipedia-22-12 35 M × 768, etc.) is 100+ GiB of parquet to
+download — out of scope for this phase. Server-side generation
+with `(random()*2-1)::real` then `l2_normalize()` produced 10 M
+rows in **30 min 54 s** as one `DO` loop of 100 × 100 k batches
+on an `UNLOGGED` table with `STORAGE MAIN` on the vector column
+(inline; no TOAST). Heap is 76 GB (one row per 8 KiB page).
+
+**The synthetic-data caveat for HNSW.** Random unit vectors
+have no low-dimensional manifold structure. HNSW on this
+distribution is *unrealistically fast* because the graph is
+near-degenerate: any candidate is roughly equally close to any
+query, so a few hops in the upper layers find ten neighbours
+immediately. The `hnsw_ef40 p50 = 0.94 ms` number below is
+**not** comparable to the dbpedia-1M HNSW p50 of 61 ms (Phase
+J) or 50 ms (Phase U-2) on real ada-002 — those are real
+manifolds where ef=40 actually has to navigate. Phase V is a
+scaling check, not a head-to-head latency benchmark; the
+numbers we trust at this scale are pg_turbovec's (whose work
+per query — scan k candidates, recompute distance — is
+distribution-independent) and the system-level metrics
+(storage, build time, build memory, cache retention).
+
+### Storage at 10 M rows
+
+| Index | Type | Size | × heap | × pgvector |
+|---|---|---:|---:|---:|
+| `docs_pgv_hnsw` | pgvector HNSW (m=16, ef_construction=64) | **65.5 GiB** (66 GB) | 0.86× | 1.0× |
+| `docs_tv_4bit`  | pg_turbovec (bit_width=4)               | **14.92 GiB** (15 GB) | 0.20× | **0.23×** |
+| `docs` (heap)   | UNLOGGED, vector(1536) STORAGE MAIN     | 76 GB | 1.0× | — |
+
+pg_turbovec is **4.4× smaller on disk than pgvector HNSW** at
+10 M × 1536-d (vs. ~5× at 1 M on dbpedia — the ratio is stable
+across the 10× scale jump, which is what we expected since
+both indexes' per-row cost is dominated by the vector payload).
+
+### Build time at 10 M rows
+
+| Index | Build time | Notes |
+|---|---:|---|
+| `docs_pgv_hnsw` | **3 h 38 min 14 s** (13 094 s) | 7 parallel workers; HNSW slows super-linearly past 5 M rows even with everything in OS page cache. |
+| `docs_tv_4bit`  | **1 h 24 min 09 s** (5 048 s)  | Heap scan parallelised (16-way); prepared-layout finalisation single-process. |
+
+Both are slower than the prompt's pre-bench estimate (HNSW
+~50–60 min, pg_turbovec ~25–40 min). The HNSW estimate was
+optimistic for a 10 M × 1536-d corpus; the pg_turbovec estimate
+was optimistic about how long the post-scan in-memory prepared-
+layout phase takes (see § *Build memory pressure* below).
+
+pg_turbovec wins the build race **2.6×** even though only its
+heap-scan phase is parallel.
+
+### Warm-scan p50 (50 queries, single backend, fresh random unit-norm queries NOT in docs)
+
+| Config | min | **p50** | p95 | max | mean |
+|---|---:|---:|---:|---:|---:|
+| `hnsw_ef40`     | 0.59 ms | **0.94 ms** | 2.00 ms | 2.12 ms | 1.13 ms |
+| `tv_4bit_k100`  | 21.39 ms | **47.27 ms** | 48.96 ms | 49.16 ms | 36.83 ms |
+| `tv_4bit_k500`  | 95.36 ms | **182.41 ms** | 217.09 ms | 217.58 ms | 173.12 ms |
+
+Reading the table:
+
+- **HNSW ef=40 at 0.94 ms p50:** see the synthetic-data caveat
+  above. On real ada-002 at 1 M scale the same ef=40 was 61 ms;
+  the 65× speedup is the corpus, not the scale.
+- **tv_4bit search_k=100 at 47 ms p50:** scales linearly from
+  Phase J's 1 M × 1536 numbers (~5–25 ms p50 depending on
+  bench-host RAM). The 10× scale → ~10× p50 holds because
+  pg_turbovec's `search_k` is an *absolute* candidate-budget,
+  not a fraction of the corpus, so per-query work is dominated
+  by the prepared-layout SIMD scan over the first `search_k`
+  packed codes the IVF / probe scheduler picks. At 10 M, more
+  bytes in those `search_k` candidates need to land in cache
+  per query, hence the linear-in-bytes-scanned blowup.
+- **tv_4bit search_k=500 at 182 ms p50:** 5× more candidates
+  scanned → ~4× the p50, sub-linear because the cache stays
+  hotter across the larger sweep.
+- **Bimodality, not noise.** Both `tv_4bit_k100` (clusters at
+  ~21 ms and ~48 ms) and `tv_4bit_k500` (clusters at ~95–130 ms
+  and ~210 ms) are bimodal across the 50 queries. Same
+  query-vector-dependent search-k pruning effect documented in
+  § 2.6's `meh` Phase U-2 run; not a Phase V regression.
+
+### Build memory pressure
+
+*Captured by `snap_rss.sh` polling `/proc/<pid>/status` every
+2 s for the leader pgrx postgres backend and all its parallel
+workers.*
+
+| Phase | Peak leader RSS | Peak total (leader+workers) | Swap used |
+|---|---:|---:|---:|
+| `CREATE INDEX docs_tv_4bit`  | **121 GiB** | n/a (single backend during finalisation) | up to 60 GiB |
+| `CREATE INDEX docs_pgv_hnsw` | 16.9 GiB    | 43.4 GiB                         | 0          |
+| Warm 50-query sweep          | **15.22 GiB** | 15.78 GiB | 0 |
+
+**pg_turbovec's 121 GiB build peak is the headline scaling
+concern.** The post-heap-scan prepared-layout assembly
+allocates the raw codes, the rotation matrix, and the SIMD-
+blocked layout simultaneously in heap memory; on `meh` this
+filled essentially all 125 GiB of RAM and pushed 60 GiB into
+swap before being persisted to the relfile and freed. A host
+with less than ~100 GiB of free RAM + swap headroom would OOM
+during a 10 M × 1536-d × bit_width=4 build. Phase J's 1 M-row
+build peaked at ~6 GiB; the scaling is roughly linear in
+`n_rows` and likely linear in `dim × bit_width / 8`.
+[**Flagged for Phase W**](./PARITY_GAPS.md): bound the build's
+peak memory by either streaming the prepared layout to disk in
+chunks during finalisation or by honouring `maintenance_work_mem`
+as a real cap (currently it is read but not enforced past the
+heap-scan phase).
+
+### Cache retention at 10× scale (the question that motivated Phase V)
+
+The `cache::enforce_cap`'s `len() > 1` retain rule (`src/cache.rs`)
+is the safety valve that prevents the per-backend cache from
+evicting an entry that is *bigger than the byte-cap on its own*.
+At 10 M × 1536-d × 4-bit the entry is ~15 GiB; the default
+`cache_size_mb = 256` would unconditionally evict a normal
+entry that big. The retain rule keeps it because evicting the
+only resident entry guarantees a re-load on the next query —
+net pessimization.
+
+Observation across the 50-query `tv_4bit_k100` sweep:
+
+- All 50 queries returned in **21–49 ms**.
+- No query took ≥ 100 ms, which is what re-loading the 15 GiB
+  entry from the relfile + re-running `finalise_from_inner`
+  would look like (Phase R-3's *cold-cache* fill on a 1.5 GiB
+  index at 1 M scale was ~150 ms; at 10× the index size it
+  would be ~1.5 s — and there are zero 1.5 s spikes).
+- Peak backend RSS during the sweep was 15.22 GiB, matching
+  the 14.92 GiB index size + per-backend Postgres baseline.
+  The cache held the entry continuously across all 50 queries.
+
+**Verdict:** `enforce_cap`'s `len() > 1` retain rule scales
+cleanly to 10 M × 1536-d at the default `cache_size_mb = 256`;
+the 15 GiB entry is held resident for the whole 50-query
+workload with zero eviction-induced spikes.
+
+### Source data
+
+- Full structured run:
+  [`benches/results/recall_warm_meh_10m_v1_5_1_2026_05_26.json`](../benches/results/recall_warm_meh_10m_v1_5_1_2026_05_26.json)
+- Raw 50-query timings CSV:
+  [`benches/results/recall_warm_meh_10m_v1_5_1_2026_05_26.csv`](../benches/results/recall_warm_meh_10m_v1_5_1_2026_05_26.csv)
+- Build / sweep psql logs (with heartbeats):
+  [`benches/results/build_tv_meh_10m_v1_5_1_2026_05_26.log`](../benches/results/build_tv_meh_10m_v1_5_1_2026_05_26.log),
+  [`benches/results/build_hnsw_meh_10m_v1_5_1_2026_05_26.log`](../benches/results/build_hnsw_meh_10m_v1_5_1_2026_05_26.log),
+  [`benches/results/sweep_meh_10m_v1_5_1_2026_05_26.log`](../benches/results/sweep_meh_10m_v1_5_1_2026_05_26.log).
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

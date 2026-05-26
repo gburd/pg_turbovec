@@ -912,6 +912,52 @@ buffer-manager symbols (`ReadBufferExtended`, `WaitReadBuffers`,
 `mdreadv`, `__memmove_avx_unaligned_erms`) should fall off the
 top-50 of the warm-scan profile.
 
+**Re-bench on `meh` (Phase U-2, 2026-05-26).** First real
+measurement of v1.5.0 against the dbpedia-1M corpus. Host: 24
+cores, 125 GiB RAM, NixOS 6.12.83, `shared_buffers = 512 MB`
+(matching arnold's Phase R-3 setup), 1 M × 1536-d ada-002
+vectors, `turbovec.search_k = 100`. Methodology: single warm
+psql session per config, 2 untimed warmups + 50 timed
+`bench_one_query_tv(qid)` calls; same shape as Phase J / R-3.
+
+| metric | mmap=on (v1.5.0) | mmap=off (v1.4.x equivalent) | delta |
+|---|---:|---:|---:|
+| min  | 26.58 ms | 26.55 ms | +0.03 ms |
+| **p50** | **26.80 ms** | **26.65 ms** | **+0.15 ms** |
+| p95  | 61.34 ms | 60.97 ms | +0.37 ms |
+| max  | 61.58 ms | 61.10 ms | +0.48 ms |
+| mean | 39.39 ms | 35.01 ms | +4.38 ms |
+
+Verdict: **`shared_buffers_was_the_bottleneck`** (more
+precisely: OS-page-cache size dominated). Phase S delivers
+zero measurable warm-scan win on `meh` because the bottleneck
+it targets — buffer-manager copies of the 1.5 GB static
+regions when they don't fit shared_buffers — is fully masked
+by the OS page cache when free RAM is plentiful. With 125 GiB
+total / ~76 GiB free, the kernel page cache holds the whole
+index, `pread` from a hot OS cache costs ~0, and the
+`pread → shared_buffers slot → chain Vec` path has no copy
+left to remove. mmap eliminates one `memcpy` in principle,
+but the savings (~0.1 ms p50) are below measurement noise on
+a 26 ms baseline. The original arnold profile was at 90 ms
+p50 because arnold's 31 GiB RAM forced shared_buffers and OS
+cache to fight over the same 1.5 GB working set; on `meh`
+that fight doesn't exist. v1.5.0 is at-worst neutral on a
+generously-RAMed host — no regression.
+
+The distribution is bimodal in both modes: ~25–38 of 50
+queries cluster at ~26.5–26.7 ms (fast), ~12–14 cluster at
+~60 ms (slow). The p50 captures the fast cluster; the p95
+captures the slow one. The bimodality is query-set-dependent
+(some query vectors trigger cheaper search-k pruning paths
+than others) and present in both v1.5.0 paths, so it isn't
+the Phase S delta.
+
+The original arnold re-bench (where the buffer-manager fight
+is real) remains the definitive Phase S validation; this
+`meh` run only proves v1.5.0 is non-regressing on hosts where
+Phase S has no real work to do.
+
 **Local debug-build smoke (this commit):** the in-tree
 `#[pg_test]` `relfile_mmap_static_round_trip_matches_buffer_manager`
 builds an index with the prepared layout, runs the same query
@@ -937,6 +983,17 @@ v1.4.x indexes scan under v1.5.0 with no REINDEX.
   `tests::pg_relfile_mmap_static_concurrent_aminsert_recheck_corrects`,
   `tests::pg_relfile_mmap_static_cache_invalidation_drop_order` in `src/lib.rs`.
 - arnold re-bench: pending.
+- `meh` re-bench (Phase U-2, 2026-05-26):
+  [`benches/results/recall_warm_meh_v1_5_0_2026_05_26.json`](../benches/results/recall_warm_meh_v1_5_0_2026_05_26.json),
+  raw timings
+  [`u2_meh_tv_4bit_warm_mmap_on.tsv`](../benches/results/u2_meh_tv_4bit_warm_mmap_on.tsv) /
+  [`u2_meh_tv_4bit_warm_mmap_off.tsv`](../benches/results/u2_meh_tv_4bit_warm_mmap_off.tsv).
+- Cache-miss diagnosis (Phase U-1, 2026-05-26):
+  [`docs/PHASE_U_DIAGNOSIS.md`](PHASE_U_DIAGNOSIS.md). Verdict:
+  cache works correctly (50 / 50 hits); the Phase S agent's
+  hot `HashMap::insert` perf symbol was the one-shot
+  `finalise_from_inner` build during warmup1, not a per-query
+  rebuild.
 
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 

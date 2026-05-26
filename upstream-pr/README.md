@@ -121,16 +121,36 @@ gh pr create --repo RyanCodrai/turbovec --title "Public Read/Write I/O API + cac
 
 ## Status
 
-- Diffs captured: ✅ (this directory)
-- Upstream tests verified locally: ✅ (`cargo test --tests --release` against
+- Diffs captured: complete (this directory; targets upstream `turbovec 0.6.0`)
+- Upstream tests verified locally: complete (`cargo test --tests --release` against
   the draft branch on `RyanCodrai/turbovec` v0.6.0; all upstream test
   files green)
-- Upstream issue opened: ✅ [issue #70](https://github.com/RyanCodrai/turbovec/issues/70)
-- Draft PR branch published: ✅ [`gburd/turbovec` `in-memory-io-and-pub-from-parts`](https://github.com/gburd/turbovec/tree/in-memory-io-and-pub-from-parts)
+- Upstream issue opened: complete — [issue #70](https://github.com/RyanCodrai/turbovec/issues/70)
+- Draft PR branch published: complete — [`gburd/turbovec` `in-memory-io-and-pub-from-parts`](https://github.com/gburd/turbovec/tree/in-memory-io-and-pub-from-parts)
 - PR submitted: pending the by-invitation gate per upstream `CONTRIBUTING.md`
 - Upstream merged + released: pending
-- `vendor/turbovec/` removed from `pg_turbovec` and dependency switched to
-  crates.io: blocked on the above
+
+## Relationship to `pg_turbovec-integration`
+
+This PR (the `in-memory-io-and-pub-from-parts` branch) is now the
+**parent / subset** of the broader [`gburd/turbovec` `pg_turbovec-integration`](https://github.com/gburd/turbovec/tree/pg_turbovec-integration)
+branch. Starting with `pg_turbovec` v1.4.0, the extension depends on
+that fork branch directly via `git = ...` in `Cargo.toml` instead of
+vendoring `turbovec` 0.5.0 under `vendor/turbovec/`.
+
+The fork branch is a strict superset of this PR — it adds Phase P
+prepared-cache accessors (`prepare_eager`, `blocked_codes`, `n_blocks`,
+`centroids`, `boundaries` getter, `from_parts_with_prepared`,
+`from_id_map_parts_with_prepared`) and the Phase R-2 rotation
+accessor (`rotation`, `rotation_size`) that `pg_turbovec` needs to
+persist Lloyd-Max + QR + SIMD-blocked layouts into its relfile
+and pre-fill the inner `OnceLock`s on scan startup.
+
+When upstream merges any portion of issue #70, the fork branch
+rebases onto the released version and `pg_turbovec` follows. The
+Phase P/R-2 additions stay on the fork until upstream is ready
+for a separate PR cycle (or the user's mmap-resident reads in
+Phase S settle the API surface enough to upstream as one chunk).
 
 ## Notes
 

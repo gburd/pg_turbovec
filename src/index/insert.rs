@@ -144,7 +144,13 @@ unsafe fn aminsert_relfile(
                         });
                         (idx, meta.n_vectors as i64, meta.am_version as i32)
                     }
-                    _ => (IdMapIndex::new(dim, bit_width as usize), 0, 0),
+                    _ => (
+                        IdMapIndex::new(dim, bit_width as usize).expect(
+                            "turbovec aminsert: invalid (dim, bit_width) for IdMapIndex::new",
+                        ),
+                        0,
+                        0,
+                    ),
                 };
             let bytes_per_vec = (dim * bit_width as usize) / 8 + 4 + 64;
             let total_bytes = bytes_per_vec * n_vectors_existing.max(1) as usize;

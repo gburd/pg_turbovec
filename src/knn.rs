@@ -106,7 +106,8 @@ fn knn(
         return TableIterator::new(Vec::<(i64, f64)>::new());
     }
 
-    let mut idx = IdMapIndex::new(query.dim(), bit_width as usize);
+    let mut idx = IdMapIndex::new(query.dim(), bit_width as usize)
+        .expect("turbovec_knn: invalid (dim, bit_width) for IdMapIndex::new");
     let mut flat: Vec<f32> = Vec::with_capacity(rows.len() * query.dim());
     let mut ids: Vec<u64> = Vec::with_capacity(rows.len());
     for (id, vector) in &rows {

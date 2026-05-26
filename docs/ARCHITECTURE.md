@@ -487,6 +487,116 @@ index AM is still on the roadmap:
   so crash recovery copies the init fork over the main fork,
   restoring an empty queryable index.
 
+### 8.1 Index AM · mmap isolation contract
+
+v1.5.0 (Phase R-3) introduces a per-backend `mmap(MAP_PRIVATE)`
+of the relfile's static regions — the persisted SIMD-blocked
+codes chain, the persisted rotation matrix chain, and the inline
+codebook. The mmap'd cache entry holds the kernel mapping for
+its lifetime; `cache::lookup` invalidates on `(relfilenode,
+am_version)` mismatch and the next cache fill re-mmaps from the
+post-write disk state. Codes / scales / ids chains stay on the
+buffer-manager path — they're mutated in-place by VACUUM
+swap-remove (`ambulkdelete`).
+
+This section spells out why the relaxed read consistency that
+`mmap` provides vs the buffer manager is correct under PG's MVCC.
+
+#### 8.1.1 What MVCC requires of an index AM
+
+Index pages don't strictly snapshot. PG's executor calls the
+AM's `amgettuple`, gets back a TID, then calls `heap_fetch`
+which does the actual visibility filter. Index entries pointing
+at heap rows that aren't visible to the scan's snapshot are
+rejected at heap fetch — the AM's job is to surface a
+_candidate_ set that's good enough; correctness is the heap's
+job.
+
+For an order-by AM (`amcanorderbyop = true`), one extra
+responsibility kicks in: the executor maintains a reorder queue
+keyed by `xs_orderbyvals` and runs `IndexNextWithReorder`
+(`nodeIndexscan.c`). Setting `xs_recheckorderby = true` tells
+the executor "my advertised distance is approximate; recompute
+it from the heap tuple before returning to the caller". Phase Q
+locked this in for `pg_turbovec` and we **never** clear it,
+including on the mmap path.
+
+Together, heap visibility + recheck-orderby mean an mmap'd
+index is correctness-equivalent to a buffer-manager-backed
+index even when the mmap'd image lags a just-committed write.
+
+#### 8.1.2 What we mmap (and what we don't)
+
+Only the **deterministic-after-`ambuild`** chains are mmap'd:
+
+- **Persisted SIMD-blocked codes.** Computed by `pack::repack`
+  at `ambuild` time; rewritten on aminsert commit-flush which
+  bumps `am_version` (next scan's cache lookup invalidates).
+- **Persisted rotation matrix.** Deterministic from
+  `(dim, ROTATION_SEED)`; never mutated post-build.
+- **Inline codebook.** Deterministic from `(bit_width, dim)`;
+  64 bytes inlined in the meta page.
+
+The **codes / scales / ids** chains stay on
+`ReadBufferExtended` because Phase O-1's `ambulkdelete`
+in-place swap-removes their rows under
+`ShareUpdateExclusiveLock`. The buffer manager is the canonical
+reader for those chains; mmap'ing them would introduce
+torn-page semantics we don't need.
+
+#### 8.1.3 Lifecycle and invalidation
+
+The `Mmap` handle lives on the cache `Entry` alongside the
+`Arc<RwLock<IdMapIndex>>`. `Entry`'s drop order is `index`
+first (releases the `Arc`; if last reference, drops the inner
+`IdMapIndex`), then `mmap` (`munmap(2)`). Future zero-copy
+work that has the `IdMapIndex` borrow into the mapping
+([`from_id_map_parts_with_prepared_borrowed`](https://github.com/gburd/turbovec/blob/pg_turbovec-integration/turbovec/src/id_map.rs))
+relies on this ordering being correct; v1.5.0 holds owned
+`Vec`s in the index so the contract is trivially satisfied,
+but the test
+`relfile_mmap_static_cache_invalidation_drop_order` guards the
+invariant.
+
+Invalidation triggers:
+
+1. `relfilenode` change — REINDEX, VACUUM FULL, CLUSTER,
+   TRUNCATE bump it. Cache key includes `relfilenode`, so the
+   next lookup misses and re-mmaps from the new file.
+2. `am_version` bump — every committed mutation bumps it; the
+   next `cache::lookup` from any backend sees the mismatch and
+   re-mmaps from the post-write file.
+3. `XACT_EVENT_ABORT` — Phase K's xact callback drops every
+   dirty AM-path entry (including its `Mmap`).
+4. Backend exit — Rust's drop machinery unmaps cleanly.
+
+#### 8.1.4 Concurrent-writer scenarios
+
+| Scenario | What happens |
+|---|---|
+| Backend B's scan in flight; backend C commits `INSERT` | C's commit bumps `am_version` and invokes Phase K's PreCommit hook, which writes through the buffer manager. B's mmap'd image was from `am_version = N`; B keeps reading it for the rest of B's current `amgettuple` sweep. New rows might be missed; existing rows survive correctly. B's recheck-orderby gives exact rank for whatever it does return. B's *next* scan misses the cache (C's `am_version = N+1` mismatches stored `n_rows`), evicts the entry, and re-mmaps. |
+| Backend B's scan in flight; VACUUM commits `ambulkdelete` | VACUUM holds `ShareUpdateExclusiveLock`; B holds `AccessShareLock` (compatible). VACUUM's swap-remove rewrites codes/scales/ids in-place via the buffer manager, then bumps `am_version`. B reads the codes/scales/ids chain through the buffer manager so B sees consistent rows for the duration of one scan (the buffer manager pin protects the page contents); B's mmap'd blocked-codes / rotation are unchanged by ambulkdelete (Phase O-1 invalidates the `has_prepared_layout` flag and falls through to per-backend repack on the next cache fill). |
+| Backend B's scan in flight; REINDEX commits | REINDEX builds a new relfile and atomically swaps `relfilenode`. B's open `Mmap` still points at the old (now-unlinked) inode — the OS keeps the inode alive until every reference drops. B keeps reading consistent old data; B's *next* scan sees the new `relfilenode` and re-mmaps. |
+| Tablespace on a filesystem that doesn't support shared mappings | `MmapOptions::map` returns `Err`; `mmap_static::load_static_regions` returns `None`; the scan path falls through to the buffer-manager `read_full` + `read_blocked` + `read_rotation` triplet. No correctness impact. |
+
+#### 8.1.5 The fall-back GUC
+
+`turbovec.mmap_static_blocked = on` (default) enables the mmap
+path. Set `off` per session to revert to the v1.4.x
+buffer-manager-only read path — useful if you observe
+weirdness on a custom storage substrate or want an apples-to-
+apples comparison against v1.4 timings on your hardware.
+
+#### 8.1.6 Locks
+
+The mmap path adds **no new locking**. Scans hold
+`AccessShareLock`, aminsert holds `RowExclusiveLock`,
+ambulkdelete holds `ShareUpdateExclusiveLock`. AccessShare is
+compatible with both writer modes. The mmap'd file is opened
+RO with our own fd (independent of PG's smgr fd lifecycle);
+`MAP_PRIVATE` means writes (which we never make) wouldn't
+back-propagate to the file anyway.
+
 ---
 
 ## 9. GUCs
@@ -497,6 +607,7 @@ index AM is still on the roadmap:
 | `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      | 0 disables cache (forces rebuild on every scan) |
 | `turbovec.warn_on_rebuild`       | bool | true    | -              | emit `NOTICE` when a per-backend `IdMapIndex` is reconstructed from the relfile pages |
 | `turbovec.search_concurrency`    | int  | 1       | 1..=128        | caps rayon fan-out inside a single batched search |
+| `turbovec.mmap_static_blocked`   | bool | true    | -              | mmap the deterministic static regions of the relfile (Phase R-3, v1.5.0). See § 8.1. |
 | `turbovec.normalize_on_insert`   | bool | true    | -              | unit-normalise vectors before passing to `add_with_ids` |
 
 All five are `USERSET` — settable per-session.

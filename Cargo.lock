@@ -1448,6 +1448,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1852,11 +1861,12 @@ dependencies = [
 
 [[package]]
 name = "pg_turbovec"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "criterion",
  "half 2.7.1",
  "libc",
+ "memmap2",
  "parking_lot",
  "pgrx",
  "pgrx-tests",
@@ -2988,7 +2998,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 [[package]]
 name = "turbovec"
 version = "0.6.0"
-source = "git+https://github.com/gburd/turbovec.git?branch=pg_turbovec-integration#d72c29ccc688cf2696efe0bf8d542ba470f3affe"
+source = "git+https://github.com/gburd/turbovec.git?branch=pg_turbovec-integration#c3c0528bcd544b1c8125a7b79d7bdd391d463e92"
 dependencies = [
  "blas-src",
  "faer",

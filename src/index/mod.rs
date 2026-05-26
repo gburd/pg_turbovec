@@ -8,6 +8,8 @@
 //!   (`amoptions` callback).
 //! - `page.rs` — meta-page byte layout for the relfile main fork.
 //! - `relfile.rs` — buffer-manager I/O for the relfile pages.
+//! - `mmap_static.rs` — mmap-based reads of the deterministic
+//!   static regions (Phase R-3, v1.5.0).
 //! - `build.rs` — `ambuild` / `ambuildempty`.
 //! - `insert.rs` — `aminsert`.
 //! - `scan.rs` — `ambeginscan` / `amrescan` / `amgettuple` /
@@ -35,6 +37,7 @@ use pgrx::prelude::*;
 mod build;
 mod cost;
 mod insert;
+pub(crate) mod mmap_static;
 mod options;
 pub(crate) mod page;
 pub(crate) mod relfile;

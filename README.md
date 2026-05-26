@@ -12,7 +12,7 @@ your data. Supports:
   smaller than `pgvector` at 4-bit
 - L2 distance (`<->`), inner product (`<#>`), cosine distance (`<=>`),
   L1 distance (`<+>`)
-- in-kernel filtered ANN — push your `WHERE` predicate into the SIMD
+- in-kernel filtered ANN - push your `WHERE` predicate into the SIMD
   scoring loop so selective filters get *cheaper*, not more expensive
 - pgvector-compatible function names (`to_vec`, `array_to_vec`,
   `subvector`, `vector_dims`, `vector_norm`, `inner_product`,
@@ -28,7 +28,7 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.3.0 — 109/109 `#[pg_test]` cases pass against
+> **Status:** v1.3.0 - 109/109 `#[pg_test]` cases pass against
 > PostgreSQL 13, 14, 15, 16, 17, and 18 with the default build
 > flags (the relfile-resident page format and the `turbovec`
 > index AM are now default-on; the `experimental_index_am` and
@@ -100,13 +100,13 @@ direct 1 M-row measurement on the same corpus.
 | FP16 (`halfvec`) | 3 072 | ≈ 1.00 |
 | TurboQuant 4-bit (`turbovec` index, default) | 780 (measured payload / 1 M rows) | **1.000 (search_k = 100)** |
 | TurboQuant 2-bit (`turbovec` index) | 396 (measured payload / 1 M rows) | **1.000 (search_k = 100)** |
-| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65–0.75 (literature) |
+| 1-bit + Hamming HNSW (pgvector `bit_hamming_ops`) | 192 | ≈ 0.65-0.75 (literature) |
 
 The 4-bit / 2-bit numbers come from the 50-query head-to-head sweep
 in [`docs/RECALL.md § 2.2`](docs/RECALL.md); the synthetic random-vector
 measurements in [`docs/RECALL.md § 2.1`](docs/RECALL.md) are
 deliberately pessimistic because random points have no clustering
-structure to exploit — the dbpedia run shows what real embedding
+structure to exploit - the dbpedia run shows what real embedding
 geometry buys you.
 
 **Why does Lloyd-Max scalar quantization beat 1-bit thresholding at
@@ -114,19 +114,19 @@ the same byte count?** TurboQuant first rotates the input by a fixed
 orthogonal matrix so that, after rotation, each coordinate
 independently follows a known Beta distribution that converges to
 N(0, 1/d). It then assigns buckets via Lloyd-Max scalar quantization
-— provably the *distortion-rate-optimal* scalar code for that
-distribution — and packs them at 2, 3, or 4 bits per coordinate.
+- provably the *distortion-rate-optimal* scalar code for that
+distribution - and packs them at 2, 3, or 4 bits per coordinate.
 1-bit thresholding (pgvector's `binary_quantize()`) is the same idea
 pinned to `bit_width = 1`: it keeps the sign and throws the magnitude
 away. At 2 bits, Lloyd-Max with 4 reconstruction levels lands
 materially closer to the Shannon distortion-rate lower bound than a
-2-bucket sign threshold can — so pg_turbovec at `bit_width = 2`
+2-bucket sign threshold can - so pg_turbovec at `bit_width = 2`
 occupies essentially the same byte budget as 1-bit Hamming with
 strictly higher recall. See the [TurboQuant paper, arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
 for the full distortion analysis.
 
 **When is `bit_hamming_ops` still the right tool?** When the bit
-vector is *the data*, not a compression of an `f32` vector — i.e.
+vector is *the data*, not a compression of an `f32` vector - i.e.
 native binary embeddings (Cohere's binary mode), perceptual / image
 fingerprints (pHash, dHash for near-duplicate detection), and
 SimHash / MinHash signatures over text shingles. For those
@@ -140,7 +140,7 @@ and there is no reason to use pg_turbovec instead.
 | Want pgvector-equivalent recall, halve storage | `halfvec` (no quantization) | 3 072 B | ≈ 1.0 |
 | RAG / semantic search, R@10 ≥ 0.95 acceptable | **`bit_width = 4` (default)** | 780 B | 1.000 |
 | Memory pressure dominates, R@10 ≥ 0.85 acceptable | `bit_width = 2` | 396 B | 1.000 |
-| Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 396 B | 1.000 (vs 0.65–0.75) |
+| Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 396 B | 1.000 (vs 0.65-0.75) |
 
 Measured storage and recall come from the head-to-head sweep on
 1 M × 1536-d OpenAI ada-002 embeddings; methodology and the synthetic
@@ -216,7 +216,7 @@ LIMIT  5;
 
 Also supports inner product (`<#>`), L2 (`<->`), and L1 (`<+>`).
 `<#>` returns the *negative* inner product so `ORDER BY ... ASC`
-returns most-similar-first — same convention as pgvector.
+returns most-similar-first - same convention as pgvector.
 
 ## Storing
 
@@ -264,12 +264,12 @@ INSERT INTO items (id, embedding) VALUES (1, '[1,2,3,4,5,6,7,8]')
 | Op    | Meaning                            | Indexed (turbovec AM)? |
 |-------|------------------------------------|------------------------------------------|
 | `<->` | Euclidean (L2) distance            | exact only                               |
-| `<#>` | negative inner product             | yes — `vec_ip_ops` (default)         |
-| `<=>` | cosine distance (`1 - cos θ`)      | yes — `vec_cosine_ops`               |
+| `<#>` | negative inner product             | yes - `vec_ip_ops` (default)         |
+| `<=>` | cosine distance (`1 - cos θ`)      | yes - `vec_cosine_ops`               |
 | `<+>` | taxicab (L1) distance              | exact only                               |
 
 Distances are returned as `double precision`. Distance accumulators
-are `f64` internally — `pg_turbovec`'s `avg(vector)` and `sum(vector)`
+are `f64` internally - `pg_turbovec`'s `avg(vector)` and `sum(vector)`
 preserve more precision than pgvector's `f32` accumulators on
 million-row corpora.
 
@@ -343,7 +343,7 @@ Reloptions:
 The `turbovec` AM supports the full PostgreSQL index lifecycle:
 
 - `CREATE INDEX [CONCURRENTLY]` (parallel build is roadmap)
-- `INSERT` → `aminsert` (idempotent on `IdAlreadyPresent` — handles
+- `INSERT` → `aminsert` (idempotent on `IdAlreadyPresent` - handles
   CIC's two-pass build and HOT updates)
 - `DELETE` + `VACUUM` → `ambulkdelete` (we track every live `u64` id
   in a parallel `Vec` so dead rows are removed correctly)
@@ -354,7 +354,7 @@ The `turbovec` AM supports the full PostgreSQL index lifecycle:
 
 ### Filtered (hybrid) search
 
-`pg_turbovec` pushes `WHERE` predicates into the SIMD scoring loop —
+`pg_turbovec` pushes `WHERE` predicates into the SIMD scoring loop -
 selective filters get cheaper, not more expensive. The kernel
 short-circuits 32-vector blocks whose entire allowed-slot mask is
 empty before any LUT lookup.
@@ -365,7 +365,7 @@ SELECT k.id, d.body
 FROM   turbovec.knn(
          'items'::regclass,
          'id', 'embedding',
-         '[…]'::vector,
+         '[...]'::vector,
          10, 4,
          ARRAY(SELECT id FROM items WHERE tenant_id = $1)::bigint[]
        ) k
@@ -381,23 +381,33 @@ lets you pass an allowlist for hybrid retrieval).
 
 ## Performance
 
-> **Operations note: `shared_buffers`.** A pg_turbovec index built
-> on a million-row dbpedia-class corpus is roughly 1.5 GiB on disk
-> (the SIMD-blocked codes + scales + ids + persisted rotation
-> matrix + Lloyd-Max codebook). For warm-scan latency to match
-> what the kernel can deliver, the index needs to fit entirely in
-> `shared_buffers`; otherwise PostgreSQL's buffer manager re-pulls
-> touched pages from the OS page cache on every scan and you'll
-> see 80–100 ms warm p50 instead of the kernel's ~20 ms.
+> **Operations note: `shared_buffers`.** As of v1.5.0 (Phase
+> R-3), the bulk of a pg_turbovec index — the persisted
+> SIMD-blocked codes, the rotation matrix, and the inline
+> codebook — is read from disk via per-backend
+> `mmap(MAP_PRIVATE)` of the relfile, **bypassing PG's buffer
+> manager entirely** for those bytes. The OS page cache is the
+> authoritative cache, and `shared_buffers` size no longer
+> bounds warm-scan latency on the dominant chains.
 >
-> Rule of thumb: `shared_buffers ≥ 2 × (sum of all turbovec
-> indexes you query hot)`. On a host with the default 128 MiB,
-> that's the first knob to bump. Phase R-3's measurement on a
-> 1 M × 1536-d corpus with 512 MiB `shared_buffers` saw a 1.5×
-> warm-scan gap to pgvector HNSW that vanishes once the index
-> is in shared buffers.
+> You still want `shared_buffers` big enough to hold the meta
+> page, the codes/scales/ids chains (which stay on the buffer
+> manager because VACUUM mutates them in place), and your other
+> relations. A few hundred MiB is fine; 1.5× the index size is
+> no longer required.
 >
-> Full diagnosis: [`docs/RECALL.md § 2.5`](docs/RECALL.md).
+> The fall-back GUC `turbovec.mmap_static_blocked = off` reverts
+> to the v1.4.x buffer-manager-only read path on a per-session
+> basis. With it off, the v1.4.x advice applies:
+> `shared_buffers ≥ 2 × (sum of all turbovec indexes you query
+> hot)` to keep the warm-scan profile clean.
+>
+> Full diagnosis: [`docs/RECALL.md § 2.5`](docs/RECALL.md) (the
+> v1.4.0 buffer-manager-bound profile) and
+> [`docs/RECALL.md § 2.6`](docs/RECALL.md) (the v1.5.0 mmap
+> fix); architecture +
+> isolation contract:
+> [`docs/ARCHITECTURE.md § 8.1`](docs/ARCHITECTURE.md#81-index-am--mmap-isolation-contract).
 
 > **Performance methodology.** The headline numbers in the
 > table at the top of this README come from a real
@@ -411,7 +421,7 @@ lets you pass an allowlist for hybrid retrieval).
 > [`docs/RECALL.md § 2.2`](docs/RECALL.md) and
 > [`benches/scripts/`](benches/scripts/). The synthetic-uniform
 > tables below are from a pure-Rust kernel bench and are kept for
-> historical comparison — they understate real-world recall because
+> historical comparison - they understate real-world recall because
 > uniform-random vectors have no clustering structure for
 > quantization to exploit.
 
@@ -427,7 +437,7 @@ lets you pass an allowlist for hybrid retrieval).
 | 768 |         4 | 0.82 | 0.88 |  0.92 |
 
 Random vectors have no clustering structure for the quantiser to
-exploit — real embeddings (GloVe, OpenAI ada-002) recall meaningfully
+exploit - real embeddings (GloVe, OpenAI ada-002) recall meaningfully
 better. Reproduction:
 
 ```bash
@@ -448,7 +458,7 @@ documented in [`docs/RECALL.md`](docs/RECALL.md) § 6.1.
 |  3072 | 12 288 B   |               1 540 B  |                 772 B  |
 
 A 10 M-row × 1536-dim corpus that needs ~62 GiB of RAM as FP32 fits in
-~7.7 GiB at 4-bit and ~3.9 GiB at 2-bit — without any data-dependent
+~7.7 GiB at 4-bit and ~3.9 GiB at 2-bit - without any data-dependent
 codebook training.
 
 ### Search speed (from the TurboQuant paper, x86 AVX-512BW)
@@ -458,7 +468,7 @@ codebook training.
 - TurboQuant **matches or beats** FAISS `IndexPQFastScan` at every
   4-bit configuration tested (d=384, 768, 1536, 3072).
 - TurboQuant runs **within ±1%** of FAISS at 2-bit single-threaded.
-- On ARM (Apple M3 Max), TurboQuant **beats** FAISS by 12–20% at
+- On ARM (Apple M3 Max), TurboQuant **beats** FAISS by 12-20% at
   every config the paper measured.
 
 We have not yet run pg_turbovec end-to-end against pgvector + HNSW or
@@ -469,16 +479,16 @@ on the v1.0.0 roadmap; see [`docs/RECALL.md`](docs/RECALL.md).
 
 TurboQuant compresses each vector to 2/3/4 bits per coordinate using:
 
-1. **Normalize** — strip the L2 norm; store as a single `f32` scale.
-2. **Random rotation** — multiply by a fixed orthogonal matrix so
+1. **Normalize** - strip the L2 norm; store as a single `f32` scale.
+2. **Random rotation** - multiply by a fixed orthogonal matrix so
    each coordinate independently follows a known Beta distribution.
-3. **Lloyd-Max scalar quantisation** — bucket each coordinate into
+3. **Lloyd-Max scalar quantisation** - bucket each coordinate into
    2/3/4-bit codes optimal for the known distribution.
-4. **Bit-pack** — `dim` coordinates → `dim * bit_width / 8` bytes.
-5. **Length-renormalised scoring** — one extra scalar per vector
+4. **Bit-pack** - `dim` coordinates → `dim * bit_width / 8` bytes.
+5. **Length-renormalised scoring** - one extra scalar per vector
    removes the inner-product downward bias the quantiser introduces.
 
-No codebook training, no data passes — adding vectors is `O(dim)` per
+No codebook training, no data passes - adding vectors is `O(dim)` per
 vector with no rebuild as the corpus grows. Search rotates the query
 once and scores directly against the bit-packed codes via SIMD
 nibble-LUT kernels (NEON, AVX2, AVX-512BW).
@@ -487,7 +497,7 @@ nibble-LUT kernels (NEON, AVX2, AVX-512BW).
 ## Configuration
 
 `pg_turbovec` exposes five GUCs under the `turbovec.*` namespace
-(USERSET — settable per session):
+(USERSET - settable per session):
 
 | GUC                              | Type | Default | Range          |
 |----------------------------------|------|---------|----------------|
@@ -507,7 +517,7 @@ SET turbovec.cache_size_mb = 0;
 
 ## Migrating from pgvector
 
-`pg_turbovec` and `pgvector` coexist cleanly — different schema, type
+`pg_turbovec` and `pgvector` coexist cleanly - different schema, type
 name, and operator-dispatch table. See
 [`docs/MIGRATING_FROM_PGVECTOR.md`](docs/MIGRATING_FROM_PGVECTOR.md)
 for the full cookbook. TL;DR:
@@ -540,33 +550,33 @@ bridge is the supported interop path.
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module map,
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - module map,
   type / operator / aggregate signatures, index AM contract, GUC
   semantics, phased roadmap.
-- [`docs/USAGE.md`](docs/USAGE.md) — cookbook covering install,
+- [`docs/USAGE.md`](docs/USAGE.md) - cookbook covering install,
   exact + ANN search, aggregates, arithmetic, tuning.
 - [`docs/MIGRATING_FROM_PGVECTOR.md`](docs/MIGRATING_FROM_PGVECTOR.md)
-  — hands-on migration with query rewrite tables and a feature
+  - hands-on migration with query rewrite tables and a feature
   comparison.
-- [`docs/INDEXAM.md`](docs/INDEXAM.md) — implementation guide for
+- [`docs/INDEXAM.md`](docs/INDEXAM.md) - implementation guide for
   the `turbovec` index access method.
-- [`docs/RECALL.md`](docs/RECALL.md) — recall benchmark methodology
+- [`docs/RECALL.md`](docs/RECALL.md) - recall benchmark methodology
   and the latest measured numbers.
-- [an internal design note](an internal design note) — what
+- [an internal design note](an internal design note) - what
   we deliberately did *not* ship in 1.0 (binary-compat varlena,
   `bit_hamming_ops` ANN) and the reasoning.
-- [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) — feature-by-feature
+- [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) - feature-by-feature
   comparison against pgvector.
-- [an internal design note](an internal design note) — handoff
+- [an internal design note](an internal design note) - handoff
   notes for the binary-compatible varlena work, if a future session
   picks it up.
-- [`docs/BUILDING.md`](docs/BUILDING.md) — Nix-specific build
+- [`docs/BUILDING.md`](docs/BUILDING.md) - Nix-specific build
   recipe (writable `pg_config` wrapper, `BINDGEN_EXTRA_CLANG_ARGS`,
   `RUSTFLAGS` for openblas).
-- [`RELEASING.md`](RELEASING.md) — release process, version-bump
+- [`RELEASING.md`](RELEASING.md) - release process, version-bump
   checklist, Codeberg release flow.
-- [`CHANGELOG.md`](CHANGELOG.md) — phase-by-phase release notes.
-- [`tests/`](tests/) — psql regression scripts you can run yourself
+- [`CHANGELOG.md`](CHANGELOG.md) - phase-by-phase release notes.
+- [`tests/`](tests/) - psql regression scripts you can run yourself
   (`cargo pgrx run pg16`, then `\i tests/03_full_demo.sql`).
 
 ## FAQ
@@ -575,27 +585,27 @@ bridge is the supported interop path.
 
 No, by design. We coexist: type name `vector`, schema `turbovec`,
 operator dispatch by argument type. Pgvector users have years of
-`vector(1536)` columns and tooling — pretending to be a drop-in would
+`vector(1536)` columns and tooling - pretending to be a drop-in would
 silently change semantics around normalisation and recall. The
 [migration cookbook](docs/MIGRATING_FROM_PGVECTOR.md) shows the
 explicit `real[]` bridge.
 
 **What about `halfvec`, `sparsevec`, `bit`?**
 
-Not supported. `pg_turbovec` quantises full-precision `f32` input —
+Not supported. `pg_turbovec` quantises full-precision `f32` input -
 half-precision halfvec and sparse-vector representations don't map
 cleanly onto the TurboQuant kernel.
 
 **What about L2 / L1 ANN?**
 
 The TurboQuant kernel scores inner-product on unit-normalised vectors.
-We expose `l2_distance` / `l1_distance` as exact functions only — there
+We expose `l2_distance` / `l1_distance` as exact functions only - there
 is no L2 / L1 index path. For workloads dominated by Euclidean ANN,
 pgvector + HNSW is the right pick.
 
 **What's not in 1.0?**
 
-TL;DR — see [an internal design note](an internal design note)
+TL;DR - see [an internal design note](an internal design note)
 for the full cost/benefit reasoning. The two items most likely to be
 asked about:
 
@@ -610,7 +620,7 @@ asked about:
   kernel is a scalar quantizer for dense `f32` vectors; it doesn't
   fit Hamming-space ANN. And the workload that motivates
   `bit_hamming_ops` (memory-pressured semantic search) is already
-  covered better by `bit_width = 2` — same byte budget, materially
+  covered better by `bit_width = 2` - same byte budget, materially
   higher recall.
 
 **Why two crates: `pg_turbovec` and `turbovec`?**
@@ -625,22 +635,22 @@ on top of it. We track upstream releases.
 Vector search on PostgreSQL has three serious open-source options.
 The honest comparison:
 
-- **[pgvector](https://github.com/pgvector/pgvector)** — production-
+- **[pgvector](https://github.com/pgvector/pgvector)** - production-
   tested at scale, larger feature surface (HNSW for L2 *and* inner
   product *and* L1, plus `halfvec`, `sparsevec`, `bitvec`), and an
   ecosystem of clients that already speak its types and operators.
   Choose pgvector if you don't have memory pressure and you value
   maturity.
-- **[pgvectorscale](https://github.com/timescale/pgvectorscale)** —
+- **[pgvectorscale](https://github.com/timescale/pgvectorscale)** -
   SOTA published latency on 50 M+ row corpora via StreamingDiskANN,
   layered on top of pgvector. Choose pgvectorscale if your corpus is
   in the tens-of-millions-of-rows range and you can run TimescaleDB.
-- **pg_turbovec** — smallest on-disk footprint, in-kernel filtered
+- **pg_turbovec** - smallest on-disk footprint, in-kernel filtered
   ANN (selective `WHERE` clauses make scans *cheaper*, not more
   expensive), zero codebook training. Choose pg_turbovec if memory
   dominates your cost equation.
 
-The three coexist cleanly in the same database — separate schemas,
+The three coexist cleanly in the same database - separate schemas,
 separate type oids, separate operator dispatch. You can A/B them on
 your own data without committing to one.
 
@@ -668,7 +678,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - **Ryan Codrai** for the [`turbovec`](https://github.com/RyanCodrai/turbovec)
   Rust crate and the SIMD kernels that do all the actual work.
 - **Google Research** for [TurboQuant](https://arxiv.org/abs/2504.19874)
-  (ICLR 2026) — the algorithm.
+  (ICLR 2026) - the algorithm.
 - **The pgvector authors** for setting the API conventions
   (`<-> <#> <=> <+>`, `to_vector`, `array_to_vector`, `subvector`,
   `vector_dims`, `vector_norm`) we mirror.

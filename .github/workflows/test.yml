@@ -26,6 +26,12 @@ jobs:
         pg: [13, 14, 15, 16, 17, 18]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Shallow clone; the test matrix doesn't need tag history
+          # the way drift-check does. Reduces rate-limit pressure on
+          # repos with lots of history (`actions/checkout@v4` retries
+          # internally but a deep clone amplifies each 403).
+          fetch-depth: 1
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:

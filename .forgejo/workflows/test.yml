@@ -5,89 +5,30 @@ on:
   pull_request:
     branches: [main]
 
-# CI matrix: every PG version we claim to support must pass the full
-# #[pg_test] suite. v1.0.0 shipped with build failures on pg13/14/15/18
-# because the local dev box only had pg16 and arnold only ran pg17;
-# this workflow exists so that never happens again.
+# Codeberg Forgejo Actions configuration.
 #
-# `cargo pgrx init --pgN download` builds a fresh PostgreSQL N from
-# source the first time the workflow runs in a given runner image,
-# then caches it across runs. Each version takes ~5–10 min cold,
-# ~30 s warm.
+# Codeberg's hosted runners impose a 10-minute job runtime cap (see
+# https://codeberg.org/actions/meta § "Available runners"), which
+# can't fit our `cargo pgrx test pg<N>` matrix — those jobs need
+# 7-15 min each and rebuild PG from source on cold cache. So this
+# workflow runs ONLY drift-check (which finishes in 3 seconds) on
+# Codeberg's smallest hosted runner. The full 6-PG-version test
+# matrix lives at .github/workflows/test.yml and runs on the
+# GitHub mirror gburd/pg_turbovec.
 #
-# OpenBLAS is needed because the `turbovec` kernel pulls in BLAS via
-# `ndarray + faer`. Fedora/Debian package names differ; we use
-# Debian (the default Forgejo runner image).
+# If you want the full matrix on Codeberg too, register a
+# self-hosted runner against the repo via
+# `bash scripts/install-forgejo-runner.sh` (see docs/CI.md). That
+# runner has no time cap and can pick up jobs labelled `self-hosted`.
 
 jobs:
   drift-check:
-    runs-on: docker
-    container:
-      image: docker.io/library/debian:bookworm-slim
+    runs-on: codeberg-tiny
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # need tag history for the version-vs-tag check
       - name: install bash + grep
-        run: apt-get update -qq && apt-get install -y --no-install-recommends bash grep
+        run: apt-get update -qq && apt-get install -y --no-install-recommends bash grep gawk
       - name: drift-check
         run: bash scripts/drift-check.sh
-
-  test:
-    runs-on: docker
-    strategy:
-      fail-fast: false
-      matrix:
-        pg: [13, 14, 15, 16, 17, 18]
-    container:
-      image: docker.io/library/rust:1-bookworm
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: install build deps
-        run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends \
-              build-essential pkg-config libssl-dev libreadline-dev zlib1g-dev \
-              libicu-dev libxml2-dev libxslt1-dev liblz4-dev libzstd-dev \
-              libclang-dev clang \
-              flex bison \
-              libopenblas-dev gfortran \
-              git ca-certificates curl
-          # IMPORTANT: cargo-pgrx 0.17.0 matches the project Cargo.toml.
-          # Bumping pgrx requires bumping cargo-pgrx in lockstep.
-          cargo install --locked cargo-pgrx --version 0.17.0
-
-      - name: cache cargo-pgrx PG installs
-        uses: actions/cache@v4
-        with:
-          path: ~/.pgrx
-          key: pgrx-pg${{ matrix.pg }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
-
-      - name: cache cargo target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock') }}
-
-      - name: cargo pgrx init pg${{ matrix.pg }}
-        run: cargo pgrx init --pg${{ matrix.pg }} download
-
-      - name: cargo pgrx test pg${{ matrix.pg }}
-        run: |
-          cargo pgrx test pg${{ matrix.pg }} \
-              --no-default-features \
-              --features "pg${{ matrix.pg }} pg_test"
-
-      # Surface the test count in the run summary so we can spot
-      # regressions at a glance.
-      - name: report
-        if: always()
-        run: |
-          # Most recent test run produces a stdout we can scrape.
-          # When green:  "test result: ok. 92 passed; 0 failed;"
-          # When broken: surfaced in the previous step's failure.
-          echo "pg${{ matrix.pg }}: see step output above"

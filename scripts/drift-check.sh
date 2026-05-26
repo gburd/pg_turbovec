@@ -50,9 +50,15 @@ cargo_pg_set=$(echo "$cargo_pgs" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n
 docs_pg_set=$(echo "$docs_pgs" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
 [ "$cargo_pg_set" = "$docs_pg_set" ] || fail "Cargo.toml PG features ($cargo_pg_set) ≠ docs/PG_VERSION_SUPPORT.md ($docs_pg_set)"
 
-# CI matrices must match Cargo.toml.
+# CI matrices must match Cargo.toml IF a matrix is present. The
+# Codeberg workflow (.forgejo/workflows/test.yml) intentionally
+# carries only drift-check because Codeberg's hosted runners have
+# a 10-minute job cap that cargo pgrx test can't fit; the full
+# matrix lives only on .github/. Skip the matrix check for any
+# workflow that doesn't declare one.
 for ci in .forgejo/workflows/test.yml .github/workflows/test.yml; do
     [ -f "$ci" ] || continue
+    grep -q 'pg: \[' "$ci" || continue
     ci_pgs=$(grep -oE 'pg: \[[^]]+\]' "$ci" | head -1 | grep -oE '[0-9]+' | sort | sed 's/^/pg/' | tr '\n' ' ' | sed 's/ $//')
     [ "$ci_pgs" = "$cargo_pg_set" ] || fail "$ci matrix ($ci_pgs) ≠ Cargo.toml ($cargo_pg_set)"
 done

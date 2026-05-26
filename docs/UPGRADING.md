@@ -34,6 +34,8 @@ Every release that bumps the on-disk format **ships with**:
 | 1.3.x | 1.4.0+ | `REINDEX INDEX <name>;` per index | v1.4.0 introduced the persisted rotation matrix in the relfile (`MetaPageData::version` 2→3). v1.3.x indexes have an empty rotation chain so the new binary detects them via `MetaPageData::is_legacy_v2()` and ERRORs out cleanly. The lazy QR was the warm-scan hotspot (~64.8% self time on dbpedia-1M), so persisting the matrix closes the gap to pgvector HNSW. |
 | 1.3.x → 1.3.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 | 1.4.x → 1.4.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
+| 1.4.x | 1.5.0+ | _none_ | v1.5.0 (Phase R-3) is a scan-side change only: the `ambeginscan` cache-fill path now mmaps the deterministic static regions of the relfile (blocked codes + rotation matrix + inline codebook) instead of pulling them through the buffer manager. The on-disk format (`MetaPageData::version = 3`) is byte-identical to v1.4.x. No REINDEX. The fall-back GUC `turbovec.mmap_static_blocked = off` reverts to the v1.4.x scan path on a per-session basis. See `docs/ARCHITECTURE.md` § "Index AM · mmap isolation contract" for the consistency story. |
+| 1.5.x → 1.5.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 
 If you maintain pg_turbovec for a fleet of clusters, scripting the
 migration looks like:

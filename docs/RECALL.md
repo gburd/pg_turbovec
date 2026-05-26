@@ -844,6 +844,100 @@ sweep so the bench-time configuration matches Phase O-3 exactly.
 - Post-fix perf profile: [`profile_v1_4_0_symbols.txt`](../benches/results/profile_v1_4_0_symbols.txt) and [`profile_v1_4_0_flame.svg`](../benches/results/profile_v1_4_0_flame.svg)
 - Reproducer scripts: [`benches/scripts/warm_phase_r3.sh`](../benches/scripts/warm_phase_r3.sh), [`warm_phase_r3_clock.sh`](../benches/scripts/warm_phase_r3_clock.sh), [`migrate_index_v1_4_0.sh`](../benches/scripts/migrate_index_v1_4_0.sh)
 
+## 2.6 Warm-scan latency: mmap'd static regions (Phase R-3, v1.5.0)
+
+**The warm-scan fix that bypasses the buffer manager.** § 2.5
+ diagnosed the post-Phase-R-2 warm-scan profile: the 1.5 GB index
+ doesn't fit in the bench's 512 MB `shared_buffers`, so each warm
+ scan re-pulls touched pages from the OS page cache via `pread`
+ → kernel `_copy_to_iter` →
+ `__memmove_avx_unaligned_erms` into the buffer manager. That
+ was ~65% of warm-scan time and put us at 90 ms p50 vs HNSW
+ ef=40's 61 ms. Phase R-3 (v1.5.0) replaces the buffer-manager
+ reads of the *static* regions (persisted SIMD-blocked codes,
+ persisted rotation matrix, inline codebook) with a per-backend
+ `mmap(MAP_PRIVATE)` of the relfile. The OS page cache is the
+ authoritative cache for those bytes; PG's buffer manager is
+ out of the loop entirely on those reads.
+
+**What we mmap (and what we don't):**
+
+| Region | Path | Why |
+|---|---|---|
+| Meta page (block 0) | buffer manager | One 8 KB page; never the bottleneck. |
+| Codes / scales / ids chains | buffer manager | Mutated in-place by VACUUM swap-remove (`ambulkdelete`). The buffer manager is the canonical reader. |
+| **Persisted SIMD-blocked codes** (~768 MiB at 1 M × 1536-d × 4-bit) | **mmap** | Deterministic-after-`ambuild`; rewritten only on the next aminsert commit-flush which bumps `am_version` and invalidates every backend's mmap'd cache entry. **The bulk of the I/O.** |
+| **Persisted rotation matrix** (~9 MiB at dim 1536) | **mmap** | Deterministic from `(dim, ROTATION_SEED)`. Never mutated post-build. |
+| **Inline codebook (centroids + boundaries)** | **mmap-side copy** | Deterministic from `(bit_width, dim)`. 64 bytes — the path is uniform but the cost is irrelevant either way. |
+
+The Cow-based borrowed API in upstream `turbovec`
+([`from_id_map_parts_with_prepared_borrowed`](https://github.com/gburd/turbovec/blob/pg_turbovec-integration/turbovec/src/id_map.rs))
+is wired up so embedders whose on-disk static-region chains are
+*contiguous* can hand turbovec a true zero-copy `Cow::Borrowed`
+slice into the mapping. pg_turbovec's chains have 24-byte page
+headers every 8168 bytes (PG `BLCKSZ` minus `PageHeaderData`),
+so v1.5.0 still does one `memcpy` from mmap into a contiguous
+`Vec<u8>` at cache-fill time. The win over the buffer-manager
+path is
+
+1. No `BufTableLookup` / pin / lock per page (was the 37%
+   `ReadBufferExtended` children figure in the v1.4.0 profile).
+2. No double-cache: shared_buffers no longer holds a copy of
+   pages already in the OS page cache, freeing it for the
+   non-static chains.
+3. One memcpy (mmap → chain `Vec`) instead of two (`pread` →
+   shared_buffers slot, then slot → chain `Vec`).
+
+The `turbovec.mmap_static_blocked` GUC (default `on`) controls
+this path. Setting it `off` reverts to the v1.4.x buffer-manager
+read path on a per-session basis.
+
+**Isolation contract.** mmap with relaxed consistency vs the
+buffer manager is correct because the index AM contract is
+approximate-by-design: heap visibility is the source of truth
+and `xs_recheckorderby = true` (asserted unconditionally in
+`amgettuple`) recomputes the ORDER BY expression from the heap
+tuple, correcting any ranking error caused by the mmap'd image
+lagging a just-committed insert. See
+[`docs/ARCHITECTURE.md` § "Index AM · mmap isolation
+contract"](ARCHITECTURE.md#index-am--mmap-isolation-contract)
+for the full argument and worked examples (concurrent aminsert,
+concurrent ambulkdelete, REINDEX).
+
+**Re-bench on arnold:** _pending—validation against the same
+`shared_buffers=512MB` 1 M × 1536-d dbpedia corpus is queued for
+the next available bench window._ Expected: warm p50 drops from
+the v1.4.0 90 ms toward ~60 ms (HNSW ef=40 parity). The
+buffer-manager symbols (`ReadBufferExtended`, `WaitReadBuffers`,
+`mdreadv`, `__memmove_avx_unaligned_erms`) should fall off the
+top-50 of the warm-scan profile.
+
+**Local debug-build smoke (this commit):** the in-tree
+`#[pg_test]` `relfile_mmap_static_round_trip_matches_buffer_manager`
+builds an index with the prepared layout, runs the same query
+with `turbovec.mmap_static_blocked = on` and `= off`, and
+asserts identical top-1 ids. The mmap path round-trips at the
+result level; sub-ms latency on the small fixture is the
+expected debug-build speed and not the right place to measure
+the arnold-scale win.
+
+**Index growth and build cost** — unchanged from v1.4.0:
+
+| metric | v1.4.0 (Phase R-3 — wait, that's the *measurement*) | v1.5.0 (Phase R-3 — the *fix*) | delta |
+|---|---:|---:|---:|
+| build time | 234 s | 234 s | 0 (build is unchanged) |
+| size on disk | 1 536 MB | 1 536 MB | 0 (wire format unchanged) |
+
+v1.5.0 is a scan-side change only. Wire format stays at v3, so
+v1.4.x indexes scan under v1.5.0 with no REINDEX.
+
+**Source data**
+- Local pg_test smoke: see
+  `tests::pg_relfile_mmap_static_round_trip_matches_buffer_manager`,
+  `tests::pg_relfile_mmap_static_concurrent_aminsert_recheck_corrects`,
+  `tests::pg_relfile_mmap_static_cache_invalidation_drop_order` in `src/lib.rs`.
+- arnold re-bench: pending.
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

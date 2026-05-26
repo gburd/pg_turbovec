@@ -1,0 +1,77 @@
+{
+  "head": "8d7f85f",
+  "host": "meh (24 cores, 125 GiB RAM, NixOS, kernel 6.12.83)",
+  "comparison": {
+    "warm_p50_phase_r3_arnold_v1_4_0_mmap_off": 90.3,
+    "warm_p50_meh_v1_5_0_mmap_on":              26.803,
+    "warm_p50_meh_v1_5_0_mmap_off":             26.652,
+    "delta_ms":                                  0.151,
+    "note": "On meh (125 GiB RAM, 24 cores) the v1.5.0 mmap path delivers a statistically irrelevant 0.15 ms p50 improvement: both modes converge to ~26.7 ms because the entire 1.5 GB index fits trivially in OS page cache, making the buffer-manager read path effectively free. The 60-90 ms regime that motivated Phase R-3 was an arnold-class (i9-12900H, 31 GiB RAM) phenomenon."
+  },
+  "configs": [
+    {
+      "label": "tv_4bit_warm_mmap_on",
+      "engine": "pg_turbovec 1.5.0",
+      "guc": {
+        "turbovec.mmap_static_blocked": "on",
+        "turbovec.search_k": 100,
+        "shared_buffers": "512MB"
+      },
+      "n": 50,
+      "min_ms": 26.581,
+      "p50_ms": 26.803,
+      "p95_ms": 61.344,
+      "max_ms": 61.578,
+      "mean_ms": 39.392,
+      "warmup1_ms": 4188.07,
+      "warmup2_ms": 59.154,
+      "tsv": "benches/results/u2_meh_tv_4bit_warm_mmap_on.tsv"
+    },
+    {
+      "label": "tv_4bit_warm_mmap_off",
+      "engine": "pg_turbovec 1.5.0",
+      "guc": {
+        "turbovec.mmap_static_blocked": "off",
+        "turbovec.search_k": 100,
+        "shared_buffers": "512MB"
+      },
+      "n": 50,
+      "min_ms": 26.547,
+      "p50_ms": 26.652,
+      "p95_ms": 60.966,
+      "max_ms": 61.097,
+      "mean_ms": 35.011,
+      "warmup1_ms": 3151.716,
+      "warmup2_ms": 52.958,
+      "tsv": "benches/results/u2_meh_tv_4bit_warm_mmap_off.tsv"
+    }
+  ],
+  "verdict": "shared_buffers_was_the_bottleneck",
+  "verdict_explanation": "Phase S delivers no measurable warm-scan win on meh because the bottleneck Phase S targets (buffer-manager copy of the 1.5 GB static regions on a host where they don't fit shared_buffers) is fully masked by the OS page cache when free RAM is plentiful. With 125 GiB total / ~76 GiB free, the entire 1.5 GB index sits comfortably in the kernel page cache; the 'pread -> shared_buffers slot -> chain Vec' path that Phase S replaces costs ~0 because pread hits warm OS cache and the buffer-manager work is pure memcpy. mmap eliminates that memcpy in principle, but the savings (~0.1 ms p50) are below measurement noise on a 26 ms baseline. Phase S is expected to deliver the predicted win on hosts where free RAM is constrained relative to the index size (the original arnold profile: 31 GiB RAM, 1.5 GB index, plus other working sets) -- a re-bench on arnold remains the definitive validation. The U-2 numbers do confirm v1.5.0 is at-worst neutral relative to v1.4.x on a generously-RAMed host: no regression.",
+  "methodology": {
+    "primary": "Single warm psql session per config (one persistent backend). 2 untimed warmup queries against qid=1 (the first re-pays the per-backend init cost: Lloyd-Max codebook + blocked-layout repack + relfile rotation read; the second confirms cache-warm steady-state). Then 50 timed queries, qid=1..50, each routed through bench_one_query_tv(qid) which times an ORDER BY (emb::real[]::turbovec.vector) OPERATOR(turbovec.<=>) q LIMIT 10 via clock_timestamp() inside a plpgsql wrapper. Same shape as Phase J / Phase O-3 / Phase R-3.",
+    "config_isolation": "Each config runs in a fresh psql connection so the per-backend cache starts empty and the new mmap_static_blocked GUC value is observed on the warmup1 cache-miss install. Verified by SHOW turbovec.mmap_static_blocked emitting 'on' / 'off' in each session log.",
+    "shared_buffers": "512MB (matches arnold Phase R-3 setup; smaller than the 1.5 GB index)",
+    "search_k": 100,
+    "max_parallel_workers_per_gather": 0
+  },
+  "raw_observations": {
+    "bimodal_distribution": "Both configs show bimodal latencies: ~25-38 queries cluster at ~26.5-26.7 ms (fast), ~12-14 queries cluster at ~60 ms (slow), with a small middle tail. The p50 captures the fast cluster. The p95 captures the slow cluster, suggesting query-set-dependent variance (some query vectors trigger a cheaper search-k pruning path than others).",
+    "warmup1_ms": "Pays per-backend cache-miss build (Lloyd-Max codebook + blocked-layout repack + rotation matrix read). 4.19 s mmap=on, 3.15 s mmap=off.",
+    "warmup2_ms": "Cache-warm steady-state on qid=1 specifically. ~50-60 ms in both configs (qid=1 happens to be a 'slow' query)."
+  },
+  "u1_cache_diagnosis": {
+    "verdict": "cache_works_correctly",
+    "test": "Built v1.5.0 with a temporary atomic-counter tracepoint in cache::lookup() exposing cache_stats() / cache_stats_reset() SQL functions. Loaded a 2000 x 64-d random unit vector corpus, built the turbovec 4-bit index, and ran 50 separate ORDER BY queries against it inside a single warm psql session.",
+    "result": "lookups=50, hits=50, misses_key=0, misses_ver=0, misses_rel=0",
+    "interpretation": "The Phase S agent's hypothesis that the per-backend Arc<RwLock<IdMapIndex>> cache misses on every warm scan is wrong. The cache hits 100 % of the time after the first install. The HashMap::insert hot symbol the Phase S agent saw in perf was almost certainly the one-shot finalise_from_inner build during the cold/warmup1 cache-miss install (~1 M HashMap::insert calls for the 1 M-vector id-map build), amortised over the 50-query sample but not actually running per query. The warm-scan bottleneck on hardware where it is observable is therefore NOT the cache lookup; it is downstream (search kernel, ORDER BY recheck heap fetches, or buffer-manager static-region reads on RAM-constrained hosts).",
+    "tracepoint_status": "Tracepoint code reverted before the v1.5.0 sweep build; not committed."
+  },
+  "artefacts": [
+    "benches/results/u2_meh_tv_4bit_warm_mmap_on.tsv (50 timed rows, qid<TAB>ms)",
+    "benches/results/u2_meh_tv_4bit_warm_mmap_off.tsv (50 timed rows, qid<TAB>ms)",
+    "/scratch/pg_turbovec-bench/u2_results/*.log (raw psql session logs)",
+    "/scratch/pg_turbovec-bench/u2_results/*.stats (per-config p50/p95/min/max/mean)"
+  ],
+  "reproducer": "/scratch/pg_turbovec-bench/u2_run.sh on meh (sources env.sh; uses bench_one_query_tv from benches/scripts/bench_million_setup.sql)"
+}

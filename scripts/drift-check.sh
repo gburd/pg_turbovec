@@ -151,6 +151,45 @@ if [ -n "$last_tag" ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 8. Scoreboard cells in docs/PARITY_GAPS.md must not say TBD or claim
+#    a regression without a phase qualifier explaining when it shipped.
+# ----------------------------------------------------------------------
+#
+# History: v1.0.x → v1.1.0 (Phase K) shipped the 3000× INSERT speedup,
+# but the PARITY_GAPS row stayed "~200 ms / we lose 400×" through
+# three minor versions because no one re-read the table. Phase J
+# measured Recall@10 = 1.000 on dbpedia-1M but the row stayed "TBD"
+# the same way. This check fires when:
+#
+#   - Any cell in the scoreboard contains "TBD".
+#   - A cell says "we lose <N>x" without a same-row "post-Phase-X"
+#     or "shipped in v" qualifier (i.e. a regression that hasn't
+#     been re-evaluated since shipping the fix).
+
+if [ -f docs/PARITY_GAPS.md ]; then
+    # Find the scoreboard table. Awk's range pattern is finicky when
+    # the end regex could match the start line; gate the start with
+    # a flag so we only enter the range AFTER the header line.
+    scoreboard=$(awk '
+        /^## Performance gaps/ { in_section = 1; next }
+        /^## / && in_section   { exit }
+        in_section             { print }
+    ' docs/PARITY_GAPS.md | grep -E '^\| ' | head -20)
+    while IFS= read -r row; do
+        # TBD in any cell.
+        if printf '%s' "$row" | grep -qE '\bTBD\b'; then
+            fail "docs/PARITY_GAPS.md scoreboard contains TBD: $(printf '%s' "$row" | head -c 120)"
+        fi
+        # "we lose Nx" claim without a Phase / shipped-in-v qualifier.
+        if printf '%s' "$row" | grep -qE 'we lose [~]?[0-9]+(x|×)'; then
+            if ! printf '%s' "$row" | grep -qE 'Phase [A-Z]|shipped in v|post-Phase|v1\.[0-9]'; then
+                fail "docs/PARITY_GAPS.md scoreboard claims a regression without a phase qualifier; either fix the regression and re-measure, or annotate the row with the in-flight fix: $(printf '%s' "$row" | head -c 120)"
+            fi
+        fi
+    done <<<"$scoreboard"
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

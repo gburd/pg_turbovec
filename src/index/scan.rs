@@ -3,16 +3,17 @@
 //! `amgettuple`, runs a single batch search, then drains results
 //! one TID per call.
 
+use std::borrow::Cow;
 use std::ffi::c_int;
 use std::sync::Arc;
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
-use turbovec::IdMapIndex;
+use turbovec::{IdMapIndex, PreparedCachesBorrowed};
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
-use crate::index::relfile;
+use crate::index::{mmap_static, relfile};
 use crate::kernels;
 use crate::vec::Vector;
 
@@ -283,57 +284,106 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             None => match cache::lookup(key, relfile_node, version_as_i64) {
             Some(a) => a,
             None => {
-                let stored_index = {
-                    let meta = relfile::read_meta((*scan).indexRelation)
-                        .expect("meta disappeared mid-scan");
-                    let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
+                // Phase R-3: cache miss. Try the mmap fast path
+                // for the deterministic-after-`ambuild` static
+                // regions (blocked codes + rotation matrix +
+                // inline codebook); fall back to the buffer-
+                // manager `read_full` if mmap isn't available
+                // (mmap_static_blocked GUC off, non-default
+                // tablespace, or open(2) raced a REINDEX).
+                let meta = relfile::read_meta((*scan).indexRelation)
+                    .expect("meta disappeared mid-scan");
+                let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
+                let mmap_enabled = guc::MMAP_STATIC_BLOCKED.get();
+                let mmap_load = if mmap_enabled && meta.has_prepared_layout() {
+                    mmap_static::load_static_regions((*scan).indexRelation, &meta)
+                } else {
+                    None
+                };
 
-                    // Phase P + Phase R-2: when the v3 layout
-                    // is populated, skip the per-backend
-                    // `pack::repack` + Lloyd-Max compute + QR
-                    // decomposition by reading the prepared
-                    // parts (blocked codes, codebook, rotation
-                    // matrix) off disk and feeding them back
-                    // into the OnceLocks via
-                    // `from_id_map_parts_with_prepared`.
-                    let load_result = if meta.has_prepared_layout() {
-                        let blocked = relfile::read_blocked(
-                            (*scan).indexRelation,
-                            &meta,
-                        );
-                        let centroids = meta.centroids_slice().to_vec();
-                        let boundaries = meta.boundaries_slice().to_vec();
-                        let rotation = relfile::read_rotation(
-                            (*scan).indexRelation,
-                            &meta,
-                        );
-                        let rotation_opt =
-                            if rotation.is_empty() { None } else { Some(rotation) };
-                        IdMapIndex::from_id_map_parts_with_prepared(
-                            meta.bit_width as usize,
-                            meta.dim as usize,
-                            meta.n_vectors as usize,
-                            codes,
-                            scales,
-                            ids,
-                            blocked,
-                            meta.n_blocks_blocked as usize,
-                            centroids,
-                            boundaries,
-                            rotation_opt,
-                        )
-                    } else {
-                        IdMapIndex::from_id_map_parts(
-                            meta.bit_width as usize,
-                            meta.dim as usize,
-                            meta.n_vectors as usize,
-                            codes,
-                            scales,
-                            ids,
-                        )
+                let (stored_index, mmap_handle) = if let Some((handle, parts)) = mmap_load {
+                    // Mmap path: hand the chain bytes to turbovec
+                    // via the borrowed-cache constructor as
+                    // `Cow::Owned` (the chains had to be copied
+                    // off the mmap because the on-disk layout has
+                    // 24-byte page-header gaps every 8168 bytes).
+                    // The Mmap handle still lives in the cache
+                    // entry per the isolation contract.
+                    let prepared = PreparedCachesBorrowed {
+                        blocked_codes: Some(Cow::Owned(parts.blocked_codes)),
+                        n_blocks: parts.n_blocks,
+                        centroids: Some(Cow::Owned(parts.centroids)),
+                        boundaries: Some(Cow::Owned(parts.boundaries)),
+                        rotation: Some(Cow::Owned(parts.rotation)),
                     };
+                    let load_result =
+                        IdMapIndex::from_id_map_parts_with_prepared_borrowed(
+                            meta.bit_width as usize,
+                            meta.dim as usize,
+                            meta.n_vectors as usize,
+                            Cow::Owned(codes),
+                            Cow::Owned(scales),
+                            ids,
+                            prepared,
+                        );
                     match load_result {
-                        Ok(idx) => idx,
+                        Ok(idx) => (idx, Some(handle)),
+                        Err(e) => error!(
+                            "turbovec relfile (mmap path): corrupt page chain for {:?}: {}",
+                            indexrelid, e
+                        ),
+                    }
+                } else if meta.has_prepared_layout() {
+                    // Buffer-manager fallback path with prepared
+                    // layout (matches v1.4.0 behaviour).
+                    let blocked = relfile::read_blocked(
+                        (*scan).indexRelation,
+                        &meta,
+                    );
+                    let centroids = meta.centroids_slice().to_vec();
+                    let boundaries = meta.boundaries_slice().to_vec();
+                    let rotation = relfile::read_rotation(
+                        (*scan).indexRelation,
+                        &meta,
+                    );
+                    let rotation_opt =
+                        if rotation.is_empty() { None } else { Some(rotation) };
+                    let load_result = IdMapIndex::from_id_map_parts_with_prepared(
+                        meta.bit_width as usize,
+                        meta.dim as usize,
+                        meta.n_vectors as usize,
+                        codes,
+                        scales,
+                        ids,
+                        blocked,
+                        meta.n_blocks_blocked as usize,
+                        centroids,
+                        boundaries,
+                        rotation_opt,
+                    );
+                    match load_result {
+                        Ok(idx) => (idx, None),
+                        Err(e) => error!(
+                            "turbovec relfile: corrupt page chain for {:?}: {}",
+                            indexrelid, e
+                        ),
+                    }
+                } else {
+                    // No prepared layout (legacy path; should be
+                    // unreachable post-Phase Q because
+                    // ambeginscan ERRORs on legacy_v1 / legacy_v2
+                    // up-front, but keep the fall-through for
+                    // defence in depth).
+                    let load_result = IdMapIndex::from_id_map_parts(
+                        meta.bit_width as usize,
+                        meta.dim as usize,
+                        meta.n_vectors as usize,
+                        codes,
+                        scales,
+                        ids,
+                    );
+                    match load_result {
+                        Ok(idx) => (idx, None),
                         Err(e) => error!(
                             "turbovec relfile: corrupt page chain for {:?}: {}",
                             indexrelid, e
@@ -342,7 +392,14 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 };
                 let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
                 let total_bytes = bytes_per_vec * (n_in_index.max(1));
-                cache::insert(key, stored_index, total_bytes, relfile_node, version_as_i64)
+                cache::insert_with_mmap(
+                    key,
+                    stored_index,
+                    total_bytes,
+                    relfile_node,
+                    version_as_i64,
+                    mmap_handle,
+                )
             }
         }};
         let n_live = arc.read().len();

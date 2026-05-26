@@ -47,6 +47,7 @@ use pgrx::prelude::*;
 use turbovec::IdMapIndex;
 
 use crate::guc;
+use crate::index::mmap_static::StaticRegionsMap;
 
 /// Composite cache key. `attnum = 0` is reserved for the index AM
 /// path; positive values are heap attribute numbers from the
@@ -79,6 +80,21 @@ struct Entry {
     /// are single-threaded and we don't run inside parallel
     /// workers).
     index: Arc<RwLock<IdMapIndex>>,
+    /// Phase R-3: optional `Mmap` of the relfile's static regions.
+    /// `Some(_)` when the entry was installed via the mmap-load
+    /// path; `None` when it came from a pure `read_full` fall-back
+    /// (e.g. `mmap_static_blocked = off`, non-default tablespace,
+    /// or the brief mid-REINDEX rename window where opening the
+    /// relfile by path returns `ENOENT`). The `IdMapIndex` does
+    /// not literally borrow into this map today (we copy the
+    /// chains off it once at cache-fill time), but holding the
+    /// `Mmap` here pins the lifetime contract for the
+    /// `from_*_with_prepared_borrowed` constructor and lets a
+    /// future zero-copy follow-up be additive without touching
+    /// the cache machinery again. The `Mmap` is dropped (and the
+    /// kernel mapping torn down) when the cache entry is.
+    #[allow(dead_code)] // retained for Drop ordering / lifetime contract
+    mmap: Option<StaticRegionsMap>,
     /// Approximate bytes the entry occupies. Used for the LRU cap.
     bytes: usize,
     /// `pg_class.relfilenode` snapshot. Zero means we didn't track it
@@ -211,12 +227,34 @@ pub fn insert(
     relfilenode: u32,
     n_rows: i64,
 ) -> Arc<RwLock<IdMapIndex>> {
+    insert_with_mmap(key, index, bytes, relfilenode, n_rows, None)
+}
+
+/// Phase R-3 variant of [`insert`] that also takes an optional
+/// [`StaticRegionsMap`]. The `Mmap` is colocated on the cache
+/// entry so it lives for at least as long as the
+/// `Arc<RwLock<IdMapIndex>>` returned to the caller. Drop
+/// ordering on `Entry` is `Drop::drop(self)` -> drops `index`
+/// (the `Arc`; if this was the last reference, the inner
+/// `RwLock<IdMapIndex>` is freed) -> drops `mmap` (`munmap(2)`).
+///
+/// Crate-private because `StaticRegionsMap` is itself
+/// `pub(crate)`; external callers use [`insert`].
+pub(crate) fn insert_with_mmap(
+    key: CacheKey,
+    index: IdMapIndex,
+    bytes: usize,
+    relfilenode: u32,
+    n_rows: i64,
+    mmap: Option<StaticRegionsMap>,
+) -> Arc<RwLock<IdMapIndex>> {
     let arc = Arc::new(RwLock::new(index));
     let mut g = CACHE.lock();
     g.insert(
         key,
         Entry {
             index: arc.clone(),
+            mmap,
             bytes,
             relfilenode,
             n_rows,
@@ -247,6 +285,7 @@ pub fn am_install(
         key,
         Entry {
             index: arc.clone(),
+            mmap: None,
             bytes,
             relfilenode,
             n_rows: freshness,

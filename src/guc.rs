@@ -11,6 +11,7 @@
 //! | `turbovec.warn_on_rebuild`       | bool | true    | -              |
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
+//! | `turbovec.mmap_static_blocked`   | bool | true    | -              |
 
 use core::ffi::CStr;
 
@@ -22,6 +23,26 @@ pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
+
+/// Phase R-3: when on (the default), `ambeginscan` mmap-loads the
+/// deterministic-after-`ambuild` regions of the relfile (blocked
+/// codes + persisted rotation matrix) instead of pulling the
+/// chains through `ReadBufferExtended` / shared_buffers. The
+/// codebook is read straight from the meta page either way.
+///
+/// Mmap is `MAP_PRIVATE`, read-only, lives for the
+/// backend-local cache entry's lifetime, and is invalidated
+/// when the cache entry's `(relfilenode, am_version)` mismatch
+/// rolls forward (REINDEX or any committed mutation). Heap
+/// visibility + `xs_recheckorderby = true` remain the MVCC
+/// backstops; see `docs/ARCHITECTURE.md` § "Index AM · mmap
+/// isolation contract" for the full argument.
+///
+/// Set off only if you observe weirdness on a custom storage
+/// substrate (e.g. tablespace on a filesystem that doesn't
+/// support shared mappings) and need to fall back to the
+/// buffer-manager-only read path.
+pub static MMAP_STATIC_BLOCKED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
@@ -97,6 +118,17 @@ pub fn register_gucs() {
         &SEARCH_K,
         1,
         100_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c_str(b"turbovec.mmap_static_blocked\0"),
+        c_str(b"Mmap the deterministic static regions of a turbovec relfile (default on).\0"),
+        c_str(
+            b"When on, ambeginscan mmaps the persisted SIMD-blocked codes and rotation matrix RO into the backend address space, bypassing PG's buffer manager for those bytes. Halves warm-scan latency on indexes that don't fit in shared_buffers. The cache entry holds the Mmap so it lives until the cache invalidates (REINDEX / am_version bump / backend exit). Codes / scales / ids chains keep going through the buffer manager because VACUUM swap-remove mutates them in place. Heap visibility + xs_recheckorderby remain the MVCC backstops; see docs/ARCHITECTURE.md.\0",
+        ),
+        &MMAP_STATIC_BLOCKED,
         GucContext::Userset,
         GucFlags::default(),
     );

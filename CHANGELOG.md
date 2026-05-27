@@ -4,6 +4,73 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — unreleased
+
+### Added — streaming heap scan in `ambuild` (Phase W)
+
+Wire format unchanged from 1.5.x (`MetaPageData::version = 3`);
+**no `REINDEX` needed** to upgrade. v1.6.0 is a build-side change
+only: the on-disk index format is byte-identical to v1.5.x.
+
+- **Build-time memory cap.** Phase V measured `CREATE INDEX`
+  peak RSS at **121 GiB** on a 10 M × 1536-d × 4-bit corpus on
+  `meh` (24 cores, 125 GiB RAM), with 60 GiB of swap usage. The
+  dominant offender was `BuildState::flat: Vec<f32>` in
+  `src/index/build.rs::ambuild` accumulating the entire
+  heap-scan output before passing it to
+  `IdMapIndex::add_with_ids`. At 10 M × 1536-d that buffer alone
+  is 61 GiB.
+- **Phase W: stream the heap scan.** `BuildState` now carries
+  two bounded staging buffers (`pending_flat`, `pending_ids`)
+  sized off `maintenance_work_mem`. Every `chunk_rows` rows the
+  callback flushes into `IdMapIndex::add_with_ids` and
+  `shrink_to_fit`s the buffers back to zero capacity, returning
+  the bytes to the allocator. A trailing flush after the
+  heap-scan loop drains the partial chunk.
+- **Chunk sizing formula** (in `BuildState::compute_chunk_rows`):
+  `chunk_bytes = min(maintenance_work_mem_kb * 1024 * 3 / 4,
+  1 GiB)`; `chunk_rows = max(chunk_bytes / (dim * 4), 1)`. The
+  GUC is read in **kilobytes** (PG convention; the global is
+  `pg_sys::maintenance_work_mem: c_int` whose unit is KB despite
+  the name). 75% allocation leaves headroom for the IdMapIndex's
+  own growth; the 1 GiB ceiling caps the staging buffer even
+  with a `SET maintenance_work_mem = '8GB'`.
+- **Expected peak at 10 M × 1536-d:** ~16 GiB (down from 121 GiB).
+  Validation on `meh` at 10 M scale is a follow-up phase — the
+  v1.6.0 code change ships with local unit-test coverage of the
+  streaming path; the multi-hour memory-cap validation runs
+  separately.
+- **Phase W-2 deferred.** The IdMapIndex still holds
+  `packed_codes` (~7.7 GiB at 10 M × 1536-d × 4-bit) in memory
+  alongside `blocked_codes` after `prepare_eager()`. Dropping it
+  would save another ~7.7 GiB at peak but requires a turbovec
+  fork API change
+  (`IdMapIndex::drop_row_major_codes(&mut self)` on branch
+  `pg_turbovec-integration`). Tracked as a follow-up; out of
+  scope for v1.6.0.
+- **One new `#[pg_test]`:**
+  `ambuild_streams_heap_scan_under_maintenance_work_mem` exercises
+  the streaming path with `maintenance_work_mem = '4MB'` and a
+  1000-row table. Test count 116 → 117.
+- **Docs.** `docs/UPGRADING.md` migration matrix gets a
+  `1.5.x → 1.6.0` no-op row; an internal design note records
+  the diagnosis, the formula, and the Phase W-2 follow-up
+  parking lot.
+
+### Migration
+
+**No migration needed; rebuild not required.** The on-disk
+format is byte-identical to v1.5.x. Drop in the new shared
+library, restart, scan; existing indexes continue to work
+unchanged. `ALTER EXTENSION pg_turbovec UPDATE TO '1.6.0';`
+resolves against the empty `migrations/007_pg_turbovec_v1.6.0.sql`.
+
+This is a **minor** bump rather than a patch because the
+build-time memory profile is observably different: a host that
+used to OOM on 10 M × 1536-d will now succeed. That's a
+behaviour change worth a minor even though no on-disk format
+changed.
+
 ## [1.5.1] — 2026-05-26
 
 ### Bench-results-only release. Wire format unchanged from 1.5.0; no REINDEX needed.

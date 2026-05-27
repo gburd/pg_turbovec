@@ -16,18 +16,100 @@ use crate::kernels;
 use crate::vec::Vector;
 
 /// State threaded through `index_build_range_scan` into our callback.
+///
+/// Phase W (v1.6.0): we no longer accumulate the entire heap-scan output
+/// into a single `Vec<f32>` before handing it to `IdMapIndex`. At
+/// 10 M × 1536-d that buffer alone was 61 GiB, the dominant offender in
+/// the 121 GiB peak RSS Phase V observed. Instead we keep two bounded
+/// staging buffers (`pending_flat`, `pending_ids`) sized off
+/// `maintenance_work_mem`, and flush them into `IdMapIndex::add_with_ids`
+/// every `chunk_rows`. The IdMapIndex's row-major `packed_codes` still
+/// grows linearly (~7.7 GiB at 10 M × 1536-d × 4-bit) but the f32
+/// staging buffer is capped at min(0.75 × maintenance_work_mem, 1 GiB).
+///
+/// `bit_width` and `cfg_bit_width` are unused inside the staging path
+/// (the bit-width lives on the constructed `IdMapIndex` itself) but we
+/// keep them on the state for symmetry with the eventual
+/// `relfile::write_full_with_prepared` call site.
 struct BuildState {
+    /// The IdMapIndex under construction. We add into it incrementally
+    /// from the heap-scan callback rather than at end-of-scan.
+    /// `Option` because we don't know the dim until the first non-NULL
+    /// row when reloptions didn't pin it.
+    idx: Option<IdMapIndex>,
+    /// Configured bit-width (1, 2, 4, or 8). Captured here so the
+    /// callback can lazily construct `idx` once the first row pins
+    /// `dim`.
+    bit_width: usize,
     /// Expected dim. Set on the first non-NULL row, validated against
-    /// every subsequent row.
+    /// every subsequent row. Once set, also pins `idx`.
     dim: Option<usize>,
     /// Optionally L2-normalise on insert.
     normalise: bool,
-    /// Concatenated f32 buffer (`flat[i*dim..(i+1)*dim]` is row i).
-    flat: Vec<f32>,
-    /// `IdMapIndex` u64 ids — one per row, in the same order as `flat`.
-    ids: Vec<u64>,
+    /// Pending f32 staging buffer; flushed into `idx.add_with_ids`
+    /// every `chunk_rows`. Bounded by `chunk_rows * dim * 4` bytes.
+    pending_flat: Vec<f32>,
+    /// Pending u64 ids, parallel to `pending_flat`.
+    pending_ids: Vec<u64>,
+    /// How many rows trigger a flush. Computed from
+    /// `maintenance_work_mem` once `dim` is known; until then the
+    /// callback buffers everything (which is fine — flushing at every
+    /// row before `dim` is known is impossible anyway).
+    chunk_rows: usize,
     /// Number of heap tuples we were called for (alive + dead).
     heap_seen: u64,
+}
+
+impl BuildState {
+    /// Compute the chunk-row threshold from PG's `maintenance_work_mem`
+    /// GUC. The GUC is in **kilobytes** (PG convention — the variable
+    /// is named `*_mem` but the unit is KB). We allocate 75% of it to
+    /// the staging buffer (leaving headroom for the IdMapIndex's own
+    /// growth and the surrounding allocator), capped at 1 GiB so a
+    /// large `SET maintenance_work_mem = '8GB'` doesn't blow past the
+    /// memory we were trying to bound.
+    fn compute_chunk_rows(dim: usize) -> usize {
+        // 1 GiB hard ceiling. Hoisted out of the function body to
+        // avoid clippy::items_after_statements; the const is
+        // associated with the staging-buffer policy, not the
+        // function.
+        const MAX_STAGING_BYTES: usize = 1024 * 1024 * 1024;
+        // SAFETY: pg_sys::maintenance_work_mem is a global C int that
+        // is set during postmaster startup and never goes negative.
+        // Reading it from a backend is safe.
+        let mwm_kb = unsafe { pg_sys::maintenance_work_mem }.max(0) as usize;
+        // Saturating math because mwm_kb * 1024 could overflow on a
+        // hypothetical 32-bit build; on 64-bit it can't, but be safe.
+        let bytes = mwm_kb
+            .saturating_mul(1024)
+            .saturating_mul(3)
+            / 4;
+        let chunk_bytes = bytes.min(MAX_STAGING_BYTES);
+        let row_bytes = dim.saturating_mul(std::mem::size_of::<f32>()).max(1);
+        (chunk_bytes / row_bytes).max(1)
+    }
+
+    /// Drain `pending_flat` / `pending_ids` into the IdMapIndex and
+    /// release the staging memory back to the allocator. The
+    /// `shrink_to_fit` calls are load-bearing: without them, the
+    /// staging buffers would stay sized at the peak and Phase W's
+    /// memory cap would only apply to the *first* chunk.
+    fn flush(&mut self) {
+        if self.pending_ids.is_empty() {
+            return;
+        }
+        let idx = self
+            .idx
+            .as_mut()
+            .expect("turbovec ambuild: flush called before idx was constructed");
+        if let Err(e) = idx.add_with_ids(&self.pending_flat, &self.pending_ids) {
+            error!("turbovec ambuild: add_with_ids failed: {:?}", e);
+        }
+        self.pending_flat.clear();
+        self.pending_flat.shrink_to_fit();
+        self.pending_ids.clear();
+        self.pending_ids.shrink_to_fit();
+    }
 }
 
 /// `ambuild`: scan the heap, build the IdMapIndex, persist it.
@@ -67,12 +149,27 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     };
 
     let mut state = BuildState {
+        idx: None,
+        bit_width: cfg_bit_width as usize,
         dim: initial_dim,
         normalise,
-        flat: Vec::new(),
-        ids: Vec::new(),
+        pending_flat: Vec::new(),
+        pending_ids: Vec::new(),
+        // Lazily computed from `dim` on the first chunk; if dim was
+        // pinned via reloptions we can compute it up front.
+        chunk_rows: usize::MAX,
         heap_seen: 0,
     };
+    if let Some(d) = state.dim {
+        // Pre-construct the IdMapIndex when reloptions pinned the dim.
+        // Otherwise we wait for the first non-NULL row and construct
+        // there. Either way the per-row callback path is identical.
+        state.idx = Some(
+            IdMapIndex::new(d, cfg_bit_width as usize)
+                .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
+        );
+        state.chunk_rows = BuildState::compute_chunk_rows(d);
+    }
 
     // Pull the table AM's index_build_range_scan and invoke it with
     // our callback. This is functionally `table_index_build_scan` in
@@ -100,6 +197,10 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         std::ptr::null_mut(),
     );
     state.heap_seen = n_seen as u64;
+    // Drain any rows the heap scan left in the staging buffers.
+    // (Phase W: heap scan flushes whenever `pending_ids.len() >=
+    // chunk_rows`; the trailing partial chunk is flushed here.)
+    state.flush();
 
     // If the heap was empty and dim was not pinned, write an
     // empty meta page so subsequent aminserts have stable state
@@ -121,15 +222,15 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         return result;
     };
 
-    let mut idx = IdMapIndex::new(dim, cfg_bit_width as usize)
-        .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new");
-    if !state.ids.is_empty() {
-        if let Err(e) = idx.add_with_ids(&state.flat, &state.ids) {
-            error!("turbovec ambuild: add_with_ids failed: {:?}", e);
-        }
-    }
-
-    let n_vectors = state.ids.len() as i64;
+    // The IdMapIndex was either pre-constructed (dim pinned by
+    // reloptions) or built lazily by the callback when the first
+    // non-NULL row arrived. If `state.dim` is set we must have an
+    // `idx`.
+    let idx = state
+        .idx
+        .take()
+        .expect("turbovec ambuild: state.dim is set but state.idx is None");
+    let n_vectors = idx.slot_to_id().len() as i64;
     // Phase P: pre-bake the SIMD-blocked layout and the
     // Lloyd-Max codebook now, while we own the freshly-built
     // index. Persisting them alongside the row-major codes
@@ -233,7 +334,16 @@ unsafe extern "C-unwind" fn build_callback(
                 d, row_dim
             );
         }
-        None => state.dim = Some(row_dim),
+        None => {
+            state.dim = Some(row_dim);
+            // First non-NULL row pinning the dim. Lazily construct
+            // the IdMapIndex and compute the chunk threshold now.
+            state.idx = Some(
+                IdMapIndex::new(row_dim, state.bit_width)
+                    .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
+            );
+            state.chunk_rows = BuildState::compute_chunk_rows(row_dim);
+        }
         _ => {}
     }
 
@@ -241,11 +351,19 @@ unsafe extern "C-unwind" fn build_callback(
     if state.normalise {
         let mut buf = vec![0.0_f32; row_dim];
         kernels::normalise_into(&mut buf, value.as_slice());
-        state.flat.extend_from_slice(&buf);
+        state.pending_flat.extend_from_slice(&buf);
     } else {
-        state.flat.extend_from_slice(value.as_slice());
+        state.pending_flat.extend_from_slice(value.as_slice());
     }
-    state.ids.push(id);
+    state.pending_ids.push(id);
+
+    // Phase W: flush whenever the staging buffer reaches the
+    // configured chunk size. Caps peak staging memory at
+    // O(min(maintenance_work_mem, 1 GiB)) instead of
+    // O(n_vectors * dim * 4 bytes).
+    if state.pending_ids.len() >= state.chunk_rows {
+        state.flush();
+    }
 }
 
 /// `ambuildempty`: called only for **unlogged** indexes; PG uses

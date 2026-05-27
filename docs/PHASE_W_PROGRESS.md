@@ -86,11 +86,16 @@ duplicate.
   multi-hour memory-cap measurement runs against the v1.6.0
   binary on origin.
 
-## Phase W-2 (shipped — v1.7.0)
+## Phase W-2 (shipped — v1.7.0, REVERTED in v1.7.1)
 
 **Drop in-memory `packed_codes` after `prepare_eager()`
 materialises `blocked_codes`.** Shipped on 2026-05-27 in v1.7.0
 as a build-side change only; wire format unchanged.
+
+**Reverted on 2026-05-27 in v1.7.1** after 10 M-scale
+validation on `meh` showed the design did not deliver the
+predicted RSS reduction and made the build 53% slower. See
+§ "Phase W-2 reverted in v1.7.1" below.
 
 The single-call `relfile::write_full_with_prepared` was split
 into two phases so the row-major `packed_codes` Vec and the
@@ -123,71 +128,105 @@ Memory profile at 10 M × 1536-d × 4-bit:
 **New peak: ~15 GiB at 10 M × 1536-d (down from 22.5 GiB).**
 8× total reduction vs pre-Phase-W (121 → 22.5 → 15 GiB).
 
-**Validation status:** the v1.7.0 code change ships with local
-unit-test coverage of the split write
+**Validation status:** the v1.7.0 code change shipped with
+local unit-test coverage of the split write
 (`ambuild_drops_packed_codes_before_blocked_write` in
-`src/lib.rs`). The 10 M-scale peak-RSS validation on `meh`
-ran on 2026-05-27 against this commit (`3a04112`, v1.7.0)
-and **did not converge on ~15 GiB**: the measured peak was
-**23.04 GiB**, fractionally above Phase W's 22.52 GiB. See
-[`docs/RECALL.md § 2.7 "Post-Phase-W-2 follow-up"`](RECALL.md)
-and
-[`benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`](../benches/results/phase_w_2_validate_meh_10m_2026_05_27.json)
-for the full annotated 1 Hz RSS curve.
+`src/lib.rs`, renamed to `ambuild_round_trip_after_phase_w_2_revert`
+in v1.7.1); the multi-hour 10 M-scale peak-RSS validation on
+`meh` was the follow-up bench phase, and it found a
+regression. See § "Phase W-2 reverted in v1.7.1" below.
 
-What the curve shows is that the design _does_ produce the
-predicted plateaus:
+## Phase W-2 reverted in v1.7.1 (2026-05-27)
 
-- `write_packed_phase` plateau at 8.4 GiB (pred. ~8.7 ✓),
-- `prepare_eager` plateau at 15.9 GiB (pred. ~15 ✓),
-- `write_blocked_phase_and_meta` post-spike plateau at
-  8.4 GiB (pred. ~8.5 ✓).
+**Decision: revert.** v1.7.1 restores `src/index/relfile.rs::write_full_inner`
+and `src/index/build.rs::ambuild` to their v1.6.0 single-pass
+shape. Wire format is unchanged across v1.6.0 / v1.7.0 /
+v1.7.1; no REINDEX is needed in either direction.
 
-But at the boundary between `take_packed_codes()` and
-`write_blocked_phase_and_meta` there is a **38-second linear
-ramp from 15.9 GiB to 23.0 GiB**, then a synchronous ~3 s
-drop back to 8.4 GiB. The ramp rate (~190 MiB/s) matches the
-rate at which `extend_to` extends the relation file by ~8 GiB
-on this disk. The most-likely cause is that
-`drop(idx.take_packed_codes())` returns the 7.7 GiB row-major
-Vec to the Rust heap allocator, but glibc's allocator does
-NOT immediately `madvise(MADV_DONTNEED)` the freed range;
-meanwhile `extend_to` is touching ~8 GiB of newly mmap'd
-file-backed pages through the `relfile_storage` smgr, and
-those two co-exist alongside the still-alive 7.5 GiB blocked
-Vec for the duration of the chain write.
+### Validation that triggered the revert
 
-**Verdict: phase_w_2_fails by the brief's threshold**
-(≥ 22 GiB) but the failure is at the boundary, not in the
-steady-state design. The most actionable next step is _not_
-Phase W-3's `pack::repack` streaming refactor (which would
-hit the same allocator-vs-mmap overlap), but rather:
+Full data in
+`benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`.
+Host `meh` (24 cores, 125 GiB RAM, NixOS); corpus 10 M ×
+1536-d × 4-bit synthetic unit-norm; `maintenance_work_mem =
+8GB`; chunk_rows = 174,762.
 
-1. an explicit `madvise(MADV_DONTNEED)` on the freed
-   `packed_codes` byte range immediately before `extend_to`,
-   _or_
-2. switch the allocator to mimalloc, or to jemalloc with
-   `dirty_decay_ms=0` to force eager OS return.
+| metric                | v1.5.x (pre-W) | v1.6.0 (Phase W) | v1.7.0 (Phase W-2) |
+|-----------------------|---------------:|-----------------:|-------------------:|
+| Peak RSS (GiB)        |          121.0 |             22.5 |              23.04 |
+| Swap used (GiB)       |             60 |                0 |               2.67 |
+| Build time (s)        |          5,048 |            5,052 |              7,748 |
+| Predicted RSS (GiB)   |              — |                — |              ~15.0 |
 
-With either fix the predicted ~15 GiB peak should drop out
-of a re-measurement.
+Verdict: `phase_w_2_regression`.
 
-**Other findings from the validation run:**
-- Build wall-clock regressed +53 % vs Phase W (5052 s →
-  7748 s). This is dominated by the corpus being LOGGED in
-  this run vs UNLOGGED in Phase W — the original Phase V/W
-  `docs` table was lost when an earlier wedged `pg_ctl
-  restart` triggered crash-recovery's "reset unlogged
-  relations" path; the reload was made LOGGED to defend
-  against that hazard repeating, which adds ~15 GiB of
-  index-page WAL writes to `CREATE INDEX`. Not a real
-  regression in the Phase W-2 code path.
-- Index size on disk and warm-scan latency are both
-  unchanged from v1.6.0 (15 GiB, 21 ms p50 at
-  `tv_4bit_k100`). The split-write path is byte-equivalent
-  to the single-call path.
-- No `GenericXLog` or relfile-write atomicity surprises:
-  the index built cleanly and is queryable.
+### Why the hypothesis was wrong
+
+The design assumed dropping ~7.7 GiB of row-major
+`packed_codes` from the heap mid-finalise (via the new
+`IdMapIndex::take_packed_codes()`) would shave the peak RSS
+by ~7.7 GiB, taking 22.5 GiB → ~15 GiB.
+
+What actually happens: `write_packed_phase` streams the
+`packed_codes` bytes to relfile pages via `GenericXLog`, which
+means those pages are pinned in `shared_buffers`. The pinned
+pages are mapped into the backend's address space, and
+`ps -o rss` (the RSS column we measure) **counts mapped
+shared memory** as part of the backend's resident set. So:
+
+- Heap drop: real (7.7 GiB freed at the right moment).
+- RSS drop: imaginary (the same 7.7 GiB is now in pinned
+  shared mem and still counted toward the backend's RSS).
+- Net: same RSS budget, plus a 53% build-time penalty from
+  the second `GenericXLog` flush phase + extra `extend_to`
+  checks, plus 2.7 GiB of swap that v1.6.0 didn't need
+  (probably from second-phase chain-write buffers colliding
+  with the OS page cache that v1.6.0's tighter loop didn't
+  give time to grow).
+
+### What the revert does
+
+- `src/index/relfile.rs::write_full_inner` — restored to the
+  v1.6.0 single-pass batched-`GenericXLog` flow: meta page,
+  then codes / scales / ids chains, then blocked / rotation
+  chains, then `RelationTruncate` to release trailing blocks.
+- `src/index/build.rs::ambuild` — restored to the v1.6.0
+  sequence: `prepare_eager()` first, then a single
+  `write_full_with_prepared` call. The `take_packed_codes()`
+  call is removed from this code path.
+- `src/lib.rs` — the
+  `ambuild_drops_packed_codes_before_blocked_write` test is
+  renamed to `ambuild_round_trip_after_phase_w_2_revert` and
+  kept as a generic ambuild round-trip smoke (it still passes
+  via the v1.6.0 code path).
+
+### What the revert keeps
+
+- The new public APIs `relfile::write_packed_phase`,
+  `relfile::write_blocked_phase_and_meta`, and
+  `relfile::PackedPhaseLayout` stay in the source as parked
+  dead code, marked `#[allow(dead_code)]` on each item. They
+  are unused after the revert but may be useful for a future
+  Phase W-3 attempt that takes a different angle (e.g. a
+  streaming `pack::repack` that lets the blocked layout
+  itself stream to disk without ever being fully resident).
+- The turbovec fork bump to rev
+  `6e80a59f473292cc9e04d575ba1596f3e23321c5` (turbovec 0.7.0)
+  in `Cargo.toml` stays. The new
+  `IdMapIndex::take_packed_codes(&mut self) -> Vec<u8>` method
+  on the fork is harmless additive API; pg_turbovec just
+  doesn't call it after the revert.
+
+### Lesson for Phase W-3
+
+Future build-side memory work has to be measured against
+**both** `MemAvailable`-derived numbers and the
+shared-buffer mapping component, not just `ps -o rss`. The
+right budget metric for "is the box about to OOM?" is RSS;
+the right metric for "is the heap allocator actually freeing
+bytes?" is the heap-only allocator stats. Phase W-2
+conflated the two and optimised the heap component while
+leaving the visible RSS unchanged.
 
 ## Phase W-3 (parked)
 

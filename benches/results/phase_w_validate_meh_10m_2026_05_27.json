@@ -1,0 +1,57 @@
+{
+  "phase": "W (validate)",
+  "head": "f61d906 (v1.6.0)",
+  "host": "meh (24 cores, 125 GiB RAM, 138 GiB swap, NixOS)",
+  "date_utc": "2026-05-27",
+  "corpus": {
+    "n": 10000000,
+    "dim": 1536,
+    "type": "synthetic-unit-norm",
+    "table": "bench_10m.public.docs"
+  },
+  "build": {
+    "phase_v_peak_rss_gib": 121,
+    "phase_v_peak_rss_kib": 126839808,
+    "phase_v_swap_used_delta_gib": 60,
+    "phase_v_build_time_s": 5048,
+    "phase_v_build_time_human": "1h 24m 09s",
+    "phase_v_head": "v1.5.1 (commit 7ea267a, Phase V)",
+
+    "phase_w_peak_leader_rss_gib": 22.52,
+    "phase_w_peak_leader_rss_kib": 23618700,
+    "phase_w_peak_total_rss_gib": 22.62,
+    "phase_w_peak_total_rss_kib": 23719820,
+    "phase_w_swap_used_delta_gib": 0,
+    "phase_w_swap_pre_gib": 2,
+    "phase_w_swap_post_gib": 2,
+    "phase_w_build_time_s": 5052.549,
+    "phase_w_build_time_human": "1h 24m 12.549s",
+    "phase_w_index_size_gib": 15,
+
+    "maintenance_work_mem": "8GB",
+    "max_parallel_maintenance_workers_setting": 16,
+    "parallel_workers_actually_used": 0,
+    "parallel_workers_note": "turbovec.ambuild does not request parallel maintenance workers; build is single-process. The leader_pid alone hits the 22.52 GiB peak; postmaster + walwriter + io workers + checkpointer + bgwriter together added ~0.6 GiB at the peak instant.",
+    "chunk_rows_at_8gb_1536d": 174762,
+    "chunk_rows_formula": "min(0.75 * maintenance_work_mem, 1 GiB) / (dim * 4 bytes) = min(6 GiB, 1 GiB) / 6144 B = 174762"
+  },
+  "warm_scan_sanity": {
+    "config": "tv_4bit_k100",
+    "n_queries": 50,
+    "min_ms": 21.126,
+    "p50_ms": 21.243,
+    "p95_ms": 48.215,
+    "max_ms": 48.231,
+    "mean_ms": 28.420,
+    "phase_v_p50_ms_for_reference": 47.27,
+    "comment": "Latency in the same 21-49 ms band Phase V observed; index built via streaming is queryable and behaves indistinguishably from the v1.5.1 build."
+  },
+  "verdict": "phase_w_works",
+  "verdict_reasoning": "Peak RSS dropped from 121 GiB (Phase V) to 22.52 GiB (Phase W) on the same 10M x 1536-d corpus, with the same maintenance_work_mem = 8 GiB setting -- a 5.4x reduction. Swap delta during the build was 0 GiB (vs 60 GiB in Phase V). Build wall-clock was 5052.5 s vs Phase V's 5048 s, i.e. essentially identical -- streaming the heap scan into IdMapIndex::add_with_ids in 174762-row chunks did not regress build throughput. Index size and warm-scan latency are unchanged. The remaining ~22 GiB peak is the IdMapIndex's row-major packed_codes (~7.7 GiB) plus the prepared SIMD-blocked layout assembled at end-of-build (~7.5 GiB) plus per-allocator slack and the surrounding Postgres backend; the dominant offender Phase V flagged (the 61 GiB f32 staging Vec) is gone. The remaining peak is bounded by what the IdMapIndex itself plus the prepared layout must hold simultaneously, which is a separate concern (potential follow-on: stream the prepared-layout assembly to disk).",
+  "artefacts": {
+    "psql_log": "benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.psql.log",
+    "heartbeat_log": "benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.log",
+    "rss_tsv_gz": "benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.rss.tsv.gz",
+    "warm_sanity_json": "benches/results/phase_w_warm_sanity_meh_10m_2026_05_27.json"
+  }
+}

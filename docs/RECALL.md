@@ -1156,6 +1156,64 @@ workload with zero eviction-induced spikes.
   [`benches/results/build_hnsw_meh_10m_v1_5_1_2026_05_26.log`](../benches/results/build_hnsw_meh_10m_v1_5_1_2026_05_26.log),
   [`benches/results/sweep_meh_10m_v1_5_1_2026_05_26.log`](../benches/results/sweep_meh_10m_v1_5_1_2026_05_26.log).
 
+### Post-Phase-W follow-up (v1.6.0, 2026-05-27)
+
+Phase V flagged the 121 GiB CREATE INDEX peak as the dominant
+scaling concern and proposed bounding it via `maintenance_work_mem`.
+Phase W (commit `f61d906`, v1.6.0) ships that fix: the `ambuild`
+callback streams heap-scan rows into `IdMapIndex::add_with_ids`
+in chunks of `min(0.75 × maintenance_work_mem, 1 GiB) / (dim × 4 B)`
+rows instead of accumulating the entire heap-scan output in a
+single `Vec<f32>`. At `maintenance_work_mem = '8GB'` and
+`dim = 1536` that is 174 762 rows per flush.
+
+Re-measured on `meh`, same 10 M × 1536-d corpus, same
+`maintenance_work_mem = 8 GiB`:
+
+| Metric | Phase V (v1.5.1) | Phase W (v1.6.0) | Change |
+|---|---:|---:|---:|
+| Peak leader RSS during `CREATE INDEX docs_tv_4bit` | 121 GiB | **22.52 GiB** | −5.4× |
+| Swap used (delta over the build) | up to 60 GiB | **0 GiB** | gone |
+| Build wall-clock | 5 048 s (1 h 24 m 09 s) | 5 052.5 s (1 h 24 m 12 s) | +0.09 % |
+| Index size on disk | 15 GiB | 15 GiB | unchanged |
+| Warm `tv_4bit_k100` p50 (50 queries) | 47.27 ms | 21.24 ms¹ | within noise |
+
+¹ Different probe sample + different cache state; both fall in
+the 21–49 ms band Phase V already documented for the same
+config. The Phase W run does not measure recall, only that the
+streamed-build index is queryable and not pathologically slow.
+
+**Verdict: Phase W works.** The 61 GiB staging `Vec<f32>` Phase
+V identified as the dominant offender is gone, and bounded
+streaming did not regress build throughput. The remaining
+22.52 GiB peak is what the `IdMapIndex`'s row-major
+`packed_codes` (≈7.7 GiB at 10 M × 1536-d × 4-bit) plus the
+prepared SIMD-blocked layout (≈7.5 GiB) plus per-allocator
+slack and the surrounding Postgres backend must hold
+simultaneously during the end-of-build finalisation. Cutting it
+further would require streaming the prepared-layout assembly
+itself to disk during `relfile::write_full_with_prepared`—a
+separate optimisation and not part of Phase W's scope.
+
+No cluster-side changes were needed: the v1.6.0 wire format is
+byte-identical to v1.5.x (`MetaPageData::version = 3`); a no-op
+`pg_turbovec--1.5.0--1.6.0.sql` upgrade script was added and
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.6.0'` was the only
+schema-side step.
+
+#### Source data
+
+- Full structured run:
+  [`benches/results/phase_w_validate_meh_10m_2026_05_27.json`](../benches/results/phase_w_validate_meh_10m_2026_05_27.json)
+- psql build log + timing:
+  [`benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.psql.log`](../benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.psql.log)
+- Heartbeat-wrapped outer log:
+  [`benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.log`](../benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.log)
+- Per-process RSS time series (1 s cadence, gzipped TSV):
+  [`benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.rss.tsv.gz`](../benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.rss.tsv.gz)
+- Warm-scan sanity check (50 queries, `tv_4bit_k100`):
+  [`benches/results/phase_w_warm_sanity_meh_10m_2026_05_27.json`](../benches/results/phase_w_warm_sanity_meh_10m_2026_05_27.json)
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

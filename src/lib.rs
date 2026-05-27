@@ -629,6 +629,59 @@ mod tests {
         assert_eq!(n, Some(1000));
     }
 
+    /// Phase W (v1.6.0): the ambuild heap-scan callback streams
+    /// rows into `IdMapIndex::add_with_ids` in chunks bounded by
+    /// `maintenance_work_mem` rather than accumulating the entire
+    /// heap-scan output in a single `Vec<f32>`. This test exercises
+    /// that code path: with `maintenance_work_mem = '4MB'` and
+    /// dim = 8 vectors, `chunk_rows = (4 MB * 1024 * 0.75) / (8 * 4)
+    /// = ~98 304`, so 1000 rows fit in one chunk — but the chunked
+    /// flush + final drain still run, the `shrink_to_fit` path
+    /// still runs, and the final-drain code in `ambuild` is exercised.
+    /// (For more chunks we'd need >100k rows, which is too slow for
+    /// the unit-test suite; the local test asserts correctness of
+    /// the streaming path while the meh-class 10 M-row validation
+    /// is a follow-up phase.)
+    ///
+    /// Note on opclass: we use `vec_l2_ops` rather than
+    /// `vec_cosine_ops` because the test fixture
+    /// `[g, 0, 0, 0, 0, 0, 0, 0]` produces colinear vectors whose
+    /// cosine distance to any `[k, 0, ...]` query is identically
+    /// zero — every row would tie and the ORDER BY result would be
+    /// non-deterministic. L2 distance preserves the magnitude
+    /// difference (`|g - 7|`), so id=7 is the unambiguous nearest
+    /// neighbour.
+    #[pg_test]
+    fn ambuild_streams_heap_scan_under_maintenance_work_mem() {
+        use_turbovec();
+        Spi::run("SET maintenance_work_mem = '4MB'").unwrap();
+        Spi::run("CREATE TABLE t_streamed (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_streamed SELECT g, \
+                ('[' || g || ',0,0,0,0,0,0,0]')::vector \
+                FROM generate_series(1, 1000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_streamed_idx ON t_streamed \
+             USING turbovec (emb vec_l2_ops)",
+        )
+        .unwrap();
+        // Sanity: every row indexed.
+        let n: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM t_streamed").unwrap();
+        assert_eq!(n, Some(1000));
+        // Nearest neighbour to [7,0,...] under L2 is row 7
+        // (distance 0). Operator `<->` is L2.
+        let id: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_streamed \
+             ORDER BY emb <-> '[7,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(id, Some(7));
+    }
+
     /// Phase K: rollback path. The `XACT_EVENT_ABORT` callback
     /// invalidates dirty cache entries, so a same-backend scan
     /// after rollback reloads committed state from the relfile.

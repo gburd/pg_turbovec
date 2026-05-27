@@ -1,0 +1,72 @@
+[heartbeat] starting: bash /scratch/pg_turbovec-bench/build_tv_phase_w.sh
+[heartbeat] interval: 120s
+[heartbeat] label:    bash
+[build_tv] pg_turbovec extension version = 1.6.0
+[build_tv] snap_rss.sh pid=2514938 -> /scratch/pg_turbovec-bench/build_tv_phase_w.rss.tsv
+Timing is on.
+DROP INDEX IF EXISTS docs_tv_4bit;
+DROP INDEX
+Time: 2576.300 ms (00:02.576)
+SET maintenance_work_mem = '8GB';
+SET
+Time: 0.221 ms
+SET max_parallel_maintenance_workers = 16;
+SET
+Time: 0.134 ms
+SET search_path = turbovec, public;
+SET
+Time: 0.200 ms
+CREATE INDEX docs_tv_4bit ON docs USING turbovec
+    ((emb::real[]::turbovec.vector) turbovec.vec_cosine_ops)
+    WITH (bit_width = 4);
+. [bash 01:20:32 elapsed]
+. [bash 01:22:32 elapsed]
+. [bash 01:24:32 elapsed]
+. [bash 01:26:32 elapsed]
+. [bash 01:28:32 elapsed]
+. [bash 01:30:32 elapsed]
+. [bash 01:32:32 elapsed]
+. [bash 01:34:32 elapsed]
+. [bash 01:36:32 elapsed]
+. [bash 01:38:32 elapsed]
+. [bash 01:40:32 elapsed]
+. [bash 01:42:32 elapsed]
+. [bash 01:44:32 elapsed]
+. [bash 01:46:32 elapsed]
+. [bash 01:48:32 elapsed]
+. [bash 01:50:32 elapsed]
+. [bash 01:52:32 elapsed]
+. [bash 01:54:32 elapsed]
+. [bash 01:56:32 elapsed]
+. [bash 01:58:32 elapsed]
+. [bash 02:00:32 elapsed]
+. [bash 02:02:32 elapsed]
+. [bash 02:04:32 elapsed]
+. [bash 02:06:32 elapsed]
+. [bash 02:08:32 elapsed]
+. [bash 02:10:32 elapsed]
+. [bash 02:12:32 elapsed]
+. [bash 02:14:32 elapsed]
+. [bash 02:16:32 elapsed]
+. [bash 02:18:32 elapsed]
+. [bash 02:20:32 elapsed]
+. [bash 02:22:32 elapsed]
+. [bash 02:24:32 elapsed]
+. [bash 02:26:32 elapsed]
+. [bash 02:28:32 elapsed]
+. [bash 02:30:32 elapsed]
+. [bash 02:32:32 elapsed]
+. [bash 02:34:32 elapsed]
+. [bash 02:36:32 elapsed]
+. [bash 02:38:32 elapsed]
+. [bash 02:40:32 elapsed]
+. [bash 02:42:32 elapsed]
+CREATE INDEX
+Time: 5052549.048 ms (01:24:12.549)
+SELECT pg_size_pretty(pg_relation_size('docs_tv_4bit'::regclass)) AS size_after_build;
+size_after_build
+15 GB
+(1 row)
+Time: 2.200 ms
+[build_tv] psql exit rc=0
+[heartbeat] DONE rc=0 (clean exit)

@@ -4,6 +4,79 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — 2026-05-27
+
+### Added — mid-finalise drop of `packed_codes` in `ambuild` (Phase W-2)
+
+Wire format unchanged from 1.6.x (`MetaPageData::version = 3`);
+**no `REINDEX` needed** to upgrade. v1.7.0 is a build-side change
+only: the on-disk index format is byte-identical to v1.6.x.
+
+- **Reorder finalisation writes so packed_codes and blocked are
+  never co-resident.** Phase W (v1.6.0) capped the heap-scan
+  staging buffer, dropping peak `ambuild` RSS from 121 GiB to
+  22.5 GiB at 10 M × 1536-d on `meh`. The remaining 22.5 GiB peak
+  was `IdMapIndex`'s row-major `packed_codes` (~7.7 GiB) plus the
+  SIMD-blocked derived layout (~7.5 GiB) plus allocator slack +
+  GenericXLog page-assembly buffers, all alive during the
+  single-call `relfile::write_full_with_prepared` flush. Phase W-2
+  splits that call into two phases:
+
+  1. `relfile::write_packed_phase` streams `packed_codes`,
+     `scales`, and `slot_to_id` to relfile pages while
+     `packed_codes` is the only large in-memory Vec.
+  2. `IdMapIndex::prepare_eager()` materialises the SIMD-blocked
+     layout, codebook, and rotation matrix (transient peak:
+     packed + blocked).
+  3. `IdMapIndex::take_packed_codes()` (new turbovec 0.7.0 API)
+     swaps the row-major Vec out and `shrink_to_fit`s it; the
+     `OnceLock`-backed blocked cache is unaffected.
+  4. `relfile::write_blocked_phase_and_meta` streams the blocked
+     + rotation chains and stamps the meta page LAST.
+
+  Expected peak at 10 M × 1536-d: **~15 GiB** (down from 22.5
+  GiB). Combined with Phase W's 121 → 22.5 GiB cut, that's an
+  **8× total reduction vs pre-Phase-W**. Validation on `meh` at
+  10 M scale is a follow-up bench phase; the v1.7.0 code change
+  ships with local unit-test coverage of the split write
+  (`ambuild_drops_packed_codes_before_blocked_write`).
+
+- **Meta page is now written LAST.** `write_full_inner` used to
+  write the meta page first and the chains second, which left a
+  crash window where block 0 referenced not-yet-written chain
+  pages. v1.7.0 routes both the legacy `write_full` /
+  `write_full_with_prepared` and the new split path through
+  `write_blocked_phase_and_meta`, which writes the meta page
+  AFTER all chain pages — matching the standard PG hash/gist AM
+  "meta page is the atomic-complete signal" pattern. A crash
+  before the meta-page WAL record commits leaves block 0 in its
+  previous state (zero-filled for fresh build, previous meta for
+  REINDEX), and `ambeginscan` rejects the index as empty/legacy.
+  No on-disk format change — readers never observed the
+  intermediate state in any released version.
+
+- **Turbovec fork bump 0.6.0 → 0.7.0** (rev
+  `6e80a59f473292cc9e04d575ba1596f3e23321c5`, branch
+  `pg_turbovec-integration` on `gburd/turbovec`). Adds
+  `TurboQuantIndex::take_packed_codes(&mut self) -> Vec<u8>` and
+  the matching `IdMapIndex::take_packed_codes`. Additive minor;
+  no breaking changes for embedders that don't call the new API.
+
+- **Phase W-3 deferred.** The remaining ~15 GiB peak is dominated
+  by the SIMD-blocked Vec materialised by `prepare_eager()` plus
+  GenericXLog page-assembly slack. Dropping the blocked peak
+  further (to ~10 GiB) would require streaming `pack::repack` so
+  the blocked layout never has to be fully resident; that's
+  substantial turbovec internals work and is out of scope for
+  v1.7.0.
+
+### Migration
+
+**No migration needed; rebuild not required.** The on-disk
+format is byte-identical to v1.6.x. Drop in the new shared
+library, restart, scan; existing indexes continue to work
+unchanged.
+
 ## [1.6.1] — 2026-05-27
 
 ### Bench-results-only release. Wire format unchanged from 1.6.0; no REINDEX needed.

@@ -38,6 +38,8 @@ Every release that bumps the on-disk format **ships with**:
 | 1.5.x → 1.5.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 | 1.5.x | 1.6.0+ | _none_ | v1.6.0 (Phase W) is a build-side change only: `ambuild` now streams the heap scan into `IdMapIndex::add_with_ids` in chunks bounded by `maintenance_work_mem` (capped at 1 GiB) instead of accumulating the entire heap-scan output in a single `Vec<f32>`. Peak `CREATE INDEX` memory drops from ~121 GiB to ~16 GiB at 10 M × 1536-d × 4-bit. The on-disk format (`MetaPageData::version = 3`) is byte-identical to v1.5.x. **No REINDEX required.** Existing v1.5.x indexes continue to work unchanged; the v1.6.0 binary's ambuild path simply uses less memory on the next CREATE INDEX / REINDEX. |
 | 1.6.x → 1.6.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
+| 1.6.x | 1.7.0+ | _none_ | v1.7.0 (Phase W-2) is a build-side change only: `ambuild` now writes `packed_codes` to relfile pages, materialises the SIMD-blocked layout via `prepare_eager()`, drops `packed_codes` via the new `IdMapIndex::take_packed_codes()` (turbovec 0.7.0), then writes the blocked + rotation chains and stamps the meta page LAST. Peak `CREATE INDEX` memory drops from ~22.5 GiB to ~15 GiB at 10 M × 1536-d × 4-bit (8× total reduction vs pre-Phase-W). The on-disk format (`MetaPageData::version = 3`) is byte-identical to v1.6.x. **No REINDEX required.** Existing v1.6.x indexes continue to work unchanged; the v1.7.0 binary's ambuild path simply uses less memory on the next CREATE INDEX / REINDEX. |
+| 1.7.x → 1.7.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 
 If you maintain pg_turbovec for a fleet of clusters, scripting the
 migration looks like:

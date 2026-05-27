@@ -1,0 +1,163 @@
+[heartbeat] starting: bash /scratch/pg_turbovec-bench/build_tv_phase_w_2.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
+[build_tv_w2] pg_turbovec extension version = 1.7.0
+[build_tv_w2] pre-build swap_used_kib=2803904
+[build_tv_w2] snap_rss.sh pid=2841610 -> /scratch/pg_turbovec-bench/build_tv_phase_w_2.rss.tsv
+Timing is on.
+DROP INDEX IF EXISTS docs_tv_4bit;
+psql:<stdin>:2: NOTICE:  index "docs_tv_4bit" does not exist, skipping
+DROP INDEX
+Time: 0.556 ms
+SET maintenance_work_mem = '8GB';
+SET
+Time: 0.134 ms
+SET max_parallel_maintenance_workers = 16;
+SET
+Time: 0.132 ms
+SET search_path = turbovec, public;
+SET
+Time: 0.119 ms
+CREATE INDEX docs_tv_4bit ON docs USING turbovec
+    ((emb::real[]::turbovec.vector) turbovec.vec_cosine_ops)
+    WITH (bit_width = 4);
+. [bash 16:41:13 elapsed]
+. [bash 16:42:13 elapsed]
+. [bash 16:43:13 elapsed]
+. [bash 16:44:13 elapsed]
+. [bash 16:45:13 elapsed]
+. [bash 16:46:13 elapsed]
+. [bash 16:47:13 elapsed]
+. [bash 16:48:13 elapsed]
+. [bash 16:49:13 elapsed]
+. [bash 16:50:13 elapsed]
+. [bash 16:51:13 elapsed]
+. [bash 16:52:13 elapsed]
+. [bash 16:53:13 elapsed]
+. [bash 16:54:13 elapsed]
+. [bash 16:55:13 elapsed]
+. [bash 16:56:13 elapsed]
+. [bash 16:57:13 elapsed]
+. [bash 16:58:13 elapsed]
+. [bash 16:59:13 elapsed]
+. [bash 17:00:13 elapsed]
+. [bash 17:01:13 elapsed]
+. [bash 17:02:13 elapsed]
+. [bash 17:03:13 elapsed]
+. [bash 17:04:13 elapsed]
+. [bash 17:05:13 elapsed]
+. [bash 17:06:13 elapsed]
+. [bash 17:07:14 elapsed]
+. [bash 17:08:14 elapsed]
+. [bash 17:09:14 elapsed]
+. [bash 17:10:14 elapsed]
+. [bash 17:11:14 elapsed]
+. [bash 17:12:14 elapsed]
+. [bash 17:13:14 elapsed]
+. [bash 17:14:14 elapsed]
+. [bash 17:15:14 elapsed]
+. [bash 17:16:14 elapsed]
+. [bash 17:17:14 elapsed]
+. [bash 17:18:14 elapsed]
+. [bash 17:19:14 elapsed]
+. [bash 17:20:14 elapsed]
+. [bash 17:21:14 elapsed]
+. [bash 17:22:14 elapsed]
+. [bash 17:23:14 elapsed]
+. [bash 17:24:14 elapsed]
+. [bash 17:25:14 elapsed]
+. [bash 17:26:14 elapsed]
+. [bash 17:27:14 elapsed]
+. [bash 17:28:14 elapsed]
+. [bash 17:29:14 elapsed]
+. [bash 17:30:14 elapsed]
+. [bash 17:31:14 elapsed]
+. [bash 17:32:14 elapsed]
+. [bash 17:33:14 elapsed]
+. [bash 17:34:14 elapsed]
+. [bash 17:35:14 elapsed]
+. [bash 17:36:14 elapsed]
+. [bash 17:37:14 elapsed]
+. [bash 17:38:14 elapsed]
+. [bash 17:39:14 elapsed]
+. [bash 17:40:14 elapsed]
+. [bash 17:41:14 elapsed]
+. [bash 17:42:14 elapsed]
+. [bash 17:43:14 elapsed]
+. [bash 17:44:14 elapsed]
+. [bash 17:45:14 elapsed]
+. [bash 17:46:14 elapsed]
+. [bash 17:47:14 elapsed]
+. [bash 17:48:14 elapsed]
+. [bash 17:49:14 elapsed]
+. [bash 17:50:14 elapsed]
+. [bash 17:51:14 elapsed]
+. [bash 17:52:14 elapsed]
+. [bash 17:53:14 elapsed]
+. [bash 17:54:14 elapsed]
+. [bash 17:55:14 elapsed]
+. [bash 17:56:14 elapsed]
+. [bash 17:57:14 elapsed]
+. [bash 17:58:14 elapsed]
+. [bash 17:59:14 elapsed]
+. [bash 18:00:14 elapsed]
+. [bash 18:01:14 elapsed]
+. [bash 18:02:14 elapsed]
+. [bash 18:03:14 elapsed]
+. [bash 18:04:14 elapsed]
+. [bash 18:05:14 elapsed]
+. [bash 18:06:14 elapsed]
+. [bash 18:07:14 elapsed]
+. [bash 18:08:14 elapsed]
+. [bash 18:09:14 elapsed]
+. [bash 18:10:14 elapsed]
+. [bash 18:11:14 elapsed]
+. [bash 18:12:14 elapsed]
+. [bash 18:13:14 elapsed]
+. [bash 18:14:14 elapsed]
+. [bash 18:15:14 elapsed]
+. [bash 18:16:14 elapsed]
+. [bash 18:17:14 elapsed]
+. [bash 18:18:14 elapsed]
+. [bash 18:19:14 elapsed]
+. [bash 18:20:14 elapsed]
+. [bash 18:21:14 elapsed]
+. [bash 18:22:14 elapsed]
+. [bash 18:23:14 elapsed]
+. [bash 18:24:14 elapsed]
+. [bash 18:25:14 elapsed]
+. [bash 18:26:14 elapsed]
+. [bash 18:27:14 elapsed]
+. [bash 18:28:14 elapsed]
+. [bash 18:29:14 elapsed]
+. [bash 18:30:14 elapsed]
+. [bash 18:31:14 elapsed]
+. [bash 18:32:14 elapsed]
+. [bash 18:33:14 elapsed]
+. [bash 18:34:14 elapsed]
+. [bash 18:35:14 elapsed]
+. [bash 18:36:14 elapsed]
+. [bash 18:37:14 elapsed]
+. [bash 18:38:14 elapsed]
+. [bash 18:39:14 elapsed]
+. [bash 18:40:14 elapsed]
+. [bash 18:41:14 elapsed]
+. [bash 18:42:14 elapsed]
+. [bash 18:43:14 elapsed]
+. [bash 18:44:14 elapsed]
+. [bash 18:45:14 elapsed]
+. [bash 18:46:14 elapsed]
+. [bash 18:47:14 elapsed]
+. [bash 18:48:14 elapsed]
+. [bash 18:49:14 elapsed]
+CREATE INDEX
+Time: 7748486.068 ms (02:09:08.486)
+SELECT pg_size_pretty(pg_relation_size('docs_tv_4bit'::regclass)) AS size_after_build;
+size_after_build
+15 GB
+(1 row)
+Time: 1.875 ms
+[build_tv_w2] psql exit rc=0
+[build_tv_w2] post-build swap_used_kib=2803904
+[build_tv_w2] peak swap_used_kib=2803904
+[heartbeat] DONE rc=0 (clean exit)

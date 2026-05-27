@@ -1,0 +1,23 @@
+Timing is on.
+DROP INDEX IF EXISTS docs_tv_4bit;
+DROP INDEX
+Time: 2576.300 ms (00:02.576)
+SET maintenance_work_mem = '8GB';
+SET
+Time: 0.221 ms
+SET max_parallel_maintenance_workers = 16;
+SET
+Time: 0.134 ms
+SET search_path = turbovec, public;
+SET
+Time: 0.200 ms
+CREATE INDEX docs_tv_4bit ON docs USING turbovec
+    ((emb::real[]::turbovec.vector) turbovec.vec_cosine_ops)
+    WITH (bit_width = 4);
+CREATE INDEX
+Time: 5052549.048 ms (01:24:12.549)
+SELECT pg_size_pretty(pg_relation_size('docs_tv_4bit'::regclass)) AS size_after_build;
+size_after_build
+15 GB
+(1 row)
+Time: 2.200 ms

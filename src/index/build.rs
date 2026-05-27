@@ -226,70 +226,44 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // reloptions) or built lazily by the callback when the first
     // non-NULL row arrived. If `state.dim` is set we must have an
     // `idx`.
-    let mut idx = state
+    let idx = state
         .idx
         .take()
         .expect("turbovec ambuild: state.dim is set but state.idx is None");
     let n_vectors = idx.slot_to_id().len() as i64;
-    // Phase W-2 (v1.7.0): the finalisation peak used to be
-    // packed_codes (~7.7 GiB at 10 M × 1536-d × 4-bit) + the
-    // SIMD-blocked layout (~7.5 GiB) alive simultaneously
-    // because the single-call write_full_with_prepared kept
-    // both Vec<u8>s referenced through the whole flush. We now
-    // serialise the two halves so they're never co-resident:
+    // Phase P: pre-bake the SIMD-blocked layout and the
+    // Lloyd-Max codebook now, while we own the freshly-built
+    // index. Persisting them alongside the row-major codes
+    // means every backend opening this index for the first
+    // time skips the per-backend ~12–15 s `pack::repack` and
+    // ~5–8 s codebook compute. The prepare step is not free
+    // here, but ambuild is the right place to pay it: it
+    // already runs once per index and at the only point
+    // where we definitively know n_vectors won't change
+    // until the next mutation.
     //
-    //   1. Phase 1 — stream packed_codes + scales + slot_to_id
-    //      to relfile pages. Peak: packed + chain-write buffer.
-    //   2. Materialise the SIMD-blocked layout via
-    //      prepare_eager(). Peak: packed + blocked (transient).
-    //   3. Drop packed_codes via take_packed_codes(); the
-    //      blocked OnceLock survives because it's already
-    //      populated. Peak drops back to ~blocked.
-    //   4. Phase 2 — stream blocked + rotation chains and
-    //      stamp the meta page LAST. Peak: blocked + chain-
-    //      write buffer.
-    //
-    // Phase R-2: also drives the rotation OnceLock so the
-    // matrix gets persisted alongside the codes. Rotation is a
-    // deterministic function of (dim, ROTATION_SEED) whose lazy
-    // QR was the warm-scan hotspot Phase R diagnosed (~64% self
-    // time at dim = 1536); persisting it lets every backend
-    // skip the per-backend QR forever.
+    // v1.7.1 revert note: Phase W-2 (v1.7.0) split this into
+    // write_packed_phase + take_packed_codes + prepare_eager +
+    // write_blocked_phase_and_meta in an attempt to avoid
+    // packed_codes and blocked being co-resident. Validation
+    // on `meh` at 10 M × 1536-d showed the split made the
+    // build 53% slower with no actual RSS reduction (the
+    // "freed" heap pages just migrate to pinned shared
+    // buffers, which `ps -o rss` still counts). Reverted to
+    // the v1.6.0 single-call path. See
+    // an internal design note and the validation JSON at
+    // `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`.
     if n_vectors > 0 {
-        // Phase 1: write the row-major chains. packed_codes is
-        // still alive here — we need it to compute the blocked
-        // layout in step 2.
-        let layout = relfile::write_packed_phase(
-            index_relation,
-            cfg_bit_width as u8,
-            dim as u32,
-            n_vectors as u64,
-            idx.packed_codes(),
-            idx.scales(),
-            idx.slot_to_id(),
-            /*am_version=*/ 1,
-        );
-
-        // Step 2: materialise blocked + codebook + rotation
-        // while packed_codes is still resident.
         idx.prepare_eager();
-
-        // Step 3: drop the row-major packed_codes Vec. The
-        // blocked OnceLock and the codebook/rotation caches are
-        // independent allocations, so dropping packed_codes
-        // doesn't invalidate them. After this point the
-        // in-memory IdMapIndex is no longer mutable (add() etc.
-        // would panic), but ambuild is followed by drop(idx)
-        // so we don't care.
-        drop(idx.take_packed_codes());
-
-        // Phase 2: write blocked + rotation + meta. The meta
-        // page is written LAST inside write_blocked_phase_and_meta
-        // so it's the atomic-complete signal: a crash before
-        // the meta-page WAL record commits leaves block 0 in
-        // its previous state (zero-filled for fresh build,
-        // previous meta for REINDEX), and ambeginscan rejects
-        // the index as empty/legacy.
+        // Phase R-2: also drive the rotation `OnceLock` so we
+        // can persist the matrix alongside the codes. The
+        // rotation is a deterministic function of `(dim,
+        // ROTATION_SEED)` whose lazy QR was the warm-scan
+        // hotspot Phase R diagnosed (~64% self time at
+        // dim = 1536). Computing it once here — we already pay
+        // QR on the first search of every backend in the
+        // pre-Phase-R-2 path — lets every backend reading the
+        // index skip it forever.
         let rotation = idx.rotation();
         let prepared = relfile::PreparedParts {
             blocked_codes: idx.blocked_codes(),
@@ -298,12 +272,20 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
             boundaries: idx.boundaries(),
             rotation,
         };
-        relfile::write_blocked_phase_and_meta(index_relation, layout, Some(prepared));
+        relfile::write_full_with_prepared(
+            index_relation,
+            cfg_bit_width as u8,
+            dim as u32,
+            n_vectors as u64,
+            idx.packed_codes(),
+            idx.scales(),
+            idx.slot_to_id(),
+            1,
+            prepared,
+        );
     } else {
-        // Empty index: no prepared layout to persist, no row
-        // chains to write — phase 1 is a no-op aside from the
-        // returned layout, phase 2 just stamps an empty meta.
-        let layout = relfile::write_packed_phase(
+        // Empty index: no prepared layout to persist.
+        relfile::write_full(
             index_relation,
             cfg_bit_width as u8,
             dim as u32,
@@ -311,9 +293,8 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
             idx.packed_codes(),
             idx.scales(),
             idx.slot_to_id(),
-            /*am_version=*/ 1,
+            1,
         );
-        relfile::write_blocked_phase_and_meta(index_relation, layout, None);
     }
     let _ = indexrelid;
 

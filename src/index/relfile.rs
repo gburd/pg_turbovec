@@ -582,23 +582,15 @@ pub(crate) unsafe fn write_full_with_prepared(
 /// the build-time configuration that phase 2 needs to re-plan with
 /// the blocked + rotation byte sizes filled in.
 ///
-/// Phase W-2 (v1.7.0) introduced the split so `ambuild` can drop
-/// the row-major `packed_codes` Vec<u8> after it has been streamed
-/// out to phase 1's chain pages and BEFORE the SIMD-blocked
-/// derived layout is materialised in memory by
-/// `IdMapIndex::prepare_eager()`. The old single-call path kept
-/// both Vec<u8>s alive through the whole write, doubling the
-/// finalisation peak (~7.7 GiB packed + ~7.5 GiB blocked at
-/// 10 M × 1536-d × 4-bit). With the split, the peak is just the
-/// blocked Vec plus the chain write buffer.
-///
-/// The wire format is unchanged from v1.6.x: codes / scales / ids
-/// occupy their planned blknos starting at block 1 regardless of
-/// whether a blocked / rotation chain follows. Phase 2 re-plans
-/// with the actual `blocked_bytes` / `rotation_bytes` and asserts
-/// the codes / scales / ids offsets agree with phase 1's plan;
-/// they always do because `MetaPageData::plan_with_blocked` lays
-/// the row-major chains out before the blocked / rotation chains.
+/// **Phase W-2 (v1.7.0) introduced this split. It was reverted in
+/// v1.7.1** — see an internal design note for the regression
+/// analysis. The struct and its two helper functions
+/// (`write_packed_phase`, `write_blocked_phase_and_meta`) are
+/// kept as parked dead-code APIs because a future Phase W-3
+/// attempt (e.g. streaming `pack::repack`) may want to revisit a
+/// split-write design from a different angle. They have no
+/// callers in pg_turbovec after the revert.
+#[allow(dead_code)]
 pub(crate) struct PackedPhaseLayout {
     /// `bit_width` from the build config; phase 2 re-plans with it.
     pub bit_width: u8,
@@ -644,6 +636,10 @@ pub(crate) struct PackedPhaseLayout {
 /// Caller must hold an exclusive relation lock and have ensured
 /// the index isn't being concurrently scanned (same constraint as
 /// [`write_full`] and [`write_full_with_prepared`]).
+///
+/// **Parked dead code as of v1.7.1** — Phase W-2's split-write
+/// design was reverted; see the [`PackedPhaseLayout`] doc comment.
+#[allow(dead_code)]
 pub(crate) unsafe fn write_packed_phase(
     rel: pg_sys::Relation,
     bit_width: u8,
@@ -773,6 +769,10 @@ pub(crate) unsafe fn write_packed_phase(
 /// # Safety
 ///
 /// Same constraints as [`write_full`].
+///
+/// **Parked dead code as of v1.7.1** — Phase W-2's split-write
+/// design was reverted; see the [`PackedPhaseLayout`] doc comment.
+#[allow(dead_code)]
 pub(crate) unsafe fn write_blocked_phase_and_meta(
     rel: pg_sys::Relation,
     layout: PackedPhaseLayout,
@@ -877,23 +877,147 @@ unsafe fn write_full_inner(
     am_version: u32,
     prepared: Option<PreparedParts<'_>>,
 ) {
-    // Internally route through the two-phase split so the legacy
-    // single-call path and the Phase W-2 ambuild path share the
-    // exact same on-disk write order: codes/scales/ids first,
-    // then blocked/rotation, then meta. Callers that don't need
-    // the mid-phase drop just keep `packed_codes` alive across
-    // both calls, which is harmless.
-    let layout = write_packed_phase(
-        rel,
+    // v1.7.1 revert: restored to v1.6.0's single-pass batched-
+    // GenericXLog flow. Phase W-2 (v1.7.0) split this into
+    // `write_packed_phase` + `write_blocked_phase_and_meta` so
+    // ambuild could drop `packed_codes` between the two halves.
+    // Validation on `meh` at 10 M × 1536-d showed the split made
+    // the build 53% slower (5052 → 7748 s) and used 2.7 GiB of
+    // swap (vs 0 in v1.6.0) without actually lowering peak RSS
+    // (the "freed" heap pages just migrated to pinned shared
+    // buffers, which `ps -o rss` still counts). See
+    // `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`
+    // and an internal design note for the full analysis.
+    assert_eq!(slot_to_id.len() as u64, n_vectors);
+    assert_eq!(scales.len() as u64, n_vectors);
+
+    let (blocked_bytes, n_blocks_blocked, rotation_bytes) = match &prepared {
+        Some(p) => (
+            p.blocked_codes.len() as u64,
+            p.n_blocks,
+            std::mem::size_of_val(p.rotation) as u64,
+        ),
+        None => (0, 0, 0),
+    };
+    let mut meta = MetaPageData::plan_with_blocked(
         bit_width,
         dim,
         n_vectors,
-        packed_codes,
-        scales,
-        slot_to_id,
         am_version,
+        blocked_bytes,
+        n_blocks_blocked,
+        rotation_bytes,
     );
-    write_blocked_phase_and_meta(rel, layout, prepared);
+    if let Some(p) = &prepared {
+        meta.set_codebook(p.centroids, p.boundaries);
+    }
+    let new_total = meta.total_blocks().max(1);
+
+    // Step 1: ensure the relation is at least `new_total` blocks
+    // long. write_chain_at will rewrite leading blocks and extend
+    // the tail itself, but the meta page (block 0) has to exist
+    // before we call write_meta when the relation is empty —
+    // write_meta handles that case via extend_block_in_fork.
+    //
+    // For the in-place rewrite path (`existing >= new_total`) we
+    // skip extend_to entirely and rely on write_chain_at's
+    // in-place branch.
+    let existing_before = nblocks(rel);
+    if existing_before < new_total {
+        // Pre-extend so the chain offsets in the meta page are
+        // valid the moment readers see them.
+        extend_to(rel, new_total);
+    }
+
+    write_meta(rel, &meta);
+
+    if n_vectors > 0 {
+        write_chain_at(
+            rel,
+            meta.codes_first,
+            packed_codes,
+            meta.stride_bytes,
+            meta.rows_per_codes_page,
+            n_vectors,
+        );
+
+        // Scales chain. Reinterpret f32 slice as raw bytes.
+        let scales_bytes: &[u8] =
+            std::slice::from_raw_parts(scales.as_ptr().cast::<u8>(), std::mem::size_of_val(scales));
+        write_chain_at(
+            rel,
+            meta.scales_first,
+            scales_bytes,
+            std::mem::size_of::<f32>() as u32,
+            meta.rows_per_scales_page,
+            n_vectors,
+        );
+
+        // Ids chain.
+        let ids_bytes: &[u8] = std::slice::from_raw_parts(
+            slot_to_id.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(slot_to_id),
+        );
+        write_chain_at(
+            rel,
+            meta.ids_first,
+            ids_bytes,
+            std::mem::size_of::<u64>() as u32,
+            meta.rows_per_ids_page,
+            n_vectors,
+        );
+
+        // v2: prepared SIMD-blocked layout. Stored as a flat
+        // byte chain (stride = 1, rows_per_page = PAYLOAD_BYTES)
+        // since the blocked buffer doesn't have a meaningful
+        // per-row stride at this layer — the consumer
+        // (turbovec::search) treats it as opaque bytes.
+        if let Some(p) = &prepared {
+            if !p.blocked_codes.is_empty() {
+                write_chain_at(
+                    rel,
+                    meta.blocked_first,
+                    p.blocked_codes,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    p.blocked_codes.len() as u64,
+                );
+            }
+
+            // v3: persisted rotation matrix. Same flat-byte
+            // chain shape as `blocked`. The consumer
+            // (`turbovec::IdMapIndex::from_id_map_parts_with_prepared`)
+            // pre-fills the rotation `OnceLock` from these bytes
+            // and skips the per-backend QR decomposition that
+            // dominates warm-scan latency at large dim.
+            if !p.rotation.is_empty() {
+                let rotation_bytes_buf: &[u8] = std::slice::from_raw_parts(
+                    p.rotation.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(p.rotation),
+                );
+                write_chain_at(
+                    rel,
+                    meta.rotation_first,
+                    rotation_bytes_buf,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    rotation_bytes_buf.len() as u64,
+                );
+            }
+        }
+    }
+
+    // Step 3 — Phase L hardening (item 3): release any trailing
+    // blocks left over from a larger previous layout. This
+    // matters after a shrinking REINDEX or `ambulkdelete`
+    // consolidation; without it, dropped rows linger on disk as
+    // orphan pages until the next REINDEX. `RelationTruncate`
+    // emits its own WAL record (`XLOG_SMGR_TRUNCATE`) and is
+    // crash-safe.
+    let existing_after = nblocks(rel);
+    if existing_after > new_total {
+        pg_sys::RelationTruncate(rel, new_total);
+    }
 }
 
 /// In-place swap-remove on a single chain: copy the row at slot

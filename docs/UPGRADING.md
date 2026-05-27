@@ -36,6 +36,8 @@ Every release that bumps the on-disk format **ships with**:
 | 1.4.x → 1.4.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 | 1.4.x | 1.5.0+ | _none_ | v1.5.0 (Phase R-3) is a scan-side change only: the `ambeginscan` cache-fill path now mmaps the deterministic static regions of the relfile (blocked codes + rotation matrix + inline codebook) instead of pulling them through the buffer manager. The on-disk format (`MetaPageData::version = 3`) is byte-identical to v1.4.x. No REINDEX. The fall-back GUC `turbovec.mmap_static_blocked = off` reverts to the v1.4.x scan path on a per-session basis. See `docs/ARCHITECTURE.md` § "Index AM · mmap isolation contract" for the consistency story. |
 | 1.5.x → 1.5.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
+| 1.5.x | 1.6.0+ | _none_ | v1.6.0 (Phase W) is a build-side change only: `ambuild` now streams the heap scan into `IdMapIndex::add_with_ids` in chunks bounded by `maintenance_work_mem` (capped at 1 GiB) instead of accumulating the entire heap-scan output in a single `Vec<f32>`. Peak `CREATE INDEX` memory drops from ~121 GiB to ~16 GiB at 10 M × 1536-d × 4-bit. The on-disk format (`MetaPageData::version = 3`) is byte-identical to v1.5.x. **No REINDEX required.** Existing v1.5.x indexes continue to work unchanged; the v1.6.0 binary's ambuild path simply uses less memory on the next CREATE INDEX / REINDEX. |
+| 1.6.x → 1.6.x+1 (patch) | _none_ | none | Wire format is frozen across patch releases. |
 
 If you maintain pg_turbovec for a fleet of clusters, scripting the
 migration looks like:

@@ -1,0 +1,29 @@
+{
+  "head": "3a04112 (v1.7.0)",
+  "host": "meh (24 cores, 125 GiB RAM, NixOS)",
+  "corpus": {"n": 10000000, "dim": 1536, "type": "synthetic-unit-norm"},
+  "build": {
+    "phase_v_peak_rss_gib": 121.0,
+    "phase_v_swap_used_gib": 60,
+    "phase_v_build_time_s": 5048,
+    "phase_w_peak_rss_gib": 22.5,
+    "phase_w_swap_used_gib": 0,
+    "phase_w_build_time_s": 5052,
+    "phase_w_2_peak_rss_gib": 23.04,
+    "phase_w_2_swap_peak_gib": 2.67,
+    "phase_w_2_build_time_s": 7748,
+    "maintenance_work_mem": "8GB",
+    "chunk_rows": 174762
+  },
+  "expected_phase_w_2_peak_gib": 15.0,
+  "verdict": "phase_w_2_regression",
+  "verdict_reasoning": "Peak RSS climbed slightly higher (23.04 vs 22.5 GiB), build time grew 53% (5052 -> 7748 s), and 2.7 GiB of swap got used (vs 0 in Phase W). The design hypothesis was that dropping packed_codes from the heap (~7.7 GiB) before write_blocked_phase would shave the peak from 22.5 -> ~15 GiB. The observed RSS curve confirms take_packed_codes() does free the heap memory, but RSS does not drop in proportion: write_packed_phase pins the codes pages in shared_buffers and the backend's RSS still counts those mapped pages even after the heap Vec is gone. Net effect: Phase W-2 trades 7.7 GiB of heap for 7.7 GiB of pinned shared-buffer pages; same RSS budget, but with extra cost from a second GenericXLog flush phase (build time +53%, swap +2.7 GiB). The 15 GiB prediction was wrong because it didn't account for the shared-buffer mapping component of `ps -o rss`.",
+  "rss_curve_summary": {
+    "build_start_unixts": 1779914413,
+    "peak_unixts": 1779920545,
+    "peak_at_seconds_into_build": 6132,
+    "build_finished_at_seconds": 7748,
+    "phases_inferred": "0-3500s = streaming heap scan + write_packed_phase (RSS climbs ~10 GiB), 3500-5500s = prepare_eager + take_packed_codes drop (RSS dips and recovers), 5500-7100s = write_blocked_phase + meta (RSS peaks at 23 GiB), 7100-7748s = teardown"
+  },
+  "decision": "Revert Phase W-2's split-write reordering. v1.6.0's single-call write_full_with_prepared had identical peak RSS, faster build, and zero swap usage. The take_packed_codes() turbovec API addition is harmless to keep for future use; the relfile.rs split is what to revert."
+}

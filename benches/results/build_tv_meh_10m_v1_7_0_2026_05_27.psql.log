@@ -1,0 +1,24 @@
+Timing is on.
+DROP INDEX IF EXISTS docs_tv_4bit;
+psql:<stdin>:2: NOTICE:  index "docs_tv_4bit" does not exist, skipping
+DROP INDEX
+Time: 0.556 ms
+SET maintenance_work_mem = '8GB';
+SET
+Time: 0.134 ms
+SET max_parallel_maintenance_workers = 16;
+SET
+Time: 0.132 ms
+SET search_path = turbovec, public;
+SET
+Time: 0.119 ms
+CREATE INDEX docs_tv_4bit ON docs USING turbovec
+    ((emb::real[]::turbovec.vector) turbovec.vec_cosine_ops)
+    WITH (bit_width = 4);
+CREATE INDEX
+Time: 7748486.068 ms (02:09:08.486)
+SELECT pg_size_pretty(pg_relation_size('docs_tv_4bit'::regclass)) AS size_after_build;
+size_after_build
+15 GB
+(1 row)
+Time: 1.875 ms

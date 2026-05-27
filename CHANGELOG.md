@@ -4,7 +4,48 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.6.0] — unreleased
+## [1.6.1] — 2026-05-27
+
+### Bench-results-only release. Wire format unchanged from 1.6.0; no REINDEX needed.
+
+- **Phase W validation on `meh` (commit `8efb89c`).** Re-ran the
+  Phase V 10M × 1536-d build against v1.6.0 to confirm the
+  streaming `ambuild` change actually drops peak RSS as designed.
+  Result: **121 GiB → 22.5 GiB peak** (5.4× reduction), **60 GiB
+  → 0 GiB swap usage**. Build time within 0.1 % of Phase V
+  (5048 → 5052 s); index size unchanged (15 GiB); warm-scan p50
+  identical (21.2 ms vs Phase V's 21–49 ms band). The remaining
+  22.5 GiB peak is `IdMapIndex`'s row-major `packed_codes`
+  (~7.7 GiB) + the SIMD-blocked prepared layout (~7.5 GiB) +
+  allocator slack + PG backend baseline, all held simultaneously
+  during end-of-build finalisation. Tracked as Phase W-2.
+  Files: `benches/results/phase_w_validate_meh_10m_2026_05_27.json`,
+  `benches/results/phase_w_warm_sanity_meh_10m_2026_05_27.json`,
+  `benches/results/build_tv_meh_10m_v1_6_0_2026_05_27.{log,psql.log,rss.tsv.gz}`,
+  `docs/RECALL.md` § 2.7 follow-up.
+
+- **Phase X: RISC-V architecture comparison (commit `a8fbd87`).**
+  First non-x86 host bring-up. 100 k × 384-d synthetic on `rv`
+  (RISC-V 64, 8 cores, 7.7 GiB RAM, Ubuntu 24.04 LTS):
+  index 39 MB (5× compression), build 13.97 s, warm p50
+  **242.64 ms** (50-query stdev 0.73 ms — extremely tight).
+  Verdict: **arch_works**. The latency multiplier vs x86 (~10–25×
+  depending on corpus comparison) reflects turbovec's AVX2/SSE
+  inner loop falling back to scalar on RISC-V; RVV intrinsics
+  are upstream-future work. Operational note for non-NixOS hosts:
+  the postmaster needs `LD_PRELOAD=libopenblas.so.0` because
+  `cblas_sgemm` is a deferred symbol not in the .so's NEEDED
+  entries. Files: `benches/results/recall_warm_rv_100k_v1_6_0_2026_05_27.json`,
+  `docs/RECALL.md` § 2.8 (new section).
+
+### Migration
+
+**No migration needed; rebuild not required.** The on-disk
+format is byte-identical to v1.6.0. Drop in the new shared
+library, restart, scan; existing indexes continue to work
+unchanged.
+
+## [1.6.0] — 2026-05-26
 
 ### Added — streaming heap scan in `ambuild` (Phase W)
 

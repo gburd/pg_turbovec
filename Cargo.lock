@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "pg_turbovec"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "criterion",
  "half 2.7.1",
@@ -2997,8 +2997,8 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "turbovec"
-version = "0.6.0"
-source = "git+https://github.com/gburd/turbovec.git?branch=pg_turbovec-integration#c3c0528bcd544b1c8125a7b79d7bdd391d463e92"
+version = "0.7.0"
+source = "git+https://github.com/gburd/turbovec.git?rev=6e80a59f473292cc9e04d575ba1596f3e23321c5#6e80a59f473292cc9e04d575ba1596f3e23321c5"
 dependencies = [
  "blas-src",
  "faer",

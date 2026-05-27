@@ -1251,6 +1251,49 @@ table appended to this document.
   build-on-every-call latency is exactly the cold case; v0.3's
   cached AM is exactly the warm case.
 
+## 2.8 RISC-V architecture comparison (Phase X, 2026-05-27)
+
+First run of pg_turbovec on a non-x86 architecture: 100 k × 384-d on
+`rv` (RISC-V 64, 8 cores, 7.7 GiB RAM, Ubuntu 24.04 LTS Noble),
+v1.6.0 (commit `f61d906`).
+
+| metric | rv (riscv64) | meh (x86_64, dbpedia 1M reference) |
+| --- | ---: | ---: |
+| corpus | 100 k × 384-d synthetic | 1 M × 1536-d ada-002 |
+| index size | 39 MB | 280 MB |
+| compression vs heap | 5× (195 MB → 39 MB) | 5× |
+| build time | 13.97 s | 234 s |
+| warm p50 (`tv_4bit_k100`) | **242.64 ms** | 26.8 ms |
+| stdev across 50 q | 0.73 ms | n/a |
+
+50-query warm sweep on rv: min 240.6 ms, p50 242.6 ms, p95 244.1 ms,
+max 245.2 ms, stdev 0.73 ms. Distribution is extremely tight — no
+thermal throttling, no scheduler interference.
+
+**Verdict: pg_turbovec works on RISC-V.** Build, install, query,
+and index correctness all clean. The 5× compression ratio matches
+the x86 numbers exactly. The latency multiplier vs x86 is rough
+(different corpus sizes; ~10–25× slower depending on how you
+compare) and reflects the SIMD inner loop falling back to scalar
+on RISC-V — turbovec 0.5.0 / our fork has AVX2/SSE intrinsics but
+no RVV path yet. RISC-V Vector extension support is upstream-future
+work.
+
+### Operational notes for non-NixOS hosts
+
+- `pg_turbovec.so` does not list `libopenblas.so` in its dynamic
+  `NEEDED` entries (the cblas_sgemm symbol is deferred). On hosts
+  without openblas in the default loader path, start the
+  postmaster with
+  `LD_PRELOAD=/path/to/libopenblas.so.0`. NixOS hosts get this
+  automatically via the build-time RUSTFLAGS.
+- `cargo install cargo-pgrx` + `cargo pgrx init --pg17 download`
+  takes ~7 hours on this RISC-V host. The pg_turbovec compile
+  itself is only 18 minutes; the long tail is bootstrapping pgrx +
+  building Postgres from source.
+- pgvector was not installed on rv during this run, so no head-to-
+  head comparison number is available on the same host.
+
 ## 4. Hardware
 
 Phase 4 results will be reported on:

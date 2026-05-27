@@ -1,0 +1,43 @@
+{
+  "head": "f61d906 (v1.6.0)",
+  "host": "rv (riscv64, 8 cores, 7.7 GiB RAM, Ubuntu 24.04 LTS Noble)",
+  "corpus": {
+    "n": 100000,
+    "dim": 384,
+    "type": "synthetic-unit-norm",
+    "distance": "cosine",
+    "note": "synthetic random vectors via DO loop with STORAGE MAIN; no real-embedding semantic structure"
+  },
+  "index": {
+    "name": "docs_tv_4bit",
+    "type": "pg_turbovec",
+    "bit_width": 4,
+    "size_mb": 39,
+    "build_time_s": 13.97,
+    "compression_vs_heap": "5x (heap 195 MB / index 39 MB)"
+  },
+  "warm_p50_ms": {
+    "tv_4bit_k100": {
+      "n_queries": 50,
+      "min": 240.61,
+      "p50": 242.64,
+      "p95": 244.11,
+      "max": 245.22,
+      "mean": 242.75,
+      "stdev": 0.73
+    }
+  },
+  "comparison_to_x86_64": {
+    "phase_u_meh_dbpedia_1m_warm_p50_ms": 26.8,
+    "phase_v_meh_synthetic_10m_warm_p50_ms": 47.27,
+    "rv_synthetic_100k_warm_p50_ms": 242.64,
+    "ratio_estimate": "~10-25x slower on RISC-V vs x86 AVX2 (different corpus sizes; ratio is rough). The turbovec inner loop falls back to scalar on RISC-V; no RVV intrinsics available in turbovec 0.5.0 / fork."
+  },
+  "verdict": "arch_works",
+  "verdict_reasoning": "pg_turbovec v1.6.0 builds, installs, and queries cleanly on RISC-V 64 (Ubuntu 24.04). Tiny index correctness test passes (vector ORDER BY returns expected nearest neighbour). 50-query warm sweep returns 240-245 ms with stdev 0.73 ms - extremely tight distribution showing no thermal/scheduler interference. 5x compression ratio matches x86_64 numbers. Build/install path required LD_PRELOAD=libopenblas.so.0 because cblas_sgemm is a deferred symbol not in the .so's NEEDED entries; this is a packaging note for non-NixOS hosts.",
+  "ops_notes": [
+    "rv lacks pgvector — comparison was pg_turbovec-only; x86 numbers from Phase U/V used as reference.",
+    "LD_PRELOAD required: postmaster started with LD_PRELOAD=/path/to/libopenblas.so.0",
+    "cargo-pgrx install + cargo pgrx init pg17 took ~7 hours total on rv; pg_turbovec compile only 18 minutes."
+  ]
+}

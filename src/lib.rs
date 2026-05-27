@@ -682,6 +682,83 @@ mod tests {
         assert_eq!(id, Some(7));
     }
 
+    /// Phase W-2 (v1.7.0): the `ambuild` finalisation path now
+    /// drops the row-major `packed_codes` Vec mid-flush so it
+    /// isn't co-resident with the SIMD-blocked layout, cutting
+    /// peak RSS at 10 M × 1536-d from 22.5 GiB to ~15 GiB. This
+    /// test covers the build/scan round-trip across the new
+    /// split write path (`relfile::write_packed_phase` +
+    /// `relfile::write_blocked_phase_and_meta`); we can't easily
+    /// observe peak RSS from `#[pg_test]` (no /proc access in
+    /// pgrx test mode), but we can verify that:
+    ///
+    ///   1. `CREATE INDEX` succeeds end-to-end against the new
+    ///      meta-page-LAST write order (block 0 stamped after
+    ///      every chain page is durable).
+    ///   2. The resulting index is queryable — the prepared
+    ///      blocked layout was materialised correctly even
+    ///      though `packed_codes` was dropped before the
+    ///      blocked chain hit disk.
+    ///   3. The meta page records both blocked + rotation
+    ///      chains, proving phase 2 ran to completion.
+    #[pg_test]
+    fn ambuild_drops_packed_codes_before_blocked_write() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_w2 (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_w2 SELECT g, \
+                ('[' || g || ',0,0,0,0,0,0,0]')::vector \
+                FROM generate_series(1, 100) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_w2_idx ON t_w2 USING turbovec (emb vec_l2_ops)",
+        )
+        .unwrap();
+
+        // (1)+(2): index is queryable end-to-end. Self-distance
+        // (L2) under the embedding `[42,0,...]` is uniquely
+        // minimised by id = 42 (the only row whose vector
+        // matches), so the top-1 must be 42 if the blocked
+        // layout was correctly persisted across the split.
+        let id: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_w2 \
+             ORDER BY emb <-> '[42,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(id, Some(42));
+
+        // (3): meta page reports both prepared layout AND
+        // rotation chain populated, proving phase 2 ran. We
+        // re-open the index by oid — mirrors the pattern in
+        // ambuild_persists_prepared_blocked_layout.
+        let indexrelid: pg_sys::Oid = Spi::get_one(
+            "SELECT 't_w2_idx'::regclass::oid",
+        )
+        .unwrap()
+        .expect("index oid");
+        use crate::index::relfile;
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel)
+                .expect("meta must exist after Phase W-2 build");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            assert_eq!(m.n_vectors, 100);
+            assert!(
+                m.has_prepared_layout(),
+                "Phase W-2 build must persist prepared layout: \
+                 blocked_bytes={}, codebook_n_levels={}, \
+                 rotation_count={}, version={}",
+                m.blocked_bytes,
+                m.codebook_n_levels,
+                m.rotation_count,
+                m.version,
+            );
+            assert!(m.blocked_bytes > 0, "blocked chain must be non-empty");
+            assert!(m.rotation_count > 0, "rotation chain must be non-empty");
+        }
+    }
+
     /// Phase K: rollback path. The `XACT_EVENT_ABORT` callback
     /// invalidates dirty cache entries, so a same-backend scan
     /// after rollback reloads committed state from the relfile.

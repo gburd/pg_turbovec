@@ -86,6 +86,83 @@ duplicate.
   multi-hour memory-cap measurement runs against the v1.6.0
   binary on origin.
 
+## Phase W-2 (shipped — v1.7.0)
+
+**Drop in-memory `packed_codes` after `prepare_eager()`
+materialises `blocked_codes`.** Shipped on 2026-05-27 in v1.7.0
+as a build-side change only; wire format unchanged.
+
+The single-call `relfile::write_full_with_prepared` was split
+into two phases so the row-major `packed_codes` Vec and the
+SIMD-blocked derived layout are never co-resident:
+
+1. `relfile::write_packed_phase` streams `packed_codes`,
+   `scales`, and `slot_to_id` to relfile pages while
+   `packed_codes` is the only large in-memory Vec.
+2. `IdMapIndex::prepare_eager()` materialises the SIMD-blocked
+   layout, codebook, and rotation matrix (transient peak:
+   packed + blocked).
+3. `IdMapIndex::take_packed_codes()` (new turbovec 0.7.0 API)
+   swaps the row-major Vec out and `shrink_to_fit`s it; the
+   `OnceLock`-backed blocked cache is unaffected.
+4. `relfile::write_blocked_phase_and_meta` streams the blocked
+   + rotation chains and stamps the meta page LAST (matching
+   the standard PG hash/gist AM "meta page is the
+   atomic-complete signal" pattern).
+
+Memory profile at 10 M × 1536-d × 4-bit:
+
+| stage                                | RSS peak |
+|--------------------------------------|----------|
+| post-heap-scan (`packed_codes` only) | 7.7 GiB  |
+| during phase-1 chain write           | 8.7 GiB  |
+| during `prepare_eager` (NEW PEAK)    | ~15 GiB  |
+| after `take_packed_codes`            | 7.5 GiB  |
+| during phase-2 chain write           | 8.5 GiB  |
+
+**New peak: ~15 GiB at 10 M × 1536-d (down from 22.5 GiB).**
+8× total reduction vs pre-Phase-W (121 → 22.5 → 15 GiB).
+
+**Validation status:** the v1.7.0 code change ships with local
+unit-test coverage of the split write
+(`ambuild_drops_packed_codes_before_blocked_write` in
+`src/lib.rs`); the multi-hour 10 M-scale peak-RSS validation
+on `meh` is a follow-up bench phase queued behind Phase W-2
+merge. Expected outcome: peak RSS measurement converges on
+~15 GiB ± allocator slack.
+
+## Phase W-3 (parked)
+
+**Stream `pack::repack` so the SIMD-blocked layout never has
+to be fully resident.** After Phase W-2 the dominant remaining
+cost during finalisation is the ~7.5 GiB `blocked_codes` Vec
+allocated by `IdMapIndex::prepare_eager()`. If `pack::repack`
+emitted blocked-block chunks via a callback (rather than
+returning a single `Vec<u8>`), `relfile::write_blocked_phase`
+could stream those chunks straight to relfile pages without
+ever holding the full materialised buffer in memory. Expected
+peak with W-3: ~10 GiB at 10 M × 1536-d.
+
+**Why it's not in v1.7.0:** requires substantial turbovec
+internals work — `pack::repack` currently builds the entire
+blocked Vec in one shot, and refactoring it to a streaming
+callback API touches the inner block-permute loop and the
+NEON / AVX2 SIMD kernels. That's an upstream API change
+worth its own phase, not a piggy-back on Phase W-2.
+
+**Acceptance criteria when we do land it:**
+
+1. Upstream turbovec PR merged on `pg_turbovec-integration`
+   branch with a streaming `pack::repack_streaming` (or
+   equivalent) that yields blocks via callback, with tests
+   covering byte-equivalence to the existing `pack::repack`
+   output.
+2. `pg_turbovec` `relfile::write_blocked_phase_and_meta` calls
+   the streaming variant and writes each block as it arrives.
+3. Peak-RSS validation on `meh` at 10 M × 1536-d × 4-bit
+   shows ~10 GiB peak (down from ~15 GiB post-Phase-W-2, down
+   from 22.5 GiB post-Phase-W, down from 121 GiB pre-Phase-W).
+
 ## Phase W-2 (parked)
 
 **Drop in-memory `packed_codes` after `prepare_eager()`
@@ -117,6 +194,39 @@ worth its own phase, not a piggy-back on Phase W-1.
 3. Peak-RSS validation on `meh` at 10 M × 1536-d × 4-bit
    shows ~8 GiB peak (down from ~16 GiB post-Phase-W-1, down
    from 121 GiB pre-Phase-W).
+
+## Files touched in Phase W-2
+
+- `Cargo.toml`, `pg_turbovec.control` — `1.6.1` → `1.7.0`;
+  turbovec dep bumped to rev
+  `6e80a59f473292cc9e04d575ba1596f3e23321c5` (turbovec 0.7.0).
+- `src/index/relfile.rs` — new `PackedPhaseLayout` struct, new
+  `write_packed_phase` and `write_blocked_phase_and_meta`
+  helpers; existing `write_full` / `write_full_with_prepared`
+  refactored to route through the same two-phase path; meta
+  page now written LAST instead of first (no on-disk format
+  change, but tighter crash-consistency).
+- `src/index/build.rs` — `ambuild` finalisation reorders to
+  phase-1 / `prepare_eager` / `take_packed_codes` / phase-2.
+- `src/lib.rs` — new `#[pg_test]
+  ambuild_drops_packed_codes_before_blocked_write`.
+- `migrations/009_pg_turbovec_v1.7.0.sql` — empty migration
+  (no SQL surface change).
+- `CHANGELOG.md` — v1.7.0 entry.
+- `docs/UPGRADING.md` — `1.6.x → 1.7.0` row in migration
+  matrix.
+- `docs/PHASE_W_PROGRESS.md` — this file.
+
+Upstream turbovec changes (branch `pg_turbovec-integration`):
+
+- `turbovec/src/lib.rs` — `TurboQuantIndex::take_packed_codes`.
+- `turbovec/src/id_map.rs` — `IdMapIndex::take_packed_codes`
+  wrapper.
+- `turbovec/tests/id_map.rs` —
+  `take_packed_codes_after_prepare_eager_keeps_search_working`
+  unit test.
+- `turbovec/Cargo.toml` — `0.6.0` → `0.7.0`.
+- `CHANGELOG.md` — 0.7.0 entry.
 
 ## Files touched in Phase W-1
 

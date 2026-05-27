@@ -4,6 +4,78 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] — 2026-05-27
+
+### Reverted — Phase W-2 split-write design (regression)
+
+Wire format unchanged from v1.6.0 / v1.7.0 (`MetaPageData::version
+= 3`); **no `REINDEX` needed** to upgrade or downgrade between
+any of these. v1.7.1 is a behaviour-only revert.
+
+- **Phase W-2 (v1.7.0) reverted.** Validation on `meh` (24-core,
+  125 GiB RAM NixOS host, head commit `a289870`) at 10 M ×
+  1536-d × 4-bit showed the split-write `ambuild` path
+  introduced in v1.7.0 made the build **53% slower**
+  (5052 → 7748 s), used **2.7 GiB of swap** (vs 0 in v1.6.0),
+  and slightly **raised** peak RSS (22.5 → 23.04 GiB). The
+  predicted ~15 GiB peak never materialised. Full data:
+  `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`.
+
+  | metric            | v1.6.0 | v1.7.0 (W-2) | v1.7.1 (revert) |
+  |-------------------|-------:|-------------:|----------------:|
+  | Peak RSS (GiB)    |   22.5 |        23.04 | 22.5 (= v1.6.0) |
+  | Swap used (GiB)   |      0 |         2.67 |   0 (= v1.6.0)  |
+  | Build time (s)    |  5,052 |        7,748 | 5,052 (= v1.6.0)|
+
+- **Why Phase W-2 didn't work.** The hypothesis was that
+  dropping the ~7.7 GiB row-major `packed_codes` Vec
+  mid-finalise (via `IdMapIndex::take_packed_codes()`) would
+  shave the peak RSS by ~7.7 GiB. It didn't, because the
+  intervening `write_packed_phase` pins those bytes in
+  `shared_buffers` before `take_packed_codes()` runs, and
+  `ps -o rss` counts mapped shared memory as part of the
+  backend's resident set. The 7.7 GiB of "freed" heap simply
+  migrated to pinned shared memory; same RSS budget, plus the
+  cost of an extra `GenericXLog` flush phase. See
+  `docs/PHASE_W_PROGRESS.md` § "Phase W-2 reverted in v1.7.1"
+  for the full analysis.
+
+- **What was reverted.**
+  - `src/index/relfile.rs::write_full_inner` — restored to the
+    v1.6.0 single-pass batched-`GenericXLog` flow: meta page,
+    then codes / scales / ids chains, then blocked / rotation
+    chains, then `RelationTruncate` for shrinking REINDEX.
+  - `src/index/build.rs::ambuild` — restored to the v1.6.0
+    sequence: `prepare_eager()` first, then a single
+    `write_full_with_prepared` call. The `take_packed_codes()`
+    call is dropped from this code path.
+  - `src/lib.rs` —
+    `ambuild_drops_packed_codes_before_blocked_write` renamed
+    to `ambuild_round_trip_after_phase_w_2_revert` and kept
+    as a generic ambuild round-trip smoke (still passes via
+    the v1.6.0 code path).
+
+- **What was kept.**
+  - `relfile::write_packed_phase`,
+    `relfile::write_blocked_phase_and_meta`, and
+    `relfile::PackedPhaseLayout` remain in the source as
+    parked dead code, marked `#[allow(dead_code)]`. They have
+    no callers after the revert but may be useful for a
+    future Phase W-3 attempt that takes a different angle
+    (e.g. streaming `pack::repack`).
+  - The turbovec fork pin at rev
+    `6e80a59f473292cc9e04d575ba1596f3e23321c5` (turbovec
+    0.7.0) stays. `IdMapIndex::take_packed_codes()` on the
+    fork is harmless additive API; we just don't call it.
+
+### Migration
+
+**No migration needed; rebuild not required.** The on-disk
+format is byte-identical across v1.6.0 / v1.7.0 / v1.7.1.
+Drop in the new shared library, restart, scan; existing
+indexes built under any of these versions continue to work
+unchanged.
+
 ## [1.7.0] — 2026-05-27
 
 ### Added — mid-finalise drop of `packed_codes` in `ambuild` (Phase W-2)

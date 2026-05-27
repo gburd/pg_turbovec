@@ -86,11 +86,16 @@ duplicate.
   multi-hour memory-cap measurement runs against the v1.6.0
   binary on origin.
 
-## Phase W-2 (shipped — v1.7.0)
+## Phase W-2 (shipped — v1.7.0, REVERTED in v1.7.1)
 
 **Drop in-memory `packed_codes` after `prepare_eager()`
 materialises `blocked_codes`.** Shipped on 2026-05-27 in v1.7.0
 as a build-side change only; wire format unchanged.
+
+**Reverted on 2026-05-27 in v1.7.1** after 10 M-scale
+validation on `meh` showed the design did not deliver the
+predicted RSS reduction and made the build 53% slower. See
+§ "Phase W-2 reverted in v1.7.1" below.
 
 The single-call `relfile::write_full_with_prepared` was split
 into two phases so the row-major `packed_codes` Vec and the
@@ -123,13 +128,105 @@ Memory profile at 10 M × 1536-d × 4-bit:
 **New peak: ~15 GiB at 10 M × 1536-d (down from 22.5 GiB).**
 8× total reduction vs pre-Phase-W (121 → 22.5 → 15 GiB).
 
-**Validation status:** the v1.7.0 code change ships with local
-unit-test coverage of the split write
+**Validation status:** the v1.7.0 code change shipped with
+local unit-test coverage of the split write
 (`ambuild_drops_packed_codes_before_blocked_write` in
-`src/lib.rs`); the multi-hour 10 M-scale peak-RSS validation
-on `meh` is a follow-up bench phase queued behind Phase W-2
-merge. Expected outcome: peak RSS measurement converges on
-~15 GiB ± allocator slack.
+`src/lib.rs`, renamed to `ambuild_round_trip_after_phase_w_2_revert`
+in v1.7.1); the multi-hour 10 M-scale peak-RSS validation on
+`meh` was the follow-up bench phase, and it found a
+regression. See § "Phase W-2 reverted in v1.7.1" below.
+
+## Phase W-2 reverted in v1.7.1 (2026-05-27)
+
+**Decision: revert.** v1.7.1 restores `src/index/relfile.rs::write_full_inner`
+and `src/index/build.rs::ambuild` to their v1.6.0 single-pass
+shape. Wire format is unchanged across v1.6.0 / v1.7.0 /
+v1.7.1; no REINDEX is needed in either direction.
+
+### Validation that triggered the revert
+
+Full data in
+`benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`.
+Host `meh` (24 cores, 125 GiB RAM, NixOS); corpus 10 M ×
+1536-d × 4-bit synthetic unit-norm; `maintenance_work_mem =
+8GB`; chunk_rows = 174,762.
+
+| metric                | v1.5.x (pre-W) | v1.6.0 (Phase W) | v1.7.0 (Phase W-2) |
+|-----------------------|---------------:|-----------------:|-------------------:|
+| Peak RSS (GiB)        |          121.0 |             22.5 |              23.04 |
+| Swap used (GiB)       |             60 |                0 |               2.67 |
+| Build time (s)        |          5,048 |            5,052 |              7,748 |
+| Predicted RSS (GiB)   |              — |                — |              ~15.0 |
+
+Verdict: `phase_w_2_regression`.
+
+### Why the hypothesis was wrong
+
+The design assumed dropping ~7.7 GiB of row-major
+`packed_codes` from the heap mid-finalise (via the new
+`IdMapIndex::take_packed_codes()`) would shave the peak RSS
+by ~7.7 GiB, taking 22.5 GiB → ~15 GiB.
+
+What actually happens: `write_packed_phase` streams the
+`packed_codes` bytes to relfile pages via `GenericXLog`, which
+means those pages are pinned in `shared_buffers`. The pinned
+pages are mapped into the backend's address space, and
+`ps -o rss` (the RSS column we measure) **counts mapped
+shared memory** as part of the backend's resident set. So:
+
+- Heap drop: real (7.7 GiB freed at the right moment).
+- RSS drop: imaginary (the same 7.7 GiB is now in pinned
+  shared mem and still counted toward the backend's RSS).
+- Net: same RSS budget, plus a 53% build-time penalty from
+  the second `GenericXLog` flush phase + extra `extend_to`
+  checks, plus 2.7 GiB of swap that v1.6.0 didn't need
+  (probably from second-phase chain-write buffers colliding
+  with the OS page cache that v1.6.0's tighter loop didn't
+  give time to grow).
+
+### What the revert does
+
+- `src/index/relfile.rs::write_full_inner` — restored to the
+  v1.6.0 single-pass batched-`GenericXLog` flow: meta page,
+  then codes / scales / ids chains, then blocked / rotation
+  chains, then `RelationTruncate` to release trailing blocks.
+- `src/index/build.rs::ambuild` — restored to the v1.6.0
+  sequence: `prepare_eager()` first, then a single
+  `write_full_with_prepared` call. The `take_packed_codes()`
+  call is removed from this code path.
+- `src/lib.rs` — the
+  `ambuild_drops_packed_codes_before_blocked_write` test is
+  renamed to `ambuild_round_trip_after_phase_w_2_revert` and
+  kept as a generic ambuild round-trip smoke (it still passes
+  via the v1.6.0 code path).
+
+### What the revert keeps
+
+- The new public APIs `relfile::write_packed_phase`,
+  `relfile::write_blocked_phase_and_meta`, and
+  `relfile::PackedPhaseLayout` stay in the source as parked
+  dead code, marked `#[allow(dead_code)]` on each item. They
+  are unused after the revert but may be useful for a future
+  Phase W-3 attempt that takes a different angle (e.g. a
+  streaming `pack::repack` that lets the blocked layout
+  itself stream to disk without ever being fully resident).
+- The turbovec fork bump to rev
+  `6e80a59f473292cc9e04d575ba1596f3e23321c5` (turbovec 0.7.0)
+  in `Cargo.toml` stays. The new
+  `IdMapIndex::take_packed_codes(&mut self) -> Vec<u8>` method
+  on the fork is harmless additive API; pg_turbovec just
+  doesn't call it after the revert.
+
+### Lesson for Phase W-3
+
+Future build-side memory work has to be measured against
+**both** `MemAvailable`-derived numbers and the
+shared-buffer mapping component, not just `ps -o rss`. The
+right budget metric for "is the box about to OOM?" is RSS;
+the right metric for "is the heap allocator actually freeing
+bytes?" is the heap-only allocator stats. Phase W-2
+conflated the two and optimised the heap component while
+leaving the visible RSS unchanged.
 
 ## Phase W-3 (parked)
 

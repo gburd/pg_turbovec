@@ -682,27 +682,26 @@ mod tests {
         assert_eq!(id, Some(7));
     }
 
-    /// Phase W-2 (v1.7.0): the `ambuild` finalisation path now
-    /// drops the row-major `packed_codes` Vec mid-flush so it
-    /// isn't co-resident with the SIMD-blocked layout, cutting
-    /// peak RSS at 10 M × 1536-d from 22.5 GiB to ~15 GiB. This
-    /// test covers the build/scan round-trip across the new
-    /// split write path (`relfile::write_packed_phase` +
-    /// `relfile::write_blocked_phase_and_meta`); we can't easily
-    /// observe peak RSS from `#[pg_test]` (no /proc access in
-    /// pgrx test mode), but we can verify that:
+    /// Phase W-2 (v1.7.0) introduced a split-write `ambuild` path
+    /// that streamed `packed_codes` to the relfile, dropped the
+    /// in-memory Vec mid-finalise, then wrote the SIMD-blocked
+    /// layout. Validation on `meh` at 10 M × 1536-d showed the
+    /// split made the build 53% slower with no actual RSS
+    /// reduction (the "freed" heap pages just migrate to pinned
+    /// shared buffers, which `ps -o rss` still counts).
     ///
-    ///   1. `CREATE INDEX` succeeds end-to-end against the new
-    ///      meta-page-LAST write order (block 0 stamped after
-    ///      every chain page is durable).
-    ///   2. The resulting index is queryable — the prepared
-    ///      blocked layout was materialised correctly even
-    ///      though `packed_codes` was dropped before the
-    ///      blocked chain hit disk.
+    /// **v1.7.1 reverts that change**; this test is kept as a
+    /// generic ambuild round-trip smoke covering the v1.6.0 /
+    /// v1.7.1 single-call write path. We can't observe peak RSS
+    /// from `#[pg_test]` (no /proc access in pgrx test mode), but
+    /// we can verify that:
+    ///
+    ///   1. `CREATE INDEX` succeeds end-to-end.
+    ///   2. The resulting index is queryable.
     ///   3. The meta page records both blocked + rotation
-    ///      chains, proving phase 2 ran to completion.
+    ///      chains, proving `prepare_eager` ran to completion.
     #[pg_test]
-    fn ambuild_drops_packed_codes_before_blocked_write() {
+    fn ambuild_round_trip_after_phase_w_2_revert() {
         use_turbovec();
         Spi::run("CREATE TABLE t_w2 (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
@@ -720,7 +719,7 @@ mod tests {
         // (L2) under the embedding `[42,0,...]` is uniquely
         // minimised by id = 42 (the only row whose vector
         // matches), so the top-1 must be 42 if the blocked
-        // layout was correctly persisted across the split.
+        // layout was correctly persisted.
         let id: Option<i64> = Spi::get_one(
             "SELECT id FROM t_w2 \
              ORDER BY emb <-> '[42,0,0,0,0,0,0,0]'::vector LIMIT 1",
@@ -729,8 +728,8 @@ mod tests {
         assert_eq!(id, Some(42));
 
         // (3): meta page reports both prepared layout AND
-        // rotation chain populated, proving phase 2 ran. We
-        // re-open the index by oid — mirrors the pattern in
+        // rotation chain populated. We re-open the index by oid
+        // — mirrors the pattern in
         // ambuild_persists_prepared_blocked_layout.
         let indexrelid: pg_sys::Oid = Spi::get_one(
             "SELECT 't_w2_idx'::regclass::oid",
@@ -741,12 +740,12 @@ mod tests {
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel)
-                .expect("meta must exist after Phase W-2 build");
+                .expect("meta must exist after build");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             assert_eq!(m.n_vectors, 100);
             assert!(
                 m.has_prepared_layout(),
-                "Phase W-2 build must persist prepared layout: \
+                "build must persist prepared layout: \
                  blocked_bytes={}, codebook_n_levels={}, \
                  rotation_count={}, version={}",
                 m.blocked_bytes,

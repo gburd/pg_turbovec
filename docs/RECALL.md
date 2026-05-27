@@ -1214,6 +1214,121 @@ schema-side step.
 - Warm-scan sanity check (50 queries, `tv_4bit_k100`):
   [`benches/results/phase_w_warm_sanity_meh_10m_2026_05_27.json`](../benches/results/phase_w_warm_sanity_meh_10m_2026_05_27.json)
 
+### Post-Phase-W-2 follow-up (v1.7.0, 2026-05-27)
+
+Phase W-2 (commit `3a04112`, v1.7.0) reorders `ambuild`'s
+finalisation so the row-major `packed_codes` Vec and the
+SIMD-blocked layout are not both alive while the relfile is
+being written: the build now does (1) `write_packed_phase`,
+(2) `prepare_eager`, (3) `take_packed_codes` to drop
+`packed_codes`, (4) `write_blocked_phase_and_meta`. The
+design target was a peak of ~15 GiB at 10 M × 1536-d (the
+`prepare_eager` window where packed + blocked are both alive
+but nothing else has been added yet).
+
+Re-measured on `meh`, same 10 M × 1536-d corpus, same
+`maintenance_work_mem = 8 GiB`:
+
+| Metric | Phase V (v1.5.1) | Phase W (v1.6.0) | Phase W-2 (v1.7.0) |
+|---|---:|---:|---:|
+| Peak leader RSS during `CREATE INDEX docs_tv_4bit` | 121 GiB | 22.52 GiB | **23.04 GiB** |
+| Swap used (delta over the build) | up to 60 GiB | 0 GiB | 0 GiB |
+| Build wall-clock | 5 048 s | 5 052.5 s | **7 748.5 s** (+53 %)¹ |
+| Index size on disk | 15 GiB | 15 GiB | 15 GiB |
+| Warm `tv_4bit_k100` p50 (50 queries) | 47.27 ms | 21.24 ms | 21.37 ms |
+
+¹ The Phase V/W bench used UNLOGGED `docs`; this run had to
+reload the corpus as LOGGED after a wedged `pg_ctl restart`
+from an earlier attempt triggered crash-recovery's "reset
+unlogged relations" path and zeroed the original table.
+CREATE INDEX on a LOGGED table writes WAL for every index
+page (~15 GiB additional WAL), which accounts for most of the
+wall-clock regression. The index's RSS profile is unaffected
+by the persistence change.
+
+**Verdict: Phase W-2 fails the peak-RSS target** (criterion:
+≤ 17 GiB → works, 17–22 GiB → partial, ≥ 22 GiB → fails).
+23.04 GiB is fractionally above Phase W's 22.52 GiB. The
+reordering is _partially_ working: an annotated 1 Hz RSS
+curve (see
+[`build_tv_meh_10m_v1_7_0_2026_05_27.rss.tsv.gz`](../benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.rss.tsv.gz))
+shows the predicted plateaus exactly:
+
+- 0–58 min — heap-scan streaming, monotonic 3.4 → 10.9 GiB;
+- 60–86 min — `write_packed_phase` plateau at **8.4 GiB**
+  (predicted ~8.7 GiB ✓);
+- 88–98 min — `prepare_eager` plateau at **15.9 GiB**
+  (predicted ~15 GiB ✓);
+- **101–102 min — 38-second linear ramp to 23.04 GiB**
+  (UNPREDICTED);
+- 104–128 min — `write_blocked_phase_and_meta` plateau at
+  **8.4 GiB** (predicted ~8.5 GiB ✓).
+
+The transient peak is the boundary between
+`take_packed_codes()` and the start of
+`write_blocked_phase_and_meta`. The most likely mechanism
+(supported by the linear, ~190 MiB/s ramp rate matching the
+relation extension throughput on this disk):
+
+1. `drop(idx.take_packed_codes())` returns the 7.7 GiB Vec to
+   the Rust heap allocator, but the allocator does **not**
+   immediately `madvise(MADV_DONTNEED)` the freed range — it
+   stays in process RSS as cached freelist memory.
+2. `extend_to` extends the index relation file by ~8 GiB and
+   touches each new page through the mmap-backed
+   `relfile_storage` smgr. mmap-touched dirty file pages
+   count toward the process's RSS until `bgwriter` /
+   `RelationTruncate` clean them.
+3. For ~38 seconds the two co-exist: 7.7 GiB allocator-cached
+   freed Vec + 7.5 GiB blocked Vec (still alive, fed into
+   `write_chain_at`) + ramping ~7.5 GiB mmap-extend working
+   set = the observed 23 GiB peak.
+4. When `write_blocked_phase_and_meta` returns, the kernel
+   reclaims clean mmap pages _and_ the allocator releases the
+   freed Vec range; both happen within a single ~3 s window
+   and RSS collapses to the steady-state 8.4 GiB.
+
+Phase W's 22.5 GiB peak is the same co-residency under the
+single-call write path; Phase W-2's reordering eliminated the
+packed+blocked overlap _during_ `prepare_eager` (the 15.9 GiB
+plateau confirms it) and _during_ the chain write itself (the
+8.4 GiB post-spike plateau confirms it), but did not
+eliminate the 38-second boundary window where the relation
+extension and the lazy allocator-side free overlap.
+
+**What this means for Phase W-3.** The `pack::repack`
+streaming refactor parked under Phase W-3 (see
+an internal design note) is no longer the obvious next
+step: with the streaming-extend hypothesis above, even a
+streaming `pack::repack` would still hit the
+allocator-deferred-free vs mmap-extend overlap. A more
+targeted fix is either (a) call `madvise(MADV_DONTNEED)`
+directly on the freed range before `extend_to`, or (b) move
+to an allocator (mimalloc, jemalloc with `dirty_decay_ms=0`)
+that returns memory to the OS aggressively. Either is a
+cheaper landing than the upstream pack::repack rewrite W-3
+proposed.
+
+Warm-scan sanity (50 fresh queries, `tv_4bit_k100`,
+identical probe-vector seed): min 21.19 ms, p50 21.37 ms,
+p95 48.77 ms, max 49.02 ms — the same band Phase W observed
+(min 21.13, p50 21.24, max 48.23). The v1.7.0-built index
+queries identically to the v1.6.0-built index; the split
+write is byte-equivalent on disk.
+
+#### Source data
+
+- Full structured run:
+  [`benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`](../benches/results/phase_w_2_validate_meh_10m_2026_05_27.json)
+- psql build log + timing:
+  [`benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.psql.log`](../benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.psql.log)
+- Heartbeat-wrapped outer log:
+  [`benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.log`](../benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.log)
+- Per-process RSS time series (1 s cadence, gzipped TSV):
+  [`benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.rss.tsv.gz`](../benches/results/build_tv_meh_10m_v1_7_0_2026_05_27.rss.tsv.gz)
+- Warm-scan sanity check (50 queries, `tv_4bit_k100`):
+  [`benches/results/phase_w_2_warm_sanity_meh_10m_2026_05_27.json`](../benches/results/phase_w_2_warm_sanity_meh_10m_2026_05_27.json)
+
 ## 3. End-to-end ANN benchmarks (Phase 15+, planned)
 
 `benches/ann_recall.rs` (not yet implemented) will:

@@ -126,10 +126,68 @@ Memory profile at 10 M × 1536-d × 4-bit:
 **Validation status:** the v1.7.0 code change ships with local
 unit-test coverage of the split write
 (`ambuild_drops_packed_codes_before_blocked_write` in
-`src/lib.rs`); the multi-hour 10 M-scale peak-RSS validation
-on `meh` is a follow-up bench phase queued behind Phase W-2
-merge. Expected outcome: peak RSS measurement converges on
-~15 GiB ± allocator slack.
+`src/lib.rs`). The 10 M-scale peak-RSS validation on `meh`
+ran on 2026-05-27 against this commit (`3a04112`, v1.7.0)
+and **did not converge on ~15 GiB**: the measured peak was
+**23.04 GiB**, fractionally above Phase W's 22.52 GiB. See
+[`docs/RECALL.md § 2.7 "Post-Phase-W-2 follow-up"`](RECALL.md)
+and
+[`benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`](../benches/results/phase_w_2_validate_meh_10m_2026_05_27.json)
+for the full annotated 1 Hz RSS curve.
+
+What the curve shows is that the design _does_ produce the
+predicted plateaus:
+
+- `write_packed_phase` plateau at 8.4 GiB (pred. ~8.7 ✓),
+- `prepare_eager` plateau at 15.9 GiB (pred. ~15 ✓),
+- `write_blocked_phase_and_meta` post-spike plateau at
+  8.4 GiB (pred. ~8.5 ✓).
+
+But at the boundary between `take_packed_codes()` and
+`write_blocked_phase_and_meta` there is a **38-second linear
+ramp from 15.9 GiB to 23.0 GiB**, then a synchronous ~3 s
+drop back to 8.4 GiB. The ramp rate (~190 MiB/s) matches the
+rate at which `extend_to` extends the relation file by ~8 GiB
+on this disk. The most-likely cause is that
+`drop(idx.take_packed_codes())` returns the 7.7 GiB row-major
+Vec to the Rust heap allocator, but glibc's allocator does
+NOT immediately `madvise(MADV_DONTNEED)` the freed range;
+meanwhile `extend_to` is touching ~8 GiB of newly mmap'd
+file-backed pages through the `relfile_storage` smgr, and
+those two co-exist alongside the still-alive 7.5 GiB blocked
+Vec for the duration of the chain write.
+
+**Verdict: phase_w_2_fails by the brief's threshold**
+(≥ 22 GiB) but the failure is at the boundary, not in the
+steady-state design. The most actionable next step is _not_
+Phase W-3's `pack::repack` streaming refactor (which would
+hit the same allocator-vs-mmap overlap), but rather:
+
+1. an explicit `madvise(MADV_DONTNEED)` on the freed
+   `packed_codes` byte range immediately before `extend_to`,
+   _or_
+2. switch the allocator to mimalloc, or to jemalloc with
+   `dirty_decay_ms=0` to force eager OS return.
+
+With either fix the predicted ~15 GiB peak should drop out
+of a re-measurement.
+
+**Other findings from the validation run:**
+- Build wall-clock regressed +53 % vs Phase W (5052 s →
+  7748 s). This is dominated by the corpus being LOGGED in
+  this run vs UNLOGGED in Phase W — the original Phase V/W
+  `docs` table was lost when an earlier wedged `pg_ctl
+  restart` triggered crash-recovery's "reset unlogged
+  relations" path; the reload was made LOGGED to defend
+  against that hazard repeating, which adds ~15 GiB of
+  index-page WAL writes to `CREATE INDEX`. Not a real
+  regression in the Phase W-2 code path.
+- Index size on disk and warm-scan latency are both
+  unchanged from v1.6.0 (15 GiB, 21 ms p50 at
+  `tv_4bit_k100`). The split-write path is byte-equivalent
+  to the single-call path.
+- No `GenericXLog` or relfile-write atomicity surprises:
+  the index built cleanly and is queryable.
 
 ## Phase W-3 (parked)
 

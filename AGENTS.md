@@ -84,16 +84,16 @@ The current major (1.x) line has been wire-format-stable since v1.4.0
 majors should attempt to remain online-upgradable from the 1.x line
 unless the cost of doing so is prohibitive.
 
-### Current (as of v1.7.1, 2026-05-27)
+### Current (as of v1.7.2, 2026-05-27)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.7.1    | `REINDEX INDEX` once |
-| 1.2.x              | 1.7.1    | `REINDEX INDEX` once |
-| 1.3.x              | 1.7.1    | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.7.x      | 1.7.1    | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.7.2    | `REINDEX INDEX` once |
+| 1.2.x              | 1.7.2    | `REINDEX INDEX` once |
+| 1.3.x              | 1.7.2    | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.7.x      | 1.7.2    | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version = 3` has held across **v1.4.0 → v1.7.1**.
+`MetaPageData::version = 3` has held across **v1.4.0 → v1.7.2**.
 
 ---
 

@@ -555,6 +555,8 @@ bridge is the supported interop path.
   semantics, phased roadmap.
 - [`docs/USAGE.md`](docs/USAGE.md) - cookbook covering install,
   exact + ANN search, aggregates, arithmetic, tuning.
+- [`docs/PRODUCTION.md`](docs/PRODUCTION.md) - **deployment guide**:
+  install, GUC tuning, replication, monitoring, troubleshooting.
 - [`docs/MIGRATING_FROM_PGVECTOR.md`](docs/MIGRATING_FROM_PGVECTOR.md)
   - hands-on migration with query rewrite tables and a feature
   comparison.

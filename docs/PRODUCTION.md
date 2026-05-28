@@ -387,6 +387,41 @@ is paid once and cached. Mitigations:
 
 ---
 
+## Known issues
+
+### v1.7.2 — index AM returns duplicate rows at large scale (under investigation)
+
+**Status:** confirmed bug; 2026-05-28; under bisection.
+
+**Symptom:** At a 10 M × 1024-d corpus on `meh`, the turbovec
+index AM's `ORDER BY emb_expr <=> probe LIMIT N` returns the
+same `id` N times instead of the top-N nearest neighbours. The
+bug does not appear at 1000 × 128-d (where the unit test suite
+lives), so the 123/123 unit-test pass count is not currently a
+guarantee of correct behaviour at production scale.
+
+Verified working at scale (rules these out):
+- `turbovec.cosine_distance(col_expr, col_expr)` — returns
+  correct, distinct distances.
+- Sequential-scan `ORDER BY emb_expr <=> probe LIMIT N`
+  (with `enable_indexscan = off; enable_bitmapscan = off`) —
+  returns correct, distinct, properly-sorted top-N over a
+  small subset.
+
+So the bug lives in the index AM's scan path or the underlying
+`turbovec::IdMapIndex::search` at this scale. Bisection is
+in progress; recommended workaround until a fix lands:
+
+- Force sequential scans for ANN queries on indexes >
+  ~1 M rows: `SET enable_indexscan = off;` per session, or
+  `ALTER TABLE ... ALTER COLUMN ...` to remove the offending
+  index and use brute-force.
+- Or stay on small corpora (< ~100 k rows) where the bug has
+  not been observed.
+
+See `docs/RECALL.md § 2.9` for the bench artefact that
+discovered this.
+
 ## Reporting bugs
 
 `pg_turbovec` is developed at:

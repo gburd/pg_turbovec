@@ -1334,3 +1334,41 @@ pub(crate) unsafe fn read_rotation(
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
+
+/// Test-only helper: forge the on-disk meta-page version byte to
+/// `version`, leaving every other byte untouched. Used by the
+/// upgrade-path #[pg_test]s in `src/lib.rs` to simulate an index
+/// built under a pre-Phase-R-2 wire format without having to keep
+/// old binaries around.
+///
+/// Unlike a real REINDEX, this leaves the v2/v3 chain offsets on
+/// disk; that's intentional, because the legacy detection path in
+/// `ambeginscan` only inspects `MetaPageData::version`, and we
+/// want the test to exercise that exact predicate.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock and have ensured
+/// the relation has at least one block (the meta page). Only
+/// compiled into the cargo-test / pgrx-test build.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_meta_version(rel: pg_sys::Relation, version: u8) {
+    assert!(
+        nblocks(rel) > 0,
+        "force_meta_version: relation has no blocks"
+    );
+    let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
+    let state = pg_sys::GenericXLogStart(rel);
+    let page = pg_sys::GenericXLogRegisterBuffer(
+        state,
+        buf,
+        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+    );
+    // Byte layout: PG_HEADER (24) + magic (4) + version (1).
+    // Patch only the version byte; the surrounding chain offsets
+    // and codebook stay valid so the decoder accepts the page.
+    let version_byte = page.cast::<u8>().add(PAGE_HEADER_BYTES + 4);
+    *version_byte = version;
+    pg_sys::GenericXLogFinish(state);
+    pg_sys::UnlockReleaseBuffer(buf);
+}

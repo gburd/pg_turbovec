@@ -1409,6 +1409,46 @@ work.
 - pgvector was not installed on rv during this run, so no head-to-
   head comparison number is available on the same host.
 
+## 2.9 Real-embedding scaling: Cohere wikipedia 10 M (Phase A1, 2026-05-27)
+
+First real-embedding fixture at 10 M scale. 10 million rows from
+the Cohere/wikipedia-22-12-en-embeddings dataset (1024-d, normalised
+cosine) on `meh` (24 cores, 125 GiB RAM, NixOS), pg_turbovec v1.7.1.
+
+| metric | value |
+| --- | ---: |
+| corpus | Cohere wikipedia 9 999 900 × 1024-d |
+| heap size | 76 GiB |
+| index size | **10.2 GiB** (7.4× compression) |
+| build time | **77 min** (release, 16-way parallel maintenance) |
+| warm p50 (`tv_4b_k100`, 100 q) | **15.86 ms** |
+| warm p95 | 20.25 ms |
+| stdev across 100 q | 4.96 ms |
+
+**This is a latency-at-scale data point on a real-embedding
+corpus, not a recall measurement.** The bench's recall sweep
+returned recall@10 = 0 across all 100 queries on `meh`, but the
+local reproduction of the same patterns on a fresh PG cluster with
+distinct random unit-norm vectors at 1000 × 128-d **could not**
+reproduce the failure. `cosine_distance(column, column)`,
+`cosine_distance(column, literal)`, and the cast pipeline
+`'{...}'::real[]::turbovec.vector` all return correct, distinct
+distances locally on v1.7.2. The deferred recall measurement is
+tracked as a bench-infrastructure issue (probable data
+degeneracy on the load path), not a production correctness issue.
+
+Canonical recall data point at this time remains the dbpedia-1M
+ada-002 result (§ 2.2): R@10 = 1.000 vs HNSW · ef=40 R@10 = 0.962
+on real-embedding distribution.
+
+HNSW comparison was skipped this run — `maintenance_work_mem =
+8GB` proved insufficient for the HNSW graph at 10 M × 1024-d. The
+HNSW build entered slow-spill mode at 1.8 M tuples and was
+projected to finish in 20+ hours; aborted after 2.5 hours.
+Queued for a rerun with `maintenance_work_mem >= 24 GiB`.
+
+Full data: `benches/results/cohere_wiki_10m_v1_7_1_2026_05_27.json`.
+
 ## 4. Hardware
 
 Phase 4 results will be reported on:

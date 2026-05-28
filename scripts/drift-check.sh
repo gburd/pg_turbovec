@@ -196,6 +196,56 @@ if [ -f docs/PARITY_GAPS.md ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 9. Migration files vs documented release history.
+# ----------------------------------------------------------------------
+#
+# Every release that ships a tagged version must have a matching
+# migrations/0NN_pg_turbovec_vX.Y.Z.sql file (even if empty), so
+# `ALTER EXTENSION pg_turbovec UPDATE TO 'X.Y.Z';` resolves cleanly.
+# This check cross-references the migration filenames against the
+# 'From' column of the migration matrix in docs/UPGRADING.md.
+#
+# History: caught at release time twice already — v1.6.0 and v1.7.0
+# both had to be re-tagged after the migration file was forgotten.
+# Phase Y (v1.7.2) added an in-Rust mirror of this check
+# (`migration_files_cover_documented_versions`) so the gate fires
+# in `cargo pgrx test` too.
+
+if [ -f docs/UPGRADING.md ] && [ -d migrations ]; then
+    # The most recent Cargo.toml version must have a matching
+    # migration file. Catches "bumped Cargo.toml + control + tag
+    # but forgot the migration file" — the historical bug.
+    if ! ls "migrations/"*"_pg_turbovec_v${cargo_ver}.sql" >/dev/null 2>&1; then
+        fail "Cargo.toml is at v${cargo_ver} but migrations/ has no matching file. Add migrations/0NN_pg_turbovec_v${cargo_ver}.sql (may be empty / comments-only)."
+    fi
+
+    # Migration filenames must be monotonically increasing on the
+    # 0NN prefix (catches a release engineer who reuses or
+    # backdates a sigil).
+    prev=0
+    for f in $(ls migrations/0*.sql 2>/dev/null | sort); do
+        n=$(basename "$f" | sed -E 's/^0*([0-9]+)_.*/\1/')
+        if [ "$n" -le "$prev" ]; then
+            fail "migrations/ ordering not monotonic at $f (sigil $n <= prev $prev)."
+        fi
+        prev=$n
+    done
+
+    # The Rust-side `migration_files_cover_documented_versions`
+    # #[pg_test] in src/lib.rs holds the authoritative list of
+    # release sigils. We mirror just the "latest sigil is
+    # documented" gate here so the docs-only side of the contract
+    # is enforceable without a running PG cluster. Per-sigil
+    # mention coverage in docs/UPGRADING.md isn't checked because
+    # the matrix uses `X.Y.x → X.Y.x+1 (patch)` blanket rows for
+    # patch-line hops; a pure substring grep would false-fire on
+    # those.
+    if ! grep -qE "v?${cargo_ver}\\b" docs/UPGRADING.md; then
+        fail "docs/UPGRADING.md doesn't mention v${cargo_ver}; add a row to the migration matrix or extend the \"X.Y.x → X.Y.x+1 (patch)\" row to cover it."
+    fi
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

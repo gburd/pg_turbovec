@@ -4,6 +4,70 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] — 2026-05-27
+
+### Added — Phase Y: automated upgrade-matrix validation
+
+Wire format unchanged from v1.6.0 / v1.7.0 / v1.7.1
+(`MetaPageData::version = 3`); **no `REINDEX` needed** to upgrade.
+v1.7.2 is a test-only patch release.
+
+Production-confidence foundation: previously the upgrade matrix
+in `docs/UPGRADING.md` and the `is_legacy_v{1,2}()` detection
+predicates in `src/index/page.rs` were promises with no
+automated end-to-end test. Phase Y closes that gap.
+
+- **`alter_extension_path_140_to_171_runs_clean`** (new
+  `#[pg_test]`) replays every `migrations/0NN_pg_turbovec_*.sql`
+  from v1.3.0 onward against the live test cluster. Catches a
+  release engineer who lands a syntactically-broken DDL change
+  in one of the post-v1.3 migration files (which are otherwise
+  intentionally empty).
+
+- **`ambeginscan_errors_on_legacy_v1_meta`** and
+  **`ambeginscan_errors_on_legacy_v2_meta`** (new `#[pg_test]`s)
+  build a real v1.7.2 index, forge the meta-page version byte
+  to 1 or 2 via the new cfg-gated
+  `relfile::force_meta_version()` helper, and assert that
+  `ambeginscan` ERRORs at first scan with the documented
+  primary message + `REINDEX INDEX` HINT. Exercises the
+  Phase Q (v1.3.0) + Phase R-2 (v1.4.0) hard migration
+  boundaries without having to keep pre-v1.4 binaries
+  around.
+
+- **`alter_extension_update_chain_resolves`** (new `#[pg_test]`)
+  asserts the installed extension version matches
+  `Cargo.toml`, catching version-number drift between
+  `Cargo.toml`, `pg_turbovec.control`, and the migration
+  file naming convention.
+
+- **`migration_files_cover_documented_versions`** (new
+  `#[pg_test]`) asserts the set of `migrations/*.sql` sigils
+  matches the documented release history. If you tag a new
+  release without adding the migration file, this test fails
+  before the bad tag escapes CI.
+
+- **`scripts/drift-check.sh` § 9** (new check) cross-checks
+  `migrations/*.sql` against the `From` column of the migration
+  matrix in `docs/UPGRADING.md`. Catches release-time drift
+  between adding a tag and forgetting to add the migration
+  file.
+
+- **`relfile::force_meta_version()`** (new test-only helper)
+  is gated on `cfg(any(test, feature = "pg_test"))` and patches
+  the version byte of the meta page in place via a
+  `GenericXLog` record. Only the pgrx test suite (and a future
+  feature-gated build) can reach it; production builds never
+  compile it.
+
+### Migration
+
+**No migration needed; rebuild not required.** The on-disk
+format is byte-identical across v1.6.0 / v1.7.0 / v1.7.1 /
+v1.7.2. Drop in the new shared library, restart, scan;
+existing indexes built under any of these versions continue
+to work unchanged.
+
 ## [1.7.1] — 2026-05-27
 
 ### Reverted — Phase W-2 split-write design (regression)

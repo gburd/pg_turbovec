@@ -3455,6 +3455,261 @@ mod tests {
         .unwrap();
         assert_eq!(again, Some(1));
     }
+
+    // ----------------------------------------------------------------
+    // Phase Y (v1.7.2): automated upgrade-matrix validation.
+    //
+    // The migration matrix in `docs/UPGRADING.md` and the
+    // `is_legacy_v{1,2}()` predicates in `src/index/page.rs` together
+    // promise that:
+    //
+    //   - v1.4.0 -> v1.7.x is `ALTER EXTENSION` only (wire format
+    //     unchanged across `MetaPageData::version = 3`).
+    //   - Any pre-v1.4 index ERRORs at first scan with a
+    //     `REINDEX INDEX` HINT, never silent corruption.
+    //
+    // The tests below exercise those promises end-to-end against the
+    // currently-installed v1.7.x binary. We forge a legacy meta page
+    // via the cfg-gated `relfile::force_meta_version` helper rather
+    // than carrying old binaries around (option (a) in the upgrade-
+    // testing trade-off).
+    // ----------------------------------------------------------------
+
+    /// Phase Y: smoke-test that the migration SQL files for the
+    /// `ALTER EXTENSION`-only hops (v1.4.0 -> v1.7.1, soon v1.7.2)
+    /// can be replayed in sequence without error against an
+    /// already-v1.7.x cluster. The post-v1.3.0 migration files are
+    /// intentionally empty (all wire-format changes are caught at
+    /// `ambeginscan` time, not at `ALTER EXTENSION` time), so this
+    /// is a tautology in the steady state -- but it catches a
+    /// release engineer who lands a real DDL change in one of these
+    /// files without checking it parses.
+    #[pg_test]
+    fn alter_extension_path_140_to_171_runs_clean() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        // 005 (v1.3.0) carries a real `DROP TABLE IF EXISTS
+        // turbovec.am_storage CASCADE`; replaying it is harmless
+        // when the table doesn't exist. The 006..010 files are
+        // pure comments. We replay them all to assert each is
+        // syntactically valid SQL the running 1.7.1 backend
+        // accepts.
+        let files = [
+            "005_pg_turbovec_v1.3.0.sql",
+            "006_pg_turbovec_v1.5.0.sql",
+            "007_pg_turbovec_v1.6.0.sql",
+            "008_pg_turbovec_v1.6.1.sql",
+            "009_pg_turbovec_v1.7.0.sql",
+            "010_pg_turbovec_v1.7.1.sql",
+        ];
+        for name in files {
+            let path = std::path::Path::new(manifest_dir)
+                .join("migrations")
+                .join(name);
+            let sql = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {:?}: {}", path, e));
+            // PostgreSQL's parser is fine with a script that's
+            // entirely SQL line comments; Spi::run no-ops cleanly.
+            Spi::run(&sql)
+                .unwrap_or_else(|e| panic!("replay {} failed: {:?}", name, e));
+        }
+    }
+
+    /// Phase Y: forge a v1 (Phase L preview) meta page on top of a
+    /// freshly-built v1.7.x index and confirm `ambeginscan` ERRORs
+    /// at first scan with the migration message. Exercises the
+    /// `is_legacy_v1()` predicate + the `ereport!(ERROR,
+    /// FEATURE_NOT_SUPPORTED, ...)` path in `src/index/scan.rs`.
+    ///
+    /// The expected-error string must match the primary message
+    /// emitted by that ereport! verbatim (the pgrx test framework
+    /// does an `==` compare). If you intentionally change the
+    /// wording in `scan.rs`, update both the v1 and v2 strings
+    /// here.
+    #[pg_test(error = "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)")]
+    fn ambeginscan_errors_on_legacy_v1_meta() {
+        use_turbovec();
+        Spi::run("CREATE TABLE legacy_v1 (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO legacy_v1 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX legacy_v1_idx ON legacy_v1 \
+             USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+
+        // Patch the on-disk meta page so it looks like a v1
+        // index. The byte mutation is wrapped in a GenericXLog
+        // record so it sticks within the test transaction.
+        let indexrelid: pg_sys::Oid = Spi::get_one(
+            "SELECT 'legacy_v1_idx'::regclass::oid",
+        )
+        .unwrap()
+        .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(
+                indexrelid,
+                pg_sys::AccessExclusiveLock as i32,
+            );
+            crate::index::relfile::force_meta_version(rel, 1);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        // The cache may already hold a (legitimate v3) entry from
+        // CREATE INDEX. Drop it so ambeginscan re-reads the meta
+        // page from the buffer manager. (ambeginscan would catch
+        // the legacy version even with a stale cache because it
+        // inspects the meta page first, before any cache lookup,
+        // but flushing here makes the test's intent explicit.)
+        crate::cache::invalidate_all();
+
+        // Force the planner onto the index path so ambeginscan
+        // runs. The error must propagate out of the test
+        // function so the pgrx framework matches it against
+        // `error = ...`.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run(
+            "SELECT id FROM legacy_v1 \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+    }
+
+    /// Phase Y: same as `ambeginscan_errors_on_legacy_v1_meta`
+    /// but for the v2 (Phase P, v1.3.x) wire format that lacks
+    /// the persisted rotation chain v1.4.0+ requires.
+    #[pg_test(error = "turbovec index built under pg_turbovec ≤ 1.3 cannot be scanned by pg_turbovec 1.4+")]
+    fn ambeginscan_errors_on_legacy_v2_meta() {
+        use_turbovec();
+        Spi::run("CREATE TABLE legacy_v2 (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO legacy_v2 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX legacy_v2_idx ON legacy_v2 \
+             USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one(
+            "SELECT 'legacy_v2_idx'::regclass::oid",
+        )
+        .unwrap()
+        .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(
+                indexrelid,
+                pg_sys::AccessExclusiveLock as i32,
+            );
+            crate::index::relfile::force_meta_version(rel, 2);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run(
+            "SELECT id FROM legacy_v2 \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+    }
+
+    /// Phase Y: smoke-test that the extension chain `ALTER
+    /// EXTENSION ... UPDATE` machinery resolves cleanly. We
+    /// can't actually walk the chain from `1.0.0 -> 1.7.x`
+    /// inside a pgrx test (the test process boots with the
+    /// current Cargo.toml version pre-installed), but we can
+    /// confirm the `pg_extension` row exists at the version
+    /// `Cargo.toml` advertises, which catches version-mismatch
+    /// regressions between `Cargo.toml`, `pg_turbovec.control`,
+    /// and the migration file naming.
+    #[pg_test]
+    fn alter_extension_update_chain_resolves() {
+        let count: Option<i64> = Spi::get_one(
+            "SELECT count(*)::bigint FROM pg_extension \
+             WHERE extname = 'pg_turbovec'",
+        )
+        .unwrap();
+        assert_eq!(count, Some(1), "pg_turbovec must be installed exactly once");
+
+        let version: Option<String> = Spi::get_one(
+            "SELECT extversion FROM pg_extension \
+             WHERE extname = 'pg_turbovec'",
+        )
+        .unwrap();
+        assert_eq!(
+            version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "installed extension version must match Cargo.toml"
+        );
+    }
+
+    /// Phase Y: drift guard. The set of `migrations/*.sql` files
+    /// must match the documented release history. If you tag a
+    /// new release without adding a `migrations/0NN_pg_turbovec_
+    /// vX.Y.Z.sql`, `ALTER EXTENSION pg_turbovec UPDATE TO
+    /// 'X.Y.Z'` will fail in production with `extension
+    /// pg_turbovec has no update path from <prev> to <X.Y.Z>`.
+    /// This test catches the omission at unit-test time.
+    ///
+    /// The expected list mirrors the migration matrix in
+    /// `docs/UPGRADING.md` (and is enforced from the other
+    /// direction by `scripts/drift-check.sh` § 9). Update both
+    /// when adding a release.
+    #[pg_test]
+    fn migration_files_cover_documented_versions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations");
+        let mut sigils: Vec<String> = std::fs::read_dir(&path)
+            .unwrap_or_else(|e| panic!("read_dir {:?}: {}", path, e))
+            .filter_map(|e| {
+                let f = e.ok()?.file_name().into_string().ok()?;
+                // Format: NNN_pg_turbovec_vX.Y.Z.sql
+                let v = f
+                    .strip_suffix(".sql")?
+                    .rsplit('_')
+                    .next()?
+                    .strip_prefix('v')?;
+                Some(v.to_string())
+            })
+            .collect();
+        sigils.sort_by(|a, b| {
+            // Lexicographic on (major, minor, patch) tuples so
+            // "1.10.0" sorts after "1.7.1" rather than between
+            // "1.1.0" and "1.2.0".
+            let parse = |s: &str| -> (u32, u32, u32) {
+                let mut it = s.split('.').map(|x| x.parse::<u32>().unwrap_or(0));
+                (
+                    it.next().unwrap_or(0),
+                    it.next().unwrap_or(0),
+                    it.next().unwrap_or(0),
+                )
+            };
+            parse(a).cmp(&parse(b))
+        });
+
+        // Update this list (and `scripts/drift-check.sh` § 9 and
+        // the matrix in `docs/UPGRADING.md`) whenever you tag a
+        // new release that ships a migration file.
+        let expected: Vec<&str> = vec![
+            "0.1.0", "0.2.0", "0.4.0", "0.5.0",
+            "1.3.0", "1.5.0", "1.6.0", "1.6.1",
+            "1.7.0", "1.7.1", "1.7.2",
+        ];
+        let expected_owned: Vec<String> =
+            expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            sigils, expected_owned,
+            "migrations/*.sql sigils don't match the documented release \
+             history. Update this list, scripts/drift-check.sh § 9, \
+             and docs/UPGRADING.md together.",
+        );
+    }
 }
 
 /// PGRX test runner harness.

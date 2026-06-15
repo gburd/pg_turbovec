@@ -405,9 +405,24 @@ CREATE TABLE turbovec.am_storage (
 ```
 
 A backend-local LRU keyed by `(indexrelid, version)` caches
-deserialised `IdMapIndex` instances; total cache size is bounded
+deserialised index instances; total cache size is bounded
 by `turbovec.cache_size_mb`. The cache is shared with the
 `turbovec.knn(...)` function path.
+
+As of v1.7.3 (cold-scan parity gap #3) a cache entry holds one
+of two variants (`cache::Stored`): a `Mutable`
+`Arc<RwLock<IdMapIndex>>` (installed by `aminsert` and
+`turbovec.knn`) or a `ReadOnly` `Arc<ReadOnlyIndex>` (installed
+by the index-AM scan path). The `ReadOnly` variant stores only
+the positional `TurboQuantIndex` + the `slot_to_id` `Vec` and
+skips the O(n) `id_to_slot` HashMap that `IdMapIndex` builds
+eagerly — the scan path's `search(q, k)` only needs slot→id
+translation (a `Vec` index), never id→slot. The first
+`aminsert` in a backend evicts the read-only entry (via
+`am_lookup_for_mutation` returning `None`) and rebuilds a full
+`Mutable` `IdMapIndex`, so the HashMap build is deferred to the
+first mutation that actually needs it. A read-only / pooled
+backend that only ever scans never pays it.
 
 ### 6.5 Callback responsibilities (Phase 2 sketch)
 
@@ -418,7 +433,7 @@ by `turbovec.cache_size_mb`. The cache is shared with the
 | `aminsert`            | Lazy-load `IdMapIndex` from relfile pages into cache, `add_with_ids`, mark dirty; `PreCommit` xact callback flushes via `relfile::write_full_with_prepared` once per transaction |
 | `ambeginscan`         | Resolve opclass strategy, attach query datum slot                      |
 | `amrescan`            | Materialise the query `vector`; if `WHERE` predicate yielded a TID set, build u64 allowlist |
-| `amgettuple`          | Run `IdMapIndex::search` (or `search_with_allowlist`) on first call, then drain cached results |
+| `amgettuple`          | Build/lookup a read-only `ScanHandle` (a `ReadOnlyIndex`, no `id_to_slot` HashMap) on first call, run `search` on it, then drain cached results |
 | `amendscan`           | Drop scan state                                                       |
 | `ambulkdelete`        | For each dead CTID, `IdMapIndex::remove(ctid_to_u64)`; mark dirty     |
 | `amvacuumcleanup`     | No-op — `ambulkdelete` already wrote the new meta page and truncated trailing pages |

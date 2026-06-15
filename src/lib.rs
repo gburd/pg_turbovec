@@ -1088,6 +1088,192 @@ mod tests {
         );
     }
 
+    /// Cold-scan parity-gap #3: the index-AM scan path installs a
+    /// read-only cache entry (`Stored::ReadOnly`) that skips the
+    /// O(n) `id_to_slot` HashMap build. This test pins that a plain
+    /// read-only scan returns the same top-k as the eager path did.
+    /// The corpus is deterministic so the assertion is exact.
+    #[pg_test]
+    fn cold_scan_readonly_topk_unchanged() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_ro (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_ro VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0.9,0.1,0,0,0,0,0,0]'), \
+                 (3, '[0,1,0,0,0,0,0,0]'), \
+                 (4, '[0,0,1,0,0,0,0,0]'), \
+                 (5, '[-1,0,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_ro_idx ON t_ro USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Force a genuine cold miss so the read-only ScanHandle is
+        // built from the relfile (not served from ambuild's entry).
+        crate::cache::invalidate_all();
+
+        let nearest: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_ro \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(nearest, Some(1), "nearest to e1 must be row 1");
+
+        // A second cold scan (re-invalidate) must be identical — the
+        // read-only rebuild is deterministic.
+        crate::cache::invalidate_all();
+        let nearest2: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_ro \
+             ORDER BY emb <=> '[0,1,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(nearest2, Some(3), "nearest to e2 must be row 3");
+    }
+
+    /// KEY correctness test for the lazy-HashMap optimisation: a
+    /// mutation (`aminsert`) AFTER a read-only scan must still work.
+    /// The read-only scan installs a `Stored::ReadOnly` entry with
+    /// no `id_to_slot` map; the first `aminsert` must detect that
+    /// (via `am_lookup_for_mutation` returning `None`), rebuild a
+    /// full `IdMapIndex` (building the HashMap then), apply the
+    /// insert, and the newly-inserted row must be findable by the
+    /// next scan.
+    #[pg_test]
+    fn mutation_after_readonly_scan_is_correct() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_mas (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_mas VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_mas_idx ON t_mas USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // 1. Read-only scan first — installs a `ReadOnly` entry
+        //    (no HashMap).
+        crate::cache::invalidate_all();
+        let n1: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_mas \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(n1, Some(1));
+
+        // 2. Mutation AFTER the read-only scan. This INSERT goes
+        //    through aminsert, which must rebuild the index as a
+        //    mutable IdMapIndex (deferred HashMap build) rather
+        //    than trying to mutate the read-only entry in place.
+        Spi::run(
+            "INSERT INTO t_mas VALUES \
+                 (3, '[0,0,1,0,0,0,0,0]'), \
+                 (4, '[0,0,0,1,0,0,0,0]')",
+        )
+        .unwrap();
+
+        // 3. The newly-inserted rows must be findable in the same
+        //    transaction (the in-memory mutable mirror serves the
+        //    scan; the deferred HashMap was built correctly).
+        let near4: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_mas \
+             ORDER BY emb <=> '[0,0,0,1,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            near4,
+            Some(4),
+            "row 4 inserted after a read-only scan must be findable \
+             (the deferred id_to_slot HashMap built correctly on the \
+             first mutation)"
+        );
+        let near3: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_mas \
+             ORDER BY emb <=> '[0,0,1,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(near3, Some(3), "row 3 must also be findable");
+
+        // And the original rows still resolve correctly.
+        let near1: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_mas \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(near1, Some(1), "row 1 must still be nearest to e1");
+    }
+
+    /// Delete-then-scan must stay correct even though the scan now
+    /// installs a read-only entry. pgrx tests run inside a
+    /// transaction so plain `VACUUM` (which drives `ambulkdelete`)
+    /// can't run here; we use `REINDEX` instead, which bumps the
+    /// relfilenode, invalidates the cache, and forces a fresh
+    /// read-only rebuild over the post-delete heap snapshot — the
+    /// stronger of the two paths for this test. (Real
+    /// `ambulkdelete` swap-remove is exercised by the psql
+    /// regression script in tests/02_index_am.sql.)
+    #[pg_test]
+    fn delete_then_readonly_scan_is_correct() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_del (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_del VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_del_idx ON t_del USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Read-only scan establishes a ReadOnly cache entry.
+        crate::cache::invalidate_all();
+        let before: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_del \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(before, Some(1));
+
+        // Delete row 1, then REINDEX to rebuild the relfile over
+        // the post-delete heap.
+        Spi::run("DELETE FROM t_del WHERE id = 1").unwrap();
+        Spi::run("REINDEX INDEX t_del_idx").unwrap();
+
+        // Cold scan after the delete must not return row 1 (the
+        // deleted TID). The survivors (rows 2,3) are both orthogonal
+        // to e1 with equal cosine, so assert simply that row 1 is
+        // gone and a survivor is returned.
+        crate::cache::invalidate_all();
+        let after: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_del \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_ne!(after, Some(1), "deleted row 1 must not be returned");
+        assert!(
+            matches!(after, Some(2) | Some(3)),
+            "a surviving row must be returned, got {:?}",
+            after
+        );
+        let n_remaining: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM t_del").unwrap();
+        assert_eq!(n_remaining, Some(2));
+    }
+
     /// 64 random-but-deterministic 16-dim vectors. Verifies the AM
     /// agrees with the brute-force kernel on a meaningful recall
     /// measure. dim=8 was too lossy at 4-bit; dim=16 gives the

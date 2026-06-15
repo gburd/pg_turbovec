@@ -170,6 +170,18 @@ than ~60s with `benches/scripts/lib/with-heartbeat.sh`. Poll with
   Check `git status -sb` before commit. Use `git rm --cached
   vendor/turbovec/target/` if build artifacts leak (covered by
   `.gitignore` now).
+- **Parallel sub-agents share one pgrx test cluster.** `cargo pgrx
+  test` binds a fixed port (`32200 + major`, e.g. 32216 for pg16) and
+  uses `~/.pgrx/data-16` — there is no per-worktree override in pgrx
+  0.17. Two agents running `cargo pgrx test pg16` in different
+  worktrees will collide: one's run kills the other's cluster
+  ("terminating connection due to administrator command"). Serialize
+  test runs across parallel worktree agents, or have each agent
+  `pg_ctl stop -m fast` and retry on collision. **Never `kill -9`** the
+  shared postmaster (truncates UNLOGGED tables). The pre-test cleanup
+  `pkill` pattern must be scoped to `/target/test-pgdata` (not bare
+  `test-pgdata`, which matches a worktree dir name and kills the
+  agent's own postmaster).
 - **Stale task notifications for completed agents are common.** Safe to
   acknowledge as "no action needed" if the work is already merged.
 

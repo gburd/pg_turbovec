@@ -12,17 +12,37 @@ gap that bites users today.
 
 ## Bottom line
 
-`pg_turbovec` wins decisively on **storage** (4-bit: ~10× smaller
-than pgvector HNSW), **build speed** (~15× faster), and **warm
-recall** (R@10 = 1.000 on dbpedia-1M vs HNSW ef=40's 0.962). It has
-near-complete scalar parity: types, distance operators, aggregates,
-most arithmetic.
+> **2026-06-15 correction.** An earlier draft claimed pg_turbovec
+> won on "warm scan latency" — that was based on a pre-AVX2
+> scalar-fallback BUG (fast-but-wrong, fixed v1.7.3). The corrected
+> AVX2 benchmark (`docs/BENCHMARKS.md`) shows pg_turbovec is a flat
+> `O(n·dim)` quantized scan and **loses to HNSW on latency by ~490×
+> at 1M rows** (~2.5 s vs ~5 ms). The real, durable wins are below.
 
-The one correctness/usability gap that bites users is **fixed-K
-single-batch scans with no iterative refill** — a problem pgvector
-already solved with `hnsw.iterative_scan`. Under a selective
-`WHERE filter ORDER BY emb <=> q LIMIT k`, the executor post-filters
-the fixed `search_k` candidates and silently under-returns. **This
+`pg_turbovec` wins decisively on **storage** (4-bit: ~10× smaller,
+2-bit: ~15× smaller than pgvector HNSW), **build speed** (~15× at
+384-d, ~2× at 1024-d), **build memory** (Phase W/W-2), and **exact
+recall** (R@10 = 1.000 vs HNSW ef=40's ~0.96, ef400's ~0.98 —
+because it's a full scan, not an approximation). It has
+near-complete scalar parity: types, distance operators, aggregates,
+arithmetic, iterative scans, parallel build, oversampling.
+
+**Where it LOSES: query latency at scale.** A flat scan over 1M×
+1024-d is seconds, not milliseconds, even on AVX2 — HNSW's sublinear
+graph traversal is ~490× faster. **pg_turbovec is the right tool
+when storage and exact recall dominate, or at corpus sizes / with
+pre-filters where an O(n) scan fits the latency budget; it is the
+wrong tool for low-latency ANN over millions of rows.** Honest
+positioning: "best storage efficiency + exact recall for PG vector
+search where an O(n) scan is acceptable," NOT "beat HNSW on every
+axis."
+
+The one correctness/usability gap that bit users (now fixed in
+v1.8.0) was **fixed-K single-batch scans with no iterative refill**
+— a problem pgvector solved with `hnsw.iterative_scan`. Under a
+selective `WHERE filter ORDER BY emb <=> q LIMIT k`, the executor
+post-filtered the fixed `search_k` candidates and silently
+under-returned. **This
 is the #1 roadmap priority.**
 
 ---

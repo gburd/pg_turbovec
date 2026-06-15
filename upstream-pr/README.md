@@ -1,8 +1,27 @@
-# Upstream PR: in-memory I/O + cached codebook boundaries
+# Upstream PR: in-memory I/O + pub `from_parts` (issue #70)
 
-This directory captures the additive patches `pg_turbovec` carries on top of [`turbovec` 0.5.0](https://crates.io/crates/turbovec) so the maintainer can review and accept them without diffing through our project history.
+> **Status (2026-06-15):** issue
+> [#70](https://github.com/RyanCodrai/turbovec/issues/70) is still
+> OPEN. Upstream has been very active (v0.6 → v0.9.0) and merged a
+> large security-audit PR (#108) that, among other things, **fixed
+> a pre-AVX2 x86_64 scalar-fallback bug** that was producing
+> silently-wrong top-k — a bug `pg_turbovec` hit in production on a
+> pre-AVX2 bench host. So the upstream relationship is paying off
+> even without #70 being merged.
+>
+> The `pg_turbovec` fork now tracks **upstream v0.9.0**
+> (`gburd/turbovec` branch `pg_turbovec-integration-v0.9.0`,
+> commit `d3d468e`). The diffs below were written against
+> turbovec 0.5.0 and are **stale** — the current fork patch is
+> re-applied by hand on top of v0.9.0 and additionally threads the
+> new TQ+ calibration fields through `from_parts`. If the
+> maintainer invites a PR, it should be regenerated against v0.9.0;
+> the API shape (pub `from_parts` / `packed_codes` / `scales`,
+> `Read`/`Write` IO, `from_id_map_parts*`) is unchanged in intent.
 
-## Files
+This directory captures the additive patches `pg_turbovec` carries on top of [`turbovec`](https://crates.io/crates/turbovec) so the maintainer can review and accept them without diffing through our project history.
+
+## Files (stale — written against turbovec 0.5.0)
 
 - `01-lib-rs.diff` — `TurboQuantIndex::{from_parts, packed_codes, scales}` made `pub`, plus a new `boundaries: OnceLock<Vec<f32>>` field that caches the Lloyd-Max decision boundaries alongside the existing `centroids: OnceLock<Vec<f32>>`.
 - `02-io-rs.diff` — new `pub fn write_to<W: Write>`, `load_from<R: Read>`, `write_id_map_to<W: Write>`, `load_id_map_from<R: Read>` mirroring the existing path-based functions. The path-based functions are refactored to be thin wrappers.

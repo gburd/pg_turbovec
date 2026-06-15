@@ -1,0 +1,40 @@
+{
+  "configs": [
+    {
+      "label": "tv_2b_k100",
+      "engine": "pg_turbovec_2bit",
+      "param": {
+        "bit_width": 2,
+        "search_k": 100
+      },
+      "n_queries": 12,
+      "latency_basis": "client_wall_unix_socket",
+      "recall_at_10": 1.0,
+      "mean_ms": 42344.1,
+      "p50_ms": 41617.9,
+      "p95_ms": 46485.9,
+      "p99_ms": 47086.3,
+      "min_ms": 40151.9,
+      "max_ms": 47236.4,
+      "qps_single_conn": 0.0236
+    },
+    {
+      "label": "tv_2b_k500",
+      "engine": "pg_turbovec_2bit",
+      "param": {
+        "bit_width": 2,
+        "search_k": 500
+      },
+      "n_queries": 12,
+      "latency_basis": "client_wall_unix_socket",
+      "recall_at_10": 1.0,
+      "mean_ms": 41939.5,
+      "p50_ms": 42014.1,
+      "p95_ms": 42645.5,
+      "p99_ms": 42778.5,
+      "min_ms": 40963.5,
+      "max_ms": 42811.7,
+      "qps_single_conn": 0.0238
+    }
+  ]
+}

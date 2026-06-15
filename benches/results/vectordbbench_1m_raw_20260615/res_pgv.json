@@ -1,0 +1,68 @@
+{
+  "configs": [
+    {
+      "label": "hnsw_ef40",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 40
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.849,
+      "mean_ms": 10.34,
+      "p50_ms": 9.384,
+      "p95_ms": 20.3,
+      "p99_ms": 25.045,
+      "min_ms": 1.406,
+      "max_ms": 28.366,
+      "qps_single_conn": 96.71
+    },
+    {
+      "label": "hnsw_ef100",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 100
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.926,
+      "mean_ms": 13.48,
+      "p50_ms": 13.127,
+      "p95_ms": 22.447,
+      "p99_ms": 25.079,
+      "min_ms": 2.602,
+      "max_ms": 28.627,
+      "qps_single_conn": 74.18
+    },
+    {
+      "label": "hnsw_ef200",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 200
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.957,
+      "mean_ms": 18.538,
+      "p50_ms": 17.333,
+      "p95_ms": 32.439,
+      "p99_ms": 41.295,
+      "min_ms": 3.053,
+      "max_ms": 44.53,
+      "qps_single_conn": 53.94
+    },
+    {
+      "label": "hnsw_ef400",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 400
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.979,
+      "mean_ms": 21.441,
+      "p50_ms": 20.139,
+      "p95_ms": 38.156,
+      "p99_ms": 48.243,
+      "min_ms": 5.527,
+      "max_ms": 50.915,
+      "qps_single_conn": 46.64
+    }
+  ]
+}

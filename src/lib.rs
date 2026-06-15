@@ -507,6 +507,163 @@ mod tests {
         assert_eq!(n_remaining, Some(4));
     }
 
+    /// Parity gap #2 (parallel index build, Option B). The build's
+    /// quantize + repack phases fan out across a `turbovec.build_parallelism`-
+    /// sized rayon pool. Because the heap scan stays serial and the
+    /// fan-out is a pure data-parallel map, a parallel build must
+    /// return exactly the same top-k as a serial build of the same
+    /// rows. We build the SAME table's index twice (REINDEX) under
+    /// two different parallelism settings and compare the ranked id
+    /// list. ~2000 deterministic rows so the TQ+ calibration path
+    /// (>= 1000 samples) engages.
+    #[pg_test]
+    fn parallel_build_matches_serial_query() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_pb (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        // Deterministic 16-dim corpus: each row is e_(id%16) scaled,
+        // so nearest-neighbour answers are predictable and stable.
+        Spi::run(
+            "INSERT INTO t_pb \
+             SELECT g, \
+                    ('[' || array_to_string(ARRAY(\
+                       SELECT CASE WHEN d = (g % 16) THEN 1.0 \
+                                   ELSE (((g * 31 + d * 7) % 17)::float8 / 100.0) \
+                              END \
+                       FROM generate_series(0, 15) AS d), ',') || ']')::vector \
+             FROM generate_series(1, 2000) AS g",
+        )
+        .unwrap();
+
+        // Serial build (1 thread).
+        Spi::run("SET turbovec.build_parallelism = 1").unwrap();
+        Spi::run(
+            "CREATE INDEX t_pb_idx ON t_pb USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let serial: Vec<i64> = Spi::connect(|client| {
+            let tup = client
+                .select(
+                    "SELECT id FROM t_pb \
+                     ORDER BY emb <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::vector \
+                     LIMIT 10",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            tup.map(|r| r.get::<i64>(1).unwrap().unwrap()).collect()
+        });
+
+        // Parallel rebuild (4 workers) of the SAME data.
+        Spi::run("SET turbovec.build_parallelism = 4").unwrap();
+        Spi::run("REINDEX INDEX t_pb_idx").unwrap();
+        let parallel: Vec<i64> = Spi::connect(|client| {
+            let tup = client
+                .select(
+                    "SELECT id FROM t_pb \
+                     ORDER BY emb <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::vector \
+                     LIMIT 10",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            tup.map(|r| r.get::<i64>(1).unwrap().unwrap()).collect()
+        });
+
+        assert_eq!(
+            serial, parallel,
+            "parallel build returned a different ranked top-k than serial"
+        );
+    }
+
+    /// Byte-identity proxy at the SQL layer: a serial-built and a
+    /// parallel-built relfile for the SAME rows must have identical
+    /// `pg_relation_size`. (Page-header LSNs differ per write, so a
+    /// raw whole-file md5 across two relations is not a valid
+    /// equality test; the authoritative byte-for-byte check lives in
+    /// the `build_parts_are_pool_size_invariant` Rust unit test,
+    /// which compares packed_codes / scales / blocked_codes /
+    /// slot_to_id directly.) Equal size confirms the parallel path
+    /// did not change the page layout or chain length.
+    #[pg_test]
+    fn parallel_build_relfile_size_matches_serial() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_pbsz (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_pbsz \
+             SELECT g, \
+                    ('[' || array_to_string(ARRAY(\
+                       SELECT (((g * 13 + d * 5) % 19)::float8 / 50.0) \
+                       FROM generate_series(0, 31) AS d), ',') || ']')::vector \
+             FROM generate_series(1, 1500) AS g",
+        )
+        .unwrap();
+
+        Spi::run("SET turbovec.build_parallelism = 1").unwrap();
+        Spi::run(
+            "CREATE INDEX t_pbsz_idx ON t_pbsz USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let serial_sz: Option<i64> = Spi::get_one(
+            "SELECT pg_relation_size('t_pbsz_idx'::regclass)::int8",
+        )
+        .unwrap();
+
+        Spi::run("SET turbovec.build_parallelism = 4").unwrap();
+        Spi::run("REINDEX INDEX t_pbsz_idx").unwrap();
+        let parallel_sz: Option<i64> = Spi::get_one(
+            "SELECT pg_relation_size('t_pbsz_idx'::regclass)::int8",
+        )
+        .unwrap();
+
+        assert_eq!(
+            serial_sz, parallel_sz,
+            "parallel relfile size {:?} != serial {:?}",
+            parallel_sz, serial_sz
+        );
+    }
+
+    /// The `turbovec.build_parallelism` GUC must be registered,
+    /// settable, and accepted by `ambuild` without error at every
+    /// value in range (0 = auto, a pinned worker count, and 1 =
+    /// inline). This is the "workers actually configured" smoke
+    /// test — the pg_test harness won't necessarily launch separate
+    /// OS-process workers (our parallelism is rayon-internal, not
+    /// PG bgworkers), so we assert the GUC plumbing and a successful
+    /// build under each setting rather than a worker count.
+    #[pg_test]
+    fn parallel_build_honors_guc() {
+        use_turbovec();
+        // Default is 0 (auto).
+        let dflt: Option<i32> =
+            Spi::get_one("SELECT current_setting('turbovec.build_parallelism')::int")
+                .unwrap();
+        assert_eq!(dflt, Some(0), "build_parallelism default should be 0 (auto)");
+
+        Spi::run("CREATE TABLE t_pbg (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_pbg \
+             SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vector \
+             FROM generate_series(1, 64) AS g",
+        )
+        .unwrap();
+
+        for p in [0i32, 1, 4] {
+            Spi::run(&format!("SET turbovec.build_parallelism = {p}")).unwrap();
+            Spi::run(
+                "CREATE INDEX t_pbg_idx ON t_pbg USING turbovec (emb vec_cosine_ops)",
+            )
+            .unwrap();
+            let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_pbg").unwrap();
+            assert_eq!(n, Some(64), "build at parallelism={p} lost rows");
+            Spi::run("DROP INDEX t_pbg_idx").unwrap();
+        }
+    }
+
     /// `CREATE INDEX CONCURRENTLY` exercises a slightly different
     /// AM contract — ambuild is called twice (build pass + validate
     /// pass) under different snapshots. Our `INSERT ... ON CONFLICT
@@ -3699,7 +3856,7 @@ mod tests {
         let expected: Vec<&str> = vec![
             "0.1.0", "0.2.0", "0.4.0", "0.5.0",
             "1.3.0", "1.5.0", "1.6.0", "1.6.1",
-            "1.7.0", "1.7.1", "1.7.2",
+            "1.7.0", "1.7.1", "1.7.2", "1.7.3",
         ];
         let expected_owned: Vec<String> =
             expected.iter().map(|s| s.to_string()).collect();

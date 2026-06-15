@@ -12,6 +12,7 @@
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
 //! | `turbovec.mmap_static_blocked`   | bool | true    | -              |
+//! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 
 use core::ffi::CStr;
 
@@ -43,6 +44,28 @@ pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
 /// support shared mappings) and need to fall back to the
 /// buffer-manager-only read path.
 pub static MMAP_STATIC_BLOCKED: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// Parity gap #2 (v1.8.0): caps the rayon thread pool `ambuild`
+/// uses for the CPU-heavy quantize + SIMD-repack phases. turbovec's
+/// `encode` and `pack::repack` are embarrassingly parallel per-row,
+/// and pgvector parallelises its HNSW/IVFFlat builds across
+/// `max_parallel_maintenance_workers`; this GUC is pg_turbovec's
+/// equivalent knob.
+///
+/// `0` (the default) means "derive from `max_parallel_maintenance_workers`":
+/// `ambuild` uses `max_parallel_maintenance_workers + 1` threads (the
+/// leader plus its worker budget), matching how PG accounts a parallel
+/// maintenance op. A positive value pins the pool size directly.
+///
+/// This does NOT change the on-disk bytes: rayon's parallel iterators
+/// write each row's codes/scales to a fixed output index, so the
+/// result is independent of thread count. The heap scan stays serial,
+/// so slot ordering and the TQ+ calibration source (the first chunk)
+/// are identical to a single-threaded build. The byte-for-byte
+/// equality is asserted by the `build_parts_are_pool_size_invariant`
+/// unit test; query-level equivalence by the
+/// `parallel_build_matches_serial_query` `#[pg_test]`.
+pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
@@ -129,6 +152,19 @@ pub fn register_gucs() {
             b"When on, ambeginscan mmaps the persisted SIMD-blocked codes and rotation matrix RO into the backend address space, bypassing PG's buffer manager for those bytes. Halves warm-scan latency on indexes that don't fit in shared_buffers. The cache entry holds the Mmap so it lives until the cache invalidates (REINDEX / am_version bump / backend exit). Codes / scales / ids chains keep going through the buffer manager because VACUUM swap-remove mutates them in place. Heap visibility + xs_recheckorderby remain the MVCC backstops; see docs/ARCHITECTURE.md.\0",
         ),
         &MMAP_STATIC_BLOCKED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.build_parallelism\0"),
+        c_str(b"OS threads used to quantize + repack vectors during CREATE INDEX / REINDEX (0 = auto).\0"),
+        c_str(
+            b"ambuild's encode and SIMD-repack phases are embarrassingly parallel per vector. This caps the rayon thread pool sizing those phases. 0 (the default) derives the pool size from max_parallel_maintenance_workers + 1 (leader + worker budget). A positive value pins the thread count. The on-disk index bytes are identical regardless of this value \xe2\x80\x94 only build wall-clock changes.\0",
+        ),
+        &BUILD_PARALLELISM,
+        0,
+        128,
         GucContext::Userset,
         GucFlags::default(),
     );

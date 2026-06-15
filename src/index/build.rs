@@ -58,6 +58,15 @@ struct BuildState {
     chunk_rows: usize,
     /// Number of heap tuples we were called for (alive + dead).
     heap_seen: u64,
+    /// Bounded rayon pool for the quantize phase. `add_with_ids` →
+    /// `encode` fans out across this pool's threads instead of rayon's
+    /// global all-cores pool. Sized from `turbovec.build_parallelism`
+    /// (parity gap #2). `None` collapses to inline single-threaded
+    /// encode. Held as a raw pointer rather than a borrow because
+    /// `BuildState` is threaded through a `*mut c_void` FFI callback;
+    /// the pool outlives every callback invocation (it lives on
+    /// `ambuild`'s stack for the whole scan), so deref is sound.
+    pool: *const rayon::ThreadPool,
 }
 
 impl BuildState {
@@ -102,7 +111,19 @@ impl BuildState {
             .idx
             .as_mut()
             .expect("turbovec ambuild: flush called before idx was constructed");
-        if let Err(e) = idx.add_with_ids(&self.pending_flat, &self.pending_ids) {
+        // Run the per-vector quantize (turbovec's rayon-parallel
+        // `encode`) inside the GUC-sized build pool when present.
+        // SAFETY: `pool` either is null or points at a `ThreadPool`
+        // that lives on `ambuild`'s stack for the entire scan, which
+        // strictly outlives this callback-driven flush.
+        let pool: Option<&rayon::ThreadPool> =
+            unsafe { self.pool.as_ref() };
+        let pending_flat = &self.pending_flat;
+        let pending_ids = &self.pending_ids;
+        let res = super::build_pool::install(pool, || {
+            idx.add_with_ids(pending_flat, pending_ids)
+        });
+        if let Err(e) = res {
             error!("turbovec ambuild: add_with_ids failed: {:?}", e);
         }
         self.pending_flat.clear();
@@ -159,7 +180,18 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // pinned via reloptions we can compute it up front.
         chunk_rows: usize::MAX,
         heap_seen: 0,
+        pool: std::ptr::null(),
     };
+    // Parity gap #2: a bounded rayon pool sized from
+    // `turbovec.build_parallelism` (auto = max_parallel_maintenance_workers
+    // + 1). The encode and repack phases `install` onto it. `None` =
+    // single thread; we run inline. The pool lives on this stack frame
+    // for the whole scan, so the raw pointer stashed on `state` stays
+    // valid for every `build_callback` / `flush` invocation.
+    let build_pool = super::build_pool::make_pool();
+    state.pool = build_pool
+        .as_ref()
+        .map_or(std::ptr::null(), |p| p as *const rayon::ThreadPool);
     if let Some(d) = state.dim {
         // Pre-construct the IdMapIndex when reloptions pinned the dim.
         // Otherwise we wait for the first non-NULL row and construct
@@ -254,8 +286,19 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // `docs/PHASE_W_PROGRESS.md` and the validation JSON at
     // `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`.
     if n_vectors > 0 {
-        idx.prepare_eager();
-        // Phase R-2: also drive the rotation `OnceLock` so we
+        // Phase R-2 + parity gap #2: prepare_eager builds the
+        // SIMD-blocked layout (`pack::repack`) and the Lloyd-Max
+        // codebook. We run it under the same GUC-sized pool so that
+        // (a) the codebook's per-coord work and any future
+        // parallelised repack inherit the bounded pool rather than
+        // rayon's global all-cores pool, and (b) the pool's threads
+        // are reused for this phase instead of falling back to the
+        // global pool mid-build. The blocked layout is a deterministic
+        // function of the (already-deterministic) row-major codes, so
+        // this stays byte-identical to a serial build regardless of
+        // pool size.
+        super::build_pool::install(build_pool.as_ref(), || idx.prepare_eager());
+        // also drive the rotation `OnceLock` so we
         // can persist the matrix alongside the codes. The
         // rotation is a deterministic function of `(dim,
         // ROTATION_SEED)` whose lazy QR was the warm-scan

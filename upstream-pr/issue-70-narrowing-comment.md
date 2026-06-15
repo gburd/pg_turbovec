@@ -1,5 +1,7 @@
 # Draft comment for turbovec issue #70 (narrowing scope after v0.9.0)
 
+> **POSTED 2026-06-15:** https://github.com/RyanCodrai/turbovec/issues/70#issuecomment-4711296306
+
 Post this manually — the GitHub MCP toolset available to the agent is
 read-only (no issue-comment write). Paste into
 https://github.com/RyanCodrai/turbovec/issues/70

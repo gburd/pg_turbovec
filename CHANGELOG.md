@@ -4,6 +4,47 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Performance — cold-scan latency (parity gap #3)
+
+Wire format unchanged (`MetaPageData::version = 3`); **no
+`REINDEX` needed**. Scan-side only — `ALTER EXTENSION pg_turbovec
+UPDATE` is sufficient.
+
+- **Lazy `id_to_slot` on the read path.** Profiling the
+  per-backend cache-fill (200 k × 256-d, debug) showed the
+  dominant residual term — once Phase P pre-baked the
+  SIMD-blocked layout and Phase R-2 persisted the rotation — was
+  the `id_to_slot: HashMap<u64, usize>` that
+  `IdMapIndex::from_id_map_parts*` builds eagerly
+  (~50 ms at 200 k rows, scaling linearly with `n`; vs ~16-22 ms
+  for the `read_full` data copy and ~12-18 ms for
+  `read_blocked`+`read_rotation`). The index-AM scan path never
+  reads `id_to_slot` — `search(q, k)` with `allowlist = None`
+  only indexes `slot_to_id[slot]`, a `Vec`. The scan path now
+  installs a lightweight `cache::ReadOnlyIndex` (positional
+  `TurboQuantIndex` + `slot_to_id` `Vec`, no HashMap); the
+  HashMap build is deferred to the first `aminsert` / `remove`,
+  which rebuild a full `IdMapIndex` via `am_install`. A
+  read-only / pooled-connection backend that only ever scans
+  never pays the HashMap build. Profiled read-only constructor:
+  ~50 ms → ~0 ms (debug, 200 k rows).
+- **Confined to** `src/cache.rs`, `src/index/scan.rs`,
+  `src/index/mmap_static.rs`, and tests. No relfile write-path
+  or build-path changes.
+- **Deferred follow-ups** (see `docs/PARITY_GAPS.md` § cold
+  scan): read-path mmap of the codes/scales/ids chains (removes
+  the largest data copy on the real cold path; additive, no
+  wire change); a header-gap-free on-disk layout for true
+  zero-copy mmap (VERSION 3 → 4, a v1.8/v2.0 minor); and a
+  cross-backend DSA/DSM shared cache (XL).
+- Tests: 127 → 130 (`cargo pgrx test pg16`). New:
+  `cold_scan_readonly_topk_unchanged`,
+  `mutation_after_readonly_scan_is_correct` (the key
+  deferred-HashMap correctness test), and
+  `delete_then_readonly_scan_is_correct`.
+
 ## [1.7.3] — 2026-06-15
 
 ### Fixed — pre-AVX2 x86_64 wrong-results bug (turbovec fork → v0.9.0)

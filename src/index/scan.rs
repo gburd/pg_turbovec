@@ -6,12 +6,10 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::c_int;
-use std::sync::Arc;
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
-use parking_lot::RwLock;
-use turbovec::{IdMapIndex, PreparedCachesBorrowed};
+use turbovec::PreparedCachesBorrowed;
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
@@ -37,10 +35,10 @@ pub(crate) struct ScanOpaque {
     cursor: usize,
     /// Whether the search has been executed yet.
     fetched: bool,
-    /// Iterative-scan state. The materialised index Arc is cached on
-    /// the first search so refills don't re-do the cache lookup /
+    /// Iterative-scan state. The materialised index handle is cached
+    /// on the first search so refills don't re-do the cache lookup /
     /// relfile load. `None` until the first `amgettuple` populates it.
-    arc: Option<Arc<RwLock<IdMapIndex>>>,
+    arc: Option<cache::ScanHandle>,
     /// The `k` used for the most recent `arc.search(query, k)`. Starts
     /// at `search_k` and doubles on each refill, capped at
     /// `min(max_scan_tuples, n_live)`.
@@ -311,9 +309,9 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let relfile_node = cache::relfilenode_from_relation((*scan).indexRelation);
         let version_as_i64 = am_version_u32 as i64;
 
-        let arc: Arc<parking_lot::RwLock<IdMapIndex>> = match dirty_fallback {
-            Some((_, a, _)) => a,
-            None => match cache::lookup(key, relfile_node, version_as_i64) {
+        let arc: cache::ScanHandle = match dirty_fallback {
+            Some((_, a, _)) => cache::ScanHandle::Mutable(a),
+            None => match cache::scan_lookup(key, relfile_node, version_as_i64) {
             Some(a) => a,
             None => {
                 // Phase R-3: cache miss. Try the mmap fast path
@@ -323,6 +321,13 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 // manager `read_full` if mmap isn't available
                 // (mmap_static_blocked GUC off, non-default
                 // tablespace, or open(2) raced a REINDEX).
+                //
+                // We materialise a read-only `ReadOnlyIndex` here,
+                // NOT a full `IdMapIndex`: the scan path only needs
+                // slot->id translation (a `Vec` index), so we skip
+                // the O(n) `id_to_slot` `HashMap` build. The first
+                // `aminsert` in this backend rebuilds a full
+                // `IdMapIndex` via `am_install` (deferred HashMap).
                 let meta = relfile::read_meta((*scan).indexRelation)
                     .expect("meta disappeared mid-scan");
                 let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
@@ -333,7 +338,8 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     None
                 };
 
-                let (stored_index, mmap_handle) = if let Some((handle, parts)) = mmap_load {
+                let (stored_index, mmap_handle): (cache::ReadOnlyIndex, _) =
+                    if let Some((handle, parts)) = mmap_load {
                     // Mmap path: hand the chain bytes to turbovec
                     // via the borrowed-cache constructor as
                     // `Cow::Owned` (the chains had to be copied
@@ -348,23 +354,16 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         boundaries: Some(Cow::Owned(parts.boundaries)),
                         rotation: Some(Cow::Owned(parts.rotation)),
                     };
-                    let load_result =
-                        IdMapIndex::from_id_map_parts_with_prepared_borrowed(
-                            meta.bit_width as usize,
-                            meta.dim as usize,
-                            meta.n_vectors as usize,
-                            Cow::Owned(codes),
-                            Cow::Owned(scales),
-                            ids,
-                            prepared,
-                        );
-                    match load_result {
-                        Ok(idx) => (idx, Some(handle)),
-                        Err(e) => error!(
-                            "turbovec relfile (mmap path): corrupt page chain for {:?}: {}",
-                            indexrelid, e
-                        ),
-                    }
+                    let idx = cache::ReadOnlyIndex::from_prepared_parts_borrowed(
+                        meta.bit_width as usize,
+                        meta.dim as usize,
+                        meta.n_vectors as usize,
+                        Cow::Owned(codes),
+                        Cow::Owned(scales),
+                        ids,
+                        prepared,
+                    );
+                    (idx, Some(handle))
                 } else if meta.has_prepared_layout() {
                     // Buffer-manager fallback path with prepared
                     // layout (matches v1.4.0 behaviour).
@@ -380,7 +379,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     );
                     let rotation_opt =
                         if rotation.is_empty() { None } else { Some(rotation) };
-                    let load_result = IdMapIndex::from_id_map_parts_with_prepared(
+                    let idx = cache::ReadOnlyIndex::from_prepared_parts(
                         meta.bit_width as usize,
                         meta.dim as usize,
                         meta.n_vectors as usize,
@@ -393,20 +392,14 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         boundaries,
                         rotation_opt,
                     );
-                    match load_result {
-                        Ok(idx) => (idx, None),
-                        Err(e) => error!(
-                            "turbovec relfile: corrupt page chain for {:?}: {}",
-                            indexrelid, e
-                        ),
-                    }
+                    (idx, None)
                 } else {
                     // No prepared layout (legacy path; should be
                     // unreachable post-Phase Q because
                     // ambeginscan ERRORs on legacy_v1 / legacy_v2
                     // up-front, but keep the fall-through for
                     // defence in depth).
-                    let load_result = IdMapIndex::from_id_map_parts(
+                    let idx = cache::ReadOnlyIndex::from_parts(
                         meta.bit_width as usize,
                         meta.dim as usize,
                         meta.n_vectors as usize,
@@ -414,17 +407,11 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         scales,
                         ids,
                     );
-                    match load_result {
-                        Ok(idx) => (idx, None),
-                        Err(e) => error!(
-                            "turbovec relfile: corrupt page chain for {:?}: {}",
-                            indexrelid, e
-                        ),
-                    }
+                    (idx, None)
                 };
                 let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
                 let total_bytes = bytes_per_vec * (n_in_index.max(1));
-                cache::insert_with_mmap(
+                cache::scan_install(
                     key,
                     stored_index,
                     total_bytes,
@@ -434,7 +421,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 )
             }
         }};
-        let n_live = arc.read().len();
+        let n_live = arc.len();
         if n_live == 0 {
             (*opaque).fetched = true;
             return false;
@@ -453,7 +440,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // don't repeat the cache lookup / relfile load.
         let k_pref = crate::guc::SEARCH_K.get() as usize;
         let k = k_pref.min(n_live.max(1)).max(1);
-        let (scores, ids) = arc.read().search(&(*opaque).query, k);
+        let (scores, ids) = arc.search(&(*opaque).query, k);
         (*opaque).arc = Some(arc);
         (*opaque).n_live = n_live;
         (*opaque).current_k = k;
@@ -554,7 +541,7 @@ unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
         return false;
     }
     let arc = match &(*opaque).arc {
-        Some(a) => Arc::clone(a),
+        Some(a) => a.clone(),
         None => return false,
     };
     let n_live = (*opaque).n_live;
@@ -569,7 +556,7 @@ unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
     }
     let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
     let before = (*opaque).results.len();
-    let (scores, ids) = arc.read().search(&(*opaque).query, new_k);
+    let (scores, ids) = arc.search(&(*opaque).query, new_k);
     (*opaque).current_k = new_k;
     populate_batch(opaque, &scores, &ids);
     if (*opaque).results.len() > before {

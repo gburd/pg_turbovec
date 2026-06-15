@@ -133,11 +133,21 @@ Then `cargo pgrx test pg16` is the full local test loop.
 
 ### Bench hosts
 
-| Host    | Arch     | Cores | RAM     | Disk      | Notes |
-|---------|----------|------:|--------:|----------:|-------|
-| `meh`   | x86_64   | 24    | 125 GiB | 779 GiB   | NixOS; RAM-rich; pgrx 17.9 in `/scratch/pg_turbovec-bench/` |
-| `arnold`| x86_64   | 20    | 31 GiB  | 1.9 TiB   | Fedora 44; the physical "NUC"; RAM-constrained, exposes buffer-manager bottlenecks |
-| `rv`    | riscv64  | 8     | 7.7 GiB | 165 GiB   | Ubuntu 24.04; arch-correctness only; needs `LD_PRELOAD=libopenblas.so.0` |
+| Host    | Arch     | SIMD | Cores | RAM     | Disk      | Notes |
+|---------|----------|------|------:|--------:|----------:|-------|
+| `meh`   | x86_64   | **AVX only, NO AVX2** | 24 | 125 GiB | 779 GiB | NixOS; RAM-rich; pgrx 17.9 in `/scratch/pg_turbovec-bench/`. Ivy Bridge Xeon E5-2697 v2 — pre-AVX2. turbovec takes the SCALAR fallback here (~1000x slower than its AVX2/AVX-512 kernels: a 1M x 1024-d warm scan is ~68 s, not ms). **Use meh for correctness / recall / storage / build / memory ONLY — NEVER for latency or QPS.** Any tens-of-ms "meh warm p50" in old docs predates the v1.7.3 pre-AVX2 fix and was the fast-but-WRONG path. |
+| `arnold`| x86_64   | **AVX2** | 20 | 31 GiB  | 1.9 TiB   | Fedora 44; the physical "NUC"; RAM-constrained (exposes buffer-manager bottlenecks). i9-12900H, has AVX2 — **this is the host for turbovec LATENCY / QPS benchmarks** (the SIMD kernels actually run). |
+| `rv`    | riscv64  | scalar (no RVV) | 8 | 7.7 GiB | 165 GiB | Ubuntu 24.04; arch-correctness only; needs `LD_PRELOAD=libopenblas.so.0`. Scalar-path-slow like meh — correctness only, not latency. |
+
+**SIMD matters more than RAM for turbovec latency.** The kernel
+dispatches at runtime via `is_x86_feature_detected!`: AVX-512 > AVX2 >
+scalar fallback. The scalar fallback is correct (since v1.7.3 /
+turbovec v0.9.0) but ~1000x slower for the full-corpus scan. **Latency
+and QPS benchmarks REQUIRE an AVX2+ host (arnold); meh and rv only
+measure correctness, recall, storage, build time, and memory.** This
+is why the Phase A1 "regression" looked like a bug (meh was on the
+buggy fast path) and why the published latency frontier must come from
+arnold, not meh.
 
 `nuc` is NOT a separate host — it's an old name for `arnold` per session
 history. Don't assume `nuc` resolves; it's not on tailscale.

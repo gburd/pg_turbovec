@@ -389,10 +389,10 @@ is paid once and cached. Mitigations:
 
 ## Known issues
 
-### Pre-AVX2 x86_64 wrong-results bug (root-caused; fixed in v1.7.3)
+### Pre-AVX2 x86_64 wrong-results bug (FIXED in v1.7.3)
 
-**Status:** root cause found 2026-06-15; fix in progress (turbovec
-fork upgrade to v0.9.0).
+**Status:** root cause found 2026-06-15; **fixed in v1.7.3** via the
+turbovec fork upgrade to v0.9.0.
 
 **Symptom:** On x86_64 CPUs **without AVX2** (e.g. Intel
 Ivy Bridge / Sandy Bridge Xeons, pre-2014), the turbovec index

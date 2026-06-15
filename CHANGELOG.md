@@ -4,6 +4,59 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] — 2026-06-15
+
+### Fixed — pre-AVX2 x86_64 wrong-results bug (turbovec fork → v0.9.0)
+
+Wire format unchanged from v1.6.0 / v1.7.x
+(`MetaPageData::version = 3`); **no `REINDEX` needed** to upgrade.
+
+- **Root cause.** The Phase A1 "regression" (index `ORDER BY emb
+  <=> probe LIMIT N` returning the same `id` N times at 10 M
+  scale on the `meh` bench host) was traced to an **upstream
+  turbovec kernel bug, not pg_turbovec**. The pinned turbovec
+  v0.7.0-era fork (`6e80a59`) had a scalar fallback that, on
+  x86_64 CPUs **without AVX2**, read the perm0-interleaved
+  (FAISS-style) SIMD code layout as if it were sequential —
+  producing silently-wrong / repeated top-k. `meh` is an Intel
+  Xeon E5-2697 v2 (Ivy Bridge, 2013): `avx` but no `avx2`, so it
+  hit the buggy path. AVX2 (Haswell 2013+), AVX-512, and ARM NEON
+  hosts always took a correct SIMD path — which is why the bug
+  never reproduced on AVX2 dev boxes or `arnold`, only on `meh`.
+- **Fix.** Upstream turbovec fixed this in PR #108 (issue #106,
+  "V5"), released in v0.8.0, adding a correct
+  `score_query_into_heap` x86_64 scalar fallback plus a
+  `FORCE_SCALAR_FALLBACK` regression test. v1.7.3 upgrades the
+  `gburd/turbovec` fork from the v0.7.0-era `6e80a59` to a fork
+  rebased onto upstream **v0.9.0** (`d3d468e` on branch
+  `pg_turbovec-integration-v0.9.0`).
+- **Also brought in, inert here:**
+  - TQ+ per-coordinate calibration fields, constructed as identity
+    (empty) on the relfile path — **no recall change, no wire
+    change** in v1.7.3. Persisting them for a recall gain is a
+    future minor release (VERSION 3 → 4 + REINDEX).
+  - Security hardening: `MAX_DIM = 65536`, NaN/Inf/huge-magnitude
+    input rejection, checked-mul `.tv`/`.tvim` loaders.
+- **Zero pg_turbovec source churn** — the upgrade is a
+  `Cargo.toml` rev bump only; the fork kept the `prepare_eager`
+  alias and passes TQ+ through internally so every
+  `from_id_map_parts*` call site is unchanged.
+- **Toolchain note.** turbovec v0.9.0 uses `avx512` `target_feature`s
+  requiring **Rust ≥ 1.89**. Builds with the default `stable`
+  toolchain (1.95). See `AGENTS.md` for the refreshed openblas
+  store path and the `-fuse-ld=bfd` linker note.
+- Tests: 123/123 on pg16. drift-check clean.
+
+### Migration
+
+**No migration needed; no REINDEX.** The on-disk relfile format is
+byte-identical to v1.6.x / v1.7.x. Drop in the new shared library,
+restart, scan. **Pre-AVX2 x86_64 users specifically** should
+upgrade to clear the wrong-results bug and can drop any
+`SET enable_indexscan = off;` workaround. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.7.3';` resolves against the empty
+`migrations/012_pg_turbovec_v1.7.3.sql`.
+
 ## [1.7.2] — 2026-05-27
 
 ### Added — Phase Y: automated upgrade-matrix validation

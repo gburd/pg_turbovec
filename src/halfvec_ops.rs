@@ -82,6 +82,73 @@ fn halfvec_l2_normalize(v: Halfvec) -> Halfvec {
 }
 
 // ---------------------------------------------------------------------
+// Element-wise arithmetic (+ - *) and concatenation (||).
+//
+// Arithmetic is computed in f32 (widening each f16 operand) and the
+// result is narrowed back to f16. pgvector errors on a non-finite
+// result coordinate ("value out of range: overflow"); `from_f32_vec`
+// already raises on non-finite / f16-overflow, so we get that for free.
+// ---------------------------------------------------------------------
+
+/// Element-wise sum of two equal-dimension `halfvec`s.
+#[pg_extern(immutable, parallel_safe)]
+fn halfvec_add(a: Halfvec, b: Halfvec) -> Halfvec {
+    a.check_same_dim(&b, "+");
+    let out: ::std::vec::Vec<f32> = a
+        .as_slice()
+        .iter()
+        .zip(b.as_slice().iter())
+        .map(|(x, y)| f32::from(*x) + f32::from(*y))
+        .collect();
+    Halfvec::from_f32_vec(out)
+}
+
+/// Element-wise difference of two equal-dimension `halfvec`s.
+#[pg_extern(immutable, parallel_safe)]
+fn halfvec_sub(a: Halfvec, b: Halfvec) -> Halfvec {
+    a.check_same_dim(&b, "-");
+    let out: ::std::vec::Vec<f32> = a
+        .as_slice()
+        .iter()
+        .zip(b.as_slice().iter())
+        .map(|(x, y)| f32::from(*x) - f32::from(*y))
+        .collect();
+    Halfvec::from_f32_vec(out)
+}
+
+/// Element-wise (Hadamard) product of two equal-dimension `halfvec`s.
+#[pg_extern(immutable, parallel_safe)]
+fn halfvec_mul(a: Halfvec, b: Halfvec) -> Halfvec {
+    a.check_same_dim(&b, "*");
+    let out: ::std::vec::Vec<f32> = a
+        .as_slice()
+        .iter()
+        .zip(b.as_slice().iter())
+        .map(|(x, y)| f32::from(*x) * f32::from(*y))
+        .collect();
+    Halfvec::from_f32_vec(out)
+}
+
+/// Concatenate two `halfvec`s into one of dim `dim(a) + dim(b)`.
+/// Mirrors pgvector's `halfvec_concat`. Errors if the combined dim
+/// exceeds `MAX_DIM`.
+#[pg_extern(name = "halfvec_concat", immutable, parallel_safe)]
+fn halfvec_concat(a: Halfvec, b: Halfvec) -> Halfvec {
+    if a.dim() + b.dim() > MAX_DIM {
+        error!(
+            "operand dimensions {} + {} exceed maximum {} for halfvec concatenation",
+            a.dim(),
+            b.dim(),
+            MAX_DIM
+        );
+    }
+    let mut out = ::std::vec::Vec::with_capacity(a.dim() + b.dim());
+    out.extend_from_slice(a.as_slice());
+    out.extend_from_slice(b.as_slice());
+    Halfvec::from_f16_vec(out)
+}
+
+// ---------------------------------------------------------------------
 // Casts
 // ---------------------------------------------------------------------
 
@@ -248,6 +315,26 @@ extension_sql!(
         COMMUTATOR = '<+>'
     );
 
+    -- Element-wise arithmetic + concatenation (parity with pgvector).
+    CREATE OPERATOR + (
+        LEFTARG = halfvec, RIGHTARG = halfvec,
+        PROCEDURE = halfvec_add,
+        COMMUTATOR = '+'
+    );
+    CREATE OPERATOR - (
+        LEFTARG = halfvec, RIGHTARG = halfvec,
+        PROCEDURE = halfvec_sub
+    );
+    CREATE OPERATOR * (
+        LEFTARG = halfvec, RIGHTARG = halfvec,
+        PROCEDURE = halfvec_mul,
+        COMMUTATOR = '*'
+    );
+    CREATE OPERATOR || (
+        LEFTARG = halfvec, RIGHTARG = halfvec,
+        PROCEDURE = halfvec_concat
+    );
+
     -- Casts between vector and halfvec; both directions explicit.
     CREATE CAST (vector  AS halfvec) WITH FUNCTION vector_to_halfvec(vector);
     CREATE CAST (halfvec AS vector)  WITH FUNCTION halfvec_to_vector(halfvec);
@@ -278,6 +365,10 @@ extension_sql!(
         halfvec_negative_inner_product,
         halfvec_cosine_distance,
         halfvec_l1_distance,
+        halfvec_add,
+        halfvec_sub,
+        halfvec_mul,
+        halfvec_concat,
         vector_to_halfvec,
         halfvec_to_vector,
         array_to_halfvec,

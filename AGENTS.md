@@ -84,16 +84,21 @@ The current major (1.x) line has been wire-format-stable since v1.4.0
 majors should attempt to remain online-upgradable from the 1.x line
 unless the cost of doing so is prohibitive.
 
-### Current (as of v1.7.2, 2026-05-27)
+### Current (as of v1.7.3, 2026-06-15)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.7.2    | `REINDEX INDEX` once |
-| 1.2.x              | 1.7.2    | `REINDEX INDEX` once |
-| 1.3.x              | 1.7.2    | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.7.x      | 1.7.2    | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.7.3    | `REINDEX INDEX` once |
+| 1.2.x              | 1.7.3    | `REINDEX INDEX` once |
+| 1.3.x              | 1.7.3    | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.7.x      | 1.7.3    | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version = 3` has held across **v1.4.0 → v1.7.2**.
+`MetaPageData::version = 3` has held across **v1.4.0 → v1.7.3**.
+
+**v1.7.3 is the recommended release for all x86_64 users** — it
+fixes a kernel bug where pre-AVX2 CPUs (Ivy Bridge / Sandy Bridge
+Xeons) returned wrong ANN results. See `docs/PRODUCTION.md`
+§ "Known issues".
 
 ---
 
@@ -102,8 +107,18 @@ unless the cost of doing so is prohibitive.
 ```bash
 export LIBCLANG_PATH=/nix/store/10y7v0cqr8xqsqlqnfzw6i9s42f6f8rd-clang-17.0.6-lib/lib
 export BINDGEN_EXTRA_CLANG_ARGS="-isystem /nix/store/x8lqlydsxbrwvf6p7v18gws8kn1xl37f-glibc-2.38-23-dev/include -isystem /nix/store/10y7v0cqr8xqsqlqnfzw6i9s42f6f8rd-clang-17.0.6-lib/lib/clang/17/include"
-export RUSTFLAGS="-L /nix/store/wavv74sn7l8l21pvdpnwshjfz4nz0fqz-openblas-0.3.30/lib"
+# Live openblas store path (the older wavv74... path was nix-GC'd 2026-06).
+# Re-derive if this one is GC'd too: `ls -d /nix/store/*openblas-0.3.30`
+export RUSTFLAGS="-L /nix/store/qbq20d6v6qf87cnlv5k55i0hnpzy00hq-openblas-0.3.30/lib -C link-arg=-fuse-ld=bfd"
 ```
+
+**Toolchain:** turbovec >= 0.9.0 uses `avx512f`/`avx512bw`
+`target_feature`s that require **Rust >= 1.89**. The default `stable`
+toolchain (1.95) works. The old 1.85 pin cannot compile turbovec
+v0.9.0+. The `-C link-arg=-fuse-ld=bfd` flag is needed because the
+rustup `stable` toolchain's bundled `gcc-ld/ld.lld` wrapper
+references a GC'd rustup store path on this box; bfd is the system
+fallback.
 
 Pre-test cleanup:
 ```bash

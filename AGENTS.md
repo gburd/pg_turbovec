@@ -84,21 +84,22 @@ The current major (1.x) line has been wire-format-stable since v1.4.0
 majors should attempt to remain online-upgradable from the 1.x line
 unless the cost of doing so is prohibitive.
 
-### Current (as of v1.7.3, 2026-06-15)
+### Current (as of v1.8.0, 2026-06-15)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.7.3    | `REINDEX INDEX` once |
-| 1.2.x              | 1.7.3    | `REINDEX INDEX` once |
-| 1.3.x              | 1.7.3    | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.7.x      | 1.7.3    | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.8.0    | `REINDEX INDEX` once |
+| 1.2.x              | 1.8.0    | `REINDEX INDEX` once |
+| 1.3.x              | 1.8.0    | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.8.x      | 1.8.0    | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version = 3` has held across **v1.4.0 → v1.7.3**.
+`MetaPageData::version = 3` has held across **v1.4.0 → v1.8.0**.
 
-**v1.7.3 is the recommended release for all x86_64 users** — it
+**v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs (Ivy Bridge / Sandy Bridge
-Xeons) returned wrong ANN results. See `docs/PRODUCTION.md`
-§ "Known issues".
+Xeons) returned wrong ANN results. v1.8.0 adds iterative scans
+(fixes under-return on selective `WHERE` filters), parallel build,
+a cold-scan latency cut, and `||`/halfvec arithmetic parity.
 
 ---
 
@@ -181,7 +182,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 118/118).
+3. Pass `cargo pgrx test pg16` cleanly (current count: 142/142).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`
    (mirror). Use `git push origin vX.Y.Z` and `git push github vX.Y.Z`.

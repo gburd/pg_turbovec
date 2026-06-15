@@ -1,0 +1,687 @@
+{
+  "benchmark": "pg_turbovec vs pgvector HNSW \u2014 AVX2 latency frontier",
+  "host": {
+    "name": "arnold",
+    "cpu": "12th Gen Intel(R) Core(TM) i9-12900H",
+    "arch": "x86_64",
+    "logical_cpus": 20,
+    "simd": [
+      "avx2",
+      "fma"
+    ],
+    "avx512": false,
+    "ram_gib": 31,
+    "os": "Fedora 44 (Linux 7.0.11-200.fc44.x86_64, glibc 2.43)",
+    "note": "Busy shared workstation (interactive desktop + other agent sessions + Discord/Firefox)."
+  },
+  "build": {
+    "pg_turbovec": "v1.9.0",
+    "git": "e2d49cf",
+    "turbovec_fork": "d3d468e (v0.9.0)",
+    "pgrx": "0.17.0",
+    "postgresql": "17.9",
+    "pgvector": "0.8.0",
+    "openblas": "/usr/lib64/libopenblas.so.0 (0.3.29, Fedora)",
+    "release": true,
+    "rustflags": "-L /scratch/pg_turbovec-bench/lib -C linker=/usr/bin/cc"
+  },
+  "corpus": {
+    "name": "Cohere wikipedia 1M x 1024-d (cosine, L2-normalized)",
+    "rows": 1000000,
+    "dim": 1024,
+    "held_out_queries": 1000,
+    "gt": "brute-force exact top-10 by cosine (gt_top10.npy, computed on meh)",
+    "comparability": "Parquet shards 0000-0010 scp'd from meh, md5-verified identical. GT/query npys byte-identical to the meh run. In-DB brute-force seqscan top-10 == gt_top10.npy on 5 probe queries (overlap@10=1.00, top-1 exact). Same near-dup structure as meh (9996/10000 distinct in first 10k)."
+  },
+  "isolation": {
+    "method": "postmaster started under `taskset -c 2-5` (dedicated P-cores of the i9-12900H, away from cores 0-1 favored by the kernel/IRQs and the E-cores 14-19); all backends inherit the CPU mask. The python sweep driver also pinned to 2-5. Dedicated bench cluster on port 28815 / socket /scratch/pg_turbovec-bench \u2014 does NOT touch the user's other postmasters or processes.",
+    "scheduling": "default nice (negative nice needs privilege; CPU pinning is the main lever per the isolation plan \u2014 insulate, do not preempt the user).",
+    "shared_buffers": "2GB (RAM-constrained host)",
+    "contention_measurement": "per-batch: /proc/loadavg (1m before+after), /proc/stat CPU busy/iowait/steal delta, free+available RAM. Per-query >3x-median outliers flagged; both raw and outlier-filtered p50/p95/p99 plus a 5% trimmed mean reported. contended_flag set if observed 1m load > 1.5.",
+    "warm_protocol": "20 warmup queries (pgvector) / 5 warmup queries (turbovec full-scan) untimed to warm the per-backend Arc cache + OS page cache, then timed.",
+    "n_timed": {
+      "pgvector_hnsw": 400,
+      "turbovec": 40
+    },
+    "latency_basis": "server-side Execution Time from EXPLAIN (ANALYZE) for BOTH engines (fair engine-to-engine; excludes client RTT)."
+  },
+  "correctness_gate": {
+    "test": "10k x 128-d distinct unit vectors, turbovec 4-bit, 20 held-out probes",
+    "avx2_path": true,
+    "mean_recall_at_10": 1.0,
+    "all_top10_distinct": true,
+    "result": "PASS",
+    "note": "Confirms the AVX2 SIMD kernel (not meh's scalar fallback) is correct on v1.9.0."
+  },
+  "storage": {
+    "heap_total_mb": 5332,
+    "indexes": [
+      {
+        "index": "pgvector HNSW (m16, efc64)",
+        "size_mb": 7806,
+        "bytes": 8185118720,
+        "vs_hnsw": "1.0x"
+      },
+      {
+        "index": "pg_turbovec 4-bit",
+        "size_mb": 1026,
+        "bytes": 1075904512,
+        "vs_hnsw": "7.6x smaller"
+      },
+      {
+        "index": "pg_turbovec 2-bit",
+        "size_mb": 512,
+        "bytes": 537280512,
+        "vs_hnsw": "15.2x smaller"
+      }
+    ],
+    "note": "Byte-for-byte identical to the meh run (CPU-independent). 7.6x / 15.2x confirmed."
+  },
+  "build_times": {
+    "pgvector_hnsw": "17:55 (m=16, efc=64, maintenance_work_mem=2GB w/ disk spill)",
+    "pg_turbovec_4bit": "01:37",
+    "pg_turbovec_2bit": "01:23",
+    "note": "Build times not directly comparable to meh: arnold used maintenance_work_mem=2GB (RAM-constrained) vs meh's 8GB, so HNSW spilled to disk and took longer. turbovec builds are AVX2-accelerated here. Storage sizes ARE comparable and match meh."
+  },
+  "configs": [
+    {
+      "label": "hnsw_ef40",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 40
+      },
+      "n_queries": 400,
+      "recall_at_10": 0.8662,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2.936,
+      "p50_ms": 2.755,
+      "p95_ms": 5.541,
+      "p99_ms": 7.565,
+      "min_ms": 0.483,
+      "max_ms": 22.964,
+      "trimmed_mean_ms": 2.807,
+      "qps_single_conn": 340.61,
+      "n_outliers": 4,
+      "filt_p50_ms": 2.744,
+      "filt_p95_ms": 5.456,
+      "filt_p99_ms": 7.005,
+      "contention": {
+        "loadavg_1m_before": 0.31,
+        "loadavg_1m_after": 0.31,
+        "loadavg_1m_observed": 0.31,
+        "mem_free_mib_before": 2517,
+        "mem_avail_mib_before": 24867,
+        "cpu_busy_pct": 4.86,
+        "cpu_iowait_pct": 0.64,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.73,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "hnsw_ef100",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 100
+      },
+      "n_queries": 400,
+      "recall_at_10": 0.9375,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 3.621,
+      "p50_ms": 3.319,
+      "p95_ms": 6.818,
+      "p99_ms": 8.436,
+      "min_ms": 0.479,
+      "max_ms": 14.87,
+      "trimmed_mean_ms": 3.515,
+      "qps_single_conn": 276.13,
+      "n_outliers": 1,
+      "filt_p50_ms": 3.298,
+      "filt_p95_ms": 6.797,
+      "filt_p99_ms": 8.266,
+      "contention": {
+        "loadavg_1m_before": 0.31,
+        "loadavg_1m_after": 0.29,
+        "loadavg_1m_observed": 0.31,
+        "mem_free_mib_before": 2477,
+        "mem_avail_mib_before": 24846,
+        "cpu_busy_pct": 5.07,
+        "cpu_iowait_pct": 0.36,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.31,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "hnsw_ef200",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 200
+      },
+      "n_queries": 400,
+      "recall_at_10": 0.9643,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 5.565,
+      "p50_ms": 5.247,
+      "p95_ms": 10.003,
+      "p99_ms": 11.746,
+      "min_ms": 0.665,
+      "max_ms": 16.306,
+      "trimmed_mean_ms": 5.455,
+      "qps_single_conn": 179.7,
+      "n_outliers": 1,
+      "filt_p50_ms": 5.236,
+      "filt_p95_ms": 9.962,
+      "filt_p99_ms": 11.621,
+      "contention": {
+        "loadavg_1m_before": 0.29,
+        "loadavg_1m_after": 0.42,
+        "loadavg_1m_observed": 0.42,
+        "mem_free_mib_before": 2442,
+        "mem_avail_mib_before": 24825,
+        "cpu_busy_pct": 5.06,
+        "cpu_iowait_pct": 0.23,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 4.59,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "hnsw_ef400",
+      "engine": "pgvector_hnsw",
+      "param": {
+        "ef_search": 400
+      },
+      "n_queries": 400,
+      "recall_at_10": 0.9812,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 9.157,
+      "p50_ms": 8.626,
+      "p95_ms": 16.09,
+      "p99_ms": 21.455,
+      "min_ms": 1.938,
+      "max_ms": 24.505,
+      "trimmed_mean_ms": 8.964,
+      "qps_single_conn": 109.2,
+      "n_outliers": 0,
+      "filt_p50_ms": 8.626,
+      "filt_p95_ms": 16.09,
+      "filt_p99_ms": 21.455,
+      "contention": {
+        "loadavg_1m_before": 0.42,
+        "loadavg_1m_after": 0.55,
+        "loadavg_1m_observed": 0.55,
+        "mem_free_mib_before": 2422,
+        "mem_avail_mib_before": 24819,
+        "cpu_busy_pct": 5.17,
+        "cpu_iowait_pct": 0.14,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 7.06,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k100",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 100,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2783.987,
+      "p50_ms": 2774.803,
+      "p95_ms": 2852.473,
+      "p99_ms": 2886.9,
+      "min_ms": 2733.935,
+      "max_ms": 2887.123,
+      "trimmed_mean_ms": 2780.944,
+      "qps_single_conn": 0.36,
+      "n_outliers": 0,
+      "filt_p50_ms": 2774.803,
+      "filt_p95_ms": 2852.473,
+      "filt_p99_ms": 2886.9,
+      "contention": {
+        "loadavg_1m_before": 0.47,
+        "loadavg_1m_after": 1.03,
+        "loadavg_1m_observed": 1.03,
+        "mem_free_mib_before": 1454,
+        "mem_avail_mib_before": 23829,
+        "cpu_busy_pct": 5.23,
+        "cpu_iowait_pct": 0.03,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 245.88,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k200",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 200,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2709.653,
+      "p50_ms": 2711.443,
+      "p95_ms": 2734.153,
+      "p99_ms": 2768.357,
+      "min_ms": 2670.277,
+      "max_ms": 2785.4,
+      "trimmed_mean_ms": 2708.597,
+      "qps_single_conn": 0.37,
+      "n_outliers": 0,
+      "filt_p50_ms": 2711.443,
+      "filt_p95_ms": 2734.153,
+      "filt_p99_ms": 2768.357,
+      "contention": {
+        "loadavg_1m_before": 1.02,
+        "loadavg_1m_after": 1.0,
+        "loadavg_1m_observed": 1.02,
+        "mem_free_mib_before": 1323,
+        "mem_avail_mib_before": 23691,
+        "cpu_busy_pct": 5.19,
+        "cpu_iowait_pct": 0.01,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 240.2,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k500",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 500,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2904.848,
+      "p50_ms": 2906.41,
+      "p95_ms": 2933.999,
+      "p99_ms": 2972.873,
+      "min_ms": 2854.418,
+      "max_ms": 2982.339,
+      "trimmed_mean_ms": 2903.657,
+      "qps_single_conn": 0.34,
+      "n_outliers": 0,
+      "filt_p50_ms": 2906.41,
+      "filt_p95_ms": 2933.999,
+      "filt_p99_ms": 2972.873,
+      "contention": {
+        "loadavg_1m_before": 1.0,
+        "loadavg_1m_after": 1.04,
+        "loadavg_1m_observed": 1.04,
+        "mem_free_mib_before": 1344,
+        "mem_avail_mib_before": 23715,
+        "cpu_busy_pct": 5.19,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 255.85,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k1000",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 1000,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2853.711,
+      "p50_ms": 2854.179,
+      "p95_ms": 2884.282,
+      "p99_ms": 2918.075,
+      "min_ms": 2801.78,
+      "max_ms": 2931.17,
+      "trimmed_mean_ms": 2852.863,
+      "qps_single_conn": 0.35,
+      "n_outliers": 0,
+      "filt_p50_ms": 2854.179,
+      "filt_p95_ms": 2884.282,
+      "filt_p99_ms": 2918.075,
+      "contention": {
+        "loadavg_1m_before": 1.03,
+        "loadavg_1m_after": 1.06,
+        "loadavg_1m_observed": 1.06,
+        "mem_free_mib_before": 1317,
+        "mem_avail_mib_before": 23690,
+        "cpu_busy_pct": 5.19,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 251.78,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_2b_k100",
+      "engine": "pg_turbovec_2bit",
+      "param": {
+        "bit_width": 2,
+        "search_k": 100,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2561.448,
+      "p50_ms": 2552.151,
+      "p95_ms": 2604.458,
+      "p99_ms": 2619.863,
+      "min_ms": 2519.749,
+      "max_ms": 2628.478,
+      "trimmed_mean_ms": 2560.369,
+      "qps_single_conn": 0.39,
+      "n_outliers": 0,
+      "filt_p50_ms": 2552.151,
+      "filt_p95_ms": 2604.458,
+      "filt_p99_ms": 2619.863,
+      "contention": {
+        "loadavg_1m_before": 0.67,
+        "loadavg_1m_after": 1.02,
+        "loadavg_1m_observed": 1.02,
+        "mem_free_mib_before": 3618,
+        "mem_avail_mib_before": 24479,
+        "cpu_busy_pct": 5.22,
+        "cpu_iowait_pct": 0.04,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 228.43,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_2b_k200",
+      "engine": "pg_turbovec_2bit",
+      "param": {
+        "bit_width": 2,
+        "search_k": 200,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2527.777,
+      "p50_ms": 2523.309,
+      "p95_ms": 2575.054,
+      "p99_ms": 2585.193,
+      "min_ms": 2476.937,
+      "max_ms": 2587.185,
+      "trimmed_mean_ms": 2527.176,
+      "qps_single_conn": 0.4,
+      "n_outliers": 0,
+      "filt_p50_ms": 2523.309,
+      "filt_p95_ms": 2575.054,
+      "filt_p99_ms": 2585.193,
+      "contention": {
+        "loadavg_1m_before": 1.01,
+        "loadavg_1m_after": 1.06,
+        "loadavg_1m_observed": 1.06,
+        "mem_free_mib_before": 3627,
+        "mem_avail_mib_before": 24500,
+        "cpu_busy_pct": 5.22,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 225.87,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_2b_k500",
+      "engine": "pg_turbovec_2bit",
+      "param": {
+        "bit_width": 2,
+        "search_k": 500,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2735.97,
+      "p50_ms": 2735.18,
+      "p95_ms": 2759.097,
+      "p99_ms": 2802.165,
+      "min_ms": 2698.443,
+      "max_ms": 2814.633,
+      "trimmed_mean_ms": 2734.458,
+      "qps_single_conn": 0.37,
+      "n_outliers": 0,
+      "filt_p50_ms": 2735.18,
+      "filt_p95_ms": 2759.097,
+      "filt_p99_ms": 2802.165,
+      "contention": {
+        "loadavg_1m_before": 1.05,
+        "loadavg_1m_after": 1.0,
+        "loadavg_1m_observed": 1.05,
+        "mem_free_mib_before": 3548,
+        "mem_avail_mib_before": 24452,
+        "cpu_busy_pct": 5.2,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 242.44,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k200",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 200,
+        "oversample": 1.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2710.158,
+      "p50_ms": 2709.719,
+      "p95_ms": 2735.221,
+      "p99_ms": 2768.285,
+      "min_ms": 2670.639,
+      "max_ms": 2777.622,
+      "trimmed_mean_ms": 2709.078,
+      "qps_single_conn": 0.37,
+      "n_outliers": 0,
+      "filt_p50_ms": 2709.719,
+      "filt_p95_ms": 2735.221,
+      "filt_p99_ms": 2768.285,
+      "contention": {
+        "loadavg_1m_before": 0.39,
+        "loadavg_1m_after": 1.05,
+        "loadavg_1m_observed": 1.05,
+        "mem_free_mib_before": 1369,
+        "mem_avail_mib_before": 23976,
+        "cpu_busy_pct": 5.2,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 240.27,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k200_os2",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 200,
+        "oversample": 2.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2666.512,
+      "p50_ms": 2661.222,
+      "p95_ms": 2734.71,
+      "p99_ms": 2779.315,
+      "min_ms": 2616.534,
+      "max_ms": 2800.41,
+      "trimmed_mean_ms": 2663.159,
+      "qps_single_conn": 0.38,
+      "n_outliers": 0,
+      "filt_p50_ms": 2661.222,
+      "filt_p95_ms": 2734.71,
+      "filt_p99_ms": 2779.315,
+      "contention": {
+        "loadavg_1m_before": 1.04,
+        "loadavg_1m_after": 1.0,
+        "loadavg_1m_observed": 1.04,
+        "mem_free_mib_before": 1295,
+        "mem_avail_mib_before": 23919,
+        "cpu_busy_pct": 5.21,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 236.64,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    },
+    {
+      "label": "tv_4b_k200_os4",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 200,
+        "oversample": 4.0
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "server_exec_explain_analyze",
+      "mean_ms": 2649.921,
+      "p50_ms": 2643.884,
+      "p95_ms": 2699.393,
+      "p99_ms": 2718.623,
+      "min_ms": 2591.249,
+      "max_ms": 2728.121,
+      "trimmed_mean_ms": 2648.98,
+      "qps_single_conn": 0.38,
+      "n_outliers": 0,
+      "filt_p50_ms": 2643.884,
+      "filt_p95_ms": 2699.393,
+      "filt_p99_ms": 2718.623,
+      "contention": {
+        "loadavg_1m_before": 1.0,
+        "loadavg_1m_after": 1.25,
+        "loadavg_1m_observed": 1.25,
+        "mem_free_mib_before": 1052,
+        "mem_avail_mib_before": 23769,
+        "cpu_busy_pct": 5.2,
+        "cpu_iowait_pct": 0.02,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 235.47,
+        "contended_flag": false,
+        "load_gate": 1.5
+      }
+    }
+  ],
+  "meta_per_phase": {
+    "pgv": {
+      "host": "arnold",
+      "uname": "Linux-7.0.11-200.fc44.x86_64-x86_64-with-glibc2.43",
+      "n_timed": 400,
+      "n_warm": 20,
+      "load_gate": 1.5,
+      "latency_basis": "server_exec_explain_analyze",
+      "start_loadavg": "0.31 1.31 3.32 1/1285 662789",
+      "ts": "2026-06-15T18:32:47-0400"
+    },
+    "tv4": {
+      "host": "arnold",
+      "uname": "Linux-7.0.11-200.fc44.x86_64-x86_64-with-glibc2.43",
+      "n_timed": 400,
+      "n_warm": 5,
+      "load_gate": 1.5,
+      "latency_basis": "server_exec_explain_analyze",
+      "start_loadavg": "0.32 1.12 3.12 1/1275 662923",
+      "ts": "2026-06-15T18:33:54-0400"
+    },
+    "tv2": {
+      "host": "arnold",
+      "uname": "Linux-7.0.11-200.fc44.x86_64-x86_64-with-glibc2.43",
+      "n_timed": 400,
+      "n_warm": 5,
+      "load_gate": 1.5,
+      "latency_basis": "server_exec_explain_analyze",
+      "start_loadavg": "0.61 1.00 1.18 1/1291 666131",
+      "ts": "2026-06-15T19:09:22-0400"
+    },
+    "oversample": {
+      "host": "arnold",
+      "uname": "Linux-7.0.11-200.fc44.x86_64-x86_64-with-glibc2.43",
+      "n_timed": 400,
+      "n_warm": 5,
+      "load_gate": 1.5,
+      "latency_basis": "server_exec_explain_analyze",
+      "start_loadavg": "0.22 0.71 1.48 1/1286 664571",
+      "ts": "2026-06-15T18:53:21-0400"
+    }
+  },
+  "headline": {
+    "question": "At matched recall@10 >= 0.95, pg_turbovec warm p50 vs pgvector HNSW p50 on AVX2.",
+    "pgvector_hnsw_at_0.95": {
+      "config": "ef200",
+      "recall_at_10": 0.9643,
+      "p50_ms": 5.247
+    },
+    "pgvector_hnsw_ef400": {
+      "recall_at_10": 0.9812,
+      "p50_ms": 8.626
+    },
+    "pg_turbovec_2bit_k100": {
+      "recall_at_10": 1.0,
+      "p50_ms": 2552.151
+    },
+    "pg_turbovec_4bit_k100": {
+      "recall_at_10": 1.0,
+      "p50_ms": 2774.803
+    },
+    "ratio_tv2_vs_hnsw_ef200": 486.4,
+    "summary": "On AVX2, turbovec's SIMD kernel runs (~15-25x faster than meh's scalar fallback), but a flat quantized full-scan over 1M x 1024-d is still ~2.5-2.9s warm p50 at PERFECT recall@10=1.0, versus HNSW's ~5-9ms at recall@10 0.96-0.98. turbovec wins decisively on storage (7.6-15.2x) and recall (exact), HNSW wins decisively on latency (~500x faster at 1M scale). They are different points on the recall/latency/storage frontier; turbovec is a flat index, not a graph."
+  },
+  "oversample_frontier": {
+    "swept": "4-bit, search_k=200, oversample in {1,2,4}",
+    "results": [
+      {
+        "oversample": 1,
+        "recall_at_10": 1.0,
+        "p50_ms": 2709.719
+      },
+      {
+        "oversample": 2,
+        "recall_at_10": 1.0,
+        "p50_ms": 2661.222
+      },
+      {
+        "oversample": 4,
+        "recall_at_10": 1.0,
+        "p50_ms": 2643.884
+      }
+    ],
+    "finding": "On the Cohere wiki corpus, both 2-bit and 4-bit turbovec already reach recall@10=1.0 at the smallest search_k (100), so oversampling has NO recall headroom to recover here and is effectively a no-op for recall (latency essentially flat). The oversample MECHANISM is verified correct on a harder synthetic corpus by the in-tree #[pg_test] monotone-recall-curve test (oversample_recall_monotone_non_decreasing). 4-bit never needs oversample to match HNSW-ef400 recall on this corpus -- it exceeds it (1.0 vs 0.98) at oversample=1."
+  },
+  "confidence": {
+    "contention_free": "High. Every batch ran at observed 1m load <= ~1.05 (well under the 1.5 gate); contended_flag=False on ALL 14 configs. CPU steal ~0 (bare metal, not virtualized). turbovec batches had 0 outliers and very tight distributions (p95 within ~3% of p50). pgvector batches had 0-4 >3x-median outliers each (raw vs filtered p50 differ by <1%). No batches discarded or re-run.",
+    "caveats": "RAM-constrained host (2GB shared_buffers, ~0.4-1GiB free during runs; one memory-hungry ad-hoc DISTINCT probe OOM-killed a backend pre-bench, recovered cleanly, data intact). Single host. The bench is CPU-pinned but the OS page cache is shared with the user's work; warm-protocol + low observed load mitigate this. Build times not comparable to meh (different maintenance_work_mem)."
+  }
+}

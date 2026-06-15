@@ -140,6 +140,26 @@ SET turbovec.iterative_scan = relaxed_order;  -- off | relaxed_order
 -- when turbovec.iterative_scan != off. Raise for very selective
 -- filters over large indexes; lower to bound worst-case scan work.
 SET turbovec.max_scan_tuples = 20000;
+
+-- Oversampling (differentiator #5): tunable recall lever. The scan
+-- fetches ceil(search_k * oversample) candidates ranked by the
+-- lossy 2-4 bit quantized distance, then the executor's reorder
+-- queue (xs_recheckorderby) re-ranks them by EXACT full-precision
+-- distance and the LIMIT trims to the true top-k. Widening the
+-- candidate set recovers true neighbours the quantized ranking
+-- placed just outside search_k, so quantization stops being a fixed
+-- accuracy point and becomes a tunable recall frontier. Matches
+-- Qdrant's `oversampling` and VectorChord's rerank knob.
+-- 1.0 (default) = no oversampling = pre-feature behaviour.
+-- Measured (4-bit, 3000x64, search_k=10): recall@10 climbs
+-- 0.81 -> 0.96 -> 0.99 -> 1.0 at oversample 1.0/1.5/2.0/4.0, with
+-- p50 latency rising ~ linearly (3.8 -> 4.7 ms). Composes with
+-- iterative_scan: this sets the INITIAL k, iterative refill grows
+-- it from there. NOTE: there is no separate `turbovec.rescore` GUC;
+-- oversampling plus the always-on reorder queue together ARE the
+-- rescore mechanism (the reorder queue already re-ranks every
+-- returned tuple by exact distance).
+SET turbovec.oversample = 1.0;  -- 1.0 .. 100.0
 ```
 
 ---

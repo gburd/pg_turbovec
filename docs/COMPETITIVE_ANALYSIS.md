@@ -39,7 +39,7 @@ Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 | **Iterative/streaming scan** | `iterative_scan`, `max_scan_tuples`, `scan_mem_multiplier` | filter-aware traversal | **none** — one fixed-K batch | **BLOCKER** | **L** |
 | **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | post-filter only; under-returns | **MAJOR** | XL (pushdown) / L (iterative) |
 | Quantization quality | halfvec, bit, binary_quantize | scalar/PQ/binary | TurboQuant 2/3/4-bit (best storage/recall) | none (we win) | — |
-| Quantization tuning | manual re-rank CTE | rescore + oversampling | `search_k` only | major | M |
+| Quantization tuning | manual re-rank CTE | rescore + oversampling (✅ shipped: `turbovec.oversample`) | `search_k` only | major | M |
 | Vector arithmetic | `+ - *` and `\|\|` concat | N/A | `+ - *` vector-only; no `\|\|` | minor | S |
 | Aggregates | avg/sum (vector, halfvec) | N/A | avg/sum (vector, halfvec), sum (sparsevec) | none | — |
 | Subvector / helpers | subvector, l2_normalize, etc. | N/A | all present (+ jsonb extras) | none | — |
@@ -83,12 +83,24 @@ Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 
 ### Differentiators (make pg_turbovec strictly better)
 
-5. **Rescore + oversampling knobs** (effort M). Answers "is
-   `search_k` enough?" — no. Expose `turbovec.oversample`: fetch
-   `k * oversample` quantized candidates, rescore against the
-   full/heap vectors, keep top-k. Pairs with the existing recheck
-   path. Turns the quantization advantage into a tunable recall
-   lever and beats pgvector's manual-CTE ergonomics.
+5. **Rescore + oversampling knobs** (effort M) — ✅ **SHIPPED**
+   (v1.8.x, scan-side only, additive GUC). `turbovec.oversample`
+   (float, default 1.0, range 1.0..100.0): the scan fetches
+   `ceil(search_k * oversample)` quantized candidates, and the
+   always-on reorder queue (`xs_recheckorderby`) re-ranks them by
+   exact full-precision distance, trimming to the true top-k under
+   the LIMIT. There is no separate `turbovec.rescore` GUC —
+   oversampling plus the reorder queue together ARE the rescore
+   mechanism (the reorder queue already re-ranks every returned
+   tuple by exact distance, so an AM-side rescore is redundant;
+   measured: oversample alone drives recall@10 to 1.0). Composes
+   with iterative scan (sets the initial k; iterative refill grows
+   it). Measured curve (4-bit, 3000×64, search_k=10): recall@10
+   0.81→0.96→0.99→1.0 at oversample 1.0/1.5/2.0/4.0, p50 ~ linear
+   (3.8→4.7 ms). Turns the quantization advantage into a tunable
+   recall frontier (matching Qdrant `oversampling` / VectorChord
+   rerank) and beats pgvector's manual-CTE ergonomics. See
+   `docs/PARITY_GAPS.md` § Recall tuning.
 
 6. **Adopt turbovec ≥ 0.9.0 TQ+ calibration** (effort M). Per-
    coordinate shift/scale that improves recall. New persisted state

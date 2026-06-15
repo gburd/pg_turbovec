@@ -438,8 +438,22 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // turbovec.iterative_scan != off), the drain block below
         // doubles k and refills. We stash the arc + n_live so refills
         // don't repeat the cache lookup / relfile load.
+        //
+        // Oversampling (differentiator #5): `turbovec.oversample`
+        // widens the *initial* candidate set to ceil(search_k *
+        // oversample). The lossy quantized ranking can place a true
+        // neighbour just outside search_k; oversampling pulls it back
+        // into the candidate set, and the reorder queue
+        // (xs_recheckorderby) re-ranks the whole set by exact distance.
+        // Default 1.0 = no oversampling = pre-feature behaviour.
+        // Iterative refill still doubles from this oversampled floor.
         let k_pref = crate::guc::SEARCH_K.get() as usize;
-        let k = k_pref.min(n_live.max(1)).max(1);
+        let oversample = crate::guc::OVERSAMPLE.get().clamp(1.0, 100.0);
+        // ceil(k_pref * oversample) without float-rounding surprises;
+        // k_pref <= 100_000 and oversample <= 100 so the product fits
+        // an f64 exactly well within u64 range.
+        let k_oversampled = (k_pref as f64 * oversample).ceil() as usize;
+        let k = k_oversampled.min(n_live.max(1)).max(1);
         let (scores, ids) = arc.search(&(*opaque).query, k);
         (*opaque).arc = Some(arc);
         (*opaque).n_live = n_live;

@@ -20,7 +20,7 @@
 use pgrx::prelude::*;
 
 use crate::kernels;
-use crate::vec::Vector;
+use crate::vec::{Vector, MAX_DIM};
 
 // ---------------------------------------------------------------------
 // SQL-callable distance functions (mirrors pgvector's named functions).
@@ -192,6 +192,25 @@ fn vec_mul(a: Vector, b: Vector) -> Vector {
     Vector::from_vec(out)
 }
 
+/// Concatenate two `vector`s into one of dim `dim(a) + dim(b)`.
+/// Mirrors pgvector's `vector_concat`. Errors if the combined dim
+/// exceeds `MAX_DIM`.
+#[pg_extern(name = "vector_concat", immutable, parallel_safe)]
+fn vec_concat(a: Vector, b: Vector) -> Vector {
+    if a.dim() + b.dim() > MAX_DIM {
+        error!(
+            "operand dimensions {} + {} exceed maximum {} for vector concatenation",
+            a.dim(),
+            b.dim(),
+            MAX_DIM
+        );
+    }
+    let mut out = Vec::with_capacity(a.dim() + b.dim());
+    out.extend_from_slice(a.as_slice());
+    out.extend_from_slice(b.as_slice());
+    Vector::from_vec(out)
+}
+
 // ---------------------------------------------------------------------
 // Operators. We declare these via `extension_sql!` so the SQL is
 // emitted exactly as we want it (with COMMUTATOR / NEGATOR clauses
@@ -240,6 +259,11 @@ extension_sql!(
         PROCEDURE = vec_mul,
         COMMUTATOR = '*'
     );
+
+    CREATE OPERATOR || (
+        LEFTARG = vector, RIGHTARG = vector,
+        PROCEDURE = vector_concat
+    );
     ",
     name = "vec_operators",
     requires = [
@@ -250,6 +274,7 @@ extension_sql!(
         l1_distance,
         vec_add,
         vec_sub,
-        vec_mul
+        vec_mul,
+        vec_concat
     ]
 );

@@ -3699,7 +3699,7 @@ mod tests {
         let expected: Vec<&str> = vec![
             "0.1.0", "0.2.0", "0.4.0", "0.5.0",
             "1.3.0", "1.5.0", "1.6.0", "1.6.1",
-            "1.7.0", "1.7.1", "1.7.2",
+            "1.7.0", "1.7.1", "1.7.2", "1.7.3",
         ];
         let expected_owned: Vec<String> =
             expected.iter().map(|s| s.to_string()).collect();
@@ -3709,6 +3709,113 @@ mod tests {
              history. Update this list, scripts/drift-check.sh § 9, \
              and docs/UPGRADING.md together.",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Vector / halfvec arithmetic + concatenation (parity gap #4).
+    // -----------------------------------------------------------------
+
+    #[pg_test]
+    fn vector_concat_basic() {
+        use_turbovec();
+        let txt: Option<String> = Spi::get_one(
+            "SELECT ('[1,2]'::vector || '[3,4]'::vector)::text",
+        )
+        .unwrap();
+        assert_eq!(txt.as_deref(), Some("[1, 2, 3, 4]"));
+    }
+
+    #[pg_test]
+    fn vector_concat_function_name() {
+        // pgvector exposes the SQL function `vector_concat`; mirror it.
+        let txt: Option<String> = Spi::get_one(
+            "SELECT turbovec.vector_concat('[1,2,3]'::turbovec.vector, \
+                                          '[4,5]'::turbovec.vector)::text",
+        )
+        .unwrap();
+        assert_eq!(txt.as_deref(), Some("[1, 2, 3, 4, 5]"));
+    }
+
+    #[pg_test]
+    fn halfvec_concat_basic() {
+        use_turbovec();
+        let txt: Option<String> = Spi::get_one(
+            "SELECT ('[1,2]'::halfvec || '[3,4]'::halfvec)::text",
+        )
+        .unwrap();
+        assert_eq!(txt.as_deref(), Some("[1, 2, 3, 4]"));
+    }
+
+    #[pg_test]
+    fn halfvec_concat_function_name() {
+        let txt: Option<String> = Spi::get_one(
+            "SELECT turbovec.halfvec_concat('[1,2,3]'::turbovec.halfvec, \
+                                           '[4,5]'::turbovec.halfvec)::text",
+        )
+        .unwrap();
+        assert_eq!(txt.as_deref(), Some("[1, 2, 3, 4, 5]"));
+    }
+
+    #[pg_test]
+    fn halfvec_arithmetic_elementwise() {
+        use_turbovec();
+        // +  : [1,2,3] + [4,5,6] = [5,7,9]
+        let add: Option<String> = Spi::get_one(
+            "SELECT ('[1,2,3]'::halfvec + '[4,5,6]'::halfvec)::text",
+        )
+        .unwrap();
+        assert_eq!(add.as_deref(), Some("[5, 7, 9]"));
+        // -  : [4,5,6] - [1,2,3] = [3,3,3]
+        let sub: Option<String> = Spi::get_one(
+            "SELECT ('[4,5,6]'::halfvec - '[1,2,3]'::halfvec)::text",
+        )
+        .unwrap();
+        assert_eq!(sub.as_deref(), Some("[3, 3, 3]"));
+        // *  : Hadamard product [1,2,3] * [4,5,6] = [4,10,18]
+        let mul: Option<String> = Spi::get_one(
+            "SELECT ('[1,2,3]'::halfvec * '[4,5,6]'::halfvec)::text",
+        )
+        .unwrap();
+        assert_eq!(mul.as_deref(), Some("[4, 10, 18]"));
+    }
+
+    #[pg_test]
+    fn halfvec_add_dim_mismatch_errors() {
+        use_turbovec();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT ('[1,2]'::halfvec + '[1,2,3]'::halfvec)::text",
+            )
+        });
+        assert!(bad.is_err(), "halfvec + dim mismatch should ERROR");
+    }
+
+    #[pg_test]
+    fn halfvec_mul_overflow_errors() {
+        use_turbovec();
+        // 300 * 300 = 90000 > f16 max (65504) -> non-finite -> ERROR,
+        // matching pgvector's "value out of range: overflow".
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT ('[300]'::halfvec * '[300]'::halfvec)::text",
+            )
+        });
+        assert!(bad.is_err(), "halfvec * f16 overflow should ERROR");
+    }
+
+    #[pg_test]
+    fn vector_concat_exceeds_max_dim_errors() {
+        use_turbovec();
+        // Two 9000-d vectors concat to 18000 > MAX_DIM (16000) -> ERROR.
+        let bad = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT (\
+                   array_fill(1.0::real, ARRAY[9000])::turbovec.vector || \
+                   array_fill(1.0::real, ARRAY[9000])::turbovec.vector \
+                 )::text",
+            )
+        });
+        assert!(bad.is_err(), "concat exceeding MAX_DIM should ERROR");
     }
 }
 

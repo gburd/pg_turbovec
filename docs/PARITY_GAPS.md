@@ -110,6 +110,27 @@ dbpedia-1M without breaking the warm-p50 latency story.
 | `<~>` Hamming (binary) | ✓ | ✓ (bitvec) |
 | `<%>` Jaccard (binary) | ✓ | ✓ (bitvec) |
 
+## Arithmetic & concatenation operators
+
+Element-wise add/subtract, the Hadamard (element-wise) product, and
+concatenation. pgvector errors on a non-finite result coordinate
+(`value out of range: overflow`); pg_turbovec matches this — `+`/`-`/`*`
+require equal dimensions and raise on a non-finite result, and `||`
+errors if the combined dimension exceeds `MAX_DIM` (16 000). pgvector
+does not define arithmetic for `sparsevec`, so neither do we.
+
+| Op | pgvector | pg_turbovec |
+|----|----------|-------------|
+| `+` element-wise (vector) | ✓ | ✓ |
+| `-` element-wise (vector) | ✓ | ✓ |
+| `*` Hadamard (vector) | ✓ | ✓ |
+| `\|\|` concat (vector) | ✓ | ✓ |
+| `+` element-wise (halfvec) | ✓ | ✓ |
+| `-` element-wise (halfvec) | ✓ | ✓ |
+| `*` Hadamard (halfvec) | ✓ | ✓ |
+| `\|\|` concat (halfvec) | ✓ | ✓ |
+| arithmetic (sparsevec) | ✗ (not offered) | ✗ (parity: not offered) |
+
 ## Index scan features
 
 | Feature | pgvector 0.8.2 | pg_turbovec status |
@@ -155,6 +176,8 @@ dbpedia-1M without breaking the warm-p50 latency story.
 | `hamming_distance(bitvec, bitvec)` | ✓ | ✓ |
 | `jaccard_distance(bitvec, bitvec)` | ✓ | ✓ |
 | `l2_normalize(vector)` | ✓ | ✓ (also `vec_normalize`) |
+| `vector_concat(vector, vector)` | ✓ | ✓ (also `\|\|` operator) |
+| `halfvec_concat(halfvec, halfvec)` | ✓ | ✓ (also `\|\|` operator) |
 
 ## Index AMs
 

@@ -14,6 +14,7 @@
 //! | `turbovec.mmap_static_blocked`   | bool | true    | -              |
 //! | `turbovec.iterative_scan`        | enum | relaxed_order | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
+//! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 
 use core::ffi::CStr;
 
@@ -79,6 +80,28 @@ pub static ITERATIVE_SCAN: GucSetting<IterativeScanMode> =
 /// examine when iterative refill is enabled. Matches pgvector's
 /// `hnsw.max_scan_tuples` default of 20000.
 pub static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(20_000);
+
+/// Parity gap #2 (v1.8.0): caps the rayon thread pool `ambuild`
+/// uses for the CPU-heavy quantize + SIMD-repack phases. turbovec's
+/// `encode` and `pack::repack` are embarrassingly parallel per-row,
+/// and pgvector parallelises its HNSW/IVFFlat builds across
+/// `max_parallel_maintenance_workers`; this GUC is pg_turbovec's
+/// equivalent knob.
+///
+/// `0` (the default) means "derive from `max_parallel_maintenance_workers`":
+/// `ambuild` uses `max_parallel_maintenance_workers + 1` threads (the
+/// leader plus its worker budget), matching how PG accounts a parallel
+/// maintenance op. A positive value pins the pool size directly.
+///
+/// This does NOT change the on-disk bytes: rayon's parallel iterators
+/// write each row's codes/scales to a fixed output index, so the
+/// result is independent of thread count. The heap scan stays serial,
+/// so slot ordering and the TQ+ calibration source (the first chunk)
+/// are identical to a single-threaded build. The byte-for-byte
+/// equality is asserted by the `build_parts_are_pool_size_invariant`
+/// unit test; query-level equivalence by the
+/// `parallel_build_matches_serial_query` `#[pg_test]`.
+pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
@@ -189,6 +212,19 @@ pub fn register_gucs() {
         &MAX_SCAN_TUPLES,
         1,
         10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.build_parallelism\0"),
+        c_str(b"OS threads used to quantize + repack vectors during CREATE INDEX / REINDEX (0 = auto).\0"),
+        c_str(
+            b"ambuild's encode and SIMD-repack phases are embarrassingly parallel per vector. This caps the rayon thread pool sizing those phases. 0 (the default) derives the pool size from max_parallel_maintenance_workers + 1 (leader + worker budget). A positive value pins the thread count. The on-disk index bytes are identical regardless of this value \xe2\x80\x94 only build wall-clock changes.\0",
+        ),
+        &BUILD_PARALLELISM,
+        0,
+        128,
         GucContext::Userset,
         GucFlags::default(),
     );

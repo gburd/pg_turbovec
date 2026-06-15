@@ -1,0 +1,40 @@
+{
+  "configs": [
+    {
+      "label": "tv_4b_k100",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 100
+      },
+      "n_queries": 8,
+      "latency_basis": "client_wall_unix_socket",
+      "recall_at_10": 1.0,
+      "mean_ms": 68705.3,
+      "p50_ms": 69043.2,
+      "p95_ms": 69879.0,
+      "p99_ms": 69992.9,
+      "min_ms": 67055.3,
+      "max_ms": 70021.4,
+      "qps_single_conn": 0.0146
+    },
+    {
+      "label": "tv_4b_k1000",
+      "engine": "pg_turbovec_4bit",
+      "param": {
+        "bit_width": 4,
+        "search_k": 1000
+      },
+      "n_queries": 8,
+      "latency_basis": "client_wall_unix_socket",
+      "recall_at_10": 1.0,
+      "mean_ms": 55347.2,
+      "p50_ms": 55701.3,
+      "p95_ms": 57309.9,
+      "p99_ms": 57343.6,
+      "min_ms": 50417.5,
+      "max_ms": 57352.0,
+      "qps_single_conn": 0.0181
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "benchmark": "vectordbbench-style head-to-head: pg_turbovec vs pgvector HNSW",
+  "schema_version": 1,
+  "date": "2026-06-15",
+  "corpus": {
+    "name": "Cohere/wikipedia-22-12-en-embeddings",
+    "rows_indexed": 1000000,
+    "dim": 1024,
+    "metric": "cosine",
+    "normalized": true,
+    "held_out_queries": 1000,
+    "query_ids": "1000000..1000999 (held out of the index)",
+    "note": "Standard VectorDBBench 'Medium' size (1M). Real embeddings (not synthetic). Corpus rows verified distinct."
+  },
+  "host": {
+    "name": "meh",
+    "cpu": "Intel Xeon E5-2697 v2 @ 2.70GHz (Ivy Bridge)",
+    "simd": "avx, sse4_1, sse4_2 -- NO avx2, NO avx512",
+    "cores": 24,
+    "ram_gib": 125,
+    "os": "NixOS"
+  },
+  "software": {
+    "postgresql": "17.9",
+    "pgvector": "0.8.0",
+    "pg_turbovec_binary": "1.8.0 (git 7d01a51, tag v1.8.0-2-g7d01a51)",
+    "pg_turbovec_ext_catalog": "1.7.1 (binary v1.8.0 .so loaded; scan path is in the binary; SQL surface unchanged for the index AM)",
+    "turbovec_crate": "fork rev d3d468e (v0.9.0 line)",
+    "shared_buffers_mb": 640,
+    "maintenance_work_mem": "8GB",
+    "max_parallel_maintenance_workers": 8
+  },
+  "ground_truth": {
+    "method": "brute-force exact top-10 by cosine distance over all 1,000,000 corpus rows",
+    "engine": "BLAS matmul (numpy/openblas), cross-checked against in-DB seqscan (enable_indexscan=off) for 3 sampled queries -> 10/10 overlap each; reconstructed corpus byte-identical to DB (max|diff|=0.0 on 4 sampled ids)",
+    "n_queries": 1000
+  },
+  "correctness_gate": {
+    "passed": true,
+    "small_table": "10k x 128-d distinct random unit vectors, turbovec 4-bit index",
+    "recall_at_10": 1.0,
+    "distinct_top10_ids": true,
+    "note": "Confirms the pre-AVX2 wrong-results bug (present in the old turbovec v0.7.0 / pg_turbovec v1.7.1 build that scored 0.0 recall on this exact host) is FIXED in the v1.8.0 build."
+  },
+  "indexes": [
+    {
+      "engine": "pgvector_hnsw",
+      "label": "hnsw_m16_efc64",
+      "params": {"m": 16, "ef_construction": 64},
+      "build_seconds": 929.394,
+      "build_hms": "15:29",
+      "size_bytes": 8185143296,
+      "size_mb": 7806
+    },
+    {
+      "engine": "pg_turbovec_4bit",
+      "label": "tv_4bit",
+      "params": {"bit_width": 4},
+      "build_seconds": 499.967,
+      "build_hms": "08:20",
+      "size_bytes": 1075904512,
+      "size_mb": 1026
+    },
+    {
+      "engine": "pg_turbovec_2bit",
+      "label": "tv_2bit",
+      "params": {"bit_width": 2},
+      "build_seconds": 446.654,
+      "build_hms": "07:27",
+      "size_bytes": 537280512,
+      "size_mb": 512
+    }
+  ],
+  "storage_vs_hnsw": {"tv_4bit": "7.6x smaller", "tv_2bit": "15.2x smaller"},
+  "build_vs_hnsw": {"tv_4bit": "1.86x faster", "tv_2bit": "2.08x faster"},
+  "heap": {"size_mb": 5332, "main_mb": 58, "rows": 1000000},
+
+  "latency_basis_note": "pgvector HNSW latency = server-side Execution Time from EXPLAIN (ANALYZE). pg_turbovec latency = client wall over a unix socket; the in-engine scan dominates (>40s) so the sub-ms cast/RTT term is negligible. NOTE: pg_turbovec latencies on this host are the SCALAR-FALLBACK FLOOR, not representative -- see caveat.",
+
+  "frontier_pgvector_hnsw": [
+    {"label": "hnsw_ef40",  "ef_search": 40,  "n_queries": 200, "recall_at_10": 0.849, "p50_ms": 9.384,  "p95_ms": 20.3,   "p99_ms": 25.045, "mean_ms": 10.34,  "qps_single_conn": 96.71},
+    {"label": "hnsw_ef100", "ef_search": 100, "n_queries": 200, "recall_at_10": 0.926, "p50_ms": 13.127, "p95_ms": 22.447, "p99_ms": 25.079, "mean_ms": 13.48,  "qps_single_conn": 74.18},
+    {"label": "hnsw_ef200", "ef_search": 200, "n_queries": 200, "recall_at_10": 0.957, "p50_ms": 17.333, "p95_ms": 32.439, "p99_ms": 41.295, "mean_ms": 18.538, "qps_single_conn": 53.94},
+    {"label": "hnsw_ef400", "ef_search": 400, "n_queries": 200, "recall_at_10": 0.979, "p50_ms": 20.139, "p95_ms": 38.156, "p99_ms": 48.243, "mean_ms": 21.441, "qps_single_conn": 46.64}
+  ],
+
+  "pg_turbovec_scalar_fallback_floor": {
+    "representative": false,
+    "reason": "meh is pre-AVX2; turbovec takes the scalar score_query_into_heap path (correct but ~1000x slower than its AVX2/AVX-512 SIMD kernels). Per-query cost is a FIXED O(n_vectors * dim) full-corpus blocked-code scan -- independent of search_k, identical warm vs cold. On an AVX2+ host these are expected to be in the tens-of-ms range.",
+    "configs": [
+      {"label": "tv_2b_k100",  "bit_width": 2, "search_k": 100,  "n_queries": 12, "recall_at_10": 1.0, "p50_ms": 41617.9, "p95_ms": 46485.9, "p99_ms": 47086.3, "mean_ms": 42344.1, "qps_single_conn": 0.0236},
+      {"label": "tv_2b_k500",  "bit_width": 2, "search_k": 500,  "n_queries": 12, "recall_at_10": 1.0, "p50_ms": 42014.1, "p95_ms": 42645.5, "p99_ms": 42778.5, "mean_ms": 41939.5, "qps_single_conn": 0.0238},
+      {"label": "tv_4b_k100",  "bit_width": 4, "search_k": 100,  "n_queries": 8,  "recall_at_10": 1.0, "p50_ms": 69043.2, "p95_ms": 69879.0, "p99_ms": 69992.9, "mean_ms": 68705.3, "qps_single_conn": 0.0146},
+      {"label": "tv_4b_k1000", "bit_width": 4, "search_k": 1000, "n_queries": 8,  "recall_at_10": 1.0, "p50_ms": 55701.3, "p95_ms": 57309.9, "p99_ms": 57343.6, "mean_ms": 55347.2, "qps_single_conn": 0.0181}
+    ]
+  },
+
+  "key_findings": {
+    "correctness": "recall@10 = 1.000 for pg_turbovec at every config (2-bit and 4-bit) vs brute-force GT on 1M x 1024-d real embeddings. The pre-AVX2 fix in v1.8.0 is confirmed correct.",
+    "storage": "pg_turbovec 4-bit is 7.6x smaller than pgvector HNSW; 2-bit is 15.2x smaller.",
+    "build": "pg_turbovec builds 1.9-2.1x faster than pgvector HNSW.",
+    "recall_quality": "turbovec is a quantized full-scan (flat) index -> near-exact recall (1.000 here). pgvector HNSW trades recall for sublinear latency (0.849-0.979 across ef_search).",
+    "latency": "DEFERRED to an AVX2+ host. meh's pre-AVX2 scalar fallback makes turbovec latency ~40-70s/query, which is NOT a representative competitive number."
+  },
+  "deferred": {
+    "tv_latency_frontier": "needs an AVX2 / AVX-512 host (turbovec's SIMD kernels). meh is correctness/storage/build/recall only.",
+    "corpus_10m": "not run (budget; 1M is the priority standardized size).",
+    "competitors": "VectorChord / pgvectorscale comparison is future work.",
+    "concurrent_qps": "pgbench multi-conn throughput not run (single-conn QPS captured for HNSW; turbovec QPS dominated by scalar-fallback scan)."
+  },
+  "reproduction": "see docs/BENCHMARKS.md"
+}

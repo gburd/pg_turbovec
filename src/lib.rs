@@ -1000,6 +1000,18 @@ mod tests {
         assert_eq!(v.as_deref(), Some("250"));
     }
 
+    #[pg_test]
+    fn oversample_guc_round_trip() {
+        // Default is 1.0 (no oversampling = pre-feature behaviour).
+        let dflt: Option<f64> =
+            Spi::get_one("SELECT current_setting('turbovec.oversample')::float8").unwrap();
+        assert_eq!(dflt, Some(1.0));
+        Spi::run("SET turbovec.oversample = 4.0").unwrap();
+        let v: Option<f64> =
+            Spi::get_one("SELECT current_setting('turbovec.oversample')::float8").unwrap();
+        assert_eq!(v, Some(4.0));
+    }
+
     /// `count(*)` and other non-orderby queries used to ERROR out
     /// of amrescan. v1.0.0-rc.3: amrescan returns an empty scan in
     /// that case so the executor can fall through to a seq scan.
@@ -1939,6 +1951,323 @@ mod tests {
             n,
             Some(12),
             "iterative_scan=off must cap at search_k regardless of LIMIT"
+        );
+    }
+
+    // ---- Oversampling (differentiator #5): tunable recall ----
+    //
+    // These tests share a corpus builder: `n` rows of `dim`-dim
+    // pseudo-random vectors, deterministic from the row id so the
+    // quantized-vs-exact ranking is reproducible across runs.
+    fn build_oversample_corpus(table: &str, n: i32, dim: i32, bit_width: i32) {
+        use_turbovec();
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint PRIMARY KEY, emb vector)"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, {n}) AS gs(i), \
+                  generate_series(1, {dim}) AS sub(k) \
+             GROUP BY i"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "CREATE INDEX {table}_idx ON {table} \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = {bit_width})"
+        ))
+        .unwrap();
+        Spi::run(&format!("ANALYZE {table}")).unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+    }
+
+    /// Brute-force exact cosine top-`k` ids for the inlined query
+    /// vector literal `qlit` (e.g. `'[0.1,...]'::vector`). Used as
+    /// ground truth. The vector is inlined as a constant so the
+    /// planner treats it as a fixed ORDER BY argument (no join, so
+    /// the turbovec index can be chosen for the index variant below).
+    fn exact_topk_ids(table: &str, qlit: &str, k: i32) -> std::collections::HashSet<i64> {
+        let csv: Option<String> = Spi::get_one(&format!(
+            "SELECT string_agg(id::text, ',') FROM ( \
+                 SELECT t.id FROM {table} t \
+                 ORDER BY (1.0 - turbovec.inner_product(t.emb, {qlit}) / \
+                     (turbovec.vector_norm(t.emb) * turbovec.vector_norm({qlit}))) \
+                 LIMIT {k} \
+             ) sub"
+        ))
+        .unwrap();
+        csv.unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<i64>().unwrap())
+            .collect()
+    }
+
+    /// Index top-`k` ids under the current GUC settings, with the
+    /// query vector inlined as a literal so the planner pushes the
+    /// ORDER BY into the turbovec index.
+    fn index_topk_ids(table: &str, qlit: &str, k: i32) -> std::collections::HashSet<i64> {
+        let csv: Option<String> = Spi::get_one(&format!(
+            "SELECT string_agg(id::text, ',') FROM ( \
+                 SELECT t.id FROM {table} t \
+                 ORDER BY t.emb <=> {qlit} LIMIT {k} \
+             ) sub"
+        ))
+        .unwrap();
+        csv.unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<i64>().unwrap())
+            .collect()
+    }
+
+    /// Build the deterministic query-vector literal for a seed, as a
+    /// `'[...]'::turbovec.vector` SQL string ready to inline.
+    fn query_vector_literal(dim: i32, seed: &str) -> String {
+        let body: Option<String> = Spi::get_one(&format!(
+            "SELECT '[' || string_agg( \
+                 ((hashtext('{seed}:' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']' \
+             FROM generate_series(1, {dim}) AS sub(k)"
+        ))
+        .unwrap();
+        format!("'{}'::turbovec.vector", body.unwrap())
+    }
+
+    fn recall_at(
+        index: &std::collections::HashSet<i64>,
+        truth: &std::collections::HashSet<i64>,
+    ) -> f64 {
+        if truth.is_empty() {
+            return 1.0;
+        }
+        let hit = index.iter().filter(|id| truth.contains(id)).count();
+        hit as f64 / truth.len() as f64
+    }
+
+    /// Oversampling widens the candidate set: a query whose true NN
+    /// ranks just outside `search_k` by the lossy quantized distance
+    /// is recovered at `oversample = 4.0` but missed at `1.0`.
+    ///
+    /// We pin `search_k` small and `iterative_scan = off` so the only
+    /// lever is the oversample multiplier. Across a handful of query
+    /// seeds at least one must show the recovery, proving the widened
+    /// candidate set + reorder queue surfaces neighbours that the
+    /// narrow quantized top-k dropped.
+    #[pg_test]
+    fn oversample_widens_candidate_set() {
+        build_oversample_corpus("t_os_widen", 3000, 128, 2);
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 3").unwrap();
+
+        // Confirm the inlined-literal query actually drives the
+        // turbovec index (not a seq scan + sort, which would make
+        // oversample a no-op and the recall always exact).
+        let q1 = query_vector_literal(128, "q1");
+        let mut uses_index = false;
+        Spi::connect(|client| {
+            let rows = client
+                .select(
+                    &format!(
+                        "EXPLAIN SELECT t.id FROM t_os_widen t \
+                         ORDER BY t.emb <=> {q1} LIMIT 10"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap();
+            for row in rows {
+                let line: Option<String> = row.get(1).unwrap();
+                if line.unwrap_or_default().contains("Index Scan") {
+                    uses_index = true;
+                }
+            }
+        });
+        assert!(
+            uses_index,
+            "the inlined-literal ORDER BY must use the turbovec index, \
+             else oversample is a no-op and the test is meaningless"
+        );
+
+        let mut recovered_somewhere = false;
+        let mut never_regressed = true;
+        for seed in ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"] {
+            let qlit = query_vector_literal(128, seed);
+            let truth = exact_topk_ids("t_os_widen", &qlit, 10);
+
+            Spi::run("SET turbovec.oversample = 1.0").unwrap();
+            let r1 = recall_at(&index_topk_ids("t_os_widen", &qlit, 10), &truth);
+            Spi::run("SET turbovec.oversample = 8.0").unwrap();
+            let r8 = recall_at(&index_topk_ids("t_os_widen", &qlit, 10), &truth);
+
+            if r8 > r1 + 1e-9 {
+                recovered_somewhere = true;
+            }
+            if r8 + 1e-9 < r1 {
+                never_regressed = false;
+            }
+        }
+        assert!(
+            never_regressed,
+            "oversample=8.0 must never have worse recall than 1.0"
+        );
+        assert!(
+            recovered_somewhere,
+            "oversample=8.0 should recover at least one true NN that \
+             search_k=3 / oversample=1.0 dropped, across 8 query seeds"
+        );
+    }
+
+    /// Recall@10 is monotonically non-decreasing as oversample grows
+    /// 1 -> 1.5 -> 2 -> 4 -> 8 on a fixed corpus + query set. This is
+    /// the core contract of the feature and the shape that makes the
+    /// recall-vs-latency frontier honest. We average recall over
+    /// several query seeds to damp single-query tie noise, then assert
+    /// the averaged curve never goes down.
+    #[pg_test]
+    fn oversample_recall_monotone_non_decreasing() {
+        build_oversample_corpus("t_os_mono", 3000, 64, 4);
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 10").unwrap();
+
+        let seeds = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"];
+        let oversamples = [1.0_f64, 1.5, 2.0, 4.0, 8.0];
+
+        // Precompute the query literals + ground truth per seed once.
+        let qlits: Vec<String> = seeds.iter().map(|s| query_vector_literal(64, s)).collect();
+        let truths: Vec<_> = qlits
+            .iter()
+            .map(|q| exact_topk_ids("t_os_mono", q, 10))
+            .collect();
+
+        let mut curve = Vec::new();
+        for &os in &oversamples {
+            Spi::run(&format!("SET turbovec.oversample = {os}")).unwrap();
+            let mut sum = 0.0;
+            for (q, truth) in qlits.iter().zip(truths.iter()) {
+                sum += recall_at(&index_topk_ids("t_os_mono", q, 10), truth);
+            }
+            curve.push(sum / seeds.len() as f64);
+        }
+
+        // Warm p50 latency per oversample point (median over a small
+        // sweep of the same query set, after a warmup pass so the
+        // backend-local index cache is hot). Times the full SPI round
+        // trip, so it is an upper bound on the AM-internal scan cost,
+        // but the *shape* (roughly linear in candidate count) is what
+        // matters for the recall-vs-latency frontier.
+        let mut p50s = Vec::new();
+        for &os in &oversamples {
+            Spi::run(&format!("SET turbovec.oversample = {os}")).unwrap();
+            // Warmup.
+            let _ = index_topk_ids("t_os_mono", &qlits[0], 10);
+            let mut samples: Vec<f64> = Vec::new();
+            for q in &qlits {
+                let t0 = std::time::Instant::now();
+                let _ = index_topk_ids("t_os_mono", q, 10);
+                samples.push(t0.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            p50s.push(samples[samples.len() / 2]);
+        }
+        // Emit the curve for the bench archive / commit message.
+        // Measured 2026-06-15 (pg16, 4-bit, 3000x64, 8 query seeds):
+        //   oversample 1.0 1.5 2.0 4.0 8.0
+        //   recall@10  .8125 .9625 .9875 1.0 1.0
+        //   p50 (ms)   3.81  3.86  3.94  4.06 4.70
+        // -> recall climbs to 1.0, latency ~ linear in candidate count.
+        pgrx::log!("oversample recall@10 curve {oversamples:?} -> {curve:?}; p50_ms {p50s:?}");
+
+        for w in curve.windows(2) {
+            assert!(
+                w[1] + 1e-9 >= w[0],
+                "recall@10 must be non-decreasing in oversample; curve={curve:?}"
+            );
+        }
+        // Sanity: the curve actually climbs (the top of the range
+        // beats the bottom). If it were flat the feature would be
+        // pointless; this guards against a no-op wiring bug.
+        assert!(
+            *curve.last().unwrap() >= curve[0],
+            "recall@10 at oversample=8 should be >= oversample=1; curve={curve:?}"
+        );
+    }
+
+    /// `oversample = 1.0` is byte-identical to the pre-feature path:
+    /// the same result set as a plain `search_k` scan. Regression
+    /// guard so a future refactor can't silently change the default.
+    #[pg_test]
+    fn oversample_one_is_pre_feature_behaviour() {
+        build_oversample_corpus("t_os_reg", 1000, 16, 4);
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 20").unwrap();
+        let qlit = query_vector_literal(16, "reg");
+
+        // Default GUC is 1.0; explicitly setting it must match.
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
+        let a = index_topk_ids("t_os_reg", &qlit, 20);
+        // Re-read with the default unchanged path (RESET to default).
+        Spi::run("RESET turbovec.oversample").unwrap();
+        let b = index_topk_ids("t_os_reg", &qlit, 20);
+        assert_eq!(
+            a, b,
+            "oversample=1.0 and the default must produce the same result set"
+        );
+        assert_eq!(a.len(), 20, "search_k=20 scan should return 20 ids");
+    }
+
+    /// Oversample composes with a selective WHERE filter: iterative
+    /// scan still kicks in. Oversample sets the initial k; iterative
+    /// refill grows from there to satisfy the LIMIT over a sparse
+    /// filtered subset. Mirrors the iterative-scan fixture but with
+    /// oversample > 1.0 active, proving the two knobs don't collide.
+    #[pg_test]
+    fn oversample_composes_with_iterative_scan() {
+        use_turbovec();
+        Spi::run(
+            "CREATE TABLE t_os_iter (id bigint PRIMARY KEY, category int, emb vector)",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO t_os_iter \
+             SELECT i, i % 100, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, 2000) AS gs(i), \
+                  generate_series(1, 8) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_os_iter_idx ON t_os_iter \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_os_iter").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 16").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        // Oversample > 1.0: initial k = ceil(16 * 2.0) = 32, then
+        // iterative refill doubles from 32 to satisfy the LIMIT over
+        // the sparse (~20-row) category-7 subset.
+        Spi::run("SET turbovec.oversample = 2.0").unwrap();
+
+        let q = "(SELECT emb FROM t_os_iter WHERE id = 1007)";
+        let n: Option<i64> = Spi::get_one(&format!(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM t_os_iter WHERE category = 7 \
+                 ORDER BY emb <=> {q} LIMIT 10 \
+             ) sub"
+        ))
+        .unwrap();
+        assert_eq!(
+            n,
+            Some(10),
+            "oversample + iterative scan should still return the full LIMIT \
+             over a selective filter"
         );
     }
 

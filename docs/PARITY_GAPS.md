@@ -124,8 +124,39 @@ recommendation is to load via `CREATE INDEX` after the bulk
 
 ### Recall tuning
 
-The trade-off knob is `turbovec.search_k` (default 100). On the
-384-d synthetic corpus, K=100 gave R@10 = 1.000 because the
+Two knobs together form the recall-vs-latency frontier:
+
+1. `turbovec.search_k` (default 100) — how many candidates the kernel
+   returns.
+2. `turbovec.oversample` (default 1.0, v1.8.x+) — the candidate-set
+   widener. The scan fetches `ceil(search_k * oversample)` candidates
+   ranked by the lossy quantized distance, and the always-on reorder
+   queue (`xs_recheckorderby`) re-ranks them by exact full-precision
+   distance, trimming to the true top-k under the LIMIT. This recovers
+   true neighbours the quantized ranking placed just outside
+   `search_k`, turning quantization from a fixed accuracy point into a
+   tunable frontier (Qdrant `oversampling` / VectorChord rerank).
+
+Measured (4-bit, 3000×64, `search_k=10`, 8 query seeds,
+`benches/results/oversample_recall_curve_2026_06_15.json`):
+
+| oversample | recall@10 | p50 (ms) |
+|-----------:|----------:|---------:|
+| 1.0        | 0.8125    | 3.81     |
+| 1.5        | 0.9625    | 3.86     |
+| 2.0        | 0.9875    | 3.94     |
+| 4.0        | 1.0000    | 4.06     |
+| 8.0        | 1.0000    | 4.70     |
+
+Recall climbs monotonically to 1.0 as `oversample` grows; latency
+rises roughly linearly with the candidate count. There is no separate
+`turbovec.rescore` GUC: oversampling plus the reorder queue together
+are the rescore mechanism (the reorder queue already re-ranks every
+returned tuple by exact distance, so an AM-side rescore would be
+redundant). `oversample` composes with iterative scan — it sets the
+initial `k`, iterative refill grows it from there.
+
+On the 384-d synthetic corpus, K=100 gave R@10 = 1.000 because the
 uniform distribution makes ~all candidates within rounding of
 each other. On real-world embedding distributions (1536-d
 ada-002, GloVe-100), recall depends on K:
@@ -186,7 +217,7 @@ does not define arithmetic for `sparsevec`, so neither do we.
 | **Iterative / streaming scan** | ✓ `hnsw.iterative_scan`, `ivfflat.iterative_scan`, `max_scan_tuples`, `scan_mem_multiplier`, `max_probes` | ✓ (v1.8.0) — `turbovec.iterative_scan` (`off` \| `relaxed_order`, default `relaxed_order`). When a selective `WHERE filter ORDER BY emb <=> q LIMIT k` drains the current candidate batch, `amgettuple` re-runs the turbovec search with a doubled `k` and feeds the new (deduplicated) candidates, capped by `turbovec.max_scan_tuples` (default 20000, matches pgvector). Ordering across refill batches is restored by the existing `xs_recheckorderby` reorder queue. pgvector's `strict_order` is future work (our reorder queue already delivers exact ordering on top of `relaxed_order`). |
 | Bitmap index scan (`amgetbitmap`) | ✓ | ✗ (not applicable to ANN ordering) |
 | Parallel index build | ✓ (maintenance workers) | ✗ **GAP** — `ambuild` is single-threaded. |
-| Quantization tuning | manual re-rank CTE | `turbovec.search_k` only; no rescore/oversampling knob yet (roadmap differentiator). |
+| Quantization tuning | manual re-rank CTE | `turbovec.search_k` (candidate count) **plus `turbovec.oversample`** (v1.8.x+): fetch `ceil(search_k * oversample)` quantized candidates, the always-on reorder queue re-ranks by exact distance — oversampling + reorder queue are the rescore mechanism, matching Qdrant oversampling / VectorChord rerank. Recall@10 climbs to 1.0 as oversample grows (see § Recall tuning). |
 | `CREATE INDEX CONCURRENTLY` | ✓ | ✓ (standard AM path) |
 | Build progress (`pg_stat_progress_create_index`) | ✓ phased | partial (no custom phase labels) |
 

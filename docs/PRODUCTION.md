@@ -122,6 +122,24 @@ SET turbovec.mmap_static_blocked = on;
 -- producer doesn't normalise; lets you use cosine distance
 -- without an explicit l2_normalize() call. Default off.
 SET turbovec.normalize_on_insert = off;
+
+-- Iterative index scan (v1.8.0+). With a selective WHERE filter +
+-- ORDER BY emb <=> q LIMIT k, the executor post-filters the
+-- index's candidates and can under-return if a single search_k
+-- batch doesn't contain k matching rows. relaxed_order (the
+-- default) re-runs the search with a doubled k and feeds the new
+-- candidates until the LIMIT is satisfied or the cap below is hit;
+-- the reorder queue keeps results exactly distance-ordered. off
+-- restores the pre-v1.8.0 single-batch behaviour (faster, but may
+-- under-return under selective filters). pgvector parity:
+-- mirrors hnsw.iterative_scan (strict_order is future work).
+SET turbovec.iterative_scan = relaxed_order;  -- off | relaxed_order
+
+-- Hard ceiling on candidates examined per iterative scan. Matches
+-- pgvector's hnsw.max_scan_tuples (default 20000). Only consulted
+-- when turbovec.iterative_scan != off. Raise for very selective
+-- filters over large indexes; lower to bound worst-case scan work.
+SET turbovec.max_scan_tuples = 20000;
 ```
 
 ---

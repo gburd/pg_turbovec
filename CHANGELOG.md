@@ -4,6 +4,88 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] — 2026-06-15
+
+Oversampling (tunable recall), test-coverage hardening, and the
+first published head-to-head benchmark. **Wire format unchanged**
+(`MetaPageData::version = 3`); **no `REINDEX`** — `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.9.0';` suffices. The one new GUC defaults
+to a no-op.
+
+### Added — `turbovec.oversample` (differentiator #5)
+
+Turns quantization from a fixed accuracy point into a tunable recall
+lever, matching Qdrant's oversampling / VectorChord's rerank.
+
+- `turbovec.oversample` (float, default 1.0, range 1.0..=100.0): the
+  scan fetches `ceil(search_k * oversample)` quantized candidates and
+  the executor's reorder queue (`xs_recheckorderby = true`) trims to
+  the exact top-k. Widening the candidate set recovers true
+  neighbours the lossy quantized ranking placed just outside
+  `search_k`.
+- No separate rescore path: oversampling + the always-on reorder
+  queue together ARE the rescore mechanism (the reorder queue
+  already re-ranks by exact full-precision distance). Measured:
+  recall@10 climbs 0.81 (oversample 1.0) → 1.0 (oversample 4.0) on a
+  4-bit / 3000×64 corpus; latency rises ~linearly.
+- Composes with iterative scan: oversample sets the initial `k`;
+  refill doubles from there, capped by `max_scan_tuples`.
+- Default 1.0 is identical to v1.8.0 behaviour.
+
+### Testing — scale + distinct-id + recall-floor regression guards
+
+The pre-AVX2 wrong-results bug (fixed in v1.7.3) shipped because no
+test exercised more than ~2000 rows or asserted distinct result
+ids. Closed those gaps:
+
+- Medium-scale (20k×128-d) recall-floor `#[pg_test]` per bit_width
+  {2,3,4}, with a brute-force ground-truth comparison.
+- `assert_distinct_ids` on EVERY ANN-scan test — the cheapest guard
+  against the whole wrong-ranking bug class (a duplicate-id assert
+  would have caught the pre-AVX2 bug instantly).
+- `docs/TESTING.md` documenting coverage + honest gaps: CI is
+  AVX2-only (the scalar fallback runs only in turbovec's upstream
+  tests + pre-AVX2-host validation on turbovec bumps); unit tests
+  cap at 20k rows (the benchmark is the large-scale evidence); the
+  15 "ignored" items are benign ` ```ignore ` doctests.
+
+### Benchmark — first published head-to-head (`docs/BENCHMARKS.md`)
+
+Cohere wikipedia 1M × 1024-d (real embeddings, 1000 held-out
+queries, brute-force GT) vs pgvector HNSW, with a full reproducible
+harness under `benches/scripts/vectordbbench/`.
+
+- **recall@10 = 1.000** on the fixed v1.8.0+ build at every config
+  — the same pre-AVX2 host scored 0.0 on the old v1.7.1 build, so
+  this is the definitive confirmation that the pre-AVX2 fix works
+  on real embeddings at scale.
+- Storage: pg_turbovec 4-bit **7.6× smaller** (1026 MB vs HNSW
+  7806 MB), 2-bit **15.2× smaller** (512 MB). Build 1.9–2.1×
+  faster.
+- pgvector HNSW frontier (its own SIMD): R@10 0.849/9.4 ms (ef40)
+  → 0.979/20.1 ms (ef400).
+- **pg_turbovec latency frontier is DEFERRED to an AVX2 host.** The
+  bench host `meh` is a pre-AVX2 Ivy Bridge Xeon; turbovec takes
+  its scalar fallback (~1000× slower than its AVX2/AVX-512 kernels:
+  ~42–69 s/query full-corpus scan). EXPLAIN confirmed Index Scan
+  (not a seq-scan artifact). Latency/QPS benchmarks require an
+  AVX2+ host (`arnold`); see `BENCHMARKS.md` for the explicit TODO
+  and full caveats. (Updated `AGENTS.md` bench-host guidance
+  accordingly — SIMD class matters more than RAM for turbovec
+  latency.)
+
+### Migration
+
+**No migration; no REINDEX.** On-disk format byte-identical to
+v1.7.x / v1.8.x. The new `turbovec.oversample` GUC defaults to 1.0
+(no-op). `ALTER EXTENSION pg_turbovec UPDATE TO '1.9.0';` resolves
+against the empty `migrations/014_pg_turbovec_v1.9.0.sql`.
+
+### Tests
+
+142 → 150 on pg16 (+5 oversampling, +3 recall-floor; distinct-id
+assertions added to existing tests). drift-check clean.
+
 ## [1.8.0] — 2026-06-15
 
 Four competitive-parity features in one minor release. **Wire

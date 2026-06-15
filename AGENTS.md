@@ -84,22 +84,22 @@ The current major (1.x) line has been wire-format-stable since v1.4.0
 majors should attempt to remain online-upgradable from the 1.x line
 unless the cost of doing so is prohibitive.
 
-### Current (as of v1.8.0, 2026-06-15)
+### Current (as of v1.9.0, 2026-06-15)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.8.0    | `REINDEX INDEX` once |
-| 1.2.x              | 1.8.0    | `REINDEX INDEX` once |
-| 1.3.x              | 1.8.0    | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.8.x      | 1.8.0    | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.9.0    | `REINDEX INDEX` once |
+| 1.2.x              | 1.9.0    | `REINDEX INDEX` once |
+| 1.3.x              | 1.9.0    | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.9.x      | 1.9.0    | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version = 3` has held across **v1.4.0 → v1.8.0**.
+`MetaPageData::version = 3` has held across **v1.4.0 → v1.9.0**.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
-fixes a kernel bug where pre-AVX2 CPUs (Ivy Bridge / Sandy Bridge
-Xeons) returned wrong ANN results. v1.8.0 adds iterative scans
-(fixes under-return on selective `WHERE` filters), parallel build,
-a cold-scan latency cut, and `||`/halfvec arithmetic parity.
+fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.
+v1.8.0 added iterative scans, parallel build, a cold-scan latency
+cut, and `||`/halfvec arithmetic. v1.9.0 added `turbovec.oversample`
+(tunable recall) + the first published benchmark.
 
 ---
 

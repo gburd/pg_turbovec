@@ -16,7 +16,7 @@ close.
 | Build time | 8 m 13 s | 33 s | ✅ we win 15× |
 | Warm scan p50 (1 M × 384-d, GloVe) | 100 ms | 22 ms (v1.0.0) | ✅ we win 5× |
 | **Warm scan p50 (1 M × 1536-d, dbpedia-1M ada-002)** | 61 ms (ef=40) / 115 ms (ef=200) | **v1.5.0 on `meh` (24 c, 125 GiB RAM): 26.8 ms mmap=on, 26.7 ms mmap=off; arnold re-bench (where the buffer-manager bottleneck is real) still queued** — prior v1.4.0 arnold figure was 90 ms | ✅ **we win 2.3× vs HNSW ef=40 on a generously-RAMed host.** Phase R-3 (v1.5.0, Phase R-3 commit on `phase-r3-mmap-static-regions`) replaces the buffer-manager reads of the deterministic static regions (blocked codes + rotation matrix) with `mmap(MAP_PRIVATE)` of the relfile, so warm scans bypass `ReadBufferExtended` / shared_buffers churn for those bytes. Phase U-2 measurement on `meh` (1 M × 1536-d, `shared_buffers = 512 MB`, `search_k = 100`): mmap=on p50 **26.80 ms**, mmap=off p50 **26.65 ms**, delta +0.15 ms (verdict `shared_buffers_was_the_bottleneck` — OS page cache size dominated; the buffer-manager bottleneck Phase S targets is invisible when free RAM ≫ index size). arnold re-bench at the original 31 GiB-RAM constraint remains the definitive Phase S validation; expected drop from 90 ms toward ~60 ms there. v1.1.0 was 70 ms; v1.3.0 (Phase P) was 87 ms; v1.4.0 (Phase R-2) was 90 ms. See `docs/RECALL.md` § 2.5 / 2.6 and `benches/results/recall_warm_meh_v1_5_0_2026_05_26.json`. |
-| Cold scan p50 (after backend restart) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38) | ⚠️ **21× speedup vs. pre-fix v1.0.x side-table path**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. The relfile-resident format is the only storage strategy as of v1.3.0; the side-table path is gone. |
+| Cold scan p50 (after backend restart) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38); v1.7.3 defers the per-backend `id_to_slot` HashMap build off the read-only scan path (parity gap #3) | ⚠️ **21× speedup vs. pre-fix v1.0.x side-table path**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. v1.7.3 cuts the dominant residual cache-fill term: the read-only scan path now materialises a `ReadOnlyIndex` (positional `TurboQuantIndex` + `slot_to_id` Vec) instead of a full `IdMapIndex`, skipping the O(n) `id_to_slot` HashMap build (~50 ms debug / 200 k rows, scales with n; the dominant cache-fill phase once Phase P pre-baked the blocked layout). The HashMap is deferred to the first mutation, which still needs it. The relfile-resident format is the only storage strategy as of v1.3.0; the side-table path is gone. |
 | INSERT throughput (per row, into a 1 M-row index) | ~0.5 ms (HNSW O(log n)) | **0.13 ms (post-Phase-K, deferred-commit on the relfile path)** | ✅ **we win 4×** — v1.0.x had ~200 ms/row (full re-serialise per row) and we lost 400×; v1.1.0 (Phase K) shipped the deferred-commit pattern that mutates the cached `Arc<RwLock<IdMapIndex>>` per-row and persists once at xact commit, taking 1k-row bulk inserts from ~400 s to ~136 ms. v1.3.0 (Phase Q) extended the same pattern to the relfile path. |
 | Recall on uniform-random | 0.03 | 1.000 | ✅ (but synthetic; real-world recall varies) |
 | Recall on real OpenAI ada-002 (dbpedia-1M) | ~0.962 (ef_search=40) / ~0.970 (ef_search=200) | **R@10 = 1.000** at default `turbovec.search_k=100` | ✅ **we win** by 0.030–0.038. See `docs/RECALL.md` §2.2 for the full Phase J head-to-head; the 4-bit and 2-bit configurations both hit 1.000 because TurboQuant's rotation + Lloyd-Max coding preserves rank order for real ada-002 embeddings (the rotation-then-reconstruct cycle is near-lossless on the workload). |
@@ -46,10 +46,57 @@ index AM (btree, gist, gin, hnsw, ivfflat).
 
 The remaining gap to pgvector HNSW (~1.2 s vs ~100 ms) is
 bounded by the cost of reading the codes + scales + ids +
-blocked-layout chains off disk into the per-backend
-`IdMapIndex` Arc. Cluster-wide caching of `IdMapIndex` parts
-(shared-memory `dsm` segment) is the next lever; tracked as a
-follow-up but not a v1.3 gating item.
+blocked-layout chains off disk into the per-backend index
+plus, until v1.7.3, the O(n) `id_to_slot` HashMap build.
+
+**v1.7.3 (parity gap #3): lazy `id_to_slot` on the read path.**
+Profiling the cache-fill (200 k × 256-d, debug) showed the
+dominant residual term was the `id_to_slot:
+HashMap<u64,usize>` that `IdMapIndex::from_id_map_parts*`
+eagerly materialises in `finalise_from_inner` — ~50 ms at
+200 k rows, scaling linearly with `n`, dwarfing the
+`read_full` (~16-22 ms) and `read_blocked`+`read_rotation`
+(~12-18 ms) data copies. The scan path never reads
+`id_to_slot`: `search(q, k)` with `allowlist = None` only ever
+indexes `slot_to_id[slot]` (a `Vec`). So the AM scan path now
+installs a `cache::ReadOnlyIndex` (the inner positional
+`TurboQuantIndex` + the `slot_to_id` `Vec`, no HashMap), and
+the HashMap build is deferred to the first `aminsert` /
+`remove`, which rebuild a full `IdMapIndex` via `am_install`.
+A read-only / pooled-connection backend that only ever scans
+never pays the HashMap build. With the fix the read-only
+constructor drops from ~50 ms to ~0 ms in the profiled debug
+build. Wire format unchanged (scan-side only).
+
+**Deferred follow-ups (not in v1.7.3):**
+
+1. **Read-path mmap of codes / scales / ids.** Today only the
+   *static* regions (blocked codes + rotation) are mmap'd; the
+   codes/scales/ids chains still go through `read_full` (the
+   buffer manager) because `ambulkdelete` swap-removes them in
+   place. On a *read-only* cold scan they could be mmap'd RO
+   too (same MVCC backstop as the static regions: heap
+   visibility + `xs_recheckorderby`). Codes are the bulk of
+   the index (≈ 768 MiB at 1 M × 1536-d × 4-bit), so this
+   removes the largest remaining data copy on the real cold
+   path. The `ReadOnlyIndex::from_prepared_parts_borrowed`
+   constructor already accepts `Cow::Borrowed`, so the wiring
+   is additive once the relfile path resolution + per-page
+   header-gap handling is extended to those chains.
+2. **Zero-copy mmap (wire-format change).** Each chain page
+   carries a 24-byte PG `PageHeaderData` prefix, so the chain
+   bytes are not contiguous in the mmap and must be copied off
+   once at cache-fill. A header-gap-free on-disk layout would
+   let the SIMD kernel read straight from the mmap with no
+   copy at all. That is a `MetaPageData::version` 3 → 4 wire
+   bump and belongs in a v1.8 / v2.0 minor, not a scan-side
+   patch.
+3. **Cross-backend shared cache.** Cluster-wide caching of the
+   index parts in a PG DSA/DSM segment keyed by relfilenode so
+   the *second* backend onward maps an already-built structure
+   instead of rebuilding. Biggest win for pooled workloads but
+   the most invasive (DSA allocator, REINDEX invalidation,
+   concurrency); XL effort, tracked as a follow-up.
 
 ### INSERT throughput — the deferred-commit pattern
 

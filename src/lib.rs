@@ -66,6 +66,42 @@ mod tests {
         Spi::run("SET search_path = turbovec, public").unwrap();
     }
 
+    /// Assert that every id in an ANN result set is distinct.
+    ///
+    /// This is the single cheapest guard against the entire
+    /// "wrong-ranking" bug class. The pre-AVX2 scalar-fallback
+    /// regression in turbovec returned the *same* TID N times
+    /// instead of the top-N distinct neighbours; a recall metric can
+    /// hide that (the right answer is often in the duplicated set),
+    /// but a distinct-count assertion catches it instantly. Every
+    /// ANN-scan `#[pg_test]` that pulls back more than one id should
+    /// run its result through here. See `docs/TESTING.md`.
+    fn assert_distinct_ids(ids: &[i64]) {
+        use std::collections::HashSet;
+        let unique: HashSet<i64> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "ANN result contained duplicate TIDs (the pre-AVX2 \
+             wrong-results signature): {} rows but only {} distinct \
+             ids: {:?}",
+            ids.len(),
+            unique.len(),
+            ids,
+        );
+    }
+
+    /// Fetch a column of `bigint` ids from an ANN query as a `Vec`,
+    /// preserving result order. Used by the recall-floor and
+    /// distinct-id tests so the Rust side can assert on the full
+    /// ranked list rather than a scalar aggregate.
+    fn fetch_ids(sql: &str) -> Vec<i64> {
+        Spi::connect(|client| {
+            let tup = client.select(sql, None, &[]).unwrap();
+            tup.map(|r| r.get::<i64>(1).unwrap().unwrap()).collect()
+        })
+    }
+
     #[pg_test]
     fn bitvec_basic_round_trip() {
         let txt: Option<String> = Spi::get_one(
@@ -575,6 +611,8 @@ mod tests {
             serial, parallel,
             "parallel build returned a different ranked top-k than serial"
         );
+        assert_distinct_ids(&serial);
+        assert_distinct_ids(&parallel);
     }
 
     /// Byte-identity proxy at the SQL layer: a serial-built and a
@@ -1480,19 +1518,15 @@ mod tests {
         // 16 dims and 4-bit quantisation the self-score should be
         // among the top-10. (R@10 == 1.0 is the minimum bar; if
         // this fails the kernel is broken.)
-        let target_in_top10: Option<bool> = Spi::get_one(
-            "WITH q AS (SELECT emb FROM t_64 WHERE id = 17), \
-             top10 AS ( \
-                 SELECT t.id FROM t_64 t, q \
-                 ORDER BY t.emb <=> q.emb \
-                 LIMIT 10 \
-             ) \
-             SELECT EXISTS (SELECT 1 FROM top10 WHERE id = 17)",
-        )
-        .unwrap();
-        assert_eq!(
-            target_in_top10,
-            Some(true),
+        let top10_self = fetch_ids(
+            "WITH q AS (SELECT emb FROM t_64 WHERE id = 17) \
+             SELECT t.id FROM t_64 t, q \
+             ORDER BY t.emb <=> q.emb \
+             LIMIT 10",
+        );
+        assert_distinct_ids(&top10_self);
+        assert!(
+            top10_self.contains(&17),
             "row 17 should appear in the top-10 nearest to itself"
         );
 
@@ -1508,6 +1542,12 @@ mod tests {
              FROM generate_series(1, 16) AS sub(k)",
         )
         .unwrap();
+        let indexed_top5 = fetch_ids(
+            "WITH q AS (SELECT q FROM q_64) \
+             SELECT t.id FROM t_64 t, q \
+             ORDER BY t.emb <=> q.q LIMIT 5",
+        );
+        assert_distinct_ids(&indexed_top5);
         let overlap: Option<i64> = Spi::get_one(
             "WITH q AS (SELECT q FROM q_64), \
              indexed AS ( \
@@ -1803,6 +1843,13 @@ mod tests {
             Some(10),
             "iterative_scan=relaxed_order should return the full LIMIT"
         );
+
+        // The refilled result must not repeat any TID across batches.
+        let relaxed_ids = fetch_ids(&format!(
+            "SELECT id FROM t_iter WHERE category = 7 \
+             ORDER BY emb <=> {q} LIMIT 10"
+        ));
+        assert_distinct_ids(&relaxed_ids);
     }
 
     /// No TID may be emitted twice across refill batches. The result
@@ -1836,27 +1883,13 @@ mod tests {
 
         // LIMIT 200 forces many refill rounds (8 -> 16 -> ... -> 200+).
         // total rows must equal distinct ids.
-        let total: Option<i64> = Spi::get_one(
-            "SELECT count(*)::bigint FROM ( \
-                 SELECT id FROM t_iter_dup \
-                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 200 \
-             ) sub",
-        )
-        .unwrap();
-        let distinct: Option<i64> = Spi::get_one(
-            "SELECT count(DISTINCT id)::bigint FROM ( \
-                 SELECT id FROM t_iter_dup \
-                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 200 \
-             ) sub",
-        )
-        .unwrap();
-        assert_eq!(
-            total, distinct,
-            "iterative scan emitted duplicate TIDs: {:?} total vs {:?} distinct",
-            total, distinct
+        let ids = fetch_ids(
+            "SELECT id FROM t_iter_dup \
+             ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 200",
         );
+        assert_distinct_ids(&ids);
         // Sanity: 200 distinct rows actually came back (corpus is 500).
-        assert_eq!(total, Some(200));
+        assert_eq!(ids.len(), 200);
     }
 
     /// `turbovec.max_scan_tuples` is the hard ceiling: with a low cap
@@ -1940,16 +1973,14 @@ mod tests {
         Spi::run("SET turbovec.iterative_scan = off").unwrap();
 
         // LIMIT 100 but search_k = 12 and off mode: exactly 12 rows.
-        let n: Option<i64> = Spi::get_one(
-            "SELECT count(*)::bigint FROM ( \
-                 SELECT id FROM t_iter_off \
-                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 100 \
-             ) sub",
-        )
-        .unwrap();
+        let ids = fetch_ids(
+            "SELECT id FROM t_iter_off \
+             ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 100",
+        );
+        assert_distinct_ids(&ids);
         assert_eq!(
-            n,
-            Some(12),
+            ids.len(),
+            12,
             "iterative_scan=off must cap at search_k regardless of LIMIT"
         );
     }
@@ -2382,17 +2413,14 @@ mod tests {
         );
 
         // Top-10 self-recall: row 73 in top-10.
-        let in_top10: Option<bool> = Spi::get_one(
-            "WITH q AS (SELECT emb FROM t_384 WHERE id = 73), \
-             top10 AS ( \
-                 SELECT t.id FROM t_384 t, q \
-                 ORDER BY t.emb <=> q.emb \
-                 LIMIT 10 \
-             ) \
-             SELECT EXISTS (SELECT 1 FROM top10 WHERE id = 73)",
-        )
-        .unwrap();
-        assert_eq!(in_top10, Some(true));
+        let top10 = fetch_ids(
+            "WITH q AS (SELECT emb FROM t_384 WHERE id = 73) \
+             SELECT t.id FROM t_384 t, q \
+             ORDER BY t.emb <=> q.emb \
+             LIMIT 10",
+        );
+        assert_distinct_ids(&top10);
+        assert!(top10.contains(&73), "row 73 must be in its own top-10");
     }
 
     /// Build at the lowest supported bit_width (= 2) on a realistic
@@ -2429,17 +2457,176 @@ mod tests {
 
         // Self-recall in top-20 at 2-bit, d=128. Tighter quantisation
         // = lower recall, so we relax the bar from top-1 to top-20.
-        let in_top20: Option<bool> = Spi::get_one(
-            "WITH q AS (SELECT emb FROM t_2bit WHERE id = 42), \
-             top20 AS ( \
-                 SELECT t.id FROM t_2bit t, q \
-                 ORDER BY t.emb <=> q.emb \
-                 LIMIT 20 \
-             ) \
-             SELECT EXISTS (SELECT 1 FROM top20 WHERE id = 42)",
-        )
+        let top20 = fetch_ids(
+            "WITH q AS (SELECT emb FROM t_2bit WHERE id = 42) \
+             SELECT t.id FROM t_2bit t, q \
+             ORDER BY t.emb <=> q.emb \
+             LIMIT 20",
+        );
+        assert_distinct_ids(&top20);
+        assert!(top20.contains(&42), "row 42 must be in its own top-20");
+    }
+
+    /// Build a medium-scale corpus of distinct random unit-ish
+    /// vectors and assert the index's recall@10 against a
+    /// brute-force exact ranking clears a per-bit-width floor —
+    /// AND that every returned id is distinct.
+    ///
+    /// This is the regression guard the pre-AVX2 wrong-results bug
+    /// slipped past: every other ANN `#[pg_test]` uses <= 2000 rows
+    /// (often 64), but that bug only manifested at scale on a
+    /// non-AVX2 CPU, returning the *same* TID N times. The
+    /// distinct-ids assertion here would have caught it instantly
+    /// regardless of recall; the recall floor catches a quieter
+    /// quantiser/de-interleave regression that degrades ranking
+    /// without collapsing it to duplicates.
+    ///
+    /// Corpus size is tuned so the in-process pgrx harness builds in
+    /// well under ~30s (see `docs/TESTING.md`); it is deliberately
+    /// much larger than the historical 2000-row ceiling but is not
+    /// the 1M+ scale that only VectorDBBench exercises.
+    fn run_recall_floor(bit_width: i32, dim: i32, n_rows: i32, floor: f64) {
+        use_turbovec();
+        let t_start = std::time::Instant::now();
+
+        Spi::run("CREATE TABLE t_rf (id bigint PRIMARY KEY, emb vector)").unwrap();
+        // Deterministic distinct random vectors. setseed makes the
+        // corpus reproducible run-to-run so a recall regression is
+        // a code change, not RNG noise. Each row is `dim` independent
+        // uniform(-1,1) coordinates built with a set-based
+        // array_to_string (much faster than string_agg + GROUP BY at
+        // this scale).
+        Spi::run("SELECT setseed(0.42)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_rf \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(1, {dim})), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
         .unwrap();
-        assert_eq!(in_top20, Some(true));
+
+        // 20 held-out query vectors (ids 1..=20 in a separate table,
+        // NOT drawn from the corpus, so recall is measured on unseen
+        // queries the way a real workload would).
+        Spi::run("CREATE TEMP TABLE q_rf (qid int PRIMARY KEY, q vector)").unwrap();
+        Spi::run("SELECT setseed(0.99)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO q_rf \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(1, {dim})), ',') || ']')::vector \
+             FROM generate_series(1, 20) AS g"
+        ))
+        .unwrap();
+
+        Spi::run(&format!(
+            "CREATE INDEX t_rf_idx ON t_rf USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = {bit_width})"
+        ))
+        .unwrap();
+        Spi::run("ANALYZE t_rf").unwrap();
+
+        let build_secs = t_start.elapsed().as_secs_f64();
+        eprintln!(
+            "recall-floor setup: {n_rows}x{dim} bit_width={bit_width} \
+             corpus+query+index build = {build_secs:.1}s"
+        );
+
+        // For each held-out query, compute exact top-10 (forced
+        // seqscan over the full Vector — the `<=>` operator computes
+        // exact cosine, the index is what quantises) and the index
+        // top-10 (forced indexscan). recall@10 = |GT ∩ index| / 10,
+        // averaged over the 20 queries.
+        let qids: Vec<i64> = fetch_ids("SELECT qid FROM q_rf ORDER BY qid");
+        assert_eq!(qids.len(), 20, "expected 20 held-out queries");
+
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for qid in &qids {
+            // Exact ground truth: force seqscan, no index.
+            Spi::run("SET enable_indexscan = off").unwrap();
+            Spi::run("SET enable_indexonlyscan = off").unwrap();
+            Spi::run("SET enable_seqscan = on").unwrap();
+            let gt = fetch_ids(&format!(
+                "SELECT t.id FROM t_rf t, (SELECT q FROM q_rf WHERE qid = {qid}) qq \
+                 ORDER BY t.emb <=> qq.q LIMIT 10"
+            ));
+            assert_eq!(gt.len(), 10, "GT top-10 must return 10 rows");
+            assert_distinct_ids(&gt);
+
+            // Index path: force indexscan.
+            Spi::run("SET enable_seqscan = off").unwrap();
+            Spi::run("SET enable_indexscan = on").unwrap();
+            Spi::run("SET enable_indexonlyscan = on").unwrap();
+            // Modest search budget (2x the LIMIT). Large enough that
+            // a healthy quantiser recovers the true top-10, small
+            // enough that bit-width quality actually shows in recall:
+            // an over-large search_k makes the exact rerank trivially
+            // perfect at every width and the floor stops
+            // discriminating.
+            Spi::run("SET turbovec.search_k = 20").unwrap();
+            let idx = fetch_ids(&format!(
+                "SELECT t.id FROM t_rf t, (SELECT q FROM q_rf WHERE qid = {qid}) qq \
+                 ORDER BY t.emb <=> qq.q LIMIT 10"
+            ));
+            assert_eq!(idx.len(), 10, "index top-10 must return 10 rows");
+            // The cheapest, sharpest guard against the pre-AVX2 bug:
+            // a wrong-ranking regression that duplicated a TID would
+            // fail HERE even if recall (by luck) stayed high.
+            assert_distinct_ids(&idx);
+
+            use std::collections::HashSet;
+            let gt_set: HashSet<i64> = gt.iter().copied().collect();
+            hits += idx.iter().filter(|id| gt_set.contains(id)).count();
+            total += 10;
+        }
+
+        let recall = hits as f64 / total as f64;
+        eprintln!(
+            "recall-floor: bit_width={bit_width} {n_rows}x{dim} \
+             recall@10 = {recall:.3} (floor {floor:.2})"
+        );
+        assert!(
+            recall >= floor,
+            "recall@10 = {recall:.3} fell below the {floor:.2} floor \
+             for bit_width={bit_width} ({n_rows}x{dim}); a ranking \
+             regression (e.g. a SIMD de-interleave bug) is the likely \
+             cause — see docs/TESTING.md"
+        );
+    }
+
+    /// Medium-scale recall floor at the default 4-bit width.
+    #[pg_test]
+    fn index_am_recall_floor_4bit() {
+        // Observed R@10 on this 20k x 128 uniform-random corpus is
+        // 1.000 at every supported bit width: TurboQuant separates
+        // near-orthogonal random vectors cleanly, so the floors are
+        // catastrophic-collapse guards (they fire well before the
+        // ~0.1 the pre-AVX2 duplicate-id bug produced), not
+        // fine-grained quality gates. The per-width quality
+        // discriminator is VectorDBBench on real embeddings (see
+        // docs/TESTING.md), not this synthetic unit test. Floors are
+        // staggered by width anyway so a width-specific regression
+        // on harder future data still trips the right test.
+        run_recall_floor(4, 128, 20_000, 0.95);
+    }
+
+    /// Same corpus shape at 3-bit. Slightly coarser quantisation =
+    /// slightly lower floor (observed still 1.000 on this easy data).
+    #[pg_test]
+    fn index_am_recall_floor_3bit() {
+        run_recall_floor(3, 128, 20_000, 0.90);
+    }
+
+    /// Same corpus shape at the tightest 2-bit width. Lowest floor
+    /// of the three; still far above the duplicate-id failure mode
+    /// (observed 1.000 on this corpus).
+    #[pg_test]
+    fn index_am_recall_floor_2bit() {
+        run_recall_floor(2, 128, 20_000, 0.80);
     }
 
     #[pg_test]

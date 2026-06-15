@@ -68,6 +68,21 @@ jobs:
 
       - run: cargo pgrx init --pg${{ matrix.pg }} download
 
+      # NOTE: GitHub `ubuntu-latest` runners are AVX2-capable, and
+      # turbovec selects its SIMD kernel with a *runtime*
+      # `is_x86_feature_detected!` check. So this job always exercises
+      # the AVX2 path, never the pre-AVX2 scalar fallback. The
+      # scalar fallback (which once shipped a silent wrong-results /
+      # duplicate-TID bug) is covered ONLY by turbovec's own upstream
+      # `x86_scalar_fallback_tests::scalar_fallback_matches_simd_topk`
+      # plus validating turbovec git-rev bumps on a pre-AVX2 host or
+      # `qemu-x86_64 -cpu Nehalem`. Compile-time `-C
+      # target-feature=-avx2` would NOT force the scalar path at
+      # runtime on an AVX2 machine, so we deliberately do not add a
+      # job that pretends to. See docs/TESTING.md § (b) and docs/CI.md.
+      # The `index_am_recall_floor_{2,3,4}bit` tests run inside the
+      # matrix below and guard the scale + distinct-ids gaps that let
+      # that bug ship.
       - run: |
           cargo pgrx test pg${{ matrix.pg }} \
               --no-default-features \

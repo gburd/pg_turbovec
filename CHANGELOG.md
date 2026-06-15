@@ -4,46 +4,104 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.8.0] — 2026-06-15
+
+Four competitive-parity features in one minor release. **Wire
+format unchanged** (`MetaPageData::version = 3`); **no `REINDEX`
+needed** — `ALTER EXTENSION pg_turbovec UPDATE TO '1.8.0';` is
+sufficient. All four additions are scan-side, build-side, or
+additive SQL surface; none touch the on-disk relfile layout.
+Driven by an internal design note.
+
+### Added — iterative index scan (parity gap #1, the correctness fix)
+
+The one true correctness gap vs pgvector. `amgettuple` used to run
+a single `search_k`-sized batch and return false when drained, so
+a selective `WHERE filter ORDER BY emb <=> q LIMIT k` silently
+under-returned (e.g. 3 rows when 10 were asked for) — exactly what
+pgvector shipped `hnsw.iterative_scan` (0.8.0) to fix.
+
+- When the executor exhausts the candidate batch and the filter
+  hasn't been satisfied, the scan re-runs the turbovec search with
+  a **doubled `k`** and feeds the new candidates, capped by a new
+  `turbovec.max_scan_tuples` GUC (default 20000, matching
+  pgvector's `hnsw.max_scan_tuples`).
+- Controlled by `turbovec.iterative_scan` — an enum GUC
+  `off | relaxed_order` (default `relaxed_order`). `strict_order`
+  is deferred; our existing reorder-queue model
+  (`xs_recheckorderby = true`) already restores exact per-tuple
+  ordering on top of `relaxed_order`.
+- Dedup across refills via a returned-TID `HashSet` (turbovec's
+  `search` isn't a stable prefix across `k` due to an unstable
+  sort on score ties; the set is robust and bounded by
+  `max_scan_tuples`).
+- Regression test demonstrates `off` under-returns and
+  `relaxed_order` returns the full `LIMIT`.
+
+### Added — parallel index build (parity gap #2)
+
+pgvector parallelises HNSW/IVFFlat builds across
+`max_parallel_maintenance_workers`; pg_turbovec's `ambuild` was
+single-threaded.
+
+- Option B (rayon): the CPU-heavy `encode` + SIMD-`repack` phases
+  (which dominate build CPU, not the heap scan) are parallelised
+  over heap-scan chunks via a rayon pool. Chunks are processed in
+  heap-scan order then concatenated deterministically.
+- New `turbovec.build_parallelism` GUC (default 0 = derive from
+  `max_parallel_maintenance_workers + 1`; positive pins the pool).
+- **Byte-for-byte identical relfiles** regardless of thread count
+  — asserted by a unit test — so the wire format and any
+  reproducibility guarantees hold. Memory stays bounded by the
+  Phase W `maintenance_work_mem` cap.
 
 ### Performance — cold-scan latency (parity gap #3)
 
-Wire format unchanged (`MetaPageData::version = 3`); **no
-`REINDEX` needed**. Scan-side only — `ALTER EXTENSION pg_turbovec
-UPDATE` is sufficient.
+Cold-scan p50 was ~1256 ms (1 M × 1536-d) vs HNSW's ~100 ms.
 
 - **Lazy `id_to_slot` on the read path.** Profiling the
-  per-backend cache-fill (200 k × 256-d, debug) showed the
-  dominant residual term — once Phase P pre-baked the
-  SIMD-blocked layout and Phase R-2 persisted the rotation — was
-  the `id_to_slot: HashMap<u64, usize>` that
-  `IdMapIndex::from_id_map_parts*` builds eagerly
-  (~50 ms at 200 k rows, scaling linearly with `n`; vs ~16-22 ms
-  for the `read_full` data copy and ~12-18 ms for
-  `read_blocked`+`read_rotation`). The index-AM scan path never
-  reads `id_to_slot` — `search(q, k)` with `allowlist = None`
-  only indexes `slot_to_id[slot]`, a `Vec`. The scan path now
-  installs a lightweight `cache::ReadOnlyIndex` (positional
-  `TurboQuantIndex` + `slot_to_id` `Vec`, no HashMap); the
-  HashMap build is deferred to the first `aminsert` / `remove`,
-  which rebuild a full `IdMapIndex` via `am_install`. A
-  read-only / pooled-connection backend that only ever scans
-  never pays the HashMap build. Profiled read-only constructor:
-  ~50 ms → ~0 ms (debug, 200 k rows).
-- **Confined to** `src/cache.rs`, `src/index/scan.rs`,
-  `src/index/mmap_static.rs`, and tests. No relfile write-path
-  or build-path changes.
-- **Deferred follow-ups** (see `docs/PARITY_GAPS.md` § cold
-  scan): read-path mmap of the codes/scales/ids chains (removes
-  the largest data copy on the real cold path; additive, no
-  wire change); a header-gap-free on-disk layout for true
-  zero-copy mmap (VERSION 3 → 4, a v1.8/v2.0 minor); and a
-  cross-backend DSA/DSM shared cache (XL).
-- Tests: 127 → 130 (`cargo pgrx test pg16`). New:
-  `cold_scan_readonly_topk_unchanged`,
-  `mutation_after_readonly_scan_is_correct` (the key
-  deferred-HashMap correctness test), and
-  `delete_then_readonly_scan_is_correct`.
+  per-backend cache-fill showed the dominant residual term — once
+  Phase P pre-baked the SIMD-blocked layout and Phase R-2
+  persisted the rotation — was the `id_to_slot: HashMap<u64,
+  usize>` that `IdMapIndex::from_id_map_parts*` builds eagerly
+  (~50 ms at 200 k rows, linear in `n`). The index-AM scan path
+  never reads `id_to_slot` (`search` returns slots, mapped via the
+  `slot_to_id` `Vec`). The scan path now installs a lightweight
+  `cache::ReadOnlyIndex` (no HashMap); the build is deferred to
+  the first `aminsert`/`remove`. A read-only / pooled-connection
+  backend that only scans never pays it. Read-only constructor:
+  ~50 ms → ~0 ms.
+- Key correctness test `mutation_after_readonly_scan_is_correct`
+  verifies the deferred HashMap builds correctly on first insert.
+- **Deferred follow-ups** (see `docs/PARITY_GAPS.md` § cold scan):
+  read-path mmap of the codes/scales/ids chains; a
+  header-gap-free on-disk layout for true zero-copy mmap (VERSION
+  3 → 4, a future minor); a cross-backend DSA/DSM shared cache.
+
+### Added — `||` concat + halfvec arithmetic (parity gap #4)
+
+pgvector has `||` concat for vector+halfvec and `+`/`-`/`*` for
+both; pg_turbovec had `+`/`-`/`*` for `vector` only.
+
+- `turbovec.vector || turbovec.vector -> vector` (concat)
+- `turbovec.halfvec || turbovec.halfvec -> halfvec` (concat)
+- `turbovec.halfvec` `+`/`-`/`*` element-wise (Hadamard for `*`)
+- Matches pgvector overflow semantics (error on non-finite
+  result) and dim-mismatch errors.
+
+### Migration
+
+**No migration needed; no REINDEX.** The on-disk relfile format is
+byte-identical to v1.7.x. Drop in the new shared library, restart,
+scan; existing indexes work unchanged. The new GUCs default to
+the pgvector-equivalent behaviour (`iterative_scan = relaxed_order`).
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.8.0';` resolves against
+the empty `migrations/013_pg_turbovec_v1.8.0.sql`.
+
+### Tests
+
+123 → 142 on pg16 (+19: iterative-scan, parallel-build, cold-scan,
+and arithmetic-parity coverage). drift-check clean.
 
 ## [1.7.3] — 2026-06-15
 

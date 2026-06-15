@@ -389,38 +389,42 @@ is paid once and cached. Mitigations:
 
 ## Known issues
 
-### v1.7.2 — index AM returns duplicate rows at large scale (under investigation)
+### Pre-AVX2 x86_64 wrong-results bug (root-caused; fixed in v1.7.3)
 
-**Status:** confirmed bug; 2026-05-28; under bisection.
+**Status:** root cause found 2026-06-15; fix in progress (turbovec
+fork upgrade to v0.9.0).
 
-**Symptom:** At a 10 M × 1024-d corpus on `meh`, the turbovec
-index AM's `ORDER BY emb_expr <=> probe LIMIT N` returns the
-same `id` N times instead of the top-N nearest neighbours. The
-bug does not appear at 1000 × 128-d (where the unit test suite
-lives), so the 123/123 unit-test pass count is not currently a
-guarantee of correct behaviour at production scale.
+**Symptom:** On x86_64 CPUs **without AVX2** (e.g. Intel
+Ivy Bridge / Sandy Bridge Xeons, pre-2014), the turbovec index
+AM's `ORDER BY emb_expr <=> probe LIMIT N` returned the same
+`id` N times instead of the top-N nearest neighbours. First
+observed on the 10 M × 1024-d Cohere wikipedia bench on `meh`
+(an Intel Xeon E5-2697 v2, `avx` but no `avx2`).
 
-Verified working at scale (rules these out):
-- `turbovec.cosine_distance(col_expr, col_expr)` — returns
-  correct, distinct distances.
-- Sequential-scan `ORDER BY emb_expr <=> probe LIMIT N`
-  (with `enable_indexscan = off; enable_bitmapscan = off`) —
-  returns correct, distinct, properly-sorted top-N over a
-  small subset.
+**Root cause:** NOT a pg_turbovec bug. The pinned turbovec
+v0.7.0 (`6e80a59`) had a kernel bug where the pre-AVX2 x86_64
+scalar fallback read the perm0-interleaved (FAISS-style) SIMD
+code layout as if it were sequential, producing silently-wrong
+top-k. CPUs with AVX2/AVX-512 took the correct SIMD path and
+were never affected — which is why it never reproduced on
+AVX2 dev hosts or `arnold`, only on the pre-AVX2 `meh`.
+Upstream turbovec fixed this in PR #108 (issue #106), released
+in v0.8.0, with a proper `score_query_into_heap` scalar
+fallback and a `FORCE_SCALAR_FALLBACK` regression test.
 
-So the bug lives in the index AM's scan path or the underlying
-`turbovec::IdMapIndex::search` at this scale. Bisection is
-in progress; recommended workaround until a fix lands:
+**Fix:** upgrade the turbovec fork to v0.9.0 (which contains the
+fix). Shipping as **v1.7.3**. Wire format unchanged; no REINDEX.
 
-- Force sequential scans for ANN queries on indexes >
-  ~1 M rows: `SET enable_indexscan = off;` per session, or
-  `ALTER TABLE ... ALTER COLUMN ...` to remove the offending
-  index and use brute-force.
-- Or stay on small corpora (< ~100 k rows) where the bug has
-  not been observed.
+**Affected users / workaround until v1.7.3:**
+- Only pre-AVX2 x86_64 hosts are affected. Check with
+  `grep -o avx2 /proc/cpuinfo | head -1` — if empty, you're on
+  a pre-AVX2 CPU and should wait for v1.7.3 or force seq scans
+  (`SET enable_indexscan = off;`).
+- AVX2 (Haswell 2013+), AVX-512, and ARM NEON hosts are
+  unaffected; the SIMD path was always correct there.
 
 See `docs/RECALL.md § 2.9` for the bench artefact that
-discovered this.
+surfaced this.
 
 ## Reporting bugs
 

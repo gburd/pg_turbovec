@@ -15,6 +15,7 @@
 //! | `turbovec.iterative_scan`        | enum | relaxed_order | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
+//! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
 
 use core::ffi::CStr;
 
@@ -27,6 +28,36 @@ pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
+
+/// Differentiator #5 (oversampling): candidate-set widener for tunable
+/// recall, matching Qdrant's `oversampling` / VectorChord's rerank knob.
+///
+/// turbovec's ANN search ranks candidates by the *quantized* (2-4 bit
+/// TurboQuant) distance, which is lossy. The executor's reorder queue
+/// (`xs_recheckorderby = true`) already re-ranks whatever candidates we
+/// return by the *exact* full-precision distance — but it can only
+/// re-rank the candidates we hand it. If the true nearest neighbour
+/// ranked just outside `search_k` by quantized distance, no amount of
+/// reorder-queue rescoring recovers it.
+///
+/// `oversample` is the lever that fixes THAT: the scan fetches
+/// `ceil(search_k * oversample)` quantized candidates instead of
+/// `search_k`, so a true neighbour the lossy ranking placed at, say,
+/// #150 enters the candidate set at `oversample >= 1.5` and the reorder
+/// queue then floats it to its correct exact rank. We still only feed
+/// the executor up to its `LIMIT`; oversampling only widens the pool
+/// the exact re-rank draws from.
+///
+/// Default `1.0` is exactly the pre-feature behaviour (no oversampling).
+/// Modelled as a float GUC (pgrx 0.17 `define_float_guc`), range
+/// `1.0 ..= 100.0`, clamped on read.
+///
+/// Composition with iterative scan: `ceil(search_k * oversample)` is the
+/// *initial* `k`. Iterative refill (triggered by a selective `WHERE`
+/// filter draining the batch) still doubles from that starting point,
+/// capped by [`MAX_SCAN_TUPLES`]. So oversample sets the floor of the
+/// candidate set; iterative scan grows it from there.
+pub static OVERSAMPLE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 
 /// Phase R-3: when on (the default), `ambeginscan` mmap-loads the
 /// deterministic-after-`ambuild` regions of the relfile (blocked
@@ -212,6 +243,19 @@ pub fn register_gucs() {
         &MAX_SCAN_TUPLES,
         1,
         10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_float_guc(
+        c_str(b"turbovec.oversample\0"),
+        c_str(b"Quantized-candidate oversampling multiplier for tunable recall (default 1.0).\0"),
+        c_str(
+            b"The scan fetches ceil(search_k * oversample) candidates ranked by the lossy quantized distance, then the executor's reorder queue (xs_recheckorderby) re-ranks them by exact full-precision distance and the LIMIT trims to the true top-k. Widening the candidate set recovers true neighbours the quantized ranking placed just outside search_k, turning quantization from a fixed accuracy point into a tunable recall frontier (matches Qdrant oversampling / VectorChord rerank). 1.0 (the default) is the pre-feature behaviour. Composes with iterative_scan: this sets the initial k, iterative refill grows it from there. Latency scales roughly linearly with the candidate count.\0",
+        ),
+        &OVERSAMPLE,
+        1.0,
+        100.0,
         GucContext::Userset,
         GucFlags::default(),
     );

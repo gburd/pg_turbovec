@@ -94,6 +94,35 @@ Both run the same two-stage pipeline:
 Cache keys include `Cargo.lock` so a dependency bump invalidates
 both the pgrx install and the cargo target dir.
 
+## CI hardware is AVX2-only — a deliberate, documented gap
+
+The GitHub `ubuntu-latest` runners are AVX2-capable, and turbovec
+selects its SIMD kernel with a **runtime** `is_x86_feature_detected!`
+check. So the test matrix always exercises the AVX2 path and **never**
+the pre-AVX2 scalar fallback.
+
+This matters because turbovec once shipped a silent wrong-results bug
+on non-AVX2 CPUs (it returned the same TID N times instead of the
+top-N). `pg_turbovec` CI would not have caught it, and still can't:
+
+- You cannot force the scalar path from `pg_turbovec` — turbovec's
+  `FORCE_SCALAR_FALLBACK` is `pub(crate)`.
+- Compile-time `-C target-feature=-avx2` does **not** help: it changes
+  what the compiler emits, not what the runtime feature-detect picks
+  on an AVX2 machine. A CI job built that way would still run the
+  AVX2 path. We deliberately do **not** add such a job — it would be
+  coverage theatre.
+
+The real mitigations are turbovec's own upstream
+`x86_scalar_fallback_tests::scalar_fallback_matches_simd_topk` test
+plus **validating turbovec git-rev bumps on a pre-AVX2 host** (or
+`qemu-x86_64 -cpu Nehalem`) before tagging. Treat a `turbovec` rev
+bump in `Cargo.toml` as the trigger for that validation. The scale +
+distinct-ids regression guards that catch the *symptom* of this bug
+class regardless of SIMD path live in
+`index_am_recall_floor_{2,3,4}bit` and the `assert_distinct_ids`
+assertions on every ANN-scan test. Full rationale: `docs/TESTING.md`.
+
 ## Common failures + fixes
 
 | Symptom | Cause | Fix |

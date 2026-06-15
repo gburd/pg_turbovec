@@ -110,6 +110,18 @@ dbpedia-1M without breaking the warm-p50 latency story.
 | `<~>` Hamming (binary) | ✓ | ✓ (bitvec) |
 | `<%>` Jaccard (binary) | ✓ | ✓ (bitvec) |
 
+## Index scan features
+
+| Feature | pgvector 0.8.2 | pg_turbovec status |
+|---------|----------------|--------------------|
+| ANN index scan | ✓ (HNSW, IVFFlat) | ✓ (`turbovec` AM) |
+| **Iterative / streaming scan** | ✓ `hnsw.iterative_scan`, `ivfflat.iterative_scan`, `max_scan_tuples`, `scan_mem_multiplier`, `max_probes` | ✗ **GAP** — `amgettuple` runs ONE fixed-`search_k` batch and returns false when drained. Under a selective `WHERE filter ORDER BY emb <=> q LIMIT k`, the executor post-filters those candidates and under-returns. See an internal design note § "Iterative / refilling index scan" — this is the #1 roadmap priority. |
+| Bitmap index scan (`amgetbitmap`) | ✓ | ✗ (not applicable to ANN ordering) |
+| Parallel index build | ✓ (maintenance workers) | ✗ **GAP** — `ambuild` is single-threaded. |
+| Quantization tuning | manual re-rank CTE | `turbovec.search_k` only; no rescore/oversampling knob yet (roadmap differentiator). |
+| `CREATE INDEX CONCURRENTLY` | ✓ | ✓ (standard AM path) |
+| Build progress (`pg_stat_progress_create_index`) | ✓ phased | partial (no custom phase labels) |
+
 ## Aggregates
 
 | Aggregate | pgvector | pg_turbovec |

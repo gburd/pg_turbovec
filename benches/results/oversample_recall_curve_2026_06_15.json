@@ -1,0 +1,24 @@
+{
+  "measurement": "recall-vs-oversample curve for turbovec.oversample (differentiator #5)",
+  "date": "2026-06-15",
+  "host": "pgrx test pg16 (local NixOS dev worktree)",
+  "source": "src/lib.rs::oversample_recall_monotone_non_decreasing #[pg_test]",
+  "corpus": {
+    "rows": 3000,
+    "dim": 64,
+    "bit_width": 4,
+    "vectors": "deterministic pseudo-random (hashtext seed) unit-ish vectors"
+  },
+  "search_k": 10,
+  "k": 10,
+  "queries": 8,
+  "ground_truth": "brute-force exact cosine top-10",
+  "note": "search_k pinned at 10, iterative_scan=off so the ONLY recall lever is oversample. recall@10 averaged over 8 query seeds; p50 is the median full-SPI round-trip latency per point (warm, after one warmup pass). The curve is what makes a VectorDBBench-style recall-vs-latency frontier honest: oversample turns the single (recall, latency) point of a fixed search_k into a tunable frontier comparable to HNSW's ef_search.",
+  "points": [
+    { "oversample": 1.0, "recall_at_10": 0.8125, "p50_ms": 3.808 },
+    { "oversample": 1.5, "recall_at_10": 0.9625, "p50_ms": 3.857 },
+    { "oversample": 2.0, "recall_at_10": 0.9875, "p50_ms": 3.944 },
+    { "oversample": 4.0, "recall_at_10": 1.0000, "p50_ms": 4.064 },
+    { "oversample": 8.0, "recall_at_10": 1.0000, "p50_ms": 4.695 }
+  ]
+}

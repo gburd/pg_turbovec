@@ -4,11 +4,13 @@
 //! one TID per call.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ffi::c_int;
 use std::sync::Arc;
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
+use parking_lot::RwLock;
 use turbovec::{IdMapIndex, PreparedCachesBorrowed};
 
 use crate::cache::{self, CacheKey};
@@ -35,6 +37,24 @@ pub(crate) struct ScanOpaque {
     cursor: usize,
     /// Whether the search has been executed yet.
     fetched: bool,
+    /// Iterative-scan state. The materialised index Arc is cached on
+    /// the first search so refills don't re-do the cache lookup /
+    /// relfile load. `None` until the first `amgettuple` populates it.
+    arc: Option<Arc<RwLock<IdMapIndex>>>,
+    /// The `k` used for the most recent `arc.search(query, k)`. Starts
+    /// at `search_k` and doubles on each refill, capped at
+    /// `min(max_scan_tuples, n_live)`.
+    current_k: usize,
+    /// Number of live vectors in the index (`arc.read().len()`),
+    /// cached so refills don't re-lock.
+    n_live: usize,
+    /// TIDs already emitted to the executor, across all refill
+    /// batches. Used to dedup: `search(query, 2k)` re-ranks the whole
+    /// corpus with `sort_unstable`, so the top-`2k` is NOT guaranteed
+    /// to contain the previous top-`k` as a stable prefix when scores
+    /// tie at the boundary. The set is robust regardless; it is
+    /// bounded by `max_scan_tuples` (default 20k entries).
+    emitted: HashSet<u64>,
 }
 
 /// `ambeginscan`: allocate the IndexScanDesc and attach our opaque.
@@ -124,6 +144,10 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
             distances: Vec::new(),
             cursor: 0,
             fetched: false,
+            arc: None,
+            current_k: 0,
+            n_live: 0,
+            emitted: HashSet::new(),
         },
     );
 
@@ -180,6 +204,10 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         (*opaque).distances.clear();
         (*opaque).cursor = 0;
         (*opaque).fetched = true;
+        (*opaque).arc = None;
+        (*opaque).current_k = 0;
+        (*opaque).n_live = 0;
+        (*opaque).emitted.clear();
         return;
     }
     let order = orderbys.add(0);
@@ -204,6 +232,10 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
     (*opaque).distances.clear();
     (*opaque).cursor = 0;
     (*opaque).fetched = false;
+    (*opaque).arc = None;
+    (*opaque).current_k = 0;
+    (*opaque).n_live = 0;
+    (*opaque).emitted.clear();
 }
 
 /// `amgettuple`: on first call run the search and cache results;
@@ -413,21 +445,40 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // row index ~17 s. Default lowered to 100 (turbovec.search_k
         // GUC) - tune up for high LIMITs or higher recall, down for
         // sub-ms latency.
+        //
+        // Iterative scan (v1.8.0): `search_k` is only the *first*
+        // batch. When the executor drains it and asks for more (and
+        // turbovec.iterative_scan != off), the drain block below
+        // doubles k and refills. We stash the arc + n_live so refills
+        // don't repeat the cache lookup / relfile load.
         let k_pref = crate::guc::SEARCH_K.get() as usize;
         let k = k_pref.min(n_live.max(1)).max(1);
         let (scores, ids) = arc.read().search(&(*opaque).query, k);
-        let dists: Vec<f64> = scores
-            .iter()
-            .map(|s| (1.0 - f64::from(*s)).clamp(0.0, 2.0))
-            .collect();
-        (*opaque).results = ids;
-        (*opaque).distances = dists;
+        (*opaque).arc = Some(arc);
+        (*opaque).n_live = n_live;
+        (*opaque).current_k = k;
+        populate_batch(opaque, &scores, &ids);
         (*opaque).cursor = 0;
         (*opaque).fetched = true;
     }
 
-    if (*opaque).cursor >= (*opaque).results.len() {
-        return false;
+    // Drain / refill loop. We may have to refill several times before
+    // we either find an unemitted candidate or exhaust the index, so
+    // loop rather than tail-recurse.
+    loop {
+        if (*opaque).cursor < (*opaque).results.len() {
+            break;
+        }
+        // Current batch drained. Try to refill if iterative scan is on
+        // and we haven't hit the caps.
+        if !try_refill(opaque) {
+            return false;
+        }
+        // try_refill either appended new candidates (loop continues to
+        // the break above) or appended nothing because every new
+        // candidate was already emitted; in the latter case cursor is
+        // still == results.len() and we'll attempt another refill with
+        // a larger k. try_refill returns false once k is maxed out.
     }
     let id = {
         let cursor = (*opaque).cursor;
@@ -438,6 +489,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         (&(*opaque).distances)[cursor]
     };
     (*opaque).cursor += 1;
+    (*opaque).emitted.insert(id);
     pgrx::itemptr::u64_to_item_pointer(id, &mut (*scan).xs_heaptid);
 
     // The executor's reorder-queue path (`IndexNextWithReorder` in
@@ -470,3 +522,64 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 /// memory context teardown.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}
+
+/// Append the candidates in `(scores, ids)` that haven't already been
+/// emitted to the current batch (`results` / `distances`), converting
+/// turbovec cosine scores to executor-facing distances. Used for both
+/// the initial search and every iterative refill. Skipping
+/// already-emitted TIDs is what makes refills dedup-safe regardless of
+/// turbovec's `search(q, 2k)` prefix (in)stability.
+#[inline]
+unsafe fn populate_batch(opaque: *mut ScanOpaque, scores: &[f32], ids: &[u64]) {
+    for (s, id) in scores.iter().zip(ids.iter()) {
+        if (*opaque).emitted.contains(id) {
+            continue;
+        }
+        (*opaque).results.push(*id);
+        let dist = (1.0 - f64::from(*s)).clamp(0.0, 2.0);
+        (*opaque).distances.push(dist);
+    }
+}
+
+/// Iterative refill (turbovec.iterative_scan != off). Grows `k` (doubling,
+/// capped at `min(max_scan_tuples, n_live)`), re-runs the search, and
+/// appends the newly-seen candidates to the current batch.
+///
+/// Returns `true` if the caller should keep draining (either new
+/// candidates were appended, or another, larger refill is still
+/// possible). Returns `false` only when the scan is exhausted: either
+/// iterative scan is off, or `k` has reached its ceiling.
+unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
+    if crate::guc::ITERATIVE_SCAN.get() == crate::guc::IterativeScanMode::Off {
+        return false;
+    }
+    let arc = match &(*opaque).arc {
+        Some(a) => Arc::clone(a),
+        None => return false,
+    };
+    let n_live = (*opaque).n_live;
+    let max_scan = (crate::guc::MAX_SCAN_TUPLES.get() as usize).max(1);
+    // Hard ceiling on k: never look past the live corpus, never past
+    // the max_scan_tuples budget.
+    let k_ceiling = n_live.min(max_scan);
+    let old_k = (*opaque).current_k;
+    if old_k >= k_ceiling {
+        // Already examined as many candidates as we're allowed to.
+        return false;
+    }
+    let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
+    let before = (*opaque).results.len();
+    let (scores, ids) = arc.read().search(&(*opaque).query, new_k);
+    (*opaque).current_k = new_k;
+    populate_batch(opaque, &scores, &ids);
+    if (*opaque).results.len() > before {
+        // New candidates appended; caller can drain them.
+        true
+    } else {
+        // The larger search surfaced nothing we hadn't already
+        // emitted (heavy tie clustering, or the corpus is exhausted).
+        // If k can still grow, signal the caller to try again with a
+        // bigger k; otherwise we're done.
+        new_k < k_ceiling
+    }
+}

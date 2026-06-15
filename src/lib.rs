@@ -1370,6 +1370,235 @@ mod tests {
         assert_eq!(count_with_dist, Some(3));
     }
 
+    /// Parity gap #1 regression: iterative index scan.
+    ///
+    /// A selective `WHERE` filter + `ORDER BY dist LIMIT k` must
+    /// return the full LIMIT even when the matching rows are sparse
+    /// among the top-`search_k` candidates. Pre-v1.8.0, `amgettuple`
+    /// ran a single `search_k`-candidate batch and returned false
+    /// when drained, so the executor post-filtered those candidates
+    /// and under-returned. `turbovec.iterative_scan = relaxed_order`
+    /// (the default) re-runs the search with a doubled k on drain.
+    ///
+    /// Fixture: 2000 rows, of which ~every-100th (category 7 ::
+    /// id % 100 == 7) matches — ~20 rows. With `search_k = 16` the
+    /// first batch holds far fewer than 10 category-7 rows, so
+    /// `off` mode under-returns and `relaxed_order` returns 10.
+    #[pg_test]
+    fn index_am_iterative_scan_selective_filter() {
+        use_turbovec();
+        Spi::run(
+            "CREATE TABLE t_iter (\
+                 id bigint PRIMARY KEY, \
+                 category int, \
+                 emb vector)",
+        )
+        .unwrap();
+        // 2000 8-dim rows; category = id % 100, so category 7
+        // matches ids 7, 107, 207, ... — exactly 20 rows. The emb is
+        // a hashed pseudo-random unit-ish vector so the category-7
+        // rows are scattered through the distance ranking rather
+        // than clustered at the top.
+        Spi::run(
+            "INSERT INTO t_iter \
+             SELECT i, i % 100, \
+                 ('[' || string_agg( \
+                     ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, 2000) AS gs(i), \
+                  generate_series(1, 8) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_iter_idx \
+             ON t_iter USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_iter").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        // Small first batch so a single search_k batch can't satisfy
+        // a LIMIT 10 over the sparse category-7 subset.
+        Spi::run("SET turbovec.search_k = 16").unwrap();
+
+        let q = "(SELECT emb FROM t_iter WHERE id = 1007)";
+        let query = format!(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM t_iter WHERE category = 7 \
+                 ORDER BY emb <=> {q} LIMIT 10 \
+             ) sub"
+        );
+
+        // off mode: single batch under-returns (< 10).
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        let off_count: Option<i64> = Spi::get_one(&query).unwrap();
+        assert!(
+            off_count.unwrap() < 10,
+            "iterative_scan=off should under-return on a selective \
+             filter; got {:?} (expected < 10)",
+            off_count
+        );
+
+        // relaxed_order (default): refills until the LIMIT is met.
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        let relaxed_count: Option<i64> = Spi::get_one(&query).unwrap();
+        assert_eq!(
+            relaxed_count,
+            Some(10),
+            "iterative_scan=relaxed_order should return the full LIMIT"
+        );
+    }
+
+    /// No TID may be emitted twice across refill batches. The result
+    /// set of an unfiltered `ORDER BY dist LIMIT k` with a tiny
+    /// `search_k` (forcing several refills) must have unique ids.
+    #[pg_test]
+    fn index_am_iterative_scan_no_duplicate_tids() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_iter_dup (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_iter_dup \
+             SELECT i, \
+                 ('[' || string_agg( \
+                     ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, 500) AS gs(i), \
+                  generate_series(1, 8) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_iter_dup_idx \
+             ON t_iter_dup USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_iter_dup").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 8").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+
+        // LIMIT 200 forces many refill rounds (8 -> 16 -> ... -> 200+).
+        // total rows must equal distinct ids.
+        let total: Option<i64> = Spi::get_one(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM t_iter_dup \
+                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 200 \
+             ) sub",
+        )
+        .unwrap();
+        let distinct: Option<i64> = Spi::get_one(
+            "SELECT count(DISTINCT id)::bigint FROM ( \
+                 SELECT id FROM t_iter_dup \
+                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 200 \
+             ) sub",
+        )
+        .unwrap();
+        assert_eq!(
+            total, distinct,
+            "iterative scan emitted duplicate TIDs: {:?} total vs {:?} distinct",
+            total, distinct
+        );
+        // Sanity: 200 distinct rows actually came back (corpus is 500).
+        assert_eq!(total, Some(200));
+    }
+
+    /// `turbovec.max_scan_tuples` is the hard ceiling: with a low cap
+    /// the scan must stop (not loop forever) even if the filter is
+    /// never satisfied. We set the cap below the corpus and use an
+    /// impossible filter, so the scan exhausts its budget and the
+    /// query terminates returning 0 rows.
+    #[pg_test]
+    fn index_am_iterative_scan_max_scan_tuples_honored() {
+        use_turbovec();
+        Spi::run(
+            "CREATE TABLE t_iter_cap (\
+                 id bigint PRIMARY KEY, category int, emb vector)",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO t_iter_cap \
+             SELECT i, 0, \
+                 ('[' || string_agg( \
+                     ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, 1000) AS gs(i), \
+                  generate_series(1, 8) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_iter_cap_idx \
+             ON t_iter_cap USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_iter_cap").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 8").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        // Cap well below the corpus; no row matches category 999, so
+        // the scan can never satisfy the filter and must terminate
+        // once it has examined ~50 candidates.
+        Spi::run("SET turbovec.max_scan_tuples = 50").unwrap();
+
+        let t0 = std::time::Instant::now();
+        let n: Option<i64> = Spi::get_one(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM t_iter_cap WHERE category = 999 \
+                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 10 \
+             ) sub",
+        )
+        .unwrap();
+        let elapsed = t0.elapsed().as_secs();
+        assert_eq!(n, Some(0), "impossible filter must return 0 rows");
+        assert!(elapsed < 30, "scan did not terminate (cap not honored)");
+    }
+
+    /// `iterative_scan = off` preserves the pre-v1.8.0 single-batch
+    /// behaviour: at most `search_k` candidates are ever returned,
+    /// regardless of LIMIT.
+    #[pg_test]
+    fn index_am_iterative_scan_off_preserves_single_batch() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_iter_off (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_iter_off \
+             SELECT i, \
+                 ('[' || string_agg( \
+                     ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, 500) AS gs(i), \
+                  generate_series(1, 8) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_iter_off_idx \
+             ON t_iter_off USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_iter_off").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 12").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+
+        // LIMIT 100 but search_k = 12 and off mode: exactly 12 rows.
+        let n: Option<i64> = Spi::get_one(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM t_iter_off \
+                 ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 100 \
+             ) sub",
+        )
+        .unwrap();
+        assert_eq!(
+            n,
+            Some(12),
+            "iterative_scan=off must cap at search_k regardless of LIMIT"
+        );
+    }
+
     #[pg_test]
     fn knn_filtered_allowlist() {
         use_turbovec();
@@ -3699,7 +3928,7 @@ mod tests {
         let expected: Vec<&str> = vec![
             "0.1.0", "0.2.0", "0.4.0", "0.5.0",
             "1.3.0", "1.5.0", "1.6.0", "1.6.1",
-            "1.7.0", "1.7.1", "1.7.2",
+            "1.7.0", "1.7.1", "1.7.2", "1.7.3",
         ];
         let expected_owned: Vec<String> =
             expected.iter().map(|s| s.to_string()).collect();

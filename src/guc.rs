@@ -12,9 +12,12 @@
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
 //! | `turbovec.mmap_static_blocked`   | bool | true    | -              |
+//! | `turbovec.iterative_scan`        | enum | relaxed_order | off, relaxed_order |
+//! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 
 use core::ffi::CStr;
 
+use pgrx::guc::PostgresGucEnum;
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
 pub static BIT_WIDTH_DEFAULT: GucSetting<i32> = GucSetting::<i32>::new(4);
@@ -43,6 +46,39 @@ pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
 /// support shared mappings) and need to fall back to the
 /// buffer-manager-only read path.
 pub static MMAP_STATIC_BLOCKED: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// Iterative-scan mode, modelled on pgvector's `hnsw.iterative_scan`.
+///
+/// * `Off` — single fixed-`search_k` batch (pre-v1.8.0 behaviour).
+///   `amgettuple` returns false as soon as that batch drains, which
+///   under-returns under a selective `WHERE` filter + `ORDER BY dist
+///   LIMIT k`.
+/// * `RelaxedOrder` (default) — when the batch drains and the
+///   executor asks for more, re-run the turbovec search with a
+///   doubled `k` and feed the new candidates, capped by
+///   [`MAX_SCAN_TUPLES`]. Results across refill batches are only
+///   approximately distance-ordered; the executor's reorder queue
+///   (`xs_recheckorderby = true`) restores exact per-tuple ordering.
+///
+/// pgvector also exposes `strict_order` for HNSW; we defer it as
+/// future work because our reorder-queue model already delivers exact
+/// ordering on top of `relaxed_order`. The `#[name = ...]` attrs give
+/// the lowercase pgvector-familiar spelling at the SQL surface.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
+pub enum IterativeScanMode {
+    #[name = c"off"]
+    Off,
+    #[name = c"relaxed_order"]
+    RelaxedOrder,
+}
+
+pub static ITERATIVE_SCAN: GucSetting<IterativeScanMode> =
+    GucSetting::<IterativeScanMode>::new(IterativeScanMode::RelaxedOrder);
+
+/// Hard ceiling on the total number of candidates a single scan may
+/// examine when iterative refill is enabled. Matches pgvector's
+/// `hnsw.max_scan_tuples` default of 20000.
+pub static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(20_000);
 
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
@@ -129,6 +165,30 @@ pub fn register_gucs() {
             b"When on, ambeginscan mmaps the persisted SIMD-blocked codes and rotation matrix RO into the backend address space, bypassing PG's buffer manager for those bytes. Halves warm-scan latency on indexes that don't fit in shared_buffers. The cache entry holds the Mmap so it lives until the cache invalidates (REINDEX / am_version bump / backend exit). Codes / scales / ids chains keep going through the buffer manager because VACUUM swap-remove mutates them in place. Heap visibility + xs_recheckorderby remain the MVCC backstops; see docs/ARCHITECTURE.md.\0",
         ),
         &MMAP_STATIC_BLOCKED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_enum_guc(
+        c_str(b"turbovec.iterative_scan\0"),
+        c_str(b"Iterative index scan mode (off | relaxed_order).\0"),
+        c_str(
+            b"When relaxed_order (the default), amgettuple re-runs the search with a doubled k and feeds new candidates if the executor exhausts the current batch under a selective WHERE filter + ORDER BY dist LIMIT k, capped by turbovec.max_scan_tuples. off restores the pre-v1.8.0 single-batch behaviour. strict_order (pgvector parity) is future work; our reorder queue already restores exact ordering on top of relaxed_order.\0",
+        ),
+        &ITERATIVE_SCAN,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.max_scan_tuples\0"),
+        c_str(b"Max candidates examined per iterative scan (default 20000).\0"),
+        c_str(
+            b"Hard ceiling on the total number of candidates a single iterative scan may examine before returning false. Matches pgvector's hnsw.max_scan_tuples. Only consulted when turbovec.iterative_scan != off. Raise for very selective filters over large indexes; lower to bound worst-case scan work.\0",
+        ),
+        &MAX_SCAN_TUPLES,
+        1,
+        10_000_000,
         GucContext::Userset,
         GucFlags::default(),
     );

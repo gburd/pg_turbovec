@@ -115,7 +115,7 @@ dbpedia-1M without breaking the warm-p50 latency story.
 | Feature | pgvector 0.8.2 | pg_turbovec status |
 |---------|----------------|--------------------|
 | ANN index scan | ✓ (HNSW, IVFFlat) | ✓ (`turbovec` AM) |
-| **Iterative / streaming scan** | ✓ `hnsw.iterative_scan`, `ivfflat.iterative_scan`, `max_scan_tuples`, `scan_mem_multiplier`, `max_probes` | ✗ **GAP** — `amgettuple` runs ONE fixed-`search_k` batch and returns false when drained. Under a selective `WHERE filter ORDER BY emb <=> q LIMIT k`, the executor post-filters those candidates and under-returns. See an internal design note § "Iterative / refilling index scan" — this is the #1 roadmap priority. |
+| **Iterative / streaming scan** | ✓ `hnsw.iterative_scan`, `ivfflat.iterative_scan`, `max_scan_tuples`, `scan_mem_multiplier`, `max_probes` | ✓ (v1.8.0) — `turbovec.iterative_scan` (`off` \| `relaxed_order`, default `relaxed_order`). When a selective `WHERE filter ORDER BY emb <=> q LIMIT k` drains the current candidate batch, `amgettuple` re-runs the turbovec search with a doubled `k` and feeds the new (deduplicated) candidates, capped by `turbovec.max_scan_tuples` (default 20000, matches pgvector). Ordering across refill batches is restored by the existing `xs_recheckorderby` reorder queue. pgvector's `strict_order` is future work (our reorder queue already delivers exact ordering on top of `relaxed_order`). |
 | Bitmap index scan (`amgetbitmap`) | ✓ | ✗ (not applicable to ANN ordering) |
 | Parallel index build | ✓ (maintenance workers) | ✗ **GAP** — `ambuild` is single-threaded. |
 | Quantization tuning | manual re-rank CTE | `turbovec.search_k` only; no rescore/oversampling knob yet (roadmap differentiator). |

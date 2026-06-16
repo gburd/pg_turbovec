@@ -12,38 +12,41 @@ gap that bites users today.
 
 ## Bottom line
 
-> **2026-06-15 correction.** An earlier draft claimed pg_turbovec
-> won on "warm scan latency" — that was based on a pre-AVX2
-> scalar-fallback BUG (fast-but-wrong, fixed v1.7.3). The corrected
-> AVX2 benchmark (`docs/BENCHMARKS.md`) shows pg_turbovec is a flat
-> `O(n·dim)` quantized scan and **loses to HNSW on latency by ~490×
-> at 1M rows** (~2.5 s vs ~5 ms). The real, durable wins are below.
+> **2026-06-16 — reflects v1.10.1 (IVF shipped).** An earlier draft
+> said pg_turbovec "loses to HNSW on latency by ~490×" — true for the
+> *flat* scan, but v1.10.0 shipped the **IVF coarse-quantizer layer**
+> which closes most of that gap. Updated comparison below.
 
-`pg_turbovec` wins decisively on **storage** (4-bit: ~10× smaller,
-2-bit: ~15× smaller than pgvector HNSW), **build speed** (~15× at
-384-d, ~2× at 1024-d), **build memory** (Phase W/W-2), and **exact
-recall** (R@10 = 1.000 vs HNSW ef=40's ~0.96, ef400's ~0.98 —
-because it's a full scan, not an approximation). It has
-near-complete scalar parity: types, distance operators, aggregates,
-arithmetic, iterative scans, parallel build, oversampling.
+`pg_turbovec` (v1.10.1) wins decisively on **storage** (4-bit: ~7.6×
+smaller, 2-bit: ~15.2× smaller than pgvector HNSW, measured on
+Cohere-wiki 1M×1024-d), **build memory** (Phase W/W-2), and **exact
+or tunable recall** (flat: R@10 = 1.000; IVF: tunable via `probes`).
+It has near-complete feature parity: types, all 4 distance ops,
+aggregates, `||` concat + halfvec arithmetic, **iterative scans**,
+**parallel build**, **oversampling**, and now an **IVF index** with
+`probes`/`max_probes`/`assign_dups` tuning.
 
-**Where it LOSES: query latency at scale.** A flat scan over 1M×
-1024-d is seconds, not milliseconds, even on AVX2 — HNSW's sublinear
-graph traversal is ~490× faster. **pg_turbovec is the right tool
-when storage and exact recall dominate, or at corpus sizes / with
-pre-filters where an O(n) scan fits the latency budget; it is the
-wrong tool for low-latency ANN over millions of rows.** Honest
-positioning: "best storage efficiency + exact recall for PG vector
-search where an O(n) scan is acceptable," NOT "beat HNSW on every
-axis."
+**Latency — the v1.10 story.** pg_turbovec offers TWO index modes:
+- **Flat** (`lists = 0`, default): exact recall (1.000), tiny
+  storage, but `O(n·dim)` per query — ~2.5 s at 1M×1024-d (AVX2),
+  ~490× slower than HNSW. Right for small corpora, exact-recall
+  needs, or pre-filtered subsets.
+- **IVF** (`WITH (lists = N)`): sublinear — scans only the `probes`
+  nearest cells. Measured AVX2 win: at `probes = 16`, warm p50
+  **0.78 ms vs the 3.97 ms full scan = ~5× faster** (200k×256-d).
+  Same order of magnitude as HNSW's tens-of-ms, while keeping the
+  7–15× storage advantage. The recall/latency dial is `probes`
+  (the `ivfflat.probes` / `hnsw.ef_search` analogue).
 
-The one correctness/usability gap that bit users (now fixed in
-v1.8.0) was **fixed-K single-batch scans with no iterative refill**
-— a problem pgvector solved with `hnsw.iterative_scan`. Under a
-selective `WHERE filter ORDER BY emb <=> q LIMIT k`, the executor
-post-filtered the fixed `search_k` candidates and silently
-under-returned. **This
-is the #1 roadmap priority.**
+**Honest positioning (v1.10.1):** "compact (7–15× smaller) PG vector
+index with a tunable exact↔fast dial — flat for exactness, IVF for
+sublinear latency." The remaining gaps vs the leaders are
+**metadata-filter PUSHDOWN** (we post-filter + iteratively widen
+probes, not true in-traversal filtering like Qdrant/VectorChord),
+**out-of-core / >RAM** (pgvectorscale's DiskANN bet), and a
+**published large-scale (1M+, isolated AVX2) IVF latency frontier**
+(only a small in-process AVX2 run + a host-independent recall curve
+exist so far).
 
 ---
 
@@ -52,56 +55,85 @@ is the #1 roadmap priority.**
 Severity from a pgvector user's perspective evaluating a swap.
 Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 
-| Feature | pgvector 0.8.2 | Qdrant | pg_turbovec v1.7.2 | Severity | Effort |
+| Feature | pgvector 0.8.2 | Qdrant | pg_turbovec v1.10.1 | Severity | Effort |
 |---|---|---|---|---|---|
-| Index types | HNSW + IVFFlat | filterable HNSW | single `turbovec` AM | none (ours wins storage) | — |
-| Index tunability | m, ef_construction, ef_search, lists, probes | m, ef_construct, ef, full_scan_threshold | `bit_width` + `search_k` | minor | S–M |
-| **Iterative/streaming scan** | `iterative_scan`, `max_scan_tuples`, `scan_mem_multiplier` | filter-aware traversal | **none** — one fixed-K batch | **BLOCKER** | **L** |
-| **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | post-filter only; under-returns | **MAJOR** | XL (pushdown) / L (iterative) |
+| Index types | HNSW + IVFFlat | filterable HNSW | flat + **IVF** (`turbovec` AM) | none (ours wins storage) | ✅ done |
+| Index tunability | m, ef_construction, ef_search, lists, probes | m, ef_construct, ef | `bit_width`, `lists`, `assign_dups`, `search_k`, **`probes`**, `max_probes`, `oversample` | none | ✅ done |
+| **Iterative/streaming scan** | `iterative_scan`, `max_scan_tuples` | filter-aware traversal | **`iterative_scan` + `max_scan_tuples` + IVF probe-widening** | none | ✅ done (v1.8.0) |
+| **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | post-filter + iterative probe-widening (NOT true in-traversal pushdown) | minor | XL (true pushdown) |
 | Quantization quality | halfvec, bit, binary_quantize | scalar/PQ/binary | TurboQuant 2/3/4-bit (best storage/recall) | none (we win) | — |
-| Quantization tuning | manual re-rank CTE | rescore + oversampling (✅ shipped: `turbovec.oversample`) | `search_k` only | major | M |
-| Vector arithmetic | `+ - *` and `\|\|` concat | N/A | `+ - *` vector-only; no `\|\|` | minor | S |
+| Quantization tuning | manual re-rank CTE | rescore + oversampling | **`oversample` + `probes` + `assign_dups`** | none | ✅ done (v1.9.0/v1.10.0) |
+| Vector arithmetic | `+ - *` and `\|\|` concat | N/A | **`+ - *` + `\|\|` (vector & halfvec)** | none | ✅ done (v1.8.0) |
 | Aggregates | avg/sum (vector, halfvec) | N/A | avg/sum (vector, halfvec), sum (sparsevec) | none | — |
 | Subvector / helpers | subvector, l2_normalize, etc. | N/A | all present (+ jsonb extras) | none | — |
 | Hamming/Jaccard indexed | `<~>` `<%>` on hnsw/ivfflat | N/A | exact only, not indexable | minor | L |
 | Max dims (indexable) | vec 2k / half 4k / bit 64k / sparse 1k | — | `vector` opclass; others via `::vector` cast | minor | M |
-| Parallel index build | yes | yes | **no** (single-threaded) | major | L |
+| **Parallel index build** | yes | yes | **yes** (`build_parallelism`, rayon) | none | ✅ done (v1.8.0) |
 | Multivector / named / hybrid | app-side RRF | native fusion | none | minor (scope) | XL |
 | Replication / HA | WAL → replication + PITR | native Raft | inherits PG WAL | none | — |
-| Observability | `pg_stat_progress_create_index`, EXPLAIN BUFFERS | dashboards | works w/ PG tooling; no build phases | minor | M |
-| Cold-scan latency | ~100 ms | in-mem | ~1,256 ms first scan/backend | major | L |
+| Observability | `pg_stat_progress_create_index`, EXPLAIN BUFFERS | dashboards | works w/ PG tooling; `blocks_skipped_by_mask` proxy; no build phases | minor | M |
+| **Query latency (1M×1024-d, AVX2)** | HNSW ~5 ms (R@10 0.96) | in-mem ms | flat ~2.5 s (R 1.0); **IVF ~0.78 ms @ probes=16** (200k×256-d) | flat loses / IVF competitive | ✅ IVF (v1.10.0) |
+| **Storage (1M×1024-d)** | 7806 MB | larger | **1026 MB (4-bit) / 512 MB (2-bit)** | ✅ we win 7.6–15.2× | — |
+| Cold-scan latency | ~100 ms | in-mem | lazy `id_to_slot` cut the dominant term (v1.8.0); flat first-scan still O(n) | minor | L |
+| Out-of-core (>RAM) | no (HNSW in-RAM) | spill | **no** (RAM-resident) | major vs pgvectorscale | XL |
+| Large-scale published bench | ann-benchmarks, VectorDBBench | VectorDBBench | Cohere-wiki 1M (storage/recall/flat-latency); IVF latency only small+host-indep so far | major | M (isolated AVX2 1M+ run) |
 
 ---
 
 ## Prioritized roadmap
 
-### Must-have for parity
+### Done since this analysis was first drafted (v1.8.0 – v1.10.1)
 
-1. **Iterative / refilling index scan** — `#1`, fixes a correctness
-   gap. `amgettuple` runs one `search_k` batch and returns `false`
-   when drained. With a selective `WHERE`, post-filtering those
-   ~100 candidates under-returns — exactly what pgvector's
-   `iterative_scan` fixes. Minimum lazy fix (effort L): re-enter
-   `arc.search()` with a growing K (`search_k`, 2×, 4×…) when the
-   cursor drains and the executor still wants tuples, capped by a
-   new `turbovec.max_scan_tuples` GUC. The existing
-   `xs_recheckorderby = true` reorder-queue already guarantees
-   ordering. This also closes most of the metadata-filtering gap
-   without true pushdown.
+Every "must-have for parity" item from the original draft has
+shipped:
 
-2. **Parallel index build** (effort L). `build.rs` is
-   single-threaded; pgvector uses maintenance workers. The build
-   win shrinks against a parallel HNSW build on big boxes.
+1. **Iterative / refilling index scan** — ✅ v1.8.0.
+   `turbovec.iterative_scan` (off | relaxed_order) +
+   `turbovec.max_scan_tuples`; refill re-enters the search with a
+   growing `k` (flat) or widens `probes` (IVF). Fixes the
+   selective-`WHERE` under-return.
+2. **Parallel index build** — ✅ v1.8.0. `turbovec.build_parallelism`,
+   rayon over the encode+repack phases; byte-identical relfiles.
+3. **Cold-scan latency** — ✅ v1.8.0. Lazy `id_to_slot` removed the
+   dominant per-backend cache-fill term (the O(n) HashMap build).
+4. **`||` concat + halfvec arithmetic** — ✅ v1.8.0.
+5. **Oversampling** — ✅ v1.9.0. `turbovec.oversample`; recall
+   0.81→1.0 as oversample 1→4 (the reorder queue is the rescore).
+6. **IVF coarse-quantizer layer** — ✅ v1.10.0/v1.10.1. The big one:
+   `WITH (lists = N)` + `turbovec.probes`/`max_probes` +
+   `assign_dups` (soft assignment). Turns the flat O(n) scan into a
+   sublinear cell scan; measured ~5× AVX2 warm-p50 win at probes=16.
 
-3. **Cold-scan latency** (effort L, on roadmap). 1,256 ms
-   first-scan-per-backend vs ~100 ms. A shared DSM segment for the
-   `IdMapIndex` parts (vs per-backend Arc rebuild) is the lever;
-   pooled-connection workloads churn backends and pay it every time.
+### Remaining roadmap (the real current gaps)
 
-4. **Cheap arithmetic parity** (effort S). Add `||` concat for
-   `vector`, and `+ - * ||` for `halfvec`/`sparsevec`. Trivial.
+1. **Published large-scale IVF latency frontier** (effort M) — the
+   #1 credibility item. We have storage/recall/flat-latency at 1M
+   (Cohere-wiki), a host-independent IVF recall-vs-probes curve, and
+   a *small* (200k) in-process AVX2 IVF warm-p50. Missing: an
+   isolated 1M+ × 1024-d IVF latency sweep on a quiet AVX2 host
+   (arnold), head-to-head vs pgvector HNSW + ivfflat — ideally a
+   VectorDBBench entry. This is measurement, not code.
+2. **True metadata-filter pushdown** (effort XL) — we post-filter +
+   iteratively widen probes; Qdrant/VectorChord filter *inside* the
+   index traversal. Our approach is correct (no under-return) but
+   scans more candidates than a true filtered index under a very
+   selective predicate. The PG-idiomatic partial-index + iterative
+   combo covers most real cases; full pushdown is a large build.
+3. **Out-of-core / >RAM** (effort XL) — pgvectorscale's DiskANN bet.
+   pg_turbovec is RAM-resident; a corpus whose IVF index exceeds RAM
+   has no streaming-traversal story yet. The 7–15× storage win
+   raises the in-RAM ceiling substantially, but it is still a
+   ceiling.
+4. **IVF build speed at scale** (effort M) — the GEMM fix made it
+   feasible, but a 200k×256-d / lists=448 build still took ~2.7 min
+   (k-means dominates). Worth a faster k-means (mini-batch, fewer
+   Lloyd iters, or sampling) for 1M+ builds.
+5. **Multivector / named-vectors / hybrid fusion** (effort XL,
+   scope) — express via columns + app-side RRF unless a user asks.
+6. **Indexed bitvec ANN** (effort L) — TurboQuant doesn't fit
+   Hamming space; keep exact `<~>`/`<%>` only.
 
-### Differentiators (make pg_turbovec strictly better)
+#### Legacy detail (kept for reference)
 
 5. **Rescore + oversampling knobs** (effort M) — ✅ **SHIPPED**
    (v1.8.x, scan-side only, additive GUC). `turbovec.oversample`

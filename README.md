@@ -569,6 +569,17 @@ bridge is the supported interop path.
   `bit_hamming_ops` ANN) and the reasoning.
 - [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) - feature-by-feature
   comparison against pgvector.
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) - the published
+  head-to-head benchmark (Cohere-wiki 1M vs pgvector HNSW), incl.
+  the AVX2 latency frontier and the honest "flat-scan loses on
+  latency, wins on storage + exact recall" finding.
+- [`docs/IVF_PLAN.md`](docs/IVF_PLAN.md) - design plan for the IVF
+  coarse-quantizer layer that would turn the flat O(n) scan into a
+  tunable sublinear ANN structure (the path to a competitive
+  latency story at scale).
+- [`docs/COMPETITIVE_ANALYSIS.md`](docs/COMPETITIVE_ANALYSIS.md) /
+  [`docs/COMPETITIVE_LANDSCAPE_2026-06.md`](docs/COMPETITIVE_LANDSCAPE_2026-06.md)
+  - positioning vs pgvector, VectorChord, pgvectorscale, Qdrant.
 - [`docs/PHASE19_PROGRESS.md`](docs/PHASE19_PROGRESS.md) - handoff
   notes for the binary-compatible varlena work, if a future session
   picks it up.

@@ -5263,6 +5263,44 @@ mod tests {
         .unwrap();
     }
 
+    /// Drive `ambulkdelete` directly with a synthetic dead-tuple
+    /// callback, the same FFI shape the autovacuum launcher uses
+    /// (mirrors `relfile_ambulkdelete_walks_pages_not_rebuild`). pgrx
+    /// tests run inside a transaction, so real `VACUUM` is forbidden;
+    /// this is how the IVF VACUUM-survival tests exercise the
+    /// tombstone path. `callback_state` is a `&HashSet<u64>` of dead
+    /// ctids.
+    fn ivf_drive_ambulkdelete(
+        indexrelid: pg_sys::Oid,
+        dead_set: &std::collections::HashSet<u64>,
+        cb: pg_sys::IndexBulkDeleteCallback,
+    ) {
+        use crate::index::vacuum::ambulkdelete;
+        unsafe {
+            let rel =
+                pg_sys::index_open(indexrelid, pg_sys::ShareUpdateExclusiveLock as i32);
+            assert!(!rel.is_null());
+            let mut info: pg_sys::IndexVacuumInfo = std::mem::zeroed();
+            info.index = rel;
+            info.analyze_only = false;
+            info.estimated_count = false;
+            info.message_level = pg_sys::DEBUG2 as i32;
+            info.num_heap_tuples = 0.0;
+            info.strategy = std::ptr::null_mut();
+            let stats = pg_sys::palloc0(
+                std::mem::size_of::<pg_sys::IndexBulkDeleteResult>(),
+            ) as *mut pg_sys::IndexBulkDeleteResult;
+            let res = ambulkdelete(
+                &mut info as *mut _,
+                stats,
+                cb,
+                dead_set as *const _ as *mut std::ffi::c_void,
+            );
+            assert!(!res.is_null());
+            pg_sys::index_close(rel, pg_sys::ShareUpdateExclusiveLock as i32);
+        }
+    }
+
     /// THE correctness anchor: with `probes >= lists`, the IVF scan
     /// probes every cell (an all-true mask), which must be
     /// byte-for-byte identical to scanning the SAME physical index
@@ -5585,6 +5623,292 @@ mod tests {
             degraded.contains(&1000),
             "flat fallback must find the query row"
         );
+    }
+
+    /// Phase E-2: an IVF index must SURVIVE a VACUUM. We build an IVF
+    /// index, mark a chunk of rows dead via `ambulkdelete` (driven
+    /// directly with a synthetic callback, since pgrx tests run
+    /// inside a transaction and `VACUUM` forbids that — same pattern
+    /// as `relfile_ambulkdelete_walks_pages_not_rebuild`), and assert
+    /// the index is STILL IVF (`has_ivf()` true, NOT degraded) and
+    /// queries are still cell-restricted (the `blocks_skipped_by_mask`
+    /// counter proves the scan isn't flat) and correct. This is the
+    /// regression test for the silent IVF->flat degradation landmine.
+    #[pg_test]
+    fn ivf_survives_vacuum() {
+        use std::collections::HashSet;
+        use_turbovec();
+        ivf2_make_corpus("ivf_sv", 4000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 100").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_sv_idx ON ivf_sv \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_sv_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // Healthy IVF before the vacuum.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert!(meta.has_ivf(), "index must start as IVF");
+            assert!(!meta.is_degraded(), "freshly-built IVF is not degraded");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // Collect ctids of ~25% of the rows (id % 4 == 0) to mark
+        // dead through ambulkdelete.
+        let dead_set: HashSet<u64> = {
+            let mut set = HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM ivf_sv WHERE id % 4 = 0", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData =
+                        row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        assert!(dead_set.len() >= 900, "expected ~1000 dead ctids");
+
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+
+        // STILL IVF after the vacuum (the whole point of E-2).
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert!(
+                meta.has_ivf(),
+                "IVF index must remain IVF after VACUUM (no degradation)"
+            );
+            assert!(
+                !meta.is_degraded(),
+                "tombstone vacuum must not mark the index degraded"
+            );
+            assert!(
+                meta.tombstone_bytes > 0,
+                "deletes must have written a tombstone bitmap"
+            );
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // Queries are still cell-restricted, not flat: probing a few
+        // cells skips strictly more blocks than probing all of them.
+        let query = "(SELECT emb FROM ivf_sv WHERE id = 1001)";
+        let run_and_count = |probes: i32| -> (Vec<i64>, u64) {
+            Spi::run(&format!("SET turbovec.probes = {probes}")).unwrap();
+            crate::cache::invalidate_all();
+            turbovec::search::reset_blocks_skipped_by_mask();
+            let ids: Vec<i64> = Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("SELECT id FROM ivf_sv ORDER BY emb <=> {query} LIMIT 10"),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            });
+            (ids, turbovec::search::blocks_skipped_by_mask())
+        };
+        let (ids_low, skipped_low) = run_and_count(2);
+        let (_ids_all, skipped_all) = run_and_count(32);
+        assert!(
+            skipped_low > skipped_all,
+            "post-vacuum index must still be cell-restricted (not flat): \
+             skipped(probes=2)={skipped_low} skipped(probes=32)={skipped_all}"
+        );
+        // Correctness: distinct ids, and no deleted (id % 4 == 0) row
+        // in the result (they were tombstoned).
+        assert_eq!(ids_low.len(), 10);
+        assert_distinct_ids(&ids_low);
+        assert!(
+            ids_low.iter().all(|id| id % 4 != 0),
+            "a deleted (id % 4 == 0) row must never appear: {ids_low:?}"
+        );
+    }
+
+    /// Phase E-2: a row deleted then VACUUMed out of an IVF index must
+    /// NEVER appear in query results, even though its slot is left in
+    /// place on disk (tombstoned, not swap-removed). We tombstone the
+    /// row that WOULD be the exact nearest neighbour of a query and
+    /// confirm it's masked out.
+    #[pg_test]
+    fn ivf_tombstoned_rows_not_returned() {
+        use std::collections::HashSet;
+        use_turbovec();
+        ivf2_make_corpus("ivf_tomb", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_tomb_idx ON ivf_tomb \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        // Query is row 1500's own embedding; row 1500 is its own
+        // exact nearest neighbour, so it tops the healthy result.
+        let query = "(SELECT emb FROM ivf_tomb WHERE id = 1500)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("SELECT id FROM ivf_tomb ORDER BY emb <=> {query} LIMIT 10"),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+        crate::cache::invalidate_all();
+        let healthy = pull();
+        assert!(
+            healthy.contains(&1500),
+            "row 1500 should be its own nearest neighbour before delete: {healthy:?}"
+        );
+
+        // Tombstone row 1500's slot via ambulkdelete (the heap row
+        // stays — we only mark the index slot dead).
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_tomb_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        let dead_set: HashSet<u64> = {
+            let mut set = HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM ivf_tomb WHERE id = 1500", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData =
+                        row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        assert_eq!(dead_set.len(), 1, "one ctid for id = 1500");
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+
+        let post = pull();
+        assert_eq!(post.len(), 10, "still returns a full top-10 after delete");
+        assert_distinct_ids(&post);
+        assert!(
+            !post.contains(&1500),
+            "tombstoned (deleted+vacuumed) row 1500 must never be returned: {post:?}"
+        );
+        // The index stays IVF — confirm has_ivf() after the tombstone.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert!(meta.has_ivf(), "tombstoned index stays IVF");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+    }
+
+    /// Phase E-2a: when an IVF index DOES degrade to flat (the
+    /// last-resort safety-net path, simulated here by forcing the
+    /// `ivf_degraded` meta flag), the degradation is OBSERVABLE: the
+    /// `turbovec.index_is_degraded()` function returns true and the
+    /// scan still returns correct results via the flat fallback (and
+    /// emits the throttled WARNING). `lists` is preserved so the
+    /// operator can see the index WAS built IVF.
+    #[pg_test]
+    fn ivf_degradation_is_observable() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_obs", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_obs_idx ON ivf_obs \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        // Healthy index: not degraded, both via the meta predicate and
+        // the SQL signal.
+        let degraded_sql = || -> bool {
+            Spi::get_one("SELECT turbovec.index_is_degraded('ivf_obs_idx'::regclass)")
+                .unwrap()
+                .expect("index_is_degraded")
+        };
+        assert!(!degraded_sql(), "healthy IVF index must not report degraded");
+
+        // Force the safety-net degradation: set ivf_degraded = 1 in
+        // place, KEEPING lists (so index_was_ivf() stays true). This
+        // is exactly what write_meta_shrink_in_place does if ever
+        // called on an IVF index.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_obs_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_set_degraded(rel);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        // The queryable signal now reports degraded.
+        assert!(
+            degraded_sql(),
+            "index_is_degraded() must report a degraded IVF index"
+        );
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert!(meta.is_degraded(), "meta.is_degraded() must be true");
+            assert!(
+                meta.index_was_ivf(),
+                "lists is preserved so the index is still recognisably IVF-built"
+            );
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // The degraded index still returns correct results (flat
+        // fallback) and emits the WARNING on scan (not asserted on
+        // here, but exercised so it doesn't panic).
+        let query = "(SELECT emb FROM ivf_obs WHERE id = 800)";
+        let res: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    &format!("SELECT id FROM ivf_obs ORDER BY emb <=> {query} LIMIT 10"),
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(res.len(), 10, "degraded index still returns top-10 (flat)");
+        assert_distinct_ids(&res);
+        assert!(res.contains(&800), "flat fallback must find the query row");
     }
 
     // ---- IVF-3: probes-widening iterative scan ----

@@ -44,7 +44,12 @@
 //!  256     4  coarse_count  (u32)                     |
 //!  260     4  cell_dir_first (BlockNumber)            |
 //!  264     4  cell_dir_count (u32)                    |
-//!  268   ...  reserved (zero)                         /
+//!  268     1  ivf_degraded (u8) 1 = was-IVF, now flat |  v4 (E-2)
+//!  269     3  reserved (zero)                         |
+//!  272     4  tombstone_first (BlockNumber)           |  v4 (E-2)
+//!  276     4  tombstone_count (u32)                   |
+//!  280     8  tombstone_bytes (u64)                   |
+//!  288   ...  reserved (zero)                         /
 //! ```
 //!
 //! After the meta block come three contiguous page chains for
@@ -223,6 +228,28 @@ pub struct MetaPageData {
     pub cell_dir_first: u32,
     /// Number of pages in the cell-directory chain.
     pub cell_dir_count: u32,
+
+    // ---- v4 E-2 fields (VACUUM survival / observability) ----
+    /// Set to `true` when an index that was BUILT `WITH (lists > 0)`
+    /// has degraded to a flat scan (its coarse/cell metadata was
+    /// invalidated). With the tombstone-vacuum path this should never
+    /// trip for IVF; it remains a loud, queryable safety-net signal
+    /// for any path that still blanks the IVF chains (and for the flat
+    /// `lists == 0` swap-remove path it is always `false`). Default
+    /// `false` on every pre-E-2 v4 index, which reads as "not
+    /// degraded" — the backward-compat path.
+    pub ivf_degraded: bool,
+    /// First block of the per-slot tombstone bitmap chain. `0` when no
+    /// rows have been deleted from an IVF index yet (or for flat
+    /// indexes, which swap-remove instead of tombstone). One bit per
+    /// slot, LSB-first; bit set ⇒ slot is dead and excluded from the
+    /// scan mask.
+    pub tombstone_first: u32,
+    /// Number of pages in the tombstone chain.
+    pub tombstone_count: u32,
+    /// Byte length of the tombstone bitmap (`ceil(n_vectors / 8)`).
+    /// `0` ⇒ no tombstones (all slots live).
+    pub tombstone_bytes: u64,
 }
 
 impl MetaPageData {
@@ -346,6 +373,10 @@ impl MetaPageData {
             coarse_count: 0,
             cell_dir_first: 0,
             cell_dir_count: 0,
+            ivf_degraded: false,
+            tombstone_first: 0,
+            tombstone_count: 0,
+            tombstone_bytes: 0,
         }
     }
 
@@ -448,6 +479,7 @@ impl MetaPageData {
             + self.rotation_count
             + self.coarse_count
             + self.cell_dir_count
+            + self.tombstone_count
     }
 
     /// Serialise the meta header (no PG page header) to a
@@ -500,6 +532,15 @@ impl MetaPageData {
         out[v4_base + 8..v4_base + 12].copy_from_slice(&self.coarse_count.to_le_bytes());
         out[v4_base + 12..v4_base + 16].copy_from_slice(&self.cell_dir_first.to_le_bytes());
         out[v4_base + 16..v4_base + 20].copy_from_slice(&self.cell_dir_count.to_le_bytes());
+        // v4 E-2 fields begin at v4_base + 20 = 244 (page offset 268):
+        // ivf_degraded (1 byte) + 3 reserved + tombstone first/count
+        // (u32 each) + tombstone_bytes (u64).
+        let e2_base = v4_base + 20;
+        out[e2_base] = u8::from(self.ivf_degraded);
+        // out[e2_base + 1 .. e2_base + 4] reserved (zero)
+        out[e2_base + 4..e2_base + 8].copy_from_slice(&self.tombstone_first.to_le_bytes());
+        out[e2_base + 8..e2_base + 12].copy_from_slice(&self.tombstone_count.to_le_bytes());
+        out[e2_base + 12..e2_base + 20].copy_from_slice(&self.tombstone_bytes.to_le_bytes());
         // Trailing bytes reserved (zero).
         out
     }
@@ -566,6 +607,10 @@ impl MetaPageData {
             coarse_count: 0,
             cell_dir_first: 0,
             cell_dir_count: 0,
+            ivf_degraded: false,
+            tombstone_first: 0,
+            tombstone_count: 0,
+            tombstone_bytes: 0,
         };
 
         if version >= 2 {
@@ -627,6 +672,23 @@ impl MetaPageData {
                 u32::from_le_bytes(bytes[v4_base + 12..v4_base + 16].try_into().unwrap());
             me.cell_dir_count =
                 u32::from_le_bytes(bytes[v4_base + 16..v4_base + 20].try_into().unwrap());
+            // v4 E-2 fields (offset 244..264). Additive: a pre-E-2 v4
+            // meta has these bytes zeroed (the page is always
+            // PAYLOAD_BYTES long), which reads as ivf_degraded=false +
+            // no tombstones — the backward-compat path, no REINDEX. We
+            // only decode them when the buffer is long enough; a short
+            // test buffer (>=244, <264) leaves them at the struct
+            // default of 0/false.
+            let e2_base = v4_base + 20; // 244
+            if bytes.len() >= e2_base + 20 {
+                me.ivf_degraded = bytes[e2_base] != 0;
+                me.tombstone_first =
+                    u32::from_le_bytes(bytes[e2_base + 4..e2_base + 8].try_into().unwrap());
+                me.tombstone_count =
+                    u32::from_le_bytes(bytes[e2_base + 8..e2_base + 12].try_into().unwrap());
+                me.tombstone_bytes =
+                    u64::from_le_bytes(bytes[e2_base + 12..e2_base + 20].try_into().unwrap());
+            }
         }
 
         Ok(me)
@@ -714,6 +776,30 @@ impl MetaPageData {
     pub fn has_ivf(&self) -> bool {
         self.version >= 4 && self.lists > 0
     }
+
+    /// Returns `true` when this index was BUILT as an IVF index
+    /// (`lists > 0` recorded on the meta page), regardless of whether
+    /// it is currently serving IVF scans. With the tombstone-vacuum
+    /// path (Phase E-2) an IVF index keeps `lists > 0` and stays IVF
+    /// across a VACUUM, so this equals [`Self::has_ivf`] in the
+    /// healthy case. It diverges only when a degrade-to-flat safety
+    /// net fired (then `lists > 0` but [`Self::is_degraded`] is
+    /// `true`). Used by the scan-time degradation WARNING and the
+    /// `turbovec.index_is_degraded()` operator function.
+    pub fn index_was_ivf(&self) -> bool {
+        self.version >= 4 && self.lists > 0
+    }
+
+    /// Returns `true` when an index built `WITH (lists > 0)` is no
+    /// longer serving IVF scans — i.e. it has silently degraded to a
+    /// flat O(n) scan. This is the queryable signal for the
+    /// production latency-cliff landmine: an operator can detect a
+    /// degraded index and `REINDEX` it. With tombstone vacuums this
+    /// is always `false` for a healthy IVF index; it only trips if a
+    /// fallback path explicitly set `ivf_degraded`.
+    pub fn is_degraded(&self) -> bool {
+        self.index_was_ivf() && (self.ivf_degraded || !self.has_ivf())
+    }
 }
 
 #[cfg(test)]
@@ -787,6 +873,68 @@ mod tests {
                 + back.blocked_count
                 + back.rotation_count,
         );
+    }
+
+    #[test]
+    fn round_trip_meta_v4_e2_tombstone_and_degraded() {
+        // E-2 additive fields (ivf_degraded + tombstone chain) must
+        // round-trip and default to a healthy state.
+        let dim: u32 = 64;
+        let lists: u32 = 16;
+        let n: u64 = 4096;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta =
+            MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        let coarse_bytes = u64::from(lists) * u64::from(dim) * 4;
+        let cell_dir_bytes = u64::from(lists) * 12;
+        meta.set_ivf_chains(lists, coarse_bytes, cell_dir_bytes);
+        // Defaults: healthy, no tombstones.
+        assert!(!meta.ivf_degraded);
+        assert_eq!(meta.tombstone_bytes, 0);
+        assert!(!meta.is_degraded());
+        assert!(meta.index_was_ivf());
+        // Now stamp a tombstone chain + the degraded flag and
+        // round-trip them.
+        meta.tombstone_first = meta.total_blocks();
+        meta.tombstone_bytes = n.div_ceil(8);
+        meta.tombstone_count = MetaPageData::byte_pages_needed(meta.tombstone_bytes);
+        meta.ivf_degraded = true;
+        let buf = meta.encode();
+        let back = MetaPageData::decode(&buf).expect("decode");
+        assert_eq!(meta, back);
+        assert!(back.ivf_degraded);
+        assert_eq!(back.tombstone_first, meta.tombstone_first);
+        assert_eq!(back.tombstone_bytes, n.div_ceil(8));
+        assert_eq!(back.tombstone_count, meta.tombstone_count);
+        // is_degraded combines "was IVF" with the flag.
+        assert!(back.is_degraded());
+    }
+
+    #[test]
+    fn flat_index_is_never_degraded() {
+        // A flat (lists = 0) index can't "degrade" — it was never IVF.
+        let mut meta = MetaPageData::plan(4, 64, 1000, 1);
+        meta.ivf_degraded = true; // even with the flag forced
+        assert!(!meta.index_was_ivf());
+        assert!(!meta.is_degraded());
+    }
+
+    #[test]
+    fn degraded_via_blanked_lists_reads_not_degraded() {
+        // If a path blanks lists to 0 (the pre-E-2 behaviour), the
+        // index reads as flat (not IVF, not degraded) — still correct,
+        // just no longer recognisable as IVF-built. The E-2 safety net
+        // KEEPS lists + sets ivf_degraded so is_degraded() is true.
+        let dim: u32 = 64;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta =
+            MetaPageData::plan_with_blocked(4, dim, 4096, 9, 200_000, 781, rotation_bytes);
+        meta.set_ivf_chains(16, u64::from(16u32) * u64::from(dim) * 4, 16 * 12);
+        assert!(meta.is_degraded() == false && meta.has_ivf());
+        // Blank lists (pre-E-2): flat, not degraded.
+        meta.lists = 0;
+        assert!(!meta.index_was_ivf());
+        assert!(!meta.is_degraded());
     }
 
     #[test]

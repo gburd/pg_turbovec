@@ -1238,11 +1238,23 @@ pub(crate) unsafe fn read_ids_only(rel: pg_sys::Relation, meta: &MetaPageData) -
 }
 
 /// Rewrite the meta page in place with a smaller `n_vectors` and
-/// a bumped `am_version`. Used by `ambulkdelete` after walking the
-/// page chains and swap-removing dead rows. The chain offsets
-/// (`codes_first`, `scales_first`, `ids_first`, `rows_per_*_page`,
-/// `stride_bytes`) are preserved so existing on-disk row positions
-/// remain valid for survivors.
+/// a bumped `am_version`. Used by `ambulkdelete`'s FLAT path after
+/// walking the page chains and swap-removing dead rows. The chain
+/// offsets (`codes_first`, `scales_first`, `ids_first`,
+/// `rows_per_*_page`, `stride_bytes`) are preserved so existing
+/// on-disk row positions remain valid for survivors.
+///
+/// **IVF indexes do NOT use this path.** Swap-remove moves the global
+/// last slot into a deleted hole, which crosses cell boundaries and
+/// breaks the cell directory's contiguity invariant — that is the
+/// Phase E-2 degradation landmine. The IVF VACUUM path instead
+/// tombstones dead slots via [`write_tombstones_and_meta`], leaving
+/// `n_vectors` and the cell layout untouched. This function is kept
+/// for the flat (`lists == 0`) path and as a documented last-resort
+/// safety net; if ever called on an IVF index it preserves `lists`
+/// and the IVF chain offsets and flips `ivf_degraded` so the
+/// degradation is observable (`is_degraded()` true) rather than
+/// silent.
 ///
 /// `*_count` fields are recomputed from the new `n_vectors` for
 /// consistency, but readers ignore them — they walk the chain by
@@ -1299,19 +1311,17 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
         // rotation_count / rotation_dim intact. Readers still
         // get the persisted rotation back even after a vacuum.
         //
-        // IVF-1: a swap-remove vacuum shuffles slot order, which
-        // breaks the cell-contiguity invariant the cell directory
-        // encodes. Blank the v4 IVF fields so the index degrades to
-        // flat (lists = 0) until the next full rewrite re-clusters.
-        // The IVF-1 scan path is flat regardless, so this is purely
-        // forward-looking hygiene for IVF-2; the stale coarse / cell
-        // chains are left on disk (mid-file gaps) and reclaimed by
-        // the next write_full_with_prepared_ivf.
-        lists: 0,
-        coarse_first: 0,
-        coarse_count: 0,
-        cell_dir_first: 0,
-        cell_dir_count: 0,
+        // IVF (Phase E-2): the swap-remove path only runs for FLAT
+        // indexes now (`lists == 0`); the IVF path tombstones instead
+        // of swap-removing, preserving cell contiguity (see
+        // `vacuum.rs`). If this is ever called on an IVF index as a
+        // last-resort safety net, we DELIBERATELY KEEP `lists` and the
+        // coarse/cell chain offsets so the degradation is observable
+        // (`index_was_ivf()` stays true) and flip `ivf_degraded` so
+        // `is_degraded()` reports the latency cliff to the operator,
+        // rather than silently blanking the IVF identity. The scan
+        // path treats `ivf_degraded` as "take the flat fallback".
+        ivf_degraded: old.index_was_ivf(),
         ..*old
     };
     write_meta(rel, &new_meta);
@@ -1504,6 +1514,109 @@ pub(crate) unsafe fn read_cell_directory(
     Some(CellDirectory::decode(&bytes, lists))
 }
 
+/// Read the v4 E-2 tombstone bitmap (one bit per slot, LSB-first;
+/// bit set ⇒ slot is dead). Returns an empty vector when the index
+/// has no tombstone chain (`tombstone_bytes == 0`), i.e. nothing has
+/// been deleted yet — callers treat that as "all slots live".
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_tombstones(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<u8> {
+    if meta.tombstone_bytes == 0 || meta.tombstone_first == 0 || meta.tombstone_count == 0 {
+        return Vec::new();
+    }
+    read_chain(
+        rel,
+        meta.tombstone_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        meta.tombstone_bytes,
+    )
+}
+
+/// Append-or-rewrite the per-slot tombstone bitmap chain at the END
+/// of the relation, then rewrite the meta page LAST so it points at
+/// the new chain. Used by the IVF VACUUM path (`vacuum.rs`) to mark
+/// dead slots WITHOUT moving any rows, so the cell-contiguous layout
+/// and the cell directory stay valid and the index keeps serving IVF
+/// scans (`has_ivf()` stays true).
+///
+/// `bitmap` is `ceil(n_vectors / 8)` bytes. The chain is laid out
+/// after every existing chain (it's the last thing in the file), so
+/// it never disturbs the codes/scales/ids/coarse/cell-dir chains.
+/// On a repeat vacuum we reuse the existing chain blocks in place
+/// when they're big enough, extending only if the bitmap grew (it
+/// never does for a fixed `n_vectors`, but a re-cluster could change
+/// it). `new_am_version` drives the per-backend cache freshness
+/// check so the next scan re-reads the bitmap.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_tombstones_and_meta(
+    rel: pg_sys::Relation,
+    old: &MetaPageData,
+    bitmap: &[u8],
+    new_am_version: u32,
+) {
+    let tombstone_bytes = bitmap.len() as u64;
+    let tombstone_count = MetaPageData::byte_pages_needed(tombstone_bytes);
+    // The tombstone chain is the last chain in the file. Its first
+    // block is whatever the existing tombstone chain already used
+    // (reuse in place) or, on the first vacuum, the first free block
+    // after every other chain.
+    let after_all_other_chains = 1
+        + old.codes_count
+        + old.scales_count
+        + old.ids_count
+        + old.blocked_count
+        + old.rotation_count
+        + old.coarse_count
+        + old.cell_dir_count;
+    let tombstone_first = if old.tombstone_first != 0 {
+        old.tombstone_first
+    } else {
+        after_all_other_chains
+    };
+
+    // Ensure the relation has room for the chain before we write the
+    // meta page that references it.
+    let needed_total = tombstone_first + tombstone_count;
+    if nblocks(rel) < needed_total {
+        extend_to(rel, needed_total);
+    }
+
+    // Write the bitmap as a flat byte chain (stride 1, PAYLOAD_BYTES
+    // rows/page), same shape as the blocked / rotation / coarse
+    // chains.
+    if tombstone_bytes > 0 {
+        write_chain_at(
+            rel,
+            tombstone_first,
+            bitmap,
+            1,
+            crate::index::page::PAYLOAD_BYTES as u32,
+            tombstone_bytes,
+        );
+    }
+
+    // Meta page LAST (atomic-complete signal). We KEEP every IVF
+    // field intact (lists, coarse/cell chains) so the index stays
+    // IVF; we only stamp the tombstone chain offsets + the bumped
+    // am_version. ivf_degraded stays false: a tombstoned IVF index is
+    // healthy, just carrying some dead space until the next REINDEX.
+    let new_meta = MetaPageData {
+        am_version: new_am_version,
+        tombstone_first,
+        tombstone_count,
+        tombstone_bytes,
+        ivf_degraded: false,
+        ..*old
+    };
+    write_meta(rel, &new_meta);
+}
+
 /// Test-only helper: forge the on-disk meta-page version byte to
 /// `version`, leaving every other byte untouched. Used by the
 /// upgrade-path #[pg_test]s in `src/lib.rs` to simulate an index
@@ -1577,6 +1690,42 @@ pub(crate) unsafe fn force_meta_blank_ivf(rel: pg_sys::Relation) {
     const V4_BASE: usize = 224;
     let ivf_fields = page.cast::<u8>().add(PAGE_HEADER_BYTES + V4_BASE);
     std::ptr::write_bytes(ivf_fields, 0u8, 20);
+    pg_sys::GenericXLogFinish(state);
+    pg_sys::UnlockReleaseBuffer(buf);
+}
+
+/// Test-only helper: set the v4 E-2 `ivf_degraded` flag byte to 1 in
+/// place, KEEPING `lists` and every IVF chain offset intact. This
+/// simulates the degrade-to-flat *safety net* (the new
+/// `write_meta_shrink_in_place` behaviour for an IVF index): the
+/// index still reports `index_was_ivf() == true` and `lists > 0`,
+/// but `is_degraded()` is now true and the scan takes the flat
+/// fallback while emitting the throttled WARNING. The byte lives at
+/// payload offset `e2_base = 244` (page offset `PAGE_HEADER_BYTES +
+/// 244`).
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock and have ensured the
+/// relation has at least one block. Only compiled into the test build.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_meta_set_degraded(rel: pg_sys::Relation) {
+    assert!(
+        nblocks(rel) > 0,
+        "force_meta_set_degraded: relation has no blocks"
+    );
+    let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
+    let state = pg_sys::GenericXLogStart(rel);
+    let page = pg_sys::GenericXLogRegisterBuffer(
+        state,
+        buf,
+        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+    );
+    // E-2 fields begin at payload offset 244 (ivf_degraded is the
+    // first byte).
+    const E2_BASE: usize = 244;
+    let degraded_byte = page.cast::<u8>().add(PAGE_HEADER_BYTES + E2_BASE);
+    *degraded_byte = 1u8;
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
 }

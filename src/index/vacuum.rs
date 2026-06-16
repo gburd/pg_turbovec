@@ -32,6 +32,24 @@
 //!
 //! Cost: O(deleted) page writes + 1 meta write + 1 truncate, vs.
 //! the old O(total) full rewrite. WAL volume scales the same way.
+//!
+//! ## IVF indexes tombstone instead of swap-removing (Phase E-2)
+//!
+//! Swap-remove moves the global last live slot into a deleted hole.
+//! For an IVF index (`lists > 0`) the codes/scales/ids chains are
+//! cell-contiguous, so that move crosses cell boundaries and breaks
+//! the cell directory's `[code_offset .. +n_vectors)` partition. The
+//! pre-E-2 code blanked the v4 IVF meta fields after a swap-remove,
+//! silently degrading the index to an O(n) flat scan — a production
+//! latency landmine for a churning index.
+//!
+//! The IVF path instead leaves every row in place, leaves
+//! `n_vectors` and the cell directory untouched, and ORs the dead
+//! slots into a persisted per-slot tombstone bitmap (a new v4-additive
+//! chain). Cells stay contiguous, the directory stays valid,
+//! `has_ivf()` stays true, and the scan masks the tombstoned slots
+//! out of its cell-restriction mask so dead rows are never returned.
+//! A REINDEX compacts the dead space. See `docs/PRODUCTION.md`.
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
@@ -102,7 +120,34 @@ unsafe fn ambulkdelete_relfile(
         return stats;
     }
 
-    // Pass 2: swap-remove from the back. dead_slots is built in
+    // Phase E-2: IVF indexes TOMBSTONE instead of swap-removing.
+    //
+    // Swap-remove (the flat path below) moves the global last live
+    // slot into a deleted hole. For an IVF index the slots are
+    // cell-contiguous, so that move crosses cell boundaries and
+    // breaks the cell directory's `[code_offset .. +n_vectors)`
+    // partition. The pre-E-2 code "fixed" this by blanking the v4
+    // IVF meta fields, silently degrading the index to an O(n) flat
+    // scan — a production latency landmine for a churning index.
+    //
+    // Instead we leave every row exactly where it is, leave
+    // `n_vectors` and the cell directory untouched, and OR the newly
+    // dead slots into a persisted per-slot tombstone bitmap. The
+    // cells stay contiguous, the directory stays valid, `has_ivf()`
+    // stays true, and the scan masks the tombstoned slots out. A
+    // future REINDEX compacts the dead space.
+    if meta.has_ivf() {
+        let next_version = meta.am_version.saturating_add(1);
+        let total_dead = ivf_tombstone_dead(index, &meta, &dead_slots, next_version);
+        // n_vectors is unchanged (dead rows stay on disk as
+        // tombstones); report the live count for the planner.
+        let live = meta.n_vectors.saturating_sub(total_dead);
+        (*stats).num_index_tuples = live as f64;
+        (*stats).tuples_removed += dead_count as f64;
+        return stats;
+    }
+
+    // Pass 2 (FLAT path only): swap-remove from the back. dead_slots is built in
     // ascending order (we walked slot 0..n); reverse-iterate to
     // process highest-index dead first. This invariant lets us
     // copy from `alive - 1` (which is always either an unmoved
@@ -171,6 +216,45 @@ unsafe fn ambulkdelete_relfile(
     (*stats).num_index_tuples = new_n as f64;
     (*stats).tuples_removed += dead_count as f64;
     stats
+}
+
+/// IVF tombstone path (Phase E-2). Reads any existing tombstone
+/// bitmap, ORs in the `dead_slots` (slot indices into the
+/// cell-contiguous chains), and persists the merged bitmap via
+/// [`relfile::write_tombstones_and_meta`] — without moving a single
+/// row or touching `n_vectors`, the cell directory, or the coarse
+/// centroids. The index stays IVF across the VACUUM.
+///
+/// Returns the TOTAL number of tombstoned (dead) slots after the
+/// merge, so the caller can report the live count
+/// (`n_vectors - total_dead`) to the planner.
+///
+/// # Safety
+///
+/// Caller holds an exclusive relation lock (VACUUM does).
+unsafe fn ivf_tombstone_dead(
+    index: pg_sys::Relation,
+    meta: &MetaPageData,
+    dead_slots: &[usize],
+    new_am_version: u32,
+) -> u64 {
+    // One bit per slot, LSB-first. ceil(n_vectors / 8) bytes.
+    let n_bytes = (meta.n_vectors as usize).div_ceil(8);
+    let mut bitmap = relfile::read_tombstones(index, meta);
+    if bitmap.len() < n_bytes {
+        // First vacuum (empty) or a grown corpus: size up, preserving
+        // any bits already set.
+        bitmap.resize(n_bytes, 0u8);
+    }
+    for &slot in dead_slots {
+        if slot >= meta.n_vectors as usize {
+            continue; // defensive: ignore out-of-range slot
+        }
+        bitmap[slot / 8] |= 1u8 << (slot % 8);
+    }
+    let total_dead: u64 = bitmap.iter().map(|b| b.count_ones() as u64).sum();
+    relfile::write_tombstones_and_meta(index, meta, &bitmap, new_am_version);
+    total_dead
 }
 
 /// `amvacuumcleanup`: nothing to do beyond what `ambulkdelete`

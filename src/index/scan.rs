@@ -17,6 +17,51 @@ use crate::index::{mmap_static, relfile};
 use crate::kernels;
 use crate::vec::Vector;
 
+thread_local! {
+    /// Index oids this backend has already warned about being
+    /// degraded (Phase E-2). Throttles the scan-time WARNING to once
+    /// per backend per index so a churning deployment gets a clear
+    /// signal without flooding the log on every query.
+    static DEGRADED_WARNED: std::cell::RefCell<HashSet<pg_sys::Oid>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// Emit a throttled WARNING that an IVF index has degraded to a flat
+/// O(n) scan (Phase E-2). Fires at most once per backend per index.
+///
+/// # Safety
+///
+/// `rel` must be a live index relation reference.
+unsafe fn warn_index_degraded(rel: pg_sys::Relation, indexrelid: pg_sys::Oid) {
+    let already = DEGRADED_WARNED.with(|s| !s.borrow_mut().insert(indexrelid));
+    if already {
+        return;
+    }
+    let name = {
+        let rd_rel = (*rel).rd_rel;
+        if rd_rel.is_null() {
+            "<unknown>".to_string()
+        } else {
+            // relname is a NameData (fixed-size, NUL-terminated char
+            // array). RelationGetRelationName is a C macro
+            // (NameStr(rel->rd_rel->relname)) with no FFI binding, so
+            // read the field directly.
+            let name_ptr = std::ptr::addr_of!((*rd_rel).relname) as *const std::os::raw::c_char;
+            std::ffi::CStr::from_ptr(name_ptr)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    ereport!(
+        PgLogLevel::WARNING,
+        PgSqlErrorCode::ERRCODE_WARNING,
+        format!(
+            "turbovec index \"{name}\" was built WITH (lists > 0) but has degraded to a flat scan after VACUUM"
+        ),
+        "REINDEX INDEX to restore IVF (cell-restricted) query performance. See docs/PRODUCTION.md."
+    );
+}
+
 /// Scan-private state. Lives in the scan's memory context (allocated
 /// by `palloc0` so all fields start zeroed).
 #[repr(C)]
@@ -84,9 +129,16 @@ struct IvfScanCtx {
     /// to `lists`) and doubles on each widening refill, capped at
     /// `min(max_probes, lists)`.
     probes: usize,
-    /// The current slot mask for the `probes` nearest cells. Rebuilt
+    /// The current slot mask for the `probes` nearest cells, with any
+    /// tombstoned (vacuum-deleted) slots already excluded. Rebuilt
     /// each time `probes` widens.
     mask: Vec<bool>,
+    /// Per-slot tombstone bitmap (LSB-first, bit set ⇒ slot is dead),
+    /// `ceil(n_live / 8)` bytes, or empty when no rows have been
+    /// vacuum-deleted. ANDed into every (re)built probe mask so a
+    /// tombstoned row is never scored or returned (Phase E-2). Cached
+    /// here so a probe-widening refill doesn't re-read the chain.
+    tombstones: Vec<u8>,
 }
 
 /// `ambeginscan`: allocate the IndexScanDesc and attach our opaque.
@@ -300,6 +352,17 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     return false;
                 }
             };
+            // Phase E-2: surface a silent IVF->flat degradation. An
+            // index built WITH (lists > 0) whose IVF metadata was
+            // invalidated (the pre-E-2 vacuum landmine, or any future
+            // safety-net path) scans O(n) flat instead of
+            // cell-restricted. Warn the operator ONCE per backend per
+            // index so a churning deployment notices the latency
+            // cliff instead of eating it silently. The queryable
+            // signal is `turbovec.index_is_degraded(regclass)`.
+            if m.is_degraded() {
+                warn_index_degraded((*scan).indexRelation, indexrelid);
+            }
             (m.bit_width, m.dim, m.n_vectors, m.am_version)
         };
 
@@ -642,6 +705,11 @@ unsafe fn ivf_setup_and_search(
         return None;
     }
 
+    // Phase E-2: per-slot tombstone bitmap from VACUUM. Empty when
+    // nothing has been deleted. ANDed into the probe mask below so a
+    // vacuum-deleted (tombstoned) row is never scored or returned.
+    let tombstones = relfile::read_tombstones((*scan).indexRelation, &meta);
+
     // Coarse search: normalise + rotate the query into the clustering
     // space the build used, then pick the `probes` nearest cells.
     // The build always normalises before assigning to a cell (see
@@ -655,7 +723,8 @@ unsafe fn ivf_setup_and_search(
     // Build the slot mask for the probed cells and run the
     // cell-restricted fine search. search_masked returns None for a
     // Mutable handle (slot order diverged) → flat fallback.
-    let mask = directory.probe_mask(&probed, n_live);
+    let mut mask = directory.probe_mask(&probed, n_live);
+    apply_tombstones(&mut mask, &tombstones);
     let (scores, ids) = arc.search_masked(query, k, &mask)?;
     let ctx = IvfScanCtx {
         centroids,
@@ -664,8 +733,30 @@ unsafe fn ivf_setup_and_search(
         lists,
         probes,
         mask,
+        tombstones,
     };
     Some((ctx, scores, ids))
+}
+
+/// Clear (set to `false`) every mask slot whose tombstone bit is set,
+/// so a vacuum-deleted row never contributes to the top-k. `tombstones`
+/// is the LSB-first per-slot bitmap (`bit set ⇒ dead`); an empty slice
+/// means no rows have been deleted and the mask is left unchanged.
+/// Phase E-2.
+#[inline]
+fn apply_tombstones(mask: &mut [bool], tombstones: &[u8]) {
+    if tombstones.is_empty() {
+        return;
+    }
+    for (slot, m) in mask.iter_mut().enumerate() {
+        if !*m {
+            continue;
+        }
+        let byte = slot / 8;
+        if byte < tombstones.len() && (tombstones[byte] >> (slot % 8)) & 1 != 0 {
+            *m = false;
+        }
+    }
 }
 
 /// Append the candidates in `(scores, ids)` that haven't already been
@@ -759,6 +850,7 @@ unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
                 new_probes,
             );
             ctx.mask = ctx.directory.probe_mask(&probed, n_live);
+            apply_tombstones(&mut ctx.mask, &ctx.tombstones);
             ctx.probes = new_probes;
         }
         // Grow k within the (possibly wider) cell set so the extra

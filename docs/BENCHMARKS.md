@@ -254,8 +254,12 @@ pre-filter) its per-query `O(n·d)` cost shrinks proportionally.
 > measurement** (see [AVX2 latency frontier](#avx2-latency-frontier-arnold-i9-12900h)
 > for the flat-scan frontier). The IVF warm-p50 latency win is now confirmed on
 > AVX2 (see [IVF warm-p50](#ivf-warm-p50-avx2-floki--the-latency-win-confirmed)
-> — ~5× vs full scan at `probes = 16`); a full isolated 1M+ × 1024-d sweep on a
-> quiet `arnold` window remains **TODO** (`arnold` was contended). The
+> — ~5× vs full scan at `probes = 16`), and the isolated head-to-head vs HNSW
+> and ivfflat is now measured at 500k × 1024-d on a quiet `arnold` window (see
+> [IVF latency frontier at scale](#ivf-latency-frontier-at-scale-head-to-head-vs-hnsw--ivfflat-avx2)
+> — at recall@10 ≥ 0.95, IVF p50 = 18.5 ms vs HNSW 7.9 ms; IVF wins the ≥ 0.99
+> tail). 1M+ IVF builds are **blocked on out-of-core build (Phase B-4)** — the
+> build OOMs at 1M on a 31 GiB host. The
 > `blocks_skipped_by_mask` fraction below is the CPU-independent proxy for that
 > latency win: a query that skips F% of the corpus's 32-vector blocks does
 > proportionally less scan work.
@@ -331,6 +335,117 @@ of the `arnold` run); indicative, not a published frontier.
 
 Artefact: [`benches/results/ivf_warmp50_floki_avx2_2026-06-16.json`](../benches/results/ivf_warmp50_floki_avx2_2026-06-16.json).
 
+## IVF latency frontier at scale, head-to-head vs HNSW + ivfflat (AVX2)
+
+> **Phase A-2 — the measurement that answers "does IVF beat/equal HNSW at
+> scale?"** IVF had only ever been measured at 200k in-process; this is the
+> first isolated, contention-gated head-to-head against pgvector HNSW and
+> ivfflat on the same corpus, same held-out queries, same brute-force GT.
+
+Host `arnold` (i9-12900H, **AVX2**, 20 logical CPUs, 31 GiB RAM), v1.11.0
+release build, isolated per the v1.9.1 protocol: postmaster + driver pinned
+`taskset -c 2-5` (off kernel/IRQ cores 0-1 and the user's load), per-batch
+contention sampling (loadavg / cpu busy-iowait-steal / free RAM), >3×-median
+outlier filtering, warm cache (20 throwaway queries), **300 timed queries per
+config**, server-side `Execution Time` from `EXPLAIN ANALYZE` as the latency
+basis. Corpus: **Cohere-wiki 500k × 1024-d** (cosine), 1000 fresh held-out
+queries (ids ≥ 1,000,000, NOT corpus members), exact-cosine GT recomputed
+against the 500k subset via BLAS (verified 1.000 overlap vs pgvector seqscan).
+Observed 1-min load stayed 1.0–1.6 throughout; **no batch was flagged
+contended** (gate 2.0), zero steal.
+
+**Why 500k and not 1M:** the IVF `lists>0` **build** is not yet out-of-core
+(Phase B-4). At 1M × 1024-d it accumulates the full flat corpus (~4 GiB) plus
+a permuted copy (~4 GiB) plus the k-means GEMM working set — a ~14 GiB peak
+backend RSS that **OOM-killed the postmaster** on this 31 GiB host (twice,
+at both 4 GiB and 1 GiB `maintenance_work_mem` — the peak is structural, not
+bounded by `maintenance_work_mem`). 500k builds comfortably (~2.8 GiB peak).
+**This is itself a finding: the IVF query path works at 1M; the IVF build
+caps the buildable corpus on a 31 GiB host at ~500k–600k until Phase B-4
+(streaming build) lands.** 5M is **blocked on B-4**.
+
+### Recall-vs-p50 frontier (500k × 1024-d, AVX2, warm, isolated)
+
+| Engine | Config | recall@10 | warm p50 | p95 | p99 | QPS (1 conn) |
+|---|---|---:|---:|---:|---:|---:|
+| pgvector HNSW | ef=40  | 0.839 | 28.2 ms† | 85.5 | 111.2 | 30 |
+| pgvector HNSW | ef=100 | 0.930 | 8.9 ms | 20.1 | 23.2 | 104 |
+| pgvector HNSW | **ef=200** | **0.966** | **7.9 ms** | 15.8 | 19.7 | 120 |
+| pgvector HNSW | ef=400 | 0.983 | 9.6 ms | 17.2 | 20.6 | 99 |
+| pg_turbovec IVF | probes=32 | 0.918 | 17.3 ms | 22.0 | 28.9 | 55 |
+| pg_turbovec IVF | **probes=64** | **0.960** | **18.5 ms** | 28.8 | 29.6 | 51 |
+| pg_turbovec IVF | probes=128 | 0.986 | 20.9 ms | 32.9 | 35.2 | 45 |
+| pg_turbovec IVF | probes=256 | 0.990 | 25.3 ms | 36.9 | 41.7 | 37 |
+| pg_turbovec IVF | probes=707 (=lists) | 1.000 | 41.4 ms | 54.7 | 57.8 | 23 |
+| pg_turbovec flat | all cells | 1.000 | 41.4 ms | 43.5 | 44.8 | 24 |
+| pgvector ivfflat | probes=10 | 0.796 | 13.8 ms | 20.4 | 31.4 | 70 |
+| pgvector ivfflat | probes=50 | 0.942 | 60.1 ms | 73.2 | 80.0 | 17 |
+| pgvector ivfflat | probes=100 | 0.978 | 117.4 ms | 133.2 | 137.4 | 9 |
+| pgvector ivfflat | probes=200 | 0.994 | 227.2 ms | 248.3 | 256.3 | 4 |
+
+† ef=40 p50 is inflated by cold-graph warmup outliers (17 dropped; filtered
+p50 = 25.7 ms); recall is the honest read at this ef.
+
+### Headline — at recall@10 ≥ 0.95 (min-p50 config per engine)
+
+| Engine | Config | recall@10 | **warm p50** |
+|---|---|---:|---:|
+| **pgvector HNSW** | ef=200 | 0.966 | **7.9 ms** |
+| **pg_turbovec IVF** | probes=64 | 0.960 | **18.5 ms** |
+| pgvector ivfflat | probes=100 | 0.978 | 117.4 ms |
+| pg_turbovec flat (exact) | all cells | 1.000 | 41.4 ms |
+
+**Verdict (brutally honest): at matched recall@10 ≈ 0.96, HNSW wins — its
+warm p50 is 7.9 ms vs IVF's 18.5 ms, a ~2.3× advantage.** IVF does NOT beat
+HNSW on warm p50 at the 0.95 operating point. But the result is far better
+than the worst case: **IVF lands squarely in HNSW's order of magnitude (tens
+of ms, not hundreds), the `turbovec.probes` dial behaves exactly as designed
+(monotone recall, smooth p50 ramp 17→41 ms), and IVF crushes ivfflat at every
+matched recall** (18.5 ms vs ~80–117 ms at 0.96–0.98) and beats its own flat
+exact scan (18.5 ms vs 41.4 ms). The speculative "~40 ms projection" was
+pessimistic: real IVF p50 at 0.95 recall is **18.5 ms**.
+
+**Where IVF wins:** the high-recall tail. **HNSW (m=16, efc=64) never
+reaches recall@10 = 0.99 on this corpus** (ef=400 tops out at 0.983), whereas
+**IVF reaches 0.99 at probes=256 in 25.3 ms** and 1.000 at probes=707 in
+41.4 ms. For workloads that need ≥ 0.99 recall, IVF is both faster and higher-
+recall than this HNSW configuration, and dramatically faster than ivfflat
+(227 ms at 0.99). Plus IVF stays **~7.5× smaller on disk** (518 MB vs
+3902 MB HNSW / 3912 MB ivfflat).
+
+**Probes calibration on this corpus:** IVF crosses **recall@10 = 0.95 at
+probes ≈ 56–64** (p50 ≈ 18 ms) and **recall@10 = 0.99 at probes ≈ 256**
+(p50 ≈ 25 ms).
+
+### Build time + storage at 500k (single-thread, `taskset -c 2-5`, pg17)
+
+| Index | Build wall-clock | `maintenance_work_mem` | Size | vs HNSW |
+|---|---:|---:|---:|---:|
+| pg_turbovec IVF (lists=707, 4-bit) | 6:21 (381 s) | 1 GiB | **518 MB** | 7.5× smaller |
+| pgvector HNSW (m=16, efc=64) | 4:13 (254 s) | 4 GiB | 3902 MB | — |
+| pgvector ivfflat (lists=707) | 1:07 (67 s) | 2 GiB | 3912 MB | 7.6× larger than IVF |
+
+The fast k-means (v1.11.0, ~7.8× faster than the prior path) made the IVF
+build feasible at all — the v1.9.0 build of the 1M index was killed after
+54 minutes. At 500k the k-means + assignment completes in 6:21 single-
+threaded on 4 pinned cores. (Table: 7106 MB incl. TOAST.)
+
+Artefact: [`benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json`](../benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json)
+— full 19-config sweep matrix + per-config contention metadata + build/storage
+block + the 1M-build OOM finding.
+
+### The IVF build ceiling (motivates Phase B-4)
+
+**IVF build OOMs at 1M on a 31 GiB host because the build is not out-of-core.**
+The `ivf_build_and_write` path in `src/index/build.rs` holds the entire flat
+corpus *and* a permuted copy in RAM simultaneously before quantization; peak
+RSS ≈ 2 × (n × dim × 4 B) + GEMM scratch. On `arnold` the largest IVF index
+that built successfully was **500k** (~2.8 GiB peak); 1M (~14 GiB peak) was
+OOM-killed. `maintenance_work_mem` does not help — the accumulation is
+structural. This directly motivates **Phase B-4 (streaming / out-of-core
+build)**, without which 1M+ IVF builds require a larger-RAM host. The query
+path is unaffected and works at 1M.
+
 ## Caveats
 
 - **Single host, pre-AVX2 CPU.** `meh` is an Ivy Bridge Xeon (`avx`, no
@@ -357,6 +472,9 @@ Artefact: [`benches/results/ivf_warmp50_floki_avx2_2026-06-16.json`](../benches/
 - **No competitor beyond pgvector.** VectorChord / pgvectorscale comparison is
   future work.
 - **10M not run** this round (budget); 1M is the priority standardized size.
+  **5M / 1M IVF blocked on Phase B-4** (out-of-core build); the IVF frontier
+  is published at 500k × 1024-d (the largest IVF index that builds on a 31 GiB
+  host) — see [IVF latency frontier at scale](#ivf-latency-frontier-at-scale-head-to-head-vs-hnsw--ivfflat-avx2).
 - **Concurrent (pgbench) QPS** not run; single-connection QPS captured for
   HNSW.
 

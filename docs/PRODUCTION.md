@@ -279,7 +279,8 @@ SELECT id FROM t ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::turbovec.vector LIMIT 1;
 ## VACUUM behavior
 
 `pg_turbovec` implements `ambulkdelete` via swap-remove on the codes /
-scales / ids chains:
+scales / ids chains (flat indexes), or via tombstoning (IVF indexes,
+`WITH (lists = N)` — see below):
 
 - Deletes shrink the index in place; no orphan pages.
 - A subsequent autovacuum run reclaims trailing pages via
@@ -294,6 +295,63 @@ scales / ids chains:
 For tables with high delete churn, schedule vacuums against the
 parent table normally. `pg_turbovec` does not have a separate
 maintenance command.
+
+### IVF indexes and VACUUM (`WITH (lists = N)`)
+
+IVF indexes store their codes in **cell-contiguous** order: each
+coarse cell occupies a contiguous slot range recorded in the cell
+directory. The flat swap-remove above would move the last slot into a
+deleted hole, crossing cell boundaries and breaking that layout.
+Before v1.10.2 the vacuum path "fixed" this by blanking the IVF
+metadata, which **silently degraded the index to an O(n) flat scan**
+— a query that took tens of milliseconds suddenly took seconds, with
+no signal to the operator. For a churning multi-million-row index
+this was a production latency landmine.
+
+**As of v1.10.2, IVF indexes survive VACUUM.** Instead of
+swap-removing, the vacuum path **tombstones** deleted slots:
+
+- The dead slot is left in place; nothing moves. `n_vectors`, the
+  cell directory, and the coarse centroids stay valid, so the index
+  keeps serving cell-restricted (fast) scans — `has_ivf()` stays
+  true.
+- The dead slot is recorded in a per-slot tombstone bitmap (a small
+  on-disk chain, ~`n_vectors / 8` bytes). At scan time the
+  tombstoned slots are masked out of the cell-restriction mask, so a
+  deleted row is **never returned**, even though its bytes remain on
+  disk until the next REINDEX.
+- Dead space accumulates with churn. A `REINDEX INDEX <name>;`
+  compacts the tombstones and re-clusters. Schedule a REINDEX when
+  the dead fraction grows large (e.g. >20-30% of rows deleted since
+  the last build) — the same cadence you would use for B-tree bloat.
+
+Flat indexes (`lists = 0`, the default) are unaffected: they still
+swap-remove, which has no contiguity invariant to protect.
+
+### Detecting a degraded IVF index
+
+With tombstone vacuums a healthy IVF index should never degrade. As a
+safety net, any path that does invalidate the IVF metadata now leaves
+the degradation **observable** instead of silent:
+
+- A throttled scan-time `WARNING` fires once per backend per index:
+  `turbovec index "<name>" was built WITH (lists > 0) but has
+  degraded to a flat scan after VACUUM` with a `HINT: REINDEX INDEX
+  ...`.
+- A queryable signal: `turbovec.index_is_degraded(regclass)` returns
+  `true` for an IVF index that has degraded to flat, `false`
+  otherwise. Poll it from monitoring:
+
+  ```sql
+  SELECT c.relname,
+         turbovec.index_is_degraded(c.oid) AS degraded
+  FROM pg_class c
+  JOIN pg_am a ON a.oid = c.relam
+  WHERE a.amname = 'turbovec';
+  ```
+
+  A `degraded = true` row means: `REINDEX INDEX <name>;` to restore
+  IVF (cell-restricted) query performance.
 
 ---
 

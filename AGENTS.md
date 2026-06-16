@@ -85,19 +85,19 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.10.0, 2026-06-16)
+### Current (as of v1.11.0, 2026-06-16)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.10.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.10.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.10.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.10.x     | 1.10.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.11.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.11.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.11.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.11.x     | 1.11.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version` is **4** as of v1.10.0 (was 3 for v1.4.0–
-v1.9.x). The bump is backward-compatible: a v1.10.0 binary reads a
-v3 index as a flat (`lists = 0`) index, so v1.4.x–v1.9.x indexes
-need **no REINDEX**. IVF is opt-in per index via `WITH (lists = N)`.
+`MetaPageData::version` is **4** (v1.10.0+); the v1.11.0 tombstone
+bitmap + `ivf_degraded` flag are additive within v4, so v1.4.x–
+v1.10.x indexes need **no REINDEX**. IVF is opt-in via
+`WITH (lists = N)`.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.

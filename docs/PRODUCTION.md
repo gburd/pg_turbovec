@@ -158,6 +158,28 @@ SET turbovec.iterative_scan = relaxed_order;  -- off | relaxed_order
 -- filters over large indexes; lower to bound worst-case scan work.
 SET turbovec.max_scan_tuples = 20000;
 
+-- IVF probe-widening cap (v1.10.0+, only for indexes built WITH
+-- (lists = N)). Under iterative_scan = relaxed_order, when a
+-- selective WHERE filter drains the cells currently probed and the
+-- executor still wants tuples, the refill WIDENS the probe set
+-- (probes, 2*probes, 4*probes, ...) and re-runs the cell-restricted
+-- search, instead of only growing k within the initial cells. This
+-- recovers true neighbours whose cell was NOT in the initial
+-- `probes` nearest set -- the failure mode plain k-growth can't fix,
+-- because those rows live in cells that were never scanned.
+-- max_probes is the IVF analogue of ivfflat.max_probes: it caps that
+-- widening at min(max_probes, lists). Clamped to lists at scan time.
+-- No effect on flat (lists = 0) or vacuum-degraded indexes (no cells
+-- to widen; they keep the k-growth refill). turbovec.max_scan_tuples
+-- still caps total candidate work as a backstop. Default 64 (8x the
+-- probes default).
+--
+-- The recall-knob model: `probes` is the primary IVF dial (it sets,
+-- and iterative refill widens, the CELL set); `search_k`/`oversample`
+-- set the candidate count WITHIN the probed cells; `max_probes` and
+-- `max_scan_tuples` are the caps on those two axes respectively.
+SET turbovec.max_probes = 64;
+
 -- Oversampling (differentiator #5): tunable recall lever. The scan
 -- fetches ceil(search_k * oversample) candidates ranked by the
 -- lossy 2-4 bit quantized distance, then the executor's reorder

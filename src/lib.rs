@@ -1050,6 +1050,18 @@ mod tests {
         assert_eq!(v, Some(4.0));
     }
 
+    #[pg_test]
+    fn max_probes_guc_round_trip() {
+        // Default is 64 (IVF-3: 8x the turbovec.probes default of 8).
+        let dflt: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.max_probes')").unwrap();
+        assert_eq!(dflt.as_deref(), Some("64"));
+        Spi::run("SET turbovec.max_probes = 128").unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.max_probes')").unwrap();
+        assert_eq!(v.as_deref(), Some("128"));
+    }
+
     /// `count(*)` and other non-orderby queries used to ERROR out
     /// of amrescan. v1.0.0-rc.3: amrescan returns an empty scan in
     /// that case so the executor can fall through to a seq scan.
@@ -5573,6 +5585,241 @@ mod tests {
             degraded.contains(&1000),
             "flat fallback must find the query row"
         );
+    }
+
+    // ---- IVF-3: probes-widening iterative scan ----
+
+    /// Build a clustered IVF corpus where `category` aligns with the
+    /// angular cluster of the embedding, so a selective `WHERE
+    /// category = X` filter targets rows that live in a *few* cells
+    /// that are angularly far from a query pointed at a *different*
+    /// cluster. This is the fixture that exercises probe-widening:
+    /// at probes=1 the scan only sees the query's own cell (no
+    /// category-X rows); widening probes reaches the category-X
+    /// cells.
+    ///
+    /// `nclust` distinct angular directions in 16-D; row `i` belongs
+    /// to cluster `i % nclust`, and `category = i % nclust` too, so
+    /// category C == cluster C. The embedding is the cluster's basis
+    /// direction (a single hot coordinate scaled per cluster) plus a
+    /// tiny per-row jitter so rows within a cluster are near but
+    /// distinct. Clusters are mutually near-orthogonal (different hot
+    /// coordinate), so cluster C is far from cluster D under cosine.
+    fn ivf3_make_clustered_corpus(table: &str, n: i64, nclust: i64) {
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint PRIMARY KEY, category int, emb vector)"
+        ))
+        .unwrap();
+        // emb[k] = (k == (i % nclust)) ? 1.0 : small jitter. The hot
+        // coordinate is the cluster id, so each cluster occupies a
+        // distinct near-orthogonal direction in the 16-D space
+        // (nclust must be <= 16). The jitter
+        // (hashtext-derived, ~+/-0.03) keeps rows within a cluster
+        // distinct without collapsing the inter-cluster separation.
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT i, (i % {nclust})::int, \
+                 ('[' || string_agg( \
+                     (CASE WHEN (k - 1) = (i % {nclust}) THEN 1.0 \
+                           ELSE (hashtext(i::text || ':' || k::text) % 100) / 1600.0 \
+                      END)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, {n}) AS gs(i), \
+                  generate_series(1, 16) AS sub(k) \
+             GROUP BY i"
+        ))
+        .unwrap();
+    }
+
+    /// IVF-3 core regression: under a selective `WHERE category = X`
+    /// filter whose matching rows live in cells NOT in the initial
+    /// `probes` nearest set, `iterative_scan = relaxed_order` must
+    /// WIDEN the probe set and return the full LIMIT, while
+    /// `iterative_scan = off` (single probe batch) under-returns.
+    /// The IVF analogue of `index_am_iterative_scan_selective_filter`.
+    #[pg_test]
+    fn ivf_iterative_widens_probes_under_filter() {
+        use_turbovec();
+        // 16 clusters over 3200 rows => 200 rows/cluster. category C
+        // == cluster C. lists = 16 so (ideally) one cell per cluster.
+        ivf3_make_clustered_corpus("ivf_w", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_w_idx ON ivf_w \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE ivf_w").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        // Query points at cluster 7's direction (a row in cluster 7),
+        // but we filter for category = 11 (cluster 11) — a DIFFERENT,
+        // angularly-far cluster. At probes=1 the scan only sees the
+        // cells nearest cluster 7; the category-11 rows are in a far
+        // cell that only a widened probe set reaches.
+        let query = "(SELECT emb FROM ivf_w WHERE id = 7)";
+        // search_k modest so a single batch can't accidentally pull
+        // the whole corpus.
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET turbovec.probes = 1").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+
+        let count_q = format!(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM ivf_w WHERE category = 11 \
+                 ORDER BY emb <=> {query} LIMIT 10 \
+             ) sub"
+        );
+
+        // off mode: single probe batch (probes=1) under-returns —
+        // the category-11 rows aren't in the one probed cell.
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        crate::cache::invalidate_all();
+        let off_count: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert!(
+            off_count.unwrap() < 10,
+            "iterative_scan=off with probes=1 should under-return on a \
+             selective filter whose matches live in an un-probed cell; \
+             got {off_count:?} (expected < 10)"
+        );
+
+        // relaxed_order: widens probes until the category-11 cell is
+        // probed and the LIMIT is satisfied.
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        crate::cache::invalidate_all();
+        let relaxed_count: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert_eq!(
+            relaxed_count,
+            Some(10),
+            "iterative_scan=relaxed_order must widen probes and return the \
+             full LIMIT under a selective filter on an un-probed cell"
+        );
+
+        // Distinct ids across the widening batches.
+        let relaxed_ids = fetch_ids(&format!(
+            "SELECT id FROM ivf_w WHERE category = 11 \
+             ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_distinct_ids(&relaxed_ids);
+        // Every returned row really is category 11 (the executor
+        // applies the filter, but assert it to catch any mask /
+        // dedup bug that smuggled a wrong-cell row through).
+        for id in &relaxed_ids {
+            assert_eq!(
+                id % 16,
+                11,
+                "widened scan returned a non-category-11 row: id={id}"
+            );
+        }
+    }
+
+    /// `max_probes` caps the widening: with a low cap, a selective
+    /// filter whose matches sit beyond the cap can't be fully
+    /// satisfied (the scan stops widening instead of looping to all
+    /// cells), AND the scan terminates (no infinite refill). We prove
+    /// termination by the query returning at all, and the cap by
+    /// contrasting a low cap (under-returns) with a high cap (full
+    /// LIMIT) on the same fixture.
+    #[pg_test]
+    fn ivf_max_probes_caps_widening() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_mp", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_mp_idx ON ivf_mp \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE ivf_mp").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET turbovec.probes = 1").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+
+        let query = "(SELECT emb FROM ivf_mp WHERE id = 7)";
+        let count_q = format!(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM ivf_mp WHERE category = 11 \
+                 ORDER BY emb <=> {query} LIMIT 10 \
+             ) sub"
+        );
+
+        // Low cap: probes can grow at most to 2 (1 -> 2, capped).
+        // The category-11 cell is unlikely to be within the 2
+        // nearest cells to cluster 7, so the scan stops widening and
+        // under-returns rather than looping to all 16 cells.
+        Spi::run("SET turbovec.max_probes = 2").unwrap();
+        crate::cache::invalidate_all();
+        let capped: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert!(
+            capped.unwrap() < 10,
+            "max_probes=2 should stop widening before reaching the \
+             category-11 cell; got {capped:?} (expected < 10). If this \
+             fails the cap isn't being honoured (scan looped to all cells)."
+        );
+
+        // High cap (== lists): widening reaches every cell, full LIMIT.
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let uncapped: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert_eq!(
+            uncapped,
+            Some(10),
+            "max_probes=lists must let the widening reach the category-11 \
+             cell and satisfy the full LIMIT"
+        );
+    }
+
+    /// Oversample composes with probe-widening: oversample sets the
+    /// initial `k` within the probed cells, probes-widening grows the
+    /// cell set, and the scan returns the correct distinct top-k
+    /// matching the brute-force ground truth. Both knobs active at
+    /// once must not corrupt ordering or dedup.
+    #[pg_test]
+    fn ivf_oversample_composes_with_probes() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_ov", 3200, 16);
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Unfiltered query: top-10 nearest to a cluster-3 row. With
+        // oversample widening k and probes widening the cell set, the
+        // result must match the exact brute-force GT.
+        let query = "(SELECT emb FROM ivf_ov WHERE id = 3)";
+
+        // Brute-force ground truth via seqscan.
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let gt = fetch_ids(&format!(
+            "SELECT id FROM ivf_ov ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(gt.len(), 10);
+
+        Spi::run(
+            "CREATE INDEX ivf_ov_idx ON ivf_ov \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        Spi::run("SET turbovec.search_k = 20").unwrap();
+        Spi::run("SET turbovec.oversample = 2.0").unwrap();
+        Spi::run("SET turbovec.probes = 2").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+
+        let ivf = fetch_ids(&format!(
+            "SELECT id FROM ivf_ov ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(ivf.len(), 10, "oversample+probes top-10");
+        assert_distinct_ids(&ivf);
+        // Recall@10 vs the exact GT must be high — oversample +
+        // widening should recover the true neighbours for the
+        // query's own (well-clustered) cell.
+        let gt_set: std::collections::HashSet<i64> = gt.iter().copied().collect();
+        let hits = ivf.iter().filter(|id| gt_set.contains(id)).count();
+        let recall = hits as f64 / gt.len() as f64;
+        assert!(
+            recall >= 0.9,
+            "oversample=2 + probes-widening recall@10 must be >= 0.9, \
+             got {recall} (gt={gt:?} ivf={ivf:?})"
+        );
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
     }
 
     /// Helper: slurp the DATA REGION (bytes after the 24-byte PG page

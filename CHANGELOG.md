@@ -4,6 +4,54 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] — 2026-06-15
+
+**Bench-results-only release. Wire format unchanged from v1.9.0
+(`MetaPageData::version = 3`); no REINDEX needed.** Zero source-code
+changes — this release bundles the AVX2 latency-frontier benchmark
+and the honest positioning correction it produced.
+
+### Benchmark — AVX2 latency frontier on `arnold`
+
+The latency numbers `meh` (a pre-AVX2 Xeon) physically could not
+produce. Run on `arnold` (i9-12900H, AVX2), isolated via
+`taskset -c 2-5` CPU-pinning to dedicated P-cores with per-batch
+contention measurement (observed 1-min load ≤ 1.05 throughout,
+zero CPU steal, no contended batches, no re-runs). Cohere wikipedia
+1M × 1024-d, 1000 held-out queries, brute-force exact GT.
+
+- **Correctness on the AVX2 SIMD path: recall@10 = 1.000** (the AVX2
+  kernel, not just meh's scalar fallback, is correct on v0.9.0).
+- **The hard truth: pg_turbovec loses to HNSW on latency by ~490×
+  at 1M rows** — warm p50 ~2552 ms (flat `O(n·dim)` quantized scan,
+  recall 1.000) vs pgvector HNSW ~5 ms (sublinear graph, recall
+  0.96). AVX2 makes the correct scan ~15–25× faster than meh's
+  scalar fallback (2.5 s vs 41.6 s), but a 1M-row full scan is
+  seconds, not ms, by design.
+- **Retracted:** the earlier "26.8 ms on `meh` / we win 2.3× warm
+  p50" claim. That came from the **pre-AVX2 scalar-fallback bug**
+  (fast-but-WRONG, fixed in v1.7.3) and never represented correct
+  behaviour.
+
+### Positioning correction
+
+`docs/PARITY_GAPS.md` and an internal design note updated to
+the honest scoreboard. pg_turbovec's durable wins are **storage**
+(10–15× smaller), **exact recall** (1.000 vs HNSW's ~0.96), and
+**build memory** — NOT query latency at scale. Honest positioning:
+*"best storage efficiency + exact recall for PG vector search where
+an O(n) scan fits the latency budget,"* NOT "beat HNSW on every
+axis." The architectural path to a latency story at scale is an IVF
+/ coarse-quantizer layer (turning the O(n) scan into
+O(n/nlist + probes)) — a planned future major arc, see an internal design note.
+
+### Files
+
+- `benches/results/latency_frontier_arnold_cohere_1m_v1_9_0_2026_06_15.json`
+- `benches/scripts/vectordbbench/sweep_latency_isolated.py`
+- `docs/BENCHMARKS.md` (arnold AVX2 section)
+- `docs/PARITY_GAPS.md`, an internal design note (corrections)
+
 ## [1.9.0] — 2026-06-15
 
 Oversampling (tunable recall), test-coverage hardening, and the

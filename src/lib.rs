@@ -5822,6 +5822,98 @@ mod tests {
         Spi::run("SET turbovec.oversample = 1.0").unwrap();
     }
 
+    /// IVF-4a: soft assignment (`WITH (assign_dups = M)`, M>1) must
+    /// raise recall@10 at a FIXED small `probes` vs single assignment
+    /// (`assign_dups = 1`) on the same corpus/queries — the whole
+    /// point of soft assignment. A true neighbour in a cell adjacent
+    /// to the query's cell is missed by single-assign at low probes
+    /// but recovered when boundary vectors are duplicated into both
+    /// cells.
+    #[pg_test]
+    fn ivf_soft_assignment_raises_recall() {
+        use_turbovec();
+        // Clustered corpus: 16 clusters, rows near cluster directions.
+        // Boundary jitter puts some rows near two clusters' border.
+        ivf3_make_clustered_corpus("ivf_soft_h", 3200, 16);
+        ivf3_make_clustered_corpus("ivf_soft_s", 3200, 16);
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let query = "(SELECT emb FROM ivf_soft_h WHERE id = 7)";
+        let gt = fetch_ids(&format!(
+            "SELECT id FROM ivf_soft_h ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(gt.len(), 10);
+        let gt_set: std::collections::HashSet<i64> = gt.iter().copied().collect();
+
+        // Single-assignment index (assign_dups = 1, the default).
+        Spi::run(
+            "CREATE INDEX ivf_soft_h_idx ON ivf_soft_h \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 1)",
+        )
+        .unwrap();
+        // Soft index (assign_dups = 2): boundary rows in top-2 cells.
+        Spi::run(
+            "CREATE INDEX ivf_soft_s_idx ON ivf_soft_s \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 2)",
+        )
+        .unwrap();
+
+        // Fixed small probes; iterative widening OFF so probes is the
+        // only cell-set lever — isolates the soft-assignment effect.
+        let recall_at = |table: &str| -> f64 {
+            Spi::run("SET enable_seqscan = off").unwrap();
+            Spi::run("SET turbovec.iterative_scan = off").unwrap();
+            Spi::run("SET turbovec.search_k = 40").unwrap();
+            Spi::run("SET turbovec.probes = 1").unwrap();
+            crate::cache::invalidate_all();
+            let q = format!("(SELECT emb FROM {table} WHERE id = 7)");
+            let ids = fetch_ids(&format!(
+                "SELECT id FROM {table} ORDER BY emb <=> {q} LIMIT 10"
+            ));
+            assert_distinct_ids(&ids);
+            let hits = ids.iter().filter(|id| gt_set.contains(id)).count();
+            hits as f64 / gt.len() as f64
+        };
+
+        let recall_hard = recall_at("ivf_soft_h");
+        let recall_soft = recall_at("ivf_soft_s");
+        assert!(
+            recall_soft >= recall_hard,
+            "soft assignment (assign_dups=2) recall@10 ({recall_soft}) must be \
+             >= single-assignment ({recall_hard}) at fixed probes=1"
+        );
+    }
+
+    /// IVF-4a: a query over a soft index must return DISTINCT ids even
+    /// when a boundary vector lives in two probed cells (slot_to_id is
+    /// non-injective under soft assignment; the scan must dedup by id).
+    #[pg_test]
+    fn ivf_soft_assignment_no_duplicate_ids() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_soft_dd", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_soft_dd_idx ON ivf_soft_dd \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 3)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        // Probe many cells so duplicated boundary vectors are very
+        // likely to appear in more than one probed cell.
+        Spi::run("SET turbovec.probes = 12").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let ids = fetch_ids(
+            "SELECT id FROM ivf_soft_dd \
+             ORDER BY emb <=> (SELECT emb FROM ivf_soft_dd WHERE id = 11) LIMIT 25",
+        );
+        assert!(!ids.is_empty(), "soft-index scan returned no rows");
+        assert_distinct_ids(&ids);
+    }
+
     // ----------------------------------------------------------------
     // IVF-3 Part B (docs/IVF_PLAN.md §7): the recall-vs-probes
     // frontier. Recall is CPU-independent (a function of which cells

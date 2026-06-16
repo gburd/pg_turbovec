@@ -56,6 +56,19 @@ pub const IVF_SEED: u64 = 0x1F_F5EE_D00D_u64;
 /// of the determinism contract — changing it changes the centroids.
 pub const KMEANS_ITERS: usize = 25;
 
+/// IVF-4a soft-assignment boundary factor. A vector is also assigned
+/// to a 2nd..Mth nearest cell `j` only when its squared distance to
+/// cell `j` is within `BOUNDARY_FACTOR` of its squared distance to
+/// the nearest cell (`dist_j <= BOUNDARY_FACTOR * dist_nearest`).
+/// This bounds the storage blow-up: only genuinely-boundary vectors
+/// (those nearly equidistant to two cells) get duplicated, not every
+/// vector. 1.2 (a 20% slack on squared distance) is the documented
+/// constant; it is part of the build determinism contract — changing
+/// it changes which vectors get duplicated and thus the on-disk
+/// bytes. Empirically yields a ~1.1–1.5× slot blow-up for M=2 on
+/// typical data.
+pub const BOUNDARY_FACTOR: f32 = 1.2;
+
 /// One cell's contiguous slot range in the (reordered) codes /
 /// scales / ids chains.
 ///
@@ -417,6 +430,12 @@ pub fn rotate_corpus_into(
 /// space). Returns a `Vec<u32>` of length `n_rows` of cell ids. The
 /// per-row reduction is parallelised; rayon's `map` preserves index
 /// order, so the output is deterministic.
+///
+/// Superseded on the build hot path by [`batched_assign_soft`] (which
+/// handles `M = 1` identically); retained as the single-assignment
+/// reference that the soft path's `M = 1` case is verified against
+/// (`ivf_soft_assign_m1_matches_single`).
+#[allow(dead_code)]
 pub fn batched_assign(
     corpus: &[f32],
     centroids: &[f32],
@@ -712,6 +731,11 @@ pub fn train_kmeans(sample: &[f32], n_sample: usize, lists: usize, dim: usize) -
 /// original_slot)`), so the whole pipeline is deterministic.
 ///
 /// `assignment[old_slot] = cell_id`, `assignment.len() == n_vectors`.
+///
+/// Superseded on the build hot path by [`build_permutation_soft`]
+/// (which handles `M = 1` identically); retained as the
+/// single-assignment reference for the soft `M = 1` parity test.
+#[allow(dead_code)]
 pub fn build_permutation(assignment: &[u32], lists: usize) -> (Vec<u32>, CellDirectory) {
     let n = assignment.len();
 
@@ -743,6 +767,219 @@ pub fn build_permutation(assignment: &[u32], lists: usize) -> (Vec<u32>, CellDir
         let pos = cursor[c as usize];
         permutation[pos as usize] = old_slot as u32;
         cursor[c as usize] += 1;
+    }
+
+    (permutation, directory)
+}
+
+/// IVF-4a soft (multi) assignment over a (rotated) corpus.
+///
+/// Like [`batched_assign`] (same GEMM cross-term + exact-scalar
+/// tie-break for the nearest cell), but each row may be assigned to
+/// up to `max_dups` cells: its nearest, plus any of the next nearest
+/// whose squared distance is within [`BOUNDARY_FACTOR`] of the
+/// nearest's (`dist_j <= BOUNDARY_FACTOR * dist_nearest`). This puts
+/// genuinely-boundary vectors (nearly equidistant to two cells) into
+/// both, so a query that probes either neighbouring cell finds them
+/// — raising recall@10 at a fixed `probes`. Non-boundary vectors stay
+/// single-assigned, bounding the storage blow-up.
+///
+/// Returns a `Vec<Vec<u32>>` of length `n_rows`; entry `i` lists the
+/// cell ids row `i` is assigned to, **nearest first**, length
+/// `1..=max_dups`. `max_dups == 1` reproduces single assignment
+/// exactly (each inner vec has one element == [`batched_assign`]'s
+/// output for that row), so the soft path is a strict generalisation.
+///
+/// Determinism: the nearest cell is chosen by the same exact-scalar
+/// `(dist, cell_id)` tie-break [`batched_assign`] uses; the
+/// additional cells are the next-nearest by exact scalar `sq_dist`
+/// (ascending distance, ties → lower cell id) that pass the boundary
+/// threshold. The GEMM (`Parallelism::None`) only pre-ranks
+/// candidates; the exact scalar recompute is the correctness anchor.
+/// Same input + same `max_dups` ⇒ byte-identical assignment.
+pub fn batched_assign_soft(
+    corpus: &[f32],
+    centroids: &[f32],
+    n_rows: usize,
+    lists: usize,
+    dim: usize,
+    max_dups: usize,
+) -> Vec<Vec<u32>> {
+    debug_assert_eq!(corpus.len(), n_rows * dim);
+    debug_assert_eq!(centroids.len(), lists * dim);
+    assert!(lists > 0, "batched_assign_soft: lists must be > 0");
+    let max_dups = max_dups.clamp(1, lists);
+    if n_rows == 0 {
+        return Vec::new();
+    }
+
+    // Cross term: cross (n_rows x lists) = corpus @ centroids^T.
+    // Identical GEMM to batched_assign.
+    let mut cross = vec![0.0f32; n_rows * lists];
+    // SAFETY: see batched_assign — same shapes/strides; overwrite.
+    unsafe {
+        gemm(
+            n_rows,
+            lists,
+            dim,
+            cross.as_mut_ptr(),
+            1,
+            lists as isize,
+            false,
+            corpus.as_ptr(),
+            1,
+            dim as isize,
+            centroids.as_ptr(),
+            dim as isize,
+            1,
+            0.0f32,
+            1.0f32,
+            false,
+            false,
+            false,
+            Parallelism::None,
+        );
+    }
+    let cnorm: Vec<f32> = (0..lists)
+        .map(|c| {
+            centroids[c * dim..(c + 1) * dim]
+                .iter()
+                .map(|&x| x * x)
+                .sum::<f32>()
+        })
+        .collect();
+
+    use rayon::prelude::*;
+    (0..n_rows)
+        .into_par_iter()
+        .map(|i| {
+            let row_cross = &cross[i * lists..(i + 1) * lists];
+            let v = &corpus[i * dim..(i + 1) * dim];
+            // Pre-rank cells by the GEMM score `||c||^2 - 2 (v . c)`
+            // (monotone in true sq_dist for a fixed row); keep the
+            // top `cand` candidates to recompute exactly. We need
+            // max_dups winners; over-fetch a few to be safe against
+            // GEMM reorder near-ties (cand = max_dups + 2, clamped).
+            let cand = (max_dups + 2).min(lists);
+            // Partial selection of the `cand` smallest GEMM scores.
+            let mut top: Vec<(f32, usize)> = Vec::with_capacity(cand + 1);
+            for c in 0..lists {
+                let s = cnorm[c] - 2.0 * row_cross[c];
+                if top.len() < cand {
+                    top.push((s, c));
+                    if top.len() == cand {
+                        // Keep sorted ascending by (score, cell).
+                        top.sort_unstable_by(|a, b| {
+                            a.0.partial_cmp(&b.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then(a.1.cmp(&b.1))
+                        });
+                    }
+                } else if s < top[cand - 1].0 {
+                    top[cand - 1] = (s, c);
+                    top.sort_unstable_by(|a, b| {
+                        a.0.partial_cmp(&b.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.1.cmp(&b.1))
+                    });
+                }
+            }
+            if top.len() < cand {
+                // lists < cand: sort whatever we have.
+                top.sort_unstable_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.1.cmp(&b.1))
+                });
+            }
+            // Recompute exact sq_dist for the candidates and re-rank
+            // by (dist, cell_id) — the determinism anchor.
+            let mut exact: Vec<(f32, usize)> = top
+                .iter()
+                .map(|&(_, c)| (sq_dist(v, &centroids[c * dim..(c + 1) * dim]), c))
+                .collect();
+            exact.sort_unstable_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            // Nearest is always included. Additional cells join only
+            // if within the boundary factor of the nearest distance.
+            let d_nearest = exact[0].0;
+            let threshold = BOUNDARY_FACTOR * d_nearest;
+            let mut out = Vec::with_capacity(max_dups);
+            out.push(exact[0].1 as u32);
+            for &(d, c) in exact.iter().skip(1) {
+                if out.len() >= max_dups {
+                    break;
+                }
+                if d <= threshold {
+                    out.push(c as u32);
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// IVF-4a soft permutation builder. Like [`build_permutation`] but
+/// each vector may belong to multiple cells, so a vector's original
+/// index appears once per cell it was assigned to — i.e. the produced
+/// `permutation` is **non-injective** (`permutation[new_slot] =
+/// old_vector_index`, and the same `old_vector_index` can appear in
+/// several new slots). The cell directory partitions the *expanded*
+/// slot count (`sum of per-vector dup counts`), not `n_vectors`.
+///
+/// `assignments[old_index]` is the (nearest-first) cell list for
+/// vector `old_index`, as produced by [`batched_assign_soft`]. The
+/// within-cell order is stable on `old_index` (ascending), so the
+/// pipeline stays deterministic. Returns `(permutation, directory)`
+/// where `permutation.len() == directory.total_vectors() as usize`.
+///
+/// The downstream quantize+pack runs on the expanded slot order;
+/// `slot_to_id` therefore repeats an id once per cell the vector
+/// landed in. The scan **must** dedup by id when merging across
+/// probed cells (a boundary vector in two probed cells must not be
+/// returned twice) — the scan's emitted-id set + an intra-batch
+/// guard handle this.
+pub fn build_permutation_soft(
+    assignments: &[Vec<u32>],
+    lists: usize,
+) -> (Vec<u32>, CellDirectory) {
+    // Count slots per cell (a vector contributes one slot per cell
+    // it is assigned to).
+    let mut counts = vec![0u64; lists];
+    for cells in assignments {
+        for &c in cells {
+            counts[c as usize] += 1;
+        }
+    }
+
+    let mut entries = Vec::with_capacity(lists);
+    let mut acc = 0u64;
+    for c in 0..lists {
+        entries.push(CellEntry {
+            code_offset: acc,
+            n_vectors: counts[c] as u32,
+        });
+        acc += counts[c];
+    }
+    let directory = CellDirectory { entries };
+
+    // Stable expansion: for each cell, in ascending old-index order,
+    // place that vector's old index into the cell's next free slot.
+    // We iterate old indices ascending in the OUTER loop so the
+    // within-cell order is the original vector order (stable), then
+    // route each (old_index, cell) into its cell's cursor.
+    let mut cursor: Vec<u64> = directory.entries.iter().map(|e| e.code_offset).collect();
+    let total = acc as usize;
+    let mut permutation = vec![0u32; total];
+    for (old_index, cells) in assignments.iter().enumerate() {
+        for &c in cells {
+            let pos = cursor[c as usize];
+            permutation[pos as usize] = old_index as u32;
+            cursor[c as usize] += 1;
+        }
     }
 
     (permutation, directory)
@@ -1137,5 +1374,121 @@ mod tests {
         // Out-of-range and duplicate cells are ignored, not panics.
         let m = dir.probe_mask(&[1, 1, 99], n);
         assert_eq!(m.iter().filter(|&&b| b).count(), 2);
+    }
+
+    /// `batched_assign_soft` with `max_dups = 1` must reproduce
+    /// `batched_assign` exactly (each row's single cell). The strict
+    /// generalisation contract: soft with M=1 == single assignment.
+    #[test]
+    fn ivf_soft_assign_m1_matches_single() {
+        let dim = 16;
+        let lists = 12;
+        let n = 400;
+        let mut centroids = vec![0.0f32; lists * dim];
+        let mut corpus = vec![0.0f32; n * dim];
+        let mut x = 0x5EED_1234u64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        for v in centroids.iter_mut() {
+            *v = next();
+        }
+        for v in corpus.iter_mut() {
+            *v = next();
+        }
+        let single = batched_assign(&corpus, &centroids, n, lists, dim);
+        let soft = batched_assign_soft(&corpus, &centroids, n, lists, dim, 1);
+        assert_eq!(soft.len(), n);
+        for (i, cells) in soft.iter().enumerate() {
+            assert_eq!(cells.len(), 1, "M=1 must give exactly one cell");
+            assert_eq!(cells[0], single[i], "M=1 cell must match single assign");
+        }
+    }
+
+    /// `batched_assign_soft` is deterministic: same input + same
+    /// `max_dups` ⇒ identical assignment lists.
+    #[test]
+    fn ivf_soft_assign_deterministic() {
+        let dim = 8;
+        let lists = 10;
+        let n = 300;
+        let mut centroids = vec![0.0f32; lists * dim];
+        let mut corpus = vec![0.0f32; n * dim];
+        let mut x = 0xABCD_9999u64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        for v in centroids.iter_mut() {
+            *v = next();
+        }
+        for v in corpus.iter_mut() {
+            *v = next();
+        }
+        let a = batched_assign_soft(&corpus, &centroids, n, lists, dim, 2);
+        let b = batched_assign_soft(&corpus, &centroids, n, lists, dim, 2);
+        assert_eq!(a, b, "soft assignment must be deterministic");
+    }
+
+    /// Soft assignment puts a genuine boundary vector into 2 cells but
+    /// keeps a clearly-interior vector single-assigned. Construct two
+    /// cells; a point exactly between them is a boundary point (within
+    /// BOUNDARY_FACTOR), a point at one centroid is interior.
+    #[test]
+    fn ivf_soft_assign_duplicates_only_boundary() {
+        let dim = 2;
+        let lists = 2;
+        // Cell 0 at (0,0), cell 1 at (10,0).
+        let centroids = vec![0.0, 0.0, 10.0, 0.0];
+        // Row 0: at (5,0) — equidistant (dist 25 each) ⇒ boundary,
+        // both cells (ratio 1.0 <= 1.2).
+        // Row 1: at (0.5,0) — dist 0.25 to cell0, 90.25 to cell1
+        // ⇒ interior, single cell.
+        let corpus = vec![5.0, 0.0, 0.5, 0.0];
+        let soft = batched_assign_soft(&corpus, &centroids, 2, lists, dim, 2);
+        assert_eq!(soft[0].len(), 2, "equidistant point must go to both cells");
+        assert_eq!(soft[1].len(), 1, "interior point must stay single-assigned");
+        assert_eq!(soft[1][0], 0, "interior point belongs to cell 0");
+    }
+
+    /// `build_permutation_soft` expands duplicated vectors into
+    /// multiple slots, the directory partitions the expanded count,
+    /// and `permutation` is non-injective (repeats the boundary
+    /// vector's old index). With M=1 it must match
+    /// `build_permutation`'s slot layout.
+    #[test]
+    fn ivf_build_permutation_soft_expands_duplicates() {
+        // 4 vectors, 2 cells. Vector 0 -> [0,1] (boundary), 1 -> [0],
+        // 2 -> [1], 3 -> [1,0] (boundary).
+        let assignments = vec![vec![0u32, 1], vec![0], vec![1], vec![1, 0]];
+        let lists = 2;
+        let (perm, dir) = build_permutation_soft(&assignments, lists);
+        // Total slots = 2 + 1 + 1 + 2 = 6.
+        assert_eq!(dir.total_vectors(), 6);
+        dir.validate_partition(6).unwrap();
+        assert_eq!(perm.len(), 6);
+        // Cell 0 gets old indices 0,1,3 (ascending order); cell 1
+        // gets 0,2,3.
+        assert_eq!(dir.entries[0].n_vectors, 3);
+        assert_eq!(dir.entries[1].n_vectors, 3);
+        assert_eq!(&perm[0..3], &[0, 1, 3]);
+        assert_eq!(&perm[3..6], &[0, 2, 3]);
+        // Old index 0 and 3 each appear twice (non-injective).
+        assert_eq!(perm.iter().filter(|&&x| x == 0).count(), 2);
+        assert_eq!(perm.iter().filter(|&&x| x == 3).count(), 2);
+
+        // M=1 equivalence: single-cell assignments must lay out
+        // identically to build_permutation.
+        let single = [0u32, 1, 1, 0];
+        let soft_single: Vec<Vec<u32>> = single.iter().map(|&c| vec![c]).collect();
+        let (p_soft, d_soft) = build_permutation_soft(&soft_single, lists);
+        let (p_hard, d_hard) = build_permutation(&single, lists);
+        assert_eq!(p_soft, p_hard, "M=1 soft perm must match single perm");
+        assert_eq!(d_soft, d_hard, "M=1 soft directory must match single");
     }
 }

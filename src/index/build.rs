@@ -73,6 +73,11 @@ struct BuildState {
     /// IVF coarse-cell count from `WITH (lists = N)`. `0` = flat
     /// (today's behaviour); the IVF fields below stay unused.
     lists: usize,
+    /// IVF-4a soft-assignment multiplicity `M` from
+    /// `WITH (assign_dups = M)`. `1` = single assignment (each vector
+    /// in exactly one cell); `M > 1` stores boundary vectors in their
+    /// top-M nearest cells. Only consulted when `lists > 0`.
+    assign_dups: usize,
     /// When `lists > 0` we cannot flush incrementally: the
     /// cell-contiguous permutation needs the whole flat corpus before
     /// quantizing. We accumulate the (optionally normalised) flat
@@ -241,10 +246,11 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         error!("turbovec: failed to allocate IndexBuildResult");
     }
 
-    let (cfg_bit_width, cfg_dim, cfg_lists) = options::read(index_relation);
+    let (cfg_bit_width, cfg_dim, cfg_lists, cfg_assign_dups) = options::read(index_relation);
     let indexrelid = (*index_relation).rd_id;
     let normalise = guc::NORMALIZE_ON_INSERT.get();
     let lists = cfg_lists.max(0) as usize;
+    let assign_dups = cfg_assign_dups.clamp(1, options::MAX_ASSIGN_DUPS) as usize;
 
     let initial_dim = if cfg_dim > 0 {
         if (cfg_dim as usize) % 8 != 0 {
@@ -270,7 +276,6 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         chunk_rows: usize::MAX,
         heap_seen: 0,
         pool: std::ptr::null(),
-        lists,
         ivf_flat: Vec::new(),
         ivf_ids: Vec::new(),
         ivf_sample: Vec::new(),
@@ -278,6 +283,8 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         ivf_seen: 0,
         ivf_rng: <rand_chacha::ChaCha8Rng as rand::SeedableRng>::seed_from_u64(ivf::IVF_SEED),
         ivf_rotation: None,
+        lists,
+        assign_dups,
     };
     // Parity gap #2: a bounded rayon pool sized from
     // `turbovec.build_parallelism` (auto = max_parallel_maintenance_workers
@@ -558,8 +565,15 @@ unsafe fn ivf_build_and_write(
     //    buffer alive here.
     let flat = std::mem::take(&mut state.ivf_flat);
     let block_rows = ivf_assign_block_rows(dim);
-    let assignment: Vec<u32> = super::build_pool::install(build_pool, || {
-        let mut assignment = Vec::with_capacity(n_vectors);
+    // IVF-4a: soft assignment when assign_dups > 1. Cap at lists.
+    let assign_dups = state.assign_dups.clamp(1, lists);
+    // Per-vector cell lists (nearest-first, length 1..=assign_dups).
+    // For single assignment (assign_dups == 1) each inner vec has
+    // exactly one cell, so the downstream soft permutation reduces to
+    // the single permutation bit-for-bit (verified by
+    // ivf_build_permutation_soft_expands_duplicates's M=1 case).
+    let assignments: Vec<Vec<u32>> = super::build_pool::install(build_pool, || {
+        let mut assignments: Vec<Vec<u32>> = Vec::with_capacity(n_vectors);
         // Reused per-block scratch: normalised block + rotated block.
         let mut norm_block = vec![0.0f32; block_rows * dim];
         let mut rot_block = vec![0.0f32; block_rows * dim];
@@ -579,47 +593,75 @@ unsafe fn ivf_build_and_write(
             let norm = &norm_block[..rows * dim];
             let rot = &mut rot_block[..rows * dim];
             ivf::rotate_corpus_into(norm, &rotation, rows, dim, rot);
-            let block_assign =
-                ivf::batched_assign(rot, &model.centroids, rows, lists, dim);
-            assignment.extend_from_slice(&block_assign);
+            let block_assign = ivf::batched_assign_soft(
+                rot,
+                &model.centroids,
+                rows,
+                lists,
+                dim,
+                assign_dups,
+            );
+            assignments.extend(block_assign);
             start += rows;
         }
-        assignment
+        assignments
     });
 
-    // 3. Stable cell-contiguous permutation + cell directory.
-    let (permutation, directory) = ivf::build_permutation(&assignment, lists);
-    debug_assert!(directory.validate_partition(n_vectors as u64).is_ok());
+    // 3. Stable cell-contiguous permutation + cell directory. With
+    //    soft assignment a vector's old index appears once per cell
+    //    it landed in, so `permutation` is non-injective and the
+    //    directory partitions the EXPANDED slot count (>= n_vectors).
+    let (permutation, directory) = ivf::build_permutation_soft(&assignments, lists);
+    let n_slots = permutation.len();
+    debug_assert!(directory.validate_partition(n_slots as u64).is_ok());
+    debug_assert!(n_slots >= n_vectors, "soft expansion never shrinks");
 
     // 4. Apply the permutation to the flat corpus + ids. `perm[new] =
-    //    old`, so new_slot i takes old_slot perm[i].
+    //    old_index`, so new_slot i takes old vector perm[i]. A
+    //    boundary vector's data + id is copied into each of its
+    //    slots; the repeated id in `perm_ids` is exactly what makes
+    //    `slot_to_id` non-injective — the scan dedups by id across
+    //    probed cells.
     let ids = std::mem::take(&mut state.ivf_ids);
-    let mut perm_flat = vec![0.0f32; n_vectors * dim];
-    let mut perm_ids = vec![0u64; n_vectors];
-    for new_slot in 0..n_vectors {
-        let old_slot = permutation[new_slot] as usize;
+    let mut perm_flat = vec![0.0f32; n_slots * dim];
+    let mut perm_ids = vec![0u64; n_slots];
+    for new_slot in 0..n_slots {
+        let old_idx = permutation[new_slot] as usize;
         perm_flat[new_slot * dim..(new_slot + 1) * dim]
-            .copy_from_slice(&flat[old_slot * dim..(old_slot + 1) * dim]);
-        perm_ids[new_slot] = ids[old_slot];
+            .copy_from_slice(&flat[old_idx * dim..(old_idx + 1) * dim]);
+        perm_ids[new_slot] = ids[old_idx];
     }
     drop(flat);
     drop(ids);
 
-    // 5. Run the EXISTING quantize+pack on the permuted order. The
-    //    fine quantizer doesn't care about order; slot_to_id reflects
-    //    the permutation, and the codes/scales/ids land
-    //    cell-contiguous on disk.
+    // 5. Run the EXISTING quantize+pack on the permuted (possibly
+    //    expanded) order. The fine quantizer doesn't care about
+    //    order. CRITICAL: `IdMapIndex::add_with_ids` enforces UNIQUE
+    //    ids, but soft assignment (assign_dups > 1) puts a boundary
+    //    vector's real external id in multiple slots. So we build the
+    //    IdMapIndex with SYNTHETIC unique slot-ids (0..n_slots) and
+    //    persist the REAL external ids (`perm_ids`, with duplicates)
+    //    into the relfile ids chain separately (below). The scan
+    //    reconstructs via `ReadOnlyIndex::from_prepared_parts`, which
+    //    does NOT build the id_to_slot HashMap (the cold-scan lazy
+    //    optimisation) and therefore tolerates duplicate ids in
+    //    slot_to_id; `search` returns slots mapped through the
+    //    persisted real ids, and the scan's returned-TID dedup
+    //    collapses a boundary vector found via two probed cells.
+    //    For single assignment (assign_dups == 1) perm_ids has no
+    //    duplicates, so this is behaviour-identical to before.
+    let synthetic_ids: Vec<u64> = (0..n_slots as u64).collect();
     let mut idx = IdMapIndex::new(dim, bit_width as usize)
         .expect("turbovec ambuild (ivf): invalid (dim, bit_width)");
     super::build_pool::install(build_pool, || {
-        idx.add_with_ids(&perm_flat, &perm_ids)
+        idx.add_with_ids(&perm_flat, &synthetic_ids)
             .expect("turbovec ambuild (ivf): add_with_ids failed")
     });
     drop(perm_flat);
-    drop(perm_ids);
+    drop(synthetic_ids);
 
     let built = idx.slot_to_id().len();
-    debug_assert_eq!(built, n_vectors);
+    debug_assert_eq!(built, n_slots);
 
     super::build_pool::install(build_pool, || idx.prepare_eager());
     let idx_rotation = idx.rotation();
@@ -643,10 +685,18 @@ unsafe fn ivf_build_and_write(
         index_relation,
         bit_width,
         dim as u32,
-        n_vectors as u64,
+        // The persisted codes/scales/ids/slot_to_id are all n_slots
+        // long (>= distinct n_vectors under soft assignment); the
+        // meta's n_vectors field is the on-disk row count the scan
+        // validates against, so it must be n_slots.
+        n_slots as u64,
         idx.packed_codes(),
         idx.scales(),
-        idx.slot_to_id(),
+        // Real external ids (with duplicates for soft-assigned
+        // boundary vectors), NOT idx.slot_to_id() (which is the
+        // synthetic 0..n_slots). This is the authoritative
+        // slot -> external-id table the scan maps through.
+        &perm_ids,
         1,
         prepared,
         ivf_parts,
@@ -771,7 +821,7 @@ unsafe extern "C-unwind" fn build_callback(
 /// pgvector's `HnswBuildEmpty` pattern.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Relation) {
-    let (bw, dim, _lists) = options::read(index_relation);
+    let (bw, dim, _lists, _assign_dups) = options::read(index_relation);
 
     // Plan an empty layout. dim may be 0 if the user didn't
     // pin it via reloptions — the meta page records 0/0/0,

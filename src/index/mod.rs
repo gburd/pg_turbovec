@@ -4,8 +4,10 @@
 //! - `mod.rs` (this file) — `IndexAmRoutine` builder, the
 //!   `turbovec_index_handler` SQL function, and the `extension_sql!`
 //!   block that creates the access method and operator classes.
-//! - `options.rs` — `bit_width` / `dim` reloption parser
+//! - `options.rs` — `bit_width` / `dim` / `lists` reloption parser
 //!   (`amoptions` callback).
+//! - `ivf.rs` — IVF coarse-quantizer k-means + cell-directory types
+//!   (Postgres-free, IVF-1).
 //! - `page.rs` — meta-page byte layout for the relfile main fork.
 //! - `relfile.rs` — buffer-manager I/O for the relfile pages.
 //! - `mmap_static.rs` — mmap-based reads of the deterministic
@@ -38,6 +40,7 @@ mod build;
 mod build_pool;
 mod cost;
 mod insert;
+pub(crate) mod ivf;
 pub(crate) mod mmap_static;
 mod options;
 pub(crate) mod page;

@@ -6,6 +6,22 @@
 //! |-------------|------|---------|--------|
 //! | `bit_width` | int  | (GUC `turbovec.bit_width_default`) | 2..=4 |
 //! | `dim`       | int  | 0 (auto-detect from first row)     | {0} ∪ ((>0) ∧ multiple of 8) |
+//! | `lists`     | int  | 0 (flat; v3-equivalent)            | 0..=1_000_000 |
+//! | `assign_dups` | int | 1 (single assignment)             | 1..=4 |
+//!
+//! `lists` is the IVF coarse-cell count (`nlist`). `0` (the default)
+//! keeps the flat layout — byte-identical to the v3 wire format
+//! modulo the version byte — so existing indexes and non-IVF users
+//! are untouched. `lists > 0` opts into the IVF build path
+//! (an internal design note). Recommended starting point: `lists ≈ √n`.
+//!
+//! `assign_dups` (IVF-4a) is the soft-assignment multiplicity `M`.
+//! `1` (the default) is single assignment (each vector in exactly one
+//! cell). `M > 1` enables soft assignment: a boundary vector (within
+//! `ivf::BOUNDARY_FACTOR` of its nearest cell) is also stored in its
+//! 2nd..Mth nearest cells, raising recall@10 at a fixed
+//! `turbovec.probes` at a bounded storage cost. Only meaningful when
+//! `lists > 0`; ignored for flat indexes.
 //!
 //! The reloption byte payload is owned by Postgres and read back via
 //! `IndexRelationGetReloptions`. We use `add_local_int_reloption` /
@@ -23,7 +39,23 @@ pub(crate) struct TurbovecRelopts {
     pub vl_len_: i32,
     pub bit_width: i32,
     pub dim: i32,
+    /// IVF coarse-cell count (`nlist`); 0 = flat (v3-equivalent).
+    pub lists: i32,
+    /// IVF-4a soft-assignment multiplicity (M); 1 = single assignment.
+    pub assign_dups: i32,
 }
+
+/// Upper bound on `assign_dups` (IVF-4a soft assignment). `M > 4`
+/// rarely helps recall enough to justify the storage blow-up; the
+/// ceiling keeps the per-vector dup list small and bounds worst-case
+/// index growth at ~4×.
+pub(crate) const MAX_ASSIGN_DUPS: i32 = 4;
+
+/// Upper bound on `lists`. A sane ceiling so a fat-fingered
+/// `WITH (lists = 2000000000)` doesn't try to train two billion
+/// centroids; well above any realistic `nlist ≈ √n` (√n = 1e6 needs
+/// n = 1e12 rows).
+pub(crate) const MAX_LISTS: i32 = 1_000_000;
 
 /// `amoptions` callback. Receives the raw `reloptions` Datum
 /// (a `text[]` of `key=value` strings) plus a `validate` flag, and
@@ -64,6 +96,24 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
             crate::vec::MAX_DIM as i32,
             pg_sys::AccessExclusiveLock as i32,
         );
+        pg_sys::add_int_reloption(
+            RELOPT_KIND,
+            c"lists".as_ptr(),
+            c"IVF coarse-cell count (nlist); 0 = flat. Recommend ~sqrt(n).".as_ptr(),
+            0,
+            0,
+            MAX_LISTS,
+            pg_sys::AccessExclusiveLock as i32,
+        );
+        pg_sys::add_int_reloption(
+            RELOPT_KIND,
+            c"assign_dups".as_ptr(),
+            c"IVF soft-assignment multiplicity M (1 = single; M>1 stores boundary vectors in their top-M nearest cells to raise recall). Needs lists>0.".as_ptr(),
+            1,
+            1,
+            MAX_ASSIGN_DUPS,
+            pg_sys::AccessExclusiveLock as i32,
+        );
 
         INITIALISED = true;
     }
@@ -83,6 +133,20 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
             optname: c"dim".as_ptr(),
             opttype: pg_sys::relopt_type::RELOPT_TYPE_INT,
             offset: std::mem::offset_of!(TurbovecRelopts, dim) as i32,
+            #[cfg(feature = "pg18")]
+            isset_offset: -1,
+        },
+        pg_sys::relopt_parse_elt {
+            optname: c"lists".as_ptr(),
+            opttype: pg_sys::relopt_type::RELOPT_TYPE_INT,
+            offset: std::mem::offset_of!(TurbovecRelopts, lists) as i32,
+            #[cfg(feature = "pg18")]
+            isset_offset: -1,
+        },
+        pg_sys::relopt_parse_elt {
+            optname: c"assign_dups".as_ptr(),
+            opttype: pg_sys::relopt_type::RELOPT_TYPE_INT,
+            offset: std::mem::offset_of!(TurbovecRelopts, assign_dups) as i32,
             #[cfg(feature = "pg18")]
             isset_offset: -1,
         },
@@ -108,6 +172,20 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
                 o.dim
             );
         }
+        if !(0..=MAX_LISTS).contains(&o.lists) {
+            pgrx::error!(
+                "turbovec: lists must be in 0..={} (got {})",
+                MAX_LISTS,
+                o.lists
+            );
+        }
+        if !(1..=MAX_ASSIGN_DUPS).contains(&o.assign_dups) {
+            pgrx::error!(
+                "turbovec: assign_dups must be in 1..={} (got {})",
+                MAX_ASSIGN_DUPS,
+                o.assign_dups
+            );
+        }
     }
 
     opts as *mut pg_sys::bytea
@@ -115,12 +193,13 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
 
 /// Resolve effective options for a given index relation. Falls back
 /// to the GUC defaults when the relation has no reloptions set.
-pub(crate) unsafe fn read(rel: pg_sys::Relation) -> (i32, i32) {
+/// Returns `(bit_width, dim, lists, assign_dups)`.
+pub(crate) unsafe fn read(rel: pg_sys::Relation) -> (i32, i32, i32, i32) {
     let raw = (*rel).rd_options as *const TurbovecRelopts;
     if raw.is_null() {
-        (guc::BIT_WIDTH_DEFAULT.get(), 0)
+        (guc::BIT_WIDTH_DEFAULT.get(), 0, 0, 1)
     } else {
         let o = &*raw;
-        (o.bit_width, o.dim)
+        (o.bit_width, o.dim, o.lists, o.assign_dups)
     }
 }

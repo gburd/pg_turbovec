@@ -1,0 +1,19 @@
+{
+  "bench": "ivf_recall_vs_probes",
+  "date": "2026-06-16",
+  "host_independent": true,
+  "note": "Recall is CPU-independent (which cells are probed vs where true neighbours live). Absolute warm-p50 latency on AVX2 is a separate measurement deferred to a quiet arnold window.",
+  "corpus": { "n_vectors": 16334, "dim": 64, "distribution": "deterministic pseudo-random unit vectors", "bit_width": 4 },
+  "lists": 128,
+  "queries": 50,
+  "ground_truth": "brute-force exact top-10 by cosine (seqscan, enable_indexscan=off)",
+  "curve": [
+    { "probes": 1, "recall_at_10": 0.078000, "blocks_skipped_fraction": 0.990098 },
+    { "probes": 2, "recall_at_10": 0.124000, "blocks_skipped_fraction": 0.980313 },
+    { "probes": 4, "recall_at_10": 0.200000, "blocks_skipped_fraction": 0.961096 },
+    { "probes": 8, "recall_at_10": 0.340000, "blocks_skipped_fraction": 0.922740 },
+    { "probes": 16, "recall_at_10": 0.528000, "blocks_skipped_fraction": 0.847789 },
+    { "probes": 32, "recall_at_10": 0.722000, "blocks_skipped_fraction": 0.704853 },
+    { "probes": 128, "recall_at_10": 1.000000, "blocks_skipped_fraction": 0.000000 }
+  ]
+}

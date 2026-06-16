@@ -243,6 +243,57 @@ is exact recall + compact codes, and at smaller corpora (or with a coarse
 pre-filter) its per-query `O(n·d)` cost shrinks proportionally.
 
 
+## IVF recall-vs-probes (host-independent)
+
+> **This is the recall/scan-work trade-off, measured without needing a quiet
+> AVX2 host.** Recall@10 is a function of *which cells are probed vs where the
+> true neighbours live* — it is independent of SIMD speed — so this curve is
+> reproducible on any host that builds the extension. It is the host-independent
+> evidence that the `turbovec.probes` dial trades recall for scan-work exactly
+> as IVF is designed to. **Absolute warm-p50 latency on AVX2 is a separate
+> measurement** (see [AVX2 latency frontier](#avx2-latency-frontier-arnold-i9-12900h)
+> for the flat-scan frontier); the IVF warm-p50 sweep on a quiet `arnold`
+> window is **TODO** — not run here because `arnold` is currently contended
+> with the user's PostgreSQL test suite. The `blocks_skipped_by_mask` fraction
+> below is the CPU-independent proxy for that latency win: a query that skips
+> F% of the corpus's 32-vector blocks does proportionally less scan work.
+
+The frontier is produced by the `ivf_recall_vs_probes_frontier` `#[pg_test]`
+(it both asserts the contract and writes the artefact). Corpus: 16,334
+distinct deterministic pseudo-random unit vectors, 64-d, 4-bit, `lists = 128`
+(≈√n), 50 held-out queries, brute-force exact top-10 ground truth
+(`enable_indexscan = off`). Random unit vectors have **no cluster structure**,
+so the curve is deliberately the *hard* case (true neighbours scatter across
+cells); a clustered or real-embedding corpus rises faster for the same probes.
+The curve **shape** (monotone, hits 1.0 at `probes = lists`, skips a large
+block fraction at the low end) is scale-invariant; a larger corpus is the same
+curve.
+
+| probes | recall@10 | blocks scanned | blocks skipped |
+|-------:|----------:|---------------:|---------------:|
+| 1      | 0.078     | ~1.0%          | 99.0%          |
+| 2      | 0.124     | ~2.0%          | 98.0%          |
+| 4      | 0.200     | ~3.9%          | 96.1%          |
+| 8      | 0.340     | ~7.7%          | 92.3%          |
+| 16     | 0.528     | ~15.2%         | 84.8%          |
+| 32     | 0.722     | ~29.5%         | 70.5%          |
+| 128 (= lists) | **1.000** | 100%   | 0.0%           |
+
+Artefact: [`benches/results/ivf_recall_vs_probes_2026-06-16.json`](../benches/results/ivf_recall_vs_probes_2026-06-16.json).
+
+**The headline this delivers:** "at `probes = P`, recall@10 = R while scanning
+F% of the corpus" — e.g. at `probes = 32` the scan touches ~30% of the blocks
+for recall@10 = 0.72, and at `probes = 1` it touches ~1% of the blocks. The
+dial works. The contract test asserts (1) recall@10 is monotone
+non-decreasing in probes, (2) `recall(probes = lists) = recall(flat) ≈ 1.0`
+(probing every cell *is* the full scan), and (3) the low-probes end skips a
+large fraction of blocks.
+
+Soft multi-assignment (`WITH (assign_dups = M)`, IVF-4) raises recall@10 at any
+fixed `probes` by storing boundary vectors in their top-M nearest cells, at a
+bounded storage cost — see [Migrating from pgvector](MIGRATING_FROM_PGVECTOR.md)
+and an internal design note.
+
 ## Caveats
 
 - **Single host, pre-AVX2 CPU.** `meh` is an Ivy Bridge Xeon (`avx`, no

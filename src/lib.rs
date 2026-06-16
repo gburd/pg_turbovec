@@ -1014,9 +1014,9 @@ mod tests {
     /// `docs/UPGRADING.md` migration matrix.
     #[pg_test]
     fn wire_format_version_is_stable() {
-        // The version emitted by v1.4.0. Bump this only as part of
-        // a deliberate minor/major release with a migration story.
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 3;
+        // The version emitted by IVF-1 (v4). Bump this only as part
+        // of a deliberate minor/major release with a migration story.
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 4;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,
@@ -3832,7 +3832,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(meta.version, 3, "new index must use the v3 wire format");
+        assert_eq!(meta.version, 4, "new index must use the v4 wire format");
         assert!(
             meta.has_prepared_layout(),
             "meta must record blocked + codebook: blocked_bytes={} cb_levels={}",
@@ -4000,14 +4000,14 @@ mod tests {
             Spi::get_one("SELECT 't_old_idx'::regclass::oid::int8").unwrap();
         let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
-        // Initial meta is v3 (the only version we write today).
+        // Initial meta is v4 (the version we write today; IVF-1).
         let v_current_meta: MetaPageData = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v_current_meta.version, 3);
+        assert_eq!(v_current_meta.version, 4);
         assert!(!v_current_meta.is_legacy_v1());
         assert!(!v_current_meta.is_legacy_v2());
         assert!(v_current_meta.has_prepared_layout());
@@ -4103,7 +4103,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v3_meta.version, 3);
+        assert_eq!(v3_meta.version, 4);
         assert!(!v3_meta.is_legacy_v1());
         assert!(!v3_meta.is_legacy_v2());
 
@@ -4233,7 +4233,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (m, c, s, i, b, cents, bnds, rot)
         };
-        assert_eq!(meta.version, 3);
+        assert_eq!(meta.version, 4);
         assert!(meta.has_prepared_layout());
         assert_eq!(meta.rotation_dim, meta.dim);
         assert!(meta.rotation_count >= 1);
@@ -4905,6 +4905,371 @@ mod tests {
             )
         });
         assert!(bad.is_err(), "concat exceeding MAX_DIM should ERROR");
+    }
+
+    // ----------------------------------------------------------------
+    // IVF-1 (an internal design note): build path + on-disk layout for the
+    // inverted-file layer. The scan path stays FLAT in IVF-1; these
+    // tests prove the v3->v4 wire change round-trips and that flat
+    // v3/lists=0 indexes need no REINDEX.
+    // ----------------------------------------------------------------
+
+    /// k-means trains deterministically: same sample + same lists =>
+    /// byte-identical centroids. The determinism anchor (mirrors the
+    /// rotation's fixed ROTATION_SEED precedent).
+    #[pg_test]
+    fn ivf_kmeans_deterministic() {
+        use crate::index::ivf;
+        let dim = 16;
+        let n = 500;
+        // Deterministic pseudo-random sample.
+        let mut sample = vec![0.0f32; n * dim];
+        let mut x = 0xC0FFEEu64;
+        for v in sample.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+        }
+        let m1 = ivf::train_kmeans(&sample, n, 32, dim);
+        let m2 = ivf::train_kmeans(&sample, n, 32, dim);
+        assert_eq!(
+            m1.centroids, m2.centroids,
+            "IVF k-means must be byte-deterministic"
+        );
+    }
+
+    /// Every slot is assigned to exactly one cell and the cell
+    /// directory partitions all vectors. Pure-permutation property
+    /// checked at the SQL boundary via the build path.
+    #[pg_test]
+    fn ivf_cell_assignment_covers_all_vectors() {
+        use crate::index::ivf;
+        // Hand-built assignment over 7 slots, 3 cells.
+        let assignment = [2u32, 0, 0, 1, 2, 1, 0];
+        let (perm, dir) = ivf::build_permutation(&assignment, 3);
+        dir.validate_partition(7).unwrap();
+        assert_eq!(dir.total_vectors(), 7);
+        // Every old slot appears exactly once in the permutation.
+        let mut seen = [false; 7];
+        for &old in &perm {
+            assert!(!seen[old as usize], "slot assigned to two cells");
+            seen[old as usize] = true;
+        }
+        assert!(seen.iter().all(|&b| b), "some slot unassigned");
+    }
+
+    /// Building `WITH (lists = 0)` produces a relfile byte-identical
+    /// to a no-lists (default) build, modulo the meta-page version
+    /// byte. Proves the v4 flat layout is backward-compatible with
+    /// v3 (no REINDEX for non-IVF users).
+    #[pg_test]
+    fn ivf_build_lists0_is_byte_identical_to_flat() {
+        use_turbovec();
+        // Deterministic corpus; dim multiple of 8.
+        Spi::run("CREATE TABLE ivf_b0 (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_b0 \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 31 + s * 17) % 97)::float8 / 97.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 400) g",
+        )
+        .unwrap();
+
+        // Default build (no lists reloption).
+        Spi::run(
+            "CREATE INDEX ivf_b0_default ON ivf_b0 \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        // Explicit lists = 0 build over the SAME data.
+        Spi::run(
+            "CREATE INDEX ivf_b0_lists0 ON ivf_b0 \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        )
+        .unwrap();
+
+        // Compare the two relfiles block-for-block, ignoring only the
+        // meta-page version byte. Both are v4 here (lists=0 is
+        // structurally v3-equivalent), so they should be fully equal.
+        let (def_oid, l0_oid): (pg_sys::Oid, pg_sys::Oid) = (
+            Spi::get_one("SELECT 'ivf_b0_default'::regclass::oid")
+                .unwrap()
+                .unwrap(),
+            Spi::get_one("SELECT 'ivf_b0_lists0'::regclass::oid")
+                .unwrap()
+                .unwrap(),
+        );
+        let (def_bytes, l0_bytes) = unsafe {
+            let a = read_relfile_blocks(def_oid);
+            let b = read_relfile_blocks(l0_oid);
+            (a, b)
+        };
+        assert_eq!(
+            def_bytes.len(),
+            l0_bytes.len(),
+            "lists=0 relfile must have same block count as default"
+        );
+        // Meta page is block 0; its version byte lives at PG header
+        // (24) + magic (4) = offset 28. Both should already be v4, so
+        // assert full byte-equality including the version byte.
+        assert_eq!(
+            def_bytes, l0_bytes,
+            "lists=0 build must be byte-identical to the default flat build"
+        );
+    }
+
+    /// A forged v3 index (version byte = 3, v4 IVF fields absent)
+    /// must still scan flat under the v4 binary, returning correct
+    /// top-k. The no-REINDEX guarantee.
+    #[pg_test]
+    fn ivf_v3_index_still_scans_under_v4_binary() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_v3 (id bigint, emb vector)").unwrap();
+        // Orthogonal-ish basis so the nearest neighbour is
+        // unambiguous.
+        Spi::run(
+            "INSERT INTO ivf_v3 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]'), \
+                 (4, '[0,0,0,1,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_v3_idx ON ivf_v3 \
+             USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+
+        // Force the on-disk meta page back to version 3. The v4 IVF
+        // fields are already zero (lists=0), so a v3-stamped page is
+        // a legitimate flat v3 index as far as the decoder is
+        // concerned.
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ivf_v3_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_version(rel, 3);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        // A v3 index must NOT trip the legacy ERROR path; it scans
+        // flat. Query nearest to id=2's vector.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let top: Option<i64> = Spi::get_one(
+            "SELECT id FROM ivf_v3 \
+             ORDER BY emb <=> '[0,1,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(top, Some(2), "v3 flat scan under v4 binary must be correct");
+    }
+
+    /// Build `WITH (lists = 16)` over a few thousand rows; read back
+    /// the coarse centroids + cell directory and assert the
+    /// directory partitions all n_vectors exactly. A FLAT scan over
+    /// the (cell-reordered) codes must still return correct top-k
+    /// (IVF-1 scan is flat, so recall is unchanged vs lists=0), with
+    /// distinct ids.
+    #[pg_test]
+    fn ivf_build_with_lists_roundtrips() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_rt (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_rt \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 13 + s * 7 + (g % 5) * 1000) % 211)::float8 / 211.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 3000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_rt_idx ON ivf_rt \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ivf_rt_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+
+        // Read back the meta, coarse centroids, and cell directory.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel)
+                .expect("ivf index has a meta page");
+            assert_eq!(meta.version, 4, "IVF index must be wire v4");
+            assert!(meta.has_ivf(), "meta.has_ivf() must be true for lists=16");
+            assert_eq!(meta.lists, 16);
+            assert_eq!(meta.n_vectors, 3000);
+
+            let coarse =
+                crate::index::relfile::read_coarse_centroids(rel, &meta);
+            assert_eq!(
+                coarse.len(),
+                16 * 16,
+                "coarse chain must hold lists*dim f32"
+            );
+            // Centroids are finite (trained, not garbage).
+            assert!(coarse.iter().all(|x| x.is_finite()));
+
+            let dir = crate::index::relfile::read_cell_directory(rel, &meta)
+                .expect("lists>0 index has a cell directory");
+            assert_eq!(dir.len(), 16);
+            // The cell directory must partition all 3000 vectors
+            // exactly: contiguous, non-overlapping, summing to n.
+            dir.validate_partition(3000).unwrap();
+            assert_eq!(dir.total_vectors(), 3000);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // A flat scan over the cell-reordered codes must still return
+        // a correct, distinct-id top-k. Pull back several neighbours
+        // and assert distinctness (the cheapest wrong-ranking guard).
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let ids: Vec<i64> = Spi::connect(|client| {
+            let tup = client
+                .select(
+                    "SELECT id FROM ivf_rt \
+                     ORDER BY emb <=> '[0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,\
+                                        0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5]'::vector \
+                     LIMIT 20",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            tup.map(|r| r.get::<i64>(1).unwrap().unwrap()).collect()
+        });
+        assert_eq!(ids.len(), 20, "top-20 over a 3000-row IVF index");
+        assert_distinct_ids(&ids);
+    }
+
+    /// IVF-1 recall anchor: a flat scan over a lists=16 index must
+    /// return essentially the SAME top-k as a lists=0 (flat) build of
+    /// the same data. IVF-1 doesn't probe cells, so reordering the
+    /// codes can't change *which corpus* is scanned — every vector is
+    /// still scored.
+    ///
+    /// The result isn't bit-identical, though: turbovec's TQ+
+    /// calibration is fit on the first ~1000 vectors *in slot order*,
+    /// and cell reordering changes that prefix, so the per-coordinate
+    /// calibration (and thus the exact quantized codes) shifts
+    /// slightly. The executor's exact-distance recheck
+    /// (`xs_recheckorderby`) absorbs most of that, so the returned
+    /// neighbour SET overlaps the flat scan's heavily. We assert a
+    /// strong overlap (the recall-unchanged guarantee) plus distinct
+    /// ids (the wrong-ranking guard), not byte-exact ranking.
+    #[pg_test]
+    fn ivf_lists_scan_matches_flat() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_eq (id bigint, emb vector)").unwrap();
+        // A corpus with clear, well-separated structure so the top-k
+        // is robust to small quantization shifts: each row gets a
+        // smoothly-varying signal (sinusoidal in the id) rather than
+        // the near-tie modular noise that makes ranking pathological.
+        Spi::run(
+            "INSERT INTO ivf_eq \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 2000) g",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Query = a specific row's vector (id 777), so the true top-1
+        // is unambiguous and the surrounding neighbours are stable.
+        let query = "(SELECT emb FROM ivf_eq WHERE id = 777)";
+
+        let pull = |idx_sql: &str| -> Vec<i64> {
+            Spi::run(idx_sql).unwrap();
+            let q = format!(
+                "SELECT id FROM ivf_eq ORDER BY emb <=> {query} LIMIT 10"
+            );
+            let r: Vec<i64> = Spi::connect(|client| {
+                client
+                    .select(&q, None, &[])
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            });
+            r
+        };
+
+        let flat = pull(
+            "CREATE INDEX ivf_eq_idx ON ivf_eq \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        );
+        Spi::run("DROP INDEX ivf_eq_idx").unwrap();
+        let ivf = pull(
+            "CREATE INDEX ivf_eq_idx ON ivf_eq \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        );
+        // Strong set overlap (the recall-unchanged guarantee). TQ+
+        // calibration's order-sensitivity means the ranking isn't
+        // byte-identical, but the neighbour sets must overlap heavily
+        // (>= 8/10 — in practice they match exactly on most queries).
+        let flat_set: std::collections::HashSet<i64> = flat.iter().copied().collect();
+        let overlap = ivf.iter().filter(|id| flat_set.contains(id)).count();
+        assert!(
+            overlap >= 8,
+            "IVF-1 flat scan (lists=16) must recall the flat top-10 set \
+             (overlap {overlap}/10): flat={flat:?} ivf={ivf:?}"
+        );
+        // The true neighbour (id 777, the query row itself) must be
+        // present in both — a flat scan over the whole corpus can't
+        // miss the query's own vector.
+        assert!(flat.contains(&777), "flat scan must find the query row");
+        assert!(ivf.contains(&777), "IVF flat scan must find the query row");
+        assert_distinct_ids(&ivf);
+    }
+
+    /// Helper: slurp the DATA REGION (bytes after the 24-byte PG page
+    /// header) of every block of an index relation's main fork into
+    /// one byte vector via the buffer manager. We skip the page
+    /// header deliberately: `pd_lsn` / `pd_checksum` live there and
+    /// differ between two independently-written relations even when
+    /// the logical payload is identical. The turbovec payload lives
+    /// entirely in the data region. Used by the byte-identity test.
+    ///
+    /// # Safety
+    /// Caller passes a valid index relation oid.
+    unsafe fn read_relfile_blocks(indexrelid: pg_sys::Oid) -> Vec<u8> {
+        let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+        let nblocks = pg_sys::RelationGetNumberOfBlocksInFork(
+            rel,
+            pg_sys::ForkNumber::MAIN_FORKNUM,
+        );
+        let mut out = Vec::new();
+        for blk in 0..nblocks {
+            let buf = pg_sys::ReadBufferExtended(
+                rel,
+                pg_sys::ForkNumber::MAIN_FORKNUM,
+                blk,
+                pg_sys::ReadBufferMode::RBM_NORMAL,
+                std::ptr::null_mut(),
+            );
+            pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+            let page = pg_sys::BufferGetPage(buf);
+            // Skip the 24-byte page header; compare only the data
+            // region (LSN/checksum-free).
+            let data = page
+                .cast::<u8>()
+                .add(crate::index::page::PAGE_HEADER_BYTES);
+            let slice = std::slice::from_raw_parts(
+                data,
+                crate::index::page::BLCKSZ - crate::index::page::PAGE_HEADER_BYTES,
+            );
+            out.extend_from_slice(slice);
+            pg_sys::UnlockReleaseBuffer(buf);
+        }
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        out
     }
 }
 

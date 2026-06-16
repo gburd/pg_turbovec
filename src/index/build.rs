@@ -11,6 +11,7 @@ use pgrx::prelude::*;
 use turbovec::IdMapIndex;
 
 use crate::guc;
+use crate::index::ivf;
 use crate::index::{options, relfile};
 use crate::kernels;
 use crate::vec::Vector;
@@ -67,6 +68,39 @@ struct BuildState {
     /// the pool outlives every callback invocation (it lives on
     /// `ambuild`'s stack for the whole scan), so deref is sound.
     pool: *const rayon::ThreadPool,
+
+    // ---- IVF-1 build state (only used when `lists > 0`) ----
+    /// IVF coarse-cell count from `WITH (lists = N)`. `0` = flat
+    /// (today's behaviour); the IVF fields below stay unused.
+    lists: usize,
+    /// When `lists > 0` we cannot flush incrementally: the
+    /// cell-contiguous permutation needs the whole flat corpus before
+    /// quantizing. We accumulate the (optionally normalised) flat
+    /// vectors and their ids here, then permute + build the
+    /// `IdMapIndex` once at end-of-scan. Bounded by the corpus size
+    /// (IVF is for medium corpora where this fits; the Phase W
+    /// streaming cap applies to the flat `lists == 0` path).
+    ivf_flat: Vec<f32>,
+    ivf_ids: Vec<u64>,
+    /// Reservoir sample of ROTATED vectors for k-means training,
+    /// capped at `256 * lists` rows (FAISS's rule of thumb). Filled
+    /// during the scan so we don't double-scan. Row-major
+    /// `sample_count * dim`.
+    ivf_sample: Vec<f32>,
+    /// Rows currently in `ivf_sample`.
+    ivf_sample_count: usize,
+    /// Total rows seen so far (for reservoir replacement probability).
+    ivf_seen: u64,
+    /// Deterministic RNG for reservoir sampling. Seeded from
+    /// `ivf::IVF_SEED` so the sample (and thus the trained centroids)
+    /// are reproducible across identical builds.
+    ivf_rng: rand_chacha::ChaCha8Rng,
+    /// Lazily-built rotation matrix (row-major `dim * dim`), used to
+    /// rotate sampled vectors into the clustering space. Built once
+    /// `dim` is known. Cells must live in the rotated space (the same
+    /// space the fine quantizer + query use), so we rotate the
+    /// L2-normalised vector exactly as turbovec's encode does.
+    ivf_rotation: Option<Vec<f32>>,
 }
 
 impl BuildState {
@@ -96,6 +130,60 @@ impl BuildState {
         let chunk_bytes = bytes.min(MAX_STAGING_BYTES);
         let row_bytes = dim.saturating_mul(std::mem::size_of::<f32>()).max(1);
         (chunk_bytes / row_bytes).max(1)
+    }
+
+    /// IVF-1 sample cap: `256 * lists` rows (FAISS's rule of thumb).
+    /// Bounds the k-means training set so the sample stays small
+    /// regardless of corpus size (Phase W streaming spirit).
+    fn ivf_sample_cap(&self) -> usize {
+        self.lists.saturating_mul(256)
+    }
+
+    /// Rotate an L2-normalised vector into the clustering (rotated)
+    /// space, mirroring turbovec's encode: `rotated[k] = sum_j R[k*dim+j]
+    /// * unit[j]` (i.e. `unit @ R^T`). `unit` must already be
+    /// L2-normalised and `dim`-length. Returns a `dim`-length Vec.
+    fn rotate_unit(rotation: &[f32], unit: &[f32], dim: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; dim];
+        for (k, o) in out.iter_mut().enumerate() {
+            let rrow = &rotation[k * dim..(k + 1) * dim];
+            let mut s = 0.0f32;
+            for j in 0..dim {
+                s += rrow[j] * unit[j];
+            }
+            *o = s;
+        }
+        out
+    }
+
+    /// Reservoir-sample one ROTATED row for k-means training. Called
+    /// per accepted vector when `lists > 0`. `raw` is the raw (un-
+    /// normalised) input slice; we normalise + rotate before storing
+    /// so the sample lives in the clustering space.
+    fn ivf_reservoir_push(&mut self, raw: &[f32], dim: usize) {
+        use rand::Rng;
+        let rotation = self
+            .ivf_rotation
+            .as_ref()
+            .expect("ivf_reservoir_push before rotation built");
+        // Normalise then rotate, matching turbovec's encode pipeline.
+        let unit = kernels::normalise_to_vec(raw);
+        let rotated = Self::rotate_unit(rotation, &unit, dim);
+
+        let cap = self.ivf_sample_cap();
+        self.ivf_seen += 1;
+        if self.ivf_sample_count < cap {
+            self.ivf_sample.extend_from_slice(&rotated);
+            self.ivf_sample_count += 1;
+        } else {
+            // Classic reservoir replacement: replace a random slot
+            // with probability cap / seen.
+            let j = self.ivf_rng.gen_range(0..self.ivf_seen);
+            if (j as usize) < cap {
+                let base = (j as usize) * dim;
+                self.ivf_sample[base..base + dim].copy_from_slice(&rotated);
+            }
+        }
     }
 
     /// Drain `pending_flat` / `pending_ids` into the IdMapIndex and
@@ -153,9 +241,10 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         error!("turbovec: failed to allocate IndexBuildResult");
     }
 
-    let (cfg_bit_width, cfg_dim) = options::read(index_relation);
+    let (cfg_bit_width, cfg_dim, cfg_lists) = options::read(index_relation);
     let indexrelid = (*index_relation).rd_id;
     let normalise = guc::NORMALIZE_ON_INSERT.get();
+    let lists = cfg_lists.max(0) as usize;
 
     let initial_dim = if cfg_dim > 0 {
         if (cfg_dim as usize) % 8 != 0 {
@@ -181,6 +270,14 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         chunk_rows: usize::MAX,
         heap_seen: 0,
         pool: std::ptr::null(),
+        lists,
+        ivf_flat: Vec::new(),
+        ivf_ids: Vec::new(),
+        ivf_sample: Vec::new(),
+        ivf_sample_count: 0,
+        ivf_seen: 0,
+        ivf_rng: <rand_chacha::ChaCha8Rng as rand::SeedableRng>::seed_from_u64(ivf::IVF_SEED),
+        ivf_rotation: None,
     };
     // Parity gap #2: a bounded rayon pool sized from
     // `turbovec.build_parallelism` (auto = max_parallel_maintenance_workers
@@ -201,6 +298,11 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
                 .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
         );
         state.chunk_rows = BuildState::compute_chunk_rows(d);
+        // IVF: build the rotation matrix up front so sampled vectors
+        // can be rotated into the clustering space during the scan.
+        if state.lists > 0 {
+            state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(d));
+        }
     }
 
     // Pull the table AM's index_build_range_scan and invoke it with
@@ -253,6 +355,25 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         (*result).index_tuples = 0.0;
         return result;
     };
+
+    // IVF-1 build path: train coarse centroids, assign, permute the
+    // flat corpus cell-contiguous, then run the EXISTING
+    // quantize+pack on the permuted order. The scan path stays flat
+    // in IVF-1; we persist cells purely to prove the v3->v4 wire
+    // change round-trips (cell-restricted search is IVF-2).
+    if state.lists > 0 {
+        let n_built = ivf_build_and_write(
+            index_relation,
+            &mut state,
+            dim,
+            cfg_bit_width as u8,
+            build_pool.as_ref(),
+        );
+        let _ = indexrelid;
+        (*result).heap_tuples = state.heap_seen as f64;
+        (*result).index_tuples = n_built as f64;
+        return result;
+    }
 
     // The IdMapIndex was either pre-constructed (dim pinned by
     // reloptions) or built lazily by the callback when the first
@@ -346,6 +467,154 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     result
 }
 
+/// IVF-1 build finisher (`lists > 0`). Trains coarse centroids on the
+/// reservoir sample, single-assigns every accumulated vector to its
+/// nearest centroid (in the rotated space), computes a stable
+/// cell-contiguous permutation, applies it to the flat corpus + ids,
+/// runs the EXISTING quantize+pack on the permuted order, then
+/// persists codes/scales/ids (cell-contiguous) plus the coarse
+/// centroids (f32) and the cell directory via the v4 relfile path.
+///
+/// Returns the number of vectors written. Consumes `state.ivf_flat` /
+/// `state.ivf_ids` / `state.ivf_sample`.
+///
+/// # Safety
+///
+/// `index_relation` is a valid, exclusively-held index relation
+/// (ambuild holds it for the whole build).
+unsafe fn ivf_build_and_write(
+    index_relation: pg_sys::Relation,
+    state: &mut BuildState,
+    dim: usize,
+    bit_width: u8,
+    build_pool: Option<&rayon::ThreadPool>,
+) -> usize {
+    let n_vectors = state.ivf_ids.len();
+
+    // Empty corpus: write an empty (flat-shaped) meta page. An IVF
+    // index over zero rows has no cells; readers treat it as empty.
+    if n_vectors == 0 {
+        relfile::write_full(
+            index_relation,
+            bit_width,
+            dim as u32,
+            0,
+            &[],
+            &[],
+            &[],
+            1,
+        );
+        return 0;
+    }
+
+    // `lists` can exceed the corpus size; cap it so we never train
+    // more centroids than we have points (k-means handles n < k, but
+    // an over-large nlist wastes cells). Keep at least 1.
+    let lists = state.lists.min(n_vectors).max(1);
+
+    let rotation = state
+        .ivf_rotation
+        .take()
+        .expect("ivf_build_and_write: rotation matrix not built");
+
+    // 1. Train coarse centroids on the (rotated) reservoir sample.
+    //    Deterministic: seeded k-means++ + Lloyd's (see ivf.rs).
+    let sample = std::mem::take(&mut state.ivf_sample);
+    let sample_count = state.ivf_sample_count;
+    let model = super::build_pool::install(build_pool, || {
+        ivf::train_kmeans(&sample, sample_count, lists, dim)
+    });
+    drop(sample);
+
+    // 2. Assign every (rotated) vector to its nearest centroid. One
+    //    streamed sweep over the accumulated flat corpus; we rotate
+    //    each L2-normalised vector on the fly (matching the sample
+    //    space) so we don't keep a second rotated copy of the corpus.
+    //    Parallelised over the build pool with a stable map (rayon
+    //    preserves index order in `map`), so the assignment is
+    //    deterministic.
+    let flat = std::mem::take(&mut state.ivf_flat);
+    let assignment: Vec<u32> = super::build_pool::install(build_pool, || {
+        use rayon::prelude::*;
+        (0..n_vectors)
+            .into_par_iter()
+            .map(|i| {
+                let raw = &flat[i * dim..(i + 1) * dim];
+                let unit = kernels::normalise_to_vec(raw);
+                let rotated = BuildState::rotate_unit(&rotation, &unit, dim);
+                model.assign_one(&rotated) as u32
+            })
+            .collect()
+    });
+
+    // 3. Stable cell-contiguous permutation + cell directory.
+    let (permutation, directory) = ivf::build_permutation(&assignment, lists);
+    debug_assert!(directory.validate_partition(n_vectors as u64).is_ok());
+
+    // 4. Apply the permutation to the flat corpus + ids. `perm[new] =
+    //    old`, so new_slot i takes old_slot perm[i].
+    let ids = std::mem::take(&mut state.ivf_ids);
+    let mut perm_flat = vec![0.0f32; n_vectors * dim];
+    let mut perm_ids = vec![0u64; n_vectors];
+    for new_slot in 0..n_vectors {
+        let old_slot = permutation[new_slot] as usize;
+        perm_flat[new_slot * dim..(new_slot + 1) * dim]
+            .copy_from_slice(&flat[old_slot * dim..(old_slot + 1) * dim]);
+        perm_ids[new_slot] = ids[old_slot];
+    }
+    drop(flat);
+    drop(ids);
+
+    // 5. Run the EXISTING quantize+pack on the permuted order. The
+    //    fine quantizer doesn't care about order; slot_to_id reflects
+    //    the permutation, and the codes/scales/ids land
+    //    cell-contiguous on disk.
+    let mut idx = IdMapIndex::new(dim, bit_width as usize)
+        .expect("turbovec ambuild (ivf): invalid (dim, bit_width)");
+    super::build_pool::install(build_pool, || {
+        idx.add_with_ids(&perm_flat, &perm_ids)
+            .expect("turbovec ambuild (ivf): add_with_ids failed")
+    });
+    drop(perm_flat);
+    drop(perm_ids);
+
+    let built = idx.slot_to_id().len();
+    debug_assert_eq!(built, n_vectors);
+
+    super::build_pool::install(build_pool, || idx.prepare_eager());
+    let idx_rotation = idx.rotation();
+    let prepared = relfile::PreparedParts {
+        blocked_codes: idx.blocked_codes(),
+        n_blocks: idx.n_blocks() as u32,
+        centroids: idx.centroids(),
+        boundaries: idx.boundaries(),
+        rotation: idx_rotation,
+    };
+    // Coarse centroids are already in the rotated space (trained on
+    // rotated samples); persist as-is. The cell directory packs the
+    // per-cell (code_offset, n_vectors) ranges.
+    let cell_dir_bytes = directory.encode();
+    let ivf_parts = relfile::IvfParts {
+        lists: lists as u32,
+        coarse_centroids: &model.centroids,
+        cell_dir_bytes: &cell_dir_bytes,
+    };
+    relfile::write_full_with_prepared_ivf(
+        index_relation,
+        bit_width,
+        dim as u32,
+        n_vectors as u64,
+        idx.packed_codes(),
+        idx.scales(),
+        idx.slot_to_id(),
+        1,
+        prepared,
+        ivf_parts,
+    );
+
+    built
+}
+
 /// Per-tuple callback invoked by `index_build_range_scan`. We treat
 /// dead tuples (`tuple_is_alive == false`) like NULL: they are skipped
 /// rather than indexed, matching pgvector's policy.
@@ -398,11 +667,40 @@ unsafe extern "C-unwind" fn build_callback(
                     .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
             );
             state.chunk_rows = BuildState::compute_chunk_rows(row_dim);
+            // IVF: build the rotation matrix now that dim is pinned,
+            // so reservoir samples land in the clustering space.
+            if state.lists > 0 && state.ivf_rotation.is_none() {
+                state.ivf_rotation =
+                    Some(turbovec::rotation::make_rotation_matrix(row_dim));
+            }
         }
         _ => {}
     }
 
     let id = pgrx::itemptr::item_pointer_to_u64(*tid);
+
+    // IVF-1 build path (`lists > 0`): we can't flush incrementally
+    // — the cell-contiguous permutation needs the whole flat corpus
+    // before quantizing. Accumulate the (optionally normalised) flat
+    // vector + id, and reservoir-sample the ROTATED vector for
+    // k-means. The permute + quantize + IVF persist happens at
+    // end-of-scan in `ambuild`.
+    if state.lists > 0 {
+        if state.normalise {
+            let mut buf = vec![0.0_f32; row_dim];
+            kernels::normalise_into(&mut buf, value.as_slice());
+            state.ivf_flat.extend_from_slice(&buf);
+        } else {
+            state.ivf_flat.extend_from_slice(value.as_slice());
+        }
+        state.ivf_ids.push(id);
+        // Reservoir sample always rotates the L2-normalised vector
+        // (cells live in the rotated unit-sphere space, matching
+        // turbovec's encode), regardless of the `normalise` GUC.
+        state.ivf_reservoir_push(value.as_slice(), row_dim);
+        return;
+    }
+
     if state.normalise {
         let mut buf = vec![0.0_f32; row_dim];
         kernels::normalise_into(&mut buf, value.as_slice());
@@ -433,7 +731,7 @@ unsafe extern "C-unwind" fn build_callback(
 /// pgvector's `HnswBuildEmpty` pattern.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Relation) {
-    let (bw, dim) = options::read(index_relation);
+    let (bw, dim, _lists) = options::read(index_relation);
 
     // Plan an empty layout. dim may be 0 if the user didn't
     // pin it via reloptions — the meta page records 0/0/0,

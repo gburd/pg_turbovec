@@ -1,0 +1,598 @@
+//! IVF (inverted-file) coarse-quantizer layer — IVF-1.
+//!
+//! **Scope of IVF-1: the build path + on-disk layout only.** The
+//! scan path stays FLAT (it ignores cells and scores the whole
+//! corpus, exactly as it does for `lists = 0`). IVF-1 proves the
+//! v3→v4 wire change round-trips: k-means coarse training,
+//! cell-contiguous code reordering, persisting coarse centroids +
+//! cell directory, and reading them all back. The latency win
+//! (cell-restricted search) is IVF-2.
+//!
+//! This module is deliberately **Postgres-free** so it is
+//! unit-testable like `kernels.rs`. It owns:
+//!
+//! - deterministic k-means (k-means++ seeding + Lloyd's iterations),
+//!   mirroring turbovec's `ChaCha8Rng::seed_from_u64` determinism
+//!   precedent (see `turbovec/src/rotation.rs`). The fixed
+//!   [`IVF_SEED`] anchors reproducibility: same sample + same
+//!   `lists` ⇒ byte-identical centroids;
+//! - the [`CellDirectory`] type and its `(code_offset, n_vectors)`
+//!   entries that give each cell's contiguous slot range;
+//! - the cell-contiguous permutation builder.
+//!
+//! ## Space
+//!
+//! All clustering happens in the **rotated** space. The caller
+//! rotates each sampled / assigned vector with the existing
+//! `turbovec` rotation matrix before handing it here, so the cells
+//! live in the same space the fine quantizer and the query use.
+//! This module never sees raw input vectors.
+//!
+//! ## Precision
+//!
+//! Coarse centroids are stored as f32 (resolved decision: at
+//! `nlist ≈ √n` it's a few MiB, mmap-resident; f16 rounding would
+//! cost boundary recall for no real savings). The cluster
+//! arithmetic here is all f32.
+
+use rand::Rng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+
+/// Fixed seed for the k-means RNG. Mirrors turbovec's
+/// `ROTATION_SEED` determinism precedent: a constant seed makes the
+/// whole coarse-training pipeline reproducible, so the same sample
+/// and the same `lists` always produce byte-identical centroids
+/// (the IVF determinism anchor the `ivf_kmeans_deterministic`
+/// `#[pg_test]` pins). Distinct from `ROTATION_SEED` (42) so the two
+/// deterministic subsystems don't share an RNG stream by accident.
+pub const IVF_SEED: u64 = 0x1F_F5EE_D00D_u64;
+
+/// Number of Lloyd's iterations. FAISS's default coarse-quantizer
+/// training runs ~10–25 iterations; 25 converges the small coarse
+/// codebook (`nlist ≈ √n` centroids over a `256·nlist`-bounded
+/// sample) well within diminishing returns. Iteration count is part
+/// of the determinism contract — changing it changes the centroids.
+pub const KMEANS_ITERS: usize = 25;
+
+/// One cell's contiguous slot range in the (reordered) codes /
+/// scales / ids chains.
+///
+/// After the build-time permutation, cell `c`'s rows occupy slots
+/// `[code_offset .. code_offset + n_vectors)`. `code_offset` is a
+/// **starting slot index** (not a byte offset); the fine-quantizer
+/// chains all share the same slot numbering, so one offset addresses
+/// codes, scales, and ids alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellEntry {
+    /// Starting slot index of this cell in the reordered chains.
+    pub code_offset: u64,
+    /// Number of vectors (slots) in this cell.
+    pub n_vectors: u32,
+}
+
+impl CellEntry {
+    /// On-disk size of one entry: `u64` offset + `u32` count = 12
+    /// bytes. Stored little-endian, packed (no padding) in the
+    /// cell-directory chain.
+    pub const ENCODED_BYTES: usize = 12;
+
+    /// Serialise to 12 little-endian bytes.
+    pub fn encode(&self) -> [u8; Self::ENCODED_BYTES] {
+        let mut out = [0u8; Self::ENCODED_BYTES];
+        out[0..8].copy_from_slice(&self.code_offset.to_le_bytes());
+        out[8..12].copy_from_slice(&self.n_vectors.to_le_bytes());
+        out
+    }
+
+    /// Inverse of [`Self::encode`].
+    pub fn decode(bytes: &[u8]) -> Self {
+        debug_assert!(bytes.len() >= Self::ENCODED_BYTES);
+        let code_offset = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let n_vectors = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        Self {
+            code_offset,
+            n_vectors,
+        }
+    }
+}
+
+/// The cell directory: one [`CellEntry`] per cell, in cell-id order.
+/// `entries.len() == lists`. The entries partition the `n_vectors`
+/// slots exactly — contiguous and non-overlapping, summing to
+/// `n_vectors`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellDirectory {
+    pub entries: Vec<CellEntry>,
+}
+
+impl CellDirectory {
+    /// Number of cells.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Total vectors across all cells (should equal the index's
+    /// `n_vectors`).
+    pub fn total_vectors(&self) -> u64 {
+        self.entries.iter().map(|e| u64::from(e.n_vectors)).sum()
+    }
+
+    /// Flatten the directory to a packed little-endian byte buffer
+    /// (`len() * CellEntry::ENCODED_BYTES` bytes) for the on-disk
+    /// chain.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.entries.len() * CellEntry::ENCODED_BYTES);
+        for e in &self.entries {
+            out.extend_from_slice(&e.encode());
+        }
+        out
+    }
+
+    /// Inverse of [`Self::encode`]: decode `lists` entries from a
+    /// packed byte buffer.
+    pub fn decode(bytes: &[u8], lists: usize) -> Self {
+        let mut entries = Vec::with_capacity(lists);
+        for i in 0..lists {
+            let off = i * CellEntry::ENCODED_BYTES;
+            entries.push(CellEntry::decode(&bytes[off..off + CellEntry::ENCODED_BYTES]));
+        }
+        Self { entries }
+    }
+
+    /// Validate that the entries partition `n_vectors` exactly:
+    /// contiguous, non-overlapping, starting at 0, summing to
+    /// `n_vectors`. Returns `Ok(())` or a descriptive error. Used by
+    /// round-trip tests and as a cheap corruption guard.
+    pub fn validate_partition(&self, n_vectors: u64) -> Result<(), String> {
+        let mut expected_offset = 0u64;
+        for (c, e) in self.entries.iter().enumerate() {
+            if e.code_offset != expected_offset {
+                return Err(format!(
+                    "cell {c}: code_offset {} != expected contiguous offset {expected_offset}",
+                    e.code_offset
+                ));
+            }
+            expected_offset += u64::from(e.n_vectors);
+        }
+        if expected_offset != n_vectors {
+            return Err(format!(
+                "cell directory covers {expected_offset} vectors, expected {n_vectors}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Result of coarse k-means training + assignment.
+pub struct CoarseModel {
+    /// `lists * dim` row-major f32 coarse centroids (rotated space).
+    pub centroids: Vec<f32>,
+    /// `lists` — number of coarse cells.
+    pub lists: usize,
+    /// Dimensionality.
+    pub dim: usize,
+}
+
+impl CoarseModel {
+    /// Centroid `c` as a `dim`-length slice.
+    pub fn centroid(&self, c: usize) -> &[f32] {
+        &self.centroids[c * self.dim..(c + 1) * self.dim]
+    }
+
+    /// Assign one (rotated) vector to its nearest centroid by
+    /// squared Euclidean distance. Returns the cell id. Ties broken
+    /// toward the lower cell id (deterministic).
+    pub fn assign_one(&self, v: &[f32]) -> usize {
+        debug_assert_eq!(v.len(), self.dim);
+        let mut best = 0usize;
+        let mut best_d = f32::INFINITY;
+        for c in 0..self.lists {
+            let d = sq_dist(v, self.centroid(c));
+            if d < best_d {
+                best_d = d;
+                best = c;
+            }
+        }
+        best
+    }
+}
+
+/// Squared Euclidean distance. Scalar — the coarse step is cheap
+/// (`lists` centroids, `lists ≈ √n`) and keeping it scalar avoids a
+/// second SIMD-correctness surface (per an internal design note §8). The reduction
+/// order is fixed (ascending coordinate), so it's deterministic.
+#[inline]
+pub fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut s = 0.0f32;
+    for i in 0..a.len() {
+        let d = a[i] - b[i];
+        s += d * d;
+    }
+    s
+}
+
+/// Train `lists` coarse centroids on `sample` (a row-major
+/// `n_sample * dim` buffer of **rotated** vectors) via deterministic
+/// k-means++ seeding + Lloyd's iterations.
+///
+/// Determinism: a `ChaCha8Rng::seed_from_u64(IVF_SEED)` drives both
+/// the k-means++ seeding and the empty-cell re-seeding, with a fixed
+/// iteration count ([`KMEANS_ITERS`]) and fixed (ascending) reduction
+/// order. Same `sample` + same `lists` ⇒ byte-identical centroids.
+///
+/// Degenerate cases:
+/// - `n_sample == 0` ⇒ all-zero centroids (the caller won't build an
+///   IVF index over an empty heap; guarded for safety).
+/// - `n_sample < lists` ⇒ the first `n_sample` centroids are the
+///   distinct sample points; the remaining `lists - n_sample` are
+///   re-seeded from the largest cell (standard rule). Such a cluster
+///   set is still valid (assignment picks the nearest of `lists`).
+pub fn train_kmeans(sample: &[f32], n_sample: usize, lists: usize, dim: usize) -> CoarseModel {
+    assert!(lists > 0, "train_kmeans: lists must be > 0");
+    assert!(dim > 0, "train_kmeans: dim must be > 0");
+    debug_assert_eq!(sample.len(), n_sample * dim);
+
+    let mut centroids = vec![0.0f32; lists * dim];
+    if n_sample == 0 {
+        return CoarseModel {
+            centroids,
+            lists,
+            dim,
+        };
+    }
+
+    let mut rng = ChaCha8Rng::seed_from_u64(IVF_SEED);
+    let row = |i: usize| -> &[f32] { &sample[i * dim..(i + 1) * dim] };
+
+    // ---- k-means++ seeding ----
+    // First centroid: a deterministic uniform pick.
+    let first = rng.gen_range(0..n_sample);
+    centroids[0..dim].copy_from_slice(row(first));
+
+    // D2 sampling for the remaining seeds. `d2[i]` is the squared
+    // distance from sample i to its nearest chosen centroid so far.
+    let mut d2 = vec![f32::INFINITY; n_sample];
+    for i in 0..n_sample {
+        d2[i] = sq_dist(row(i), &centroids[0..dim]);
+    }
+    for c in 1..lists {
+        let total: f64 = d2.iter().map(|&x| x as f64).sum();
+        let chosen = if total <= 0.0 {
+            // All sample points coincide with chosen centroids (e.g.
+            // fewer distinct points than `lists`). Fall back to a
+            // uniform pick so we still place a centroid; it may
+            // duplicate an existing one, which Lloyd's + the
+            // empty-cell rule will spread out.
+            rng.gen_range(0..n_sample)
+        } else {
+            // Weighted pick proportional to d2.
+            let target = rng.gen_range(0.0..total);
+            let mut acc = 0.0f64;
+            let mut idx = n_sample - 1;
+            for i in 0..n_sample {
+                acc += d2[i] as f64;
+                if acc >= target {
+                    idx = i;
+                    break;
+                }
+            }
+            idx
+        };
+        centroids[c * dim..(c + 1) * dim].copy_from_slice(row(chosen));
+        // Update nearest-centroid distances with the new centroid.
+        let new_c = chosen;
+        let new_centroid = row(new_c).to_vec();
+        for i in 0..n_sample {
+            let d = sq_dist(row(i), &new_centroid);
+            if d < d2[i] {
+                d2[i] = d;
+            }
+        }
+    }
+
+    // ---- Lloyd's iterations ----
+    let mut assign = vec![0u32; n_sample];
+    for _iter in 0..KMEANS_ITERS {
+        // Assignment step (ascending order ⇒ deterministic ties).
+        for i in 0..n_sample {
+            let mut best = 0usize;
+            let mut best_d = f32::INFINITY;
+            for c in 0..lists {
+                let d = sq_dist(row(i), &centroids[c * dim..(c + 1) * dim]);
+                if d < best_d {
+                    best_d = d;
+                    best = c;
+                }
+            }
+            assign[i] = best as u32;
+        }
+
+        // Update step: mean of assigned points.
+        let mut sums = vec![0.0f64; lists * dim];
+        let mut counts = vec![0u64; lists];
+        for i in 0..n_sample {
+            let c = assign[i] as usize;
+            counts[c] += 1;
+            let r = row(i);
+            let base = c * dim;
+            for j in 0..dim {
+                sums[base + j] += r[j] as f64;
+            }
+        }
+        for c in 0..lists {
+            if counts[c] == 0 {
+                continue; // handled by the empty-cell rule below
+            }
+            let inv = 1.0 / counts[c] as f64;
+            let base = c * dim;
+            for j in 0..dim {
+                centroids[base + j] = (sums[base + j] * inv) as f32;
+            }
+        }
+
+        // Empty-cell rule: re-seed each empty cell from the LARGEST
+        // cell by splitting a point off it. Deterministic: we pick
+        // the largest cell (ties → lowest id) and the
+        // deterministically-chosen sample point furthest from that
+        // cell's centroid. This is the standard "re-seed largest
+        // cell" rule and prevents dead centroids from collapsing
+        // recall.
+        for c in 0..lists {
+            if counts[c] != 0 {
+                continue;
+            }
+            // Largest cell (ties → lowest id).
+            let mut big = 0usize;
+            let mut big_n = 0u64;
+            for k in 0..lists {
+                if counts[k] > big_n {
+                    big_n = counts[k];
+                    big = k;
+                }
+            }
+            if big_n <= 1 {
+                // Nothing to split (all cells empty or singletons);
+                // jitter from a deterministic random sample point.
+                let pick = rng.gen_range(0..n_sample);
+                centroids[c * dim..(c + 1) * dim].copy_from_slice(row(pick));
+                counts[c] = 1;
+                continue;
+            }
+            // Furthest point in `big` from `big`'s centroid (ties →
+            // lowest sample index ⇒ deterministic).
+            let big_centroid = &centroids[big * dim..(big + 1) * dim];
+            let mut far = usize::MAX;
+            let mut far_d = -1.0f32;
+            for i in 0..n_sample {
+                if assign[i] as usize != big {
+                    continue;
+                }
+                let d = sq_dist(row(i), big_centroid);
+                if d > far_d {
+                    far_d = d;
+                    far = i;
+                }
+            }
+            if far == usize::MAX {
+                let pick = rng.gen_range(0..n_sample);
+                centroids[c * dim..(c + 1) * dim].copy_from_slice(row(pick));
+                counts[c] = 1;
+                continue;
+            }
+            // Move that point's mass to the empty cell.
+            centroids[c * dim..(c + 1) * dim].copy_from_slice(row(far));
+            assign[far] = c as u32;
+            counts[c] = 1;
+            counts[big] -= 1;
+        }
+    }
+
+    CoarseModel {
+        centroids,
+        lists,
+        dim,
+    }
+}
+
+/// Build the cell-contiguous permutation and directory from a
+/// `slot → cell` assignment.
+///
+/// Returns `(permutation, directory)` where `permutation[new_slot] =
+/// old_slot` — i.e. applying it reorders the flat slots so cell 0's
+/// rows come first, then cell 1's, etc. The order is stable: within
+/// a cell, original slot order is preserved (sort key `(cell_id,
+/// original_slot)`), so the whole pipeline is deterministic.
+///
+/// `assignment[old_slot] = cell_id`, `assignment.len() == n_vectors`.
+pub fn build_permutation(assignment: &[u32], lists: usize) -> (Vec<u32>, CellDirectory) {
+    let n = assignment.len();
+
+    // Count per cell.
+    let mut counts = vec![0u64; lists];
+    for &c in assignment {
+        counts[c as usize] += 1;
+    }
+
+    // Prefix offsets → cell directory.
+    let mut entries = Vec::with_capacity(lists);
+    let mut acc = 0u64;
+    for c in 0..lists {
+        entries.push(CellEntry {
+            code_offset: acc,
+            n_vectors: counts[c] as u32,
+        });
+        acc += counts[c];
+    }
+    let directory = CellDirectory { entries };
+
+    // Stable counting sort: walk old slots in ascending order, place
+    // each into the next free position of its cell. Because we visit
+    // old slots ascending and fill each cell's run left-to-right,
+    // within-cell order == original slot order (stable).
+    let mut cursor: Vec<u64> = directory.entries.iter().map(|e| e.code_offset).collect();
+    let mut permutation = vec![0u32; n];
+    for (old_slot, &c) in assignment.iter().enumerate() {
+        let pos = cursor[c as usize];
+        permutation[pos as usize] = old_slot as u32;
+        cursor[c as usize] += 1;
+    }
+
+    (permutation, directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two well-separated blobs in 2-D should train to two
+    /// centroids near the blob means, and assignment should split
+    /// them cleanly.
+    #[test]
+    fn kmeans_converges_two_blobs() {
+        let dim = 2;
+        // Blob A around (0,0), blob B around (10,10).
+        let mut sample = Vec::new();
+        for i in 0..50 {
+            let j = (i % 5) as f32 * 0.01;
+            sample.extend_from_slice(&[j, -j]);
+        }
+        for i in 0..50 {
+            let j = (i % 5) as f32 * 0.01;
+            sample.extend_from_slice(&[10.0 + j, 10.0 - j]);
+        }
+        let n = 100;
+        let model = train_kmeans(&sample, n, 2, dim);
+        // Each centroid near one blob.
+        let c0 = model.centroid(0);
+        let c1 = model.centroid(1);
+        let near_origin = |c: &[f32]| c[0].abs() < 1.0 && c[1].abs() < 1.0;
+        let near_ten = |c: &[f32]| (c[0] - 10.0).abs() < 1.0 && (c[1] - 10.0).abs() < 1.0;
+        assert!(
+            (near_origin(c0) && near_ten(c1)) || (near_origin(c1) && near_ten(c0)),
+            "centroids didn't converge to the two blobs: {c0:?} {c1:?}"
+        );
+        // Assignment splits cleanly.
+        assert_eq!(model.assign_one(&[0.0, 0.0]), model.assign_one(&[0.05, -0.05]));
+        assert_ne!(model.assign_one(&[0.0, 0.0]), model.assign_one(&[10.0, 10.0]));
+    }
+
+    /// Same sample + same lists ⇒ byte-identical centroids. The
+    /// determinism anchor.
+    #[test]
+    fn kmeans_deterministic() {
+        let dim = 8;
+        let n = 300;
+        let mut sample = vec![0.0f32; n * dim];
+        // Pseudo-random but fixed content.
+        let mut x = 12345u64;
+        for v in sample.iter_mut() {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+        }
+        let m1 = train_kmeans(&sample, n, 16, dim);
+        let m2 = train_kmeans(&sample, n, 16, dim);
+        assert_eq!(m1.centroids, m2.centroids, "k-means must be deterministic");
+    }
+
+    /// n < k: fewer sample points than centroids. Must not panic;
+    /// must still produce `lists` centroids and assign every point.
+    #[test]
+    fn kmeans_n_less_than_k() {
+        let dim = 4;
+        let n = 3;
+        let sample = vec![
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+        ];
+        let model = train_kmeans(&sample, n, 8, dim);
+        assert_eq!(model.centroids.len(), 8 * dim);
+        // Every sample point assigns to some valid cell.
+        for i in 0..n {
+            let c = model.assign_one(&sample[i * dim..(i + 1) * dim]);
+            assert!(c < 8);
+        }
+    }
+
+    /// Empty cells (degenerate: all points identical) must be
+    /// re-seeded, not left dead. With all-identical points and k=4,
+    /// the empty-cell rule kicks in; training must terminate and
+    /// produce 4 centroids.
+    #[test]
+    fn kmeans_handles_empty_cells() {
+        let dim = 3;
+        let n = 20;
+        let sample = vec![0.5f32; n * dim]; // all identical
+        let model = train_kmeans(&sample, n, 4, dim);
+        assert_eq!(model.centroids.len(), 4 * dim);
+        // Assignment is well-defined and in range.
+        let c = model.assign_one(&[0.5, 0.5, 0.5]);
+        assert!(c < 4);
+    }
+
+    /// The permutation must partition all vectors exactly and be a
+    /// valid bijection of slots.
+    #[test]
+    fn permutation_partitions_all_vectors() {
+        // 10 vectors, 3 cells, hand-built assignment.
+        let assignment = [0u32, 2, 1, 0, 0, 2, 1, 1, 2, 0];
+        let lists = 3;
+        let (perm, dir) = build_permutation(&assignment, lists);
+        // Directory partitions exactly.
+        dir.validate_partition(assignment.len() as u64).unwrap();
+        assert_eq!(dir.total_vectors(), 10);
+        // cell 0 has 4 (slots 0,3,4,9), cell 1 has 3 (2,6,7), cell 2 has 3 (1,5,8)
+        assert_eq!(dir.entries[0].n_vectors, 4);
+        assert_eq!(dir.entries[1].n_vectors, 3);
+        assert_eq!(dir.entries[2].n_vectors, 3);
+        // perm is a bijection.
+        let mut seen = vec![false; 10];
+        for &old in &perm {
+            assert!(!seen[old as usize], "duplicate old slot in permutation");
+            seen[old as usize] = true;
+        }
+        assert!(seen.iter().all(|&b| b));
+        // Within-cell order is stable (original slot order). Cell 0's
+        // new slots [0..4) must be old slots 0,3,4,9 in that order.
+        assert_eq!(&perm[0..4], &[0, 3, 4, 9]);
+        // Cell 1's new slots [4..7) must be old 2,6,7.
+        assert_eq!(&perm[4..7], &[2, 6, 7]);
+        // Cell 2's new slots [7..10) must be old 1,5,8.
+        assert_eq!(&perm[7..10], &[1, 5, 8]);
+    }
+
+    /// CellDirectory encode/decode round-trips.
+    #[test]
+    fn cell_directory_round_trip() {
+        let dir = CellDirectory {
+            entries: vec![
+                CellEntry { code_offset: 0, n_vectors: 5 },
+                CellEntry { code_offset: 5, n_vectors: 0 },
+                CellEntry { code_offset: 5, n_vectors: 7 },
+            ],
+        };
+        let bytes = dir.encode();
+        assert_eq!(bytes.len(), 3 * CellEntry::ENCODED_BYTES);
+        let back = CellDirectory::decode(&bytes, 3);
+        assert_eq!(dir, back);
+        back.validate_partition(12).unwrap();
+    }
+
+    /// validate_partition rejects a non-contiguous directory.
+    #[test]
+    fn validate_partition_rejects_gaps() {
+        let dir = CellDirectory {
+            entries: vec![
+                CellEntry { code_offset: 0, n_vectors: 5 },
+                CellEntry { code_offset: 6, n_vectors: 4 }, // gap!
+            ],
+        };
+        assert!(dir.validate_partition(9).is_err());
+    }
+}

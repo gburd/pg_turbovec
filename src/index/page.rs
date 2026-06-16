@@ -39,19 +39,31 @@
 //!  236     4  rotation_first (BlockNumber)            |  v3+
 //!  240     4  rotation_count (u32)                    |
 //!  244     4  rotation_dim (u32)                      |
-//!  248   ...  reserved (zero)                         /
+//!  248     4  lists (u32)  nlist; 0 = flat            |  v4+
+//!  252     4  coarse_first  (BlockNumber)             |
+//!  256     4  coarse_count  (u32)                     |
+//!  260     4  cell_dir_first (BlockNumber)            |
+//!  264     4  cell_dir_count (u32)                    |
+//!  268   ...  reserved (zero)                         /
 //! ```
 //!
 //! After the meta block come three contiguous page chains for
 //! the row-major codes / scales / ids, followed in v2 by a
-//! fourth chain holding the prepared SIMD-blocked layout, and
-//! in v3 by a fifth chain holding the persisted random
-//! orthogonal rotation matrix (a deterministic function of
+//! fourth chain holding the prepared SIMD-blocked layout, in v3
+//! by a fifth chain holding the persisted random orthogonal
+//! rotation matrix, and in v4 by (when `lists > 0`) a sixth
+//! chain holding the coarse centroids (`lists * dim` f32, rotated
+//! space) and a seventh holding the cell directory (`lists`
+//! `(code_offset: u64, n_vectors: u32)` entries). v4 with
+//! `lists = 0` is byte-identical to v3 modulo the version byte
+//! and the zeroed v4 fields — the IVF feature is strictly opt-in,
+//! so existing v3 indexes need no REINDEX. The blocked, rotation,
 //! `(dim, ROTATION_SEED)` whose lazy QR-on-first-search was
-//! the warm-scan hotspot Phase R diagnosed). The blocked and
-//! rotation chains are flat byte chains (no fixed row stride):
-//! every page after the page header is `PAYLOAD_BYTES` of raw
-//! bytes, with the last page holding the residual tail.
+//! the warm-scan hotspot Phase R diagnosed). The blocked,
+//! rotation, coarse-centroid, and cell-directory chains are flat
+//! byte chains (no fixed row stride): every page after the page
+//! header is `PAYLOAD_BYTES` of raw bytes, with the last page
+//! holding the residual tail.
 //!
 //! ## Why no PageAddItem / line pointers?
 //!
@@ -90,7 +102,16 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       decomposition (`rotation::make_rotation_matrix`), which
 ///       at `dim = 1536` is ~64% self time on the warm-scan
 ///       profile (see an internal design note).
-pub const VERSION: u8 = 3;
+/// `4` - IVF-1: meta + (when `lists > 0`) 7 chains, adding the
+///       coarse centroids + cell directory for the inverted-file
+///       layer (an internal design note). IVF is opt-in via
+///       `WITH (lists = N)`; `lists = 0` (the default) is
+///       byte-identical to v3 modulo the version byte, so the v3
+///       flat decode path stays valid and existing v3 indexes
+///       need no REINDEX. The scan path is still FLAT in IVF-1
+///       (cells are persisted but not yet probed); cell-restricted
+///       search is IVF-2.
+pub const VERSION: u8 = 4;
 
 /// The on-disk version we read **and** write today. Decode
 /// accepts strictly older versions for migration-HINT purposes
@@ -184,6 +205,24 @@ pub struct MetaPageData {
     /// future ALTER-style dim change can be detected; today it
     /// always equals `self.dim`.
     pub rotation_dim: u32,
+
+    // ---- v4 fields (IVF) ----
+    /// IVF coarse-cell count (`nlist`). `0` = flat (v3-equivalent;
+    /// the default). When `> 0` the codes/scales/ids chains are
+    /// stored in cell-contiguous order and the coarse-centroid +
+    /// cell-directory chains below are populated.
+    pub lists: u32,
+    /// First block of the coarse-centroid chain (`lists * dim` f32,
+    /// rotated space). `0` when `lists == 0` or empty.
+    pub coarse_first: u32,
+    /// Number of pages in the coarse-centroid chain.
+    pub coarse_count: u32,
+    /// First block of the cell-directory chain (`lists`
+    /// `(code_offset: u64, n_vectors: u32)` entries). `0` when
+    /// `lists == 0` or empty.
+    pub cell_dir_first: u32,
+    /// Number of pages in the cell-directory chain.
+    pub cell_dir_count: u32,
 }
 
 impl MetaPageData {
@@ -299,7 +338,59 @@ impl MetaPageData {
             rotation_first: if rotation_bytes > 0 { rotation_first_blkno } else { 0 },
             rotation_count,
             rotation_dim: if rotation_bytes > 0 { dim } else { 0 },
+            // v4 IVF fields default to flat; set_ivf_chains() fills
+            // them in (and lays the coarse + cell-dir chains out
+            // after the rotation chain) when lists > 0.
+            lists: 0,
+            coarse_first: 0,
+            coarse_count: 0,
+            cell_dir_first: 0,
+            cell_dir_count: 0,
         }
+    }
+
+    /// Lay out the v4 IVF chains (coarse centroids + cell directory)
+    /// AFTER the rotation chain, and stamp `lists`. Must be called on
+    /// a meta already planned by [`Self::plan_with_blocked`] (so the
+    /// row-major + blocked + rotation chain offsets are fixed).
+    ///
+    /// `coarse_bytes` is the byte length of the `lists * dim` f32
+    /// coarse-centroid buffer; `cell_dir_bytes` is the byte length of
+    /// the packed cell-directory (`lists * CellEntry::ENCODED_BYTES`).
+    /// Pass `lists = 0` (the default after `plan_with_blocked`) to
+    /// leave the index flat — in that case this is a no-op.
+    pub fn set_ivf_chains(
+        &mut self,
+        lists: u32,
+        coarse_bytes: u64,
+        cell_dir_bytes: u64,
+    ) {
+        self.lists = lists;
+        if lists == 0 {
+            self.coarse_first = 0;
+            self.coarse_count = 0;
+            self.cell_dir_first = 0;
+            self.cell_dir_count = 0;
+            return;
+        }
+        // The IVF chains follow the rotation chain. Compute the first
+        // free block after every prior chain.
+        let after_rotation = 1
+            + self.codes_count
+            + self.scales_count
+            + self.ids_count
+            + self.blocked_count
+            + self.rotation_count;
+        let coarse_count = Self::byte_pages_needed(coarse_bytes);
+        let cell_dir_count = Self::byte_pages_needed(cell_dir_bytes);
+        self.coarse_count = coarse_count;
+        self.cell_dir_count = cell_dir_count;
+        self.coarse_first = if coarse_bytes > 0 { after_rotation } else { 0 };
+        self.cell_dir_first = if cell_dir_bytes > 0 {
+            after_rotation + coarse_count
+        } else {
+            0
+        };
     }
 
     /// Plan a layout without a prepared blocked chain or
@@ -355,6 +446,8 @@ impl MetaPageData {
             + self.ids_count
             + self.blocked_count
             + self.rotation_count
+            + self.coarse_count
+            + self.cell_dir_count
     }
 
     /// Serialise the meta header (no PG page header) to a
@@ -399,6 +492,14 @@ impl MetaPageData {
         out[v3_base..v3_base + 4].copy_from_slice(&self.rotation_first.to_le_bytes());
         out[v3_base + 4..v3_base + 8].copy_from_slice(&self.rotation_count.to_le_bytes());
         out[v3_base + 8..v3_base + 12].copy_from_slice(&self.rotation_dim.to_le_bytes());
+        // v4 IVF fields begin at v3_base + 12 = 224 (data region),
+        // i.e. page offset 248 (24-byte PG header + 224).
+        let v4_base = v3_base + 12;
+        out[v4_base..v4_base + 4].copy_from_slice(&self.lists.to_le_bytes());
+        out[v4_base + 4..v4_base + 8].copy_from_slice(&self.coarse_first.to_le_bytes());
+        out[v4_base + 8..v4_base + 12].copy_from_slice(&self.coarse_count.to_le_bytes());
+        out[v4_base + 12..v4_base + 16].copy_from_slice(&self.cell_dir_first.to_le_bytes());
+        out[v4_base + 16..v4_base + 20].copy_from_slice(&self.cell_dir_count.to_le_bytes());
         // Trailing bytes reserved (zero).
         out
     }
@@ -460,6 +561,11 @@ impl MetaPageData {
             rotation_first: 0,
             rotation_count: 0,
             rotation_dim: 0,
+            lists: 0,
+            coarse_first: 0,
+            coarse_count: 0,
+            cell_dir_first: 0,
+            cell_dir_count: 0,
         };
 
         if version >= 2 {
@@ -503,6 +609,26 @@ impl MetaPageData {
                 u32::from_le_bytes(bytes[v3_base + 8..v3_base + 12].try_into().unwrap());
         }
 
+        if version >= 4 {
+            // v4 needs at least 244 bytes (224 + 20 for the five IVF
+            // u32 fields). A v3 meta read by a v4 binary leaves these
+            // zeroed (lists = 0 => flat), which is exactly the
+            // backward-compat path: no REINDEX for v3 indexes.
+            if bytes.len() < 244 {
+                return Err("v4 meta page data region too short");
+            }
+            let v4_base = 224;
+            me.lists = u32::from_le_bytes(bytes[v4_base..v4_base + 4].try_into().unwrap());
+            me.coarse_first =
+                u32::from_le_bytes(bytes[v4_base + 4..v4_base + 8].try_into().unwrap());
+            me.coarse_count =
+                u32::from_le_bytes(bytes[v4_base + 8..v4_base + 12].try_into().unwrap());
+            me.cell_dir_first =
+                u32::from_le_bytes(bytes[v4_base + 12..v4_base + 16].try_into().unwrap());
+            me.cell_dir_count =
+                u32::from_le_bytes(bytes[v4_base + 16..v4_base + 20].try_into().unwrap());
+        }
+
         Ok(me)
     }
 
@@ -526,12 +652,17 @@ impl MetaPageData {
     }
 
     /// Returns `true` when this meta page describes an index
-    /// built under the current (Phase R-2) wire format with a
-    /// prepared blocked layout AND a persisted rotation matrix
-    /// actually present. v1/v2 indexes and empty v3 indexes
-    /// (no rows yet) return `false`.
+    /// built under a wire format with a prepared blocked layout
+    /// AND a persisted rotation matrix actually present. v1/v2
+    /// indexes and empty (no-rows) v3/v4 indexes return `false`.
+    ///
+    /// IVF-1 note: this checks `version >= 3` (NOT `>= VERSION`)
+    /// so a v3 index opened by the v4 binary still reports its
+    /// prepared layout and scans flat with no REINDEX. A v4
+    /// `lists = 0` index is structurally a v3 layout and reports
+    /// the same.
     pub fn has_prepared_layout(&self) -> bool {
-        self.version >= VERSION
+        self.version >= 3
             && self.blocked_bytes > 0
             && self.codebook_n_levels > 0
             && self.rotation_count > 0
@@ -554,6 +685,34 @@ impl MetaPageData {
     pub fn is_legacy_v2(&self) -> bool {
         self.version < 3
     }
+
+    /// Returns `true` when the meta page is in a wire format the
+    /// IVF-1 (v4) binary cannot read.
+    ///
+    /// **Deliberately always `false`.** The whole point of IVF-1's
+    /// opt-in design is that v3 (flat) indexes remain fully readable
+    /// and writable under the v4 binary with NO REINDEX: a v3 meta
+    /// decodes with `lists = 0` (flat), and the v4 flat decode path
+    /// is byte-compatible with v3. There is no pre-v4 format that a
+    /// v4 binary genuinely cannot read (v1/v2 are already caught by
+    /// `is_legacy_v1`/`is_legacy_v2`). The predicate exists to
+    /// satisfy the `AGENTS.md` migration contract (every wire bump
+    /// ships an `is_legacy_v{N}()`) and to give a future v5 a place
+    /// to flag a genuinely-unreadable v4-and-earlier format. Today
+    /// it never trips, so `ambeginscan` never errors on a v3 or v4
+    /// index. See `docs/UPGRADING.md`.
+    pub fn is_legacy_v3(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` when this index uses the IVF layout
+    /// (`lists > 0`, v4+). Flat indexes (v3, or v4 with
+    /// `lists = 0`) return `false`. The IVF-1 scan path ignores
+    /// this (it stays flat regardless); it's here for IVF-2 and
+    /// for the round-trip tests.
+    pub fn has_ivf(&self) -> bool {
+        self.version >= 4 && self.lists > 0
+    }
 }
 
 #[cfg(test)]
@@ -561,7 +720,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trip_meta_v3() {
+    fn round_trip_meta_v4_flat() {
         let dim: u32 = 384;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
         let mut meta =
@@ -572,7 +731,7 @@ mod tests {
         let buf = meta.encode();
         let back = MetaPageData::decode(&buf).expect("decode");
         assert_eq!(meta, back);
-        assert_eq!(back.version, 3);
+        assert_eq!(back.version, 4);
         assert!(back.has_prepared_layout());
         assert_eq!(back.centroids_slice(), centroids.as_slice());
         assert_eq!(back.boundaries_slice(), boundaries.as_slice());
@@ -581,6 +740,52 @@ mod tests {
         assert!(back.rotation_count > 0);
         assert!(!back.is_legacy_v1());
         assert!(!back.is_legacy_v2());
+        assert!(!back.is_legacy_v3());
+        // lists = 0 => flat, not IVF.
+        assert_eq!(back.lists, 0);
+        assert!(!back.has_ivf());
+        assert_eq!(back.coarse_first, 0);
+        assert_eq!(back.cell_dir_first, 0);
+    }
+
+    #[test]
+    fn round_trip_meta_v4_ivf() {
+        let dim: u32 = 64;
+        let lists: u32 = 16;
+        let n: u64 = 4096;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta =
+            MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+        let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
+        meta.set_codebook(&centroids, &boundaries);
+        let coarse_bytes = u64::from(lists) * u64::from(dim) * 4;
+        let cell_dir_bytes = u64::from(lists) * 12;
+        meta.set_ivf_chains(lists, coarse_bytes, cell_dir_bytes);
+        let buf = meta.encode();
+        let back = MetaPageData::decode(&buf).expect("decode");
+        assert_eq!(meta, back);
+        assert_eq!(back.version, 4);
+        assert!(back.has_ivf());
+        assert_eq!(back.lists, lists);
+        // Coarse + cell-dir chains laid out after rotation, no overlap.
+        assert!(back.coarse_first > 0);
+        assert!(back.coarse_count > 0);
+        assert!(back.cell_dir_first > back.coarse_first);
+        assert_eq!(
+            back.cell_dir_first,
+            back.coarse_first + back.coarse_count,
+            "cell dir must immediately follow the coarse chain"
+        );
+        // The coarse chain must follow the rotation chain.
+        assert_eq!(
+            back.coarse_first,
+            1 + back.codes_count
+                + back.scales_count
+                + back.ids_count
+                + back.blocked_count
+                + back.rotation_count,
+        );
     }
 
     #[test]
@@ -732,6 +937,58 @@ mod tests {
         assert!(meta.is_legacy_v2(), "v2 must trip the legacy_v2 flag");
         // v2 has no rotation chain so has_prepared_layout is false.
         assert!(!meta.has_prepared_layout());
+    }
+
+    #[test]
+    fn decodes_legacy_v3_meta_as_flat_under_v4() {
+        // A v3 meta page (no v4 IVF fields) must decode under the v4
+        // binary as a flat index (lists = 0), readable with NO
+        // REINDEX. We forge a v3 page: first 224 bytes meaningful,
+        // the v4 fields stay zero.
+        let mut buf = [0u8; PAYLOAD_BYTES];
+        buf[0..4].copy_from_slice(&MAGIC);
+        buf[4] = 3; // v3
+        buf[5] = 4;
+        buf[8..12].copy_from_slice(&384u32.to_le_bytes());
+        buf[12..20].copy_from_slice(&100u64.to_le_bytes());
+        buf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        buf[24..28].copy_from_slice(&3u32.to_le_bytes());
+        buf[28..32].copy_from_slice(&4u32.to_le_bytes());
+        buf[32..36].copy_from_slice(&1u32.to_le_bytes());
+        buf[36..40].copy_from_slice(&5u32.to_le_bytes());
+        buf[40..44].copy_from_slice(&1u32.to_le_bytes());
+        buf[44..48].copy_from_slice(&42u32.to_le_bytes());
+        buf[48..52].copy_from_slice(&2042u32.to_le_bytes());
+        buf[52..56].copy_from_slice(&1021u32.to_le_bytes());
+        buf[56..60].copy_from_slice(&192u32.to_le_bytes());
+        buf[60..64].copy_from_slice(&3u32.to_le_bytes());
+        // v2 prepared-layout fields.
+        buf[64..68].copy_from_slice(&7u32.to_le_bytes());
+        buf[68..72].copy_from_slice(&2u32.to_le_bytes());
+        buf[72..80].copy_from_slice(&12_000u64.to_le_bytes());
+        buf[80..84].copy_from_slice(&5u32.to_le_bytes());
+        buf[84..88].copy_from_slice(&16u32.to_le_bytes());
+        // v3 rotation fields (data offset 212..224).
+        buf[212..216].copy_from_slice(&9u32.to_le_bytes()); // rotation_first
+        buf[216..220].copy_from_slice(&72u32.to_le_bytes()); // rotation_count
+        buf[220..224].copy_from_slice(&384u32.to_le_bytes()); // rotation_dim
+
+        let meta = MetaPageData::decode(&buf).expect("v3 decode under v4 binary");
+        assert_eq!(meta.version, 3);
+        assert_eq!(meta.rotation_first, 9);
+        assert_eq!(meta.rotation_dim, 384);
+        // v4 IVF fields zeroed => flat, no IVF.
+        assert_eq!(meta.lists, 0);
+        assert!(!meta.has_ivf());
+        assert_eq!(meta.coarse_first, 0);
+        assert_eq!(meta.cell_dir_first, 0);
+        // A v3 index is NOT legacy under v4 — it scans flat, no REINDEX.
+        assert!(!meta.is_legacy_v1());
+        assert!(!meta.is_legacy_v2());
+        assert!(!meta.is_legacy_v3());
+        // It still reports its prepared layout so the flat scan path
+        // works.
+        assert!(meta.has_prepared_layout());
     }
 
     #[test]

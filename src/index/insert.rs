@@ -85,7 +85,7 @@ unsafe fn aminsert_impl(
     let id = pgrx::itemptr::item_pointer_to_u64(*heap_tid);
 
     let normalise = guc::NORMALIZE_ON_INSERT.get();
-    let (bit_width, _) = options::read(index_relation);
+    let (bit_width, _, _) = options::read(index_relation);
 
     aminsert_relfile(
         index_relation,

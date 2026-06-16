@@ -105,6 +105,23 @@ Cosine is the most common for embedding search.
 -- Sweep this against your recall SLO; latency scales linearly.
 SET turbovec.search_k = 100;
 
+-- IVF cell probing (v1.10.0+, only for indexes built WITH (lists = N)).
+-- For an IVF index, amgettuple first coarse-searches the N cell
+-- centroids, picks the `probes` nearest cells, and fine-searches ONLY
+-- those cells' contiguous code ranges (turbovec's blocked kernel skips
+-- the unprobed ranges, so latency drops roughly proportional to
+-- probes/lists). This is the IVF latency/recall dial, analogous to
+-- ivfflat.probes / hnsw.ef_search:
+--   * lower  = fewer cells scanned = faster, lower recall;
+--   * higher = more cells scanned  = slower, higher recall;
+--   * probes >= lists probes every cell and reduces EXACTLY to the
+--     flat exact scan (recall ceiling, no latency win).
+-- Clamped to [1, lists] at scan time. No effect on flat (lists = 0)
+-- indexes, or on an IVF index degraded to flat by VACUUM swap-remove
+-- (those always scan the whole corpus). Start near sqrt(lists) and
+-- sweep against your recall SLO. Default 8.
+SET turbovec.probes = 8;
+
 -- Per-backend cache size for the prepared turbovec index data.
 -- Each entry is the size of the index on disk (codes + scales +
 -- ids + blocked + caches + rotation). Default 256 MiB; set to

@@ -53,6 +53,17 @@ pub(crate) struct ScanOpaque {
     /// tie at the boundary. The set is robust regardless; it is
     /// bounded by `max_scan_tuples` (default 20k entries).
     emitted: HashSet<u64>,
+    /// IVF-2 cell-restriction mask. `Some(mask)` when this is an IVF
+    /// index (`meta.has_ivf()`) backed by a read-only handle whose
+    /// slot order matches the on-disk cell directory: the mask is
+    /// `true` for exactly the slots in the probed cells, and every
+    /// `arc.search*` for this scan goes through `search_masked` so
+    /// turbovec's blocked kernel skips the unprobed (contiguous) cell
+    /// ranges. `None` for flat indexes, vacuum-degraded IVF indexes
+    /// (`has_ivf() == false`), or a mutable handle (slot order
+    /// diverged from the cell directory) — all of which use the flat
+    /// `arc.search` path unchanged.
+    ivf_mask: Option<Vec<bool>>,
 }
 
 /// `ambeginscan`: allocate the IndexScanDesc and attach our opaque.
@@ -146,6 +157,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
             current_k: 0,
             n_live: 0,
             emitted: HashSet::new(),
+            ivf_mask: None,
         },
     );
 
@@ -234,6 +246,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
     (*opaque).current_k = 0;
     (*opaque).n_live = 0;
     (*opaque).emitted.clear();
+    (*opaque).ivf_mask = None;
 }
 
 /// `amgettuple`: on first call run the search and cache results;
@@ -454,7 +467,35 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // an f64 exactly well within u64 range.
         let k_oversampled = (k_pref as f64 * oversample).ceil() as usize;
         let k = k_oversampled.min(n_live.max(1)).max(1);
-        let (scores, ids) = arc.search(&(*opaque).query, k);
+
+        // IVF-2: if this is an IVF index (has_ivf() == true, i.e.
+        // lists > 0 AND the v4 cell metadata is present — NOT a
+        // vacuum-degraded index, which blanks those fields), do the
+        // coarse search and build a cell-restriction mask. The mask
+        // is true for exactly the slots in the `probes` nearest cells;
+        // turbovec's blocked kernel skips the contiguous unprobed
+        // ranges. Falls back to the flat path when:
+        //   - the index is flat or vacuum-degraded (has_ivf() false),
+        //   - the handle is Mutable (post-insert / dirty-xact mirror,
+        //     whose slot order has diverged from the cell directory —
+        //     search_masked returns None and we drop the mask).
+        let ivf_results = ivf_setup_and_search(
+            scan,
+            &arc,
+            &(*opaque).query,
+            k,
+            n_live,
+        );
+        let (scores, ids) = match ivf_results {
+            Some((mask, scores, ids)) => {
+                (*opaque).ivf_mask = Some(mask);
+                (scores, ids)
+            }
+            None => {
+                (*opaque).ivf_mask = None;
+                arc.search(&(*opaque).query, k)
+            }
+        };
         (*opaque).arc = Some(arc);
         (*opaque).n_live = n_live;
         (*opaque).current_k = k;
@@ -524,6 +565,76 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}
 
+/// IVF-2 coarse search + cell-restricted fine search. Returns
+/// `Some((mask, scores, ids))` when the index is a live IVF index
+/// (`meta.has_ivf()`) backed by a read-only handle whose slot order
+/// matches the on-disk cell directory; the caller stashes `mask` for
+/// iterative refills and uses `(scores, ids)` as the first batch.
+///
+/// Returns `None` — signalling the caller to take the flat
+/// `arc.search` path — when:
+///   - the index is flat (`lists == 0`) or vacuum-degraded
+///     (`has_ivf()` is false because the v4 cell fields were blanked
+///     by `write_meta_shrink_in_place`),
+///   - the coarse centroids / rotation / cell directory are missing
+///     or inconsistent (defensive; should not happen for a healthy
+///     IVF index),
+///   - the handle is [`cache::ScanHandle::Mutable`] (slot order has
+///     diverged from the build-time cell layout; `search_masked`
+///     returns `None`).
+///
+/// # Safety
+///
+/// `scan` holds a live index relation reference for the duration.
+unsafe fn ivf_setup_and_search(
+    scan: pg_sys::IndexScanDesc,
+    arc: &cache::ScanHandle,
+    query: &[f32],
+    k: usize,
+    n_live: usize,
+) -> Option<(Vec<bool>, Vec<f32>, Vec<u64>)> {
+    let meta = relfile::read_meta((*scan).indexRelation)?;
+    if !meta.has_ivf() {
+        return None;
+    }
+    let dim = meta.dim as usize;
+    let lists = meta.lists as usize;
+
+    // Coarse centroids (f32, rotated space) + rotation matrix + cell
+    // directory. Any missing piece ⇒ flat fallback (defensive).
+    let centroids = relfile::read_coarse_centroids((*scan).indexRelation, &meta);
+    if centroids.len() != lists * dim {
+        return None;
+    }
+    let rotation = relfile::read_rotation((*scan).indexRelation, &meta);
+    if rotation.len() != dim * dim {
+        return None;
+    }
+    let directory = relfile::read_cell_directory((*scan).indexRelation, &meta)?;
+    // The cell directory must partition exactly n_live slots; if it
+    // doesn't, the mask would be wrong — fall back to flat.
+    if directory.total_vectors() != n_live as u64 {
+        return None;
+    }
+
+    // Coarse search: normalise + rotate the query into the clustering
+    // space the build used, then pick the `probes` nearest cells.
+    // The build always normalises before assigning to a cell (see
+    // ivf_build_and_write), so the coarse search must normalise too,
+    // regardless of turbovec.normalize_on_insert.
+    let unit = kernels::normalise_to_vec(query);
+    let q_rot = crate::index::ivf::rotate_query(&rotation, &unit, dim);
+    let probes = (crate::guc::PROBES.get() as usize).clamp(1, lists);
+    let probed = crate::index::ivf::coarse_probe(&centroids, lists, dim, &q_rot, probes);
+
+    // Build the slot mask for the probed cells and run the
+    // cell-restricted fine search. search_masked returns None for a
+    // Mutable handle (slot order diverged) → flat fallback.
+    let mask = directory.probe_mask(&probed, n_live);
+    let (scores, ids) = arc.search_masked(query, k, &mask)?;
+    Some((mask, scores, ids))
+}
+
 /// Append the candidates in `(scores, ids)` that haven't already been
 /// emitted to the current batch (`results` / `distances`), converting
 /// turbovec cosine scores to executor-facing distances. Used for both
@@ -570,7 +681,15 @@ unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
     }
     let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
     let before = (*opaque).results.len();
-    let (scores, ids) = arc.search(&(*opaque).query, new_k);
+    let (scores, ids) = match &(*opaque).ivf_mask {
+        // IVF scan: keep the search cell-restricted on refill so we
+        // don't silently widen to the whole corpus. (search_masked
+        // returns Some for the ReadOnly arm this mask came from.)
+        Some(mask) => arc
+            .search_masked(&(*opaque).query, new_k, mask)
+            .unwrap_or_else(|| arc.search(&(*opaque).query, new_k)),
+        None => arc.search(&(*opaque).query, new_k),
+    };
     (*opaque).current_k = new_k;
     populate_batch(opaque, &scores, &ids);
     if (*opaque).results.len() > before {

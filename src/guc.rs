@@ -28,6 +28,7 @@ pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
+pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(8);
 
 /// Differentiator #5 (oversampling): candidate-set widener for tunable
 /// recall, matching Qdrant's `oversampling` / VectorChord's rerank knob.
@@ -208,6 +209,19 @@ pub fn register_gucs() {
         &SEARCH_K,
         1,
         100_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.probes\0"),
+        c_str(b"IVF cells to scan per query (default 8); ignored by flat indexes.\0"),
+        c_str(
+            b"For an index built WITH (lists = N), amgettuple coarse-searches the N cell centroids, picks the `probes` nearest cells, and fine-searches only those cells' contiguous code ranges. This is the IVF latency/recall dial (analogous to ivfflat.probes / hnsw.ef_search): lower = faster, lower recall; higher = slower, higher recall. probes >= lists reduces to the exact flat scan. Clamped to [1, lists] at scan time. No effect on flat (lists = 0) or vacuum-degraded indexes, which always scan the whole corpus.\0",
+        ),
+        &PROBES,
+        1,
+        65_536,
         GucContext::Userset,
         GucFlags::default(),
     );

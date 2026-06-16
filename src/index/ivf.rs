@@ -144,6 +144,34 @@ impl CellDirectory {
         Self { entries }
     }
 
+    /// Build a slot allowlist mask (`Vec<bool>` of length
+    /// `n_vectors`) that is `true` for every slot belonging to one of
+    /// the `probed` cells. The IVF scan hands this to
+    /// `ReadOnlyIndex::search_masked`; turbovec's blocked kernel
+    /// short-circuits whole 32-vector blocks whose mask window is
+    /// all-zero, so the contiguous unprobed cell ranges skip their
+    /// scoring work (the latency win).
+    ///
+    /// `probed` may contain duplicates or out-of-range ids; both are
+    /// ignored. `n_vectors` must equal the index's live count (the
+    /// directory's `total_vectors()`).
+    pub fn probe_mask(&self, probed: &[u32], n_vectors: usize) -> Vec<bool> {
+        let mut mask = vec![false; n_vectors];
+        for &c in probed {
+            let c = c as usize;
+            if c >= self.entries.len() {
+                continue;
+            }
+            let e = self.entries[c];
+            let start = e.code_offset as usize;
+            let end = (start + e.n_vectors as usize).min(n_vectors);
+            for s in mask.iter_mut().take(end).skip(start) {
+                *s = true;
+            }
+        }
+        mask
+    }
+
     /// Validate that the entries partition `n_vectors` exactly:
     /// contiguous, non-overlapping, starting at 0, summing to
     /// `n_vectors`. Returns `Ok(())` or a descriptive error. Used by
@@ -200,6 +228,73 @@ impl CoarseModel {
         }
         best
     }
+}
+
+/// Coarse search: score the (already rotated) query against every
+/// coarse centroid by squared Euclidean distance and return the
+/// `nprobe` nearest cell ids (ascending distance; ties broken toward
+/// the lower cell id, deterministic).
+///
+/// `centroids` is the row-major `lists * dim` coarse codebook in the
+/// rotated space (as persisted by the build / read by
+/// `relfile::read_coarse_centroids`). `query_rotated` is the query
+/// already normalised + rotated into the same space the build used
+/// to assign vectors to cells.
+///
+/// `nprobe` is clamped to `[1, lists]`. Scalar — `lists` is small
+/// (`≈√n`), and a scalar loop avoids a second SIMD-correctness
+/// surface (per IVF_PLAN §8). Cost `O(lists * dim)`.
+pub fn coarse_probe(
+    centroids: &[f32],
+    lists: usize,
+    dim: usize,
+    query_rotated: &[f32],
+    nprobe: usize,
+) -> Vec<u32> {
+    debug_assert_eq!(centroids.len(), lists * dim);
+    debug_assert_eq!(query_rotated.len(), dim);
+    let nprobe = nprobe.clamp(1, lists.max(1)).min(lists);
+
+    // Score every cell. (distance, cell_id) pairs.
+    let mut scored: Vec<(f32, u32)> = (0..lists)
+        .map(|c| {
+            let d = sq_dist(query_rotated, &centroids[c * dim..(c + 1) * dim]);
+            (d, c as u32)
+        })
+        .collect();
+
+    // Partial sort: ascending distance, ties → lower cell id. We need
+    // the nprobe smallest, in order. `sort_unstable_by` over `lists`
+    // (small) is cheap and deterministic given the (dist, id) key.
+    scored.sort_unstable_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    scored.truncate(nprobe);
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Rotate a `dim`-length query into the clustering (rotated) space,
+/// mirroring the build's `BuildState::rotate_unit` (and turbovec's
+/// encode): `rotated[k] = sum_j R[k*dim+j] * src[j]`, i.e. `src @
+/// R^T`. `rotation` is the row-major `dim * dim` matrix read from the
+/// relfile; `src` must be the L2-normalised query (the build
+/// normalises every vector before assigning it to a cell, so the
+/// coarse search must too). Returns a `dim`-length Vec.
+pub fn rotate_query(rotation: &[f32], src: &[f32], dim: usize) -> Vec<f32> {
+    debug_assert_eq!(rotation.len(), dim * dim);
+    debug_assert_eq!(src.len(), dim);
+    let mut out = vec![0.0f32; dim];
+    for (k, o) in out.iter_mut().enumerate() {
+        let rrow = &rotation[k * dim..(k + 1) * dim];
+        let mut s = 0.0f32;
+        for j in 0..dim {
+            s += rrow[j] * src[j];
+        }
+        *o = s;
+    }
+    out
 }
 
 /// Squared Euclidean distance. Scalar — the coarse step is cheap
@@ -594,5 +689,63 @@ mod tests {
             ],
         };
         assert!(dir.validate_partition(9).is_err());
+    }
+
+    /// coarse_probe returns the nprobe nearest cells in ascending
+    /// distance order, and clamps nprobe to [1, lists].
+    #[test]
+    fn coarse_probe_picks_nearest_cells() {
+        // 4 cells in 2-D at distinct corners.
+        let dim = 2;
+        let lists = 4;
+        let centroids = vec![
+            0.0, 0.0, // cell 0
+            10.0, 0.0, // cell 1
+            0.0, 10.0, // cell 2
+            10.0, 10.0, // cell 3
+        ];
+        // Query near cell 0.
+        let q = [0.5, 0.5];
+        let probed = coarse_probe(&centroids, lists, dim, &q, 2);
+        assert_eq!(probed.len(), 2);
+        assert_eq!(probed[0], 0, "nearest cell must be 0");
+        // nprobe >= lists returns all cells.
+        let all = coarse_probe(&centroids, lists, dim, &q, 99);
+        assert_eq!(all.len(), lists);
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2, 3]);
+        // nprobe = 0 clamps up to 1.
+        let one = coarse_probe(&centroids, lists, dim, &q, 0);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0], 0);
+    }
+
+    /// probe_mask sets exactly the probed cells' contiguous slot
+    /// ranges, and probing all cells yields an all-true mask.
+    #[test]
+    fn probe_mask_marks_cell_ranges() {
+        let dir = CellDirectory {
+            entries: vec![
+                CellEntry { code_offset: 0, n_vectors: 3 },  // slots 0,1,2
+                CellEntry { code_offset: 3, n_vectors: 2 },  // slots 3,4
+                CellEntry { code_offset: 5, n_vectors: 4 },  // slots 5,6,7,8
+            ],
+        };
+        let n = 9;
+        // Probe cell 1 only.
+        let m = dir.probe_mask(&[1], n);
+        assert_eq!(m, vec![false, false, false, true, true, false, false, false, false]);
+        // Probe cells 0 and 2.
+        let m = dir.probe_mask(&[0, 2], n);
+        assert_eq!(m, vec![true, true, true, false, false, true, true, true, true]);
+        assert_eq!(m.iter().filter(|&&b| b).count(), 7);
+        // Probe all cells ⇒ all true (the exact-flat anchor at the
+        // mask level).
+        let m = dir.probe_mask(&[0, 1, 2], n);
+        assert!(m.iter().all(|&b| b));
+        // Out-of-range and duplicate cells are ignored, not panics.
+        let m = dir.probe_mask(&[1, 1, 99], n);
+        assert_eq!(m.iter().filter(|&&b| b).count(), 2);
     }
 }

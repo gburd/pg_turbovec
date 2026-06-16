@@ -16,6 +16,7 @@
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
+//! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
 
 use core::ffi::CStr;
 
@@ -29,6 +30,30 @@ pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
 pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(8);
+
+/// IVF-3: iterative-scan cap on probe-set growth under a selective
+/// `WHERE` filter, the IVF analogue of `ivfflat.max_probes`.
+///
+/// Under `turbovec.iterative_scan = relaxed_order`, when the cells
+/// currently probed by an IVF scan drain and the executor still wants
+/// tuples, the refill WIDENS the probe set (probes, 2·probes, 4·probes,
+/// …), rebuilds the cell mask, and re-runs the cell-restricted fine
+/// search — instead of only growing `k` within the initial cells. That
+/// recovers true neighbours whose cell was not in the initial `probes`
+/// nearest set (the failure mode IVF-2's k-growth refill couldn't fix
+/// under a selective filter). `max_probes` is the ceiling on that
+/// growth; the widening stops at `min(max_probes, lists)`. When the
+/// probe set reaches `lists` the whole corpus has been scanned and the
+/// next drain returns false (exhausted).
+///
+/// Default `64` mirrors a typical `ivfflat.max_probes` and is 8× the
+/// `turbovec.probes` default of 8. Clamped to `lists` at scan time, so
+/// a value larger than the index's cell count just means "widen to all
+/// cells". No effect on flat (`lists = 0`) or vacuum-degraded indexes,
+/// which have no cells to widen and keep the v1.8.0 `k`-growth refill.
+/// `turbovec.max_scan_tuples` still caps total candidate work as a
+/// backstop regardless of probe widening.
+pub static MAX_PROBES: GucSetting<i32> = GucSetting::<i32>::new(64);
 
 /// Differentiator #5 (oversampling): candidate-set widener for tunable
 /// recall, matching Qdrant's `oversampling` / VectorChord's rerank knob.
@@ -220,6 +245,19 @@ pub fn register_gucs() {
             b"For an index built WITH (lists = N), amgettuple coarse-searches the N cell centroids, picks the `probes` nearest cells, and fine-searches only those cells' contiguous code ranges. This is the IVF latency/recall dial (analogous to ivfflat.probes / hnsw.ef_search): lower = faster, lower recall; higher = slower, higher recall. probes >= lists reduces to the exact flat scan. Clamped to [1, lists] at scan time. No effect on flat (lists = 0) or vacuum-degraded indexes, which always scan the whole corpus.\0",
         ),
         &PROBES,
+        1,
+        65_536,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.max_probes\0"),
+        c_str(b"IVF iterative-scan cap on probe-set widening (default 64); ignored by flat indexes.\0"),
+        c_str(
+            b"For an index built WITH (lists = N) under turbovec.iterative_scan = relaxed_order, when the currently-probed cells drain and the executor still wants tuples, the refill WIDENS the probe set (probes, 2*probes, 4*probes, ...) and re-runs the cell-restricted search, recovering true neighbours whose cell was not in the initial `probes` nearest set. This is the IVF analogue of ivfflat.max_probes: it caps that widening at min(max_probes, lists). Clamped to lists at scan time. No effect on flat (lists = 0) or vacuum-degraded indexes (no cells to widen; they keep the k-growth refill). turbovec.max_scan_tuples still caps total candidate work.\0",
+        ),
+        &MAX_PROBES,
         1,
         65_536,
         GucContext::Userset,

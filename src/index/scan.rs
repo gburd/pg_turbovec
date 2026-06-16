@@ -53,17 +53,40 @@ pub(crate) struct ScanOpaque {
     /// tie at the boundary. The set is robust regardless; it is
     /// bounded by `max_scan_tuples` (default 20k entries).
     emitted: HashSet<u64>,
-    /// IVF-2 cell-restriction mask. `Some(mask)` when this is an IVF
-    /// index (`meta.has_ivf()`) backed by a read-only handle whose
-    /// slot order matches the on-disk cell directory: the mask is
-    /// `true` for exactly the slots in the probed cells, and every
+    /// IVF-2/IVF-3 cell-restriction context. `Some(ctx)` when this is
+    /// an IVF index (`meta.has_ivf()`) backed by a read-only handle
+    /// whose slot order matches the on-disk cell directory: every
     /// `arc.search*` for this scan goes through `search_masked` so
     /// turbovec's blocked kernel skips the unprobed (contiguous) cell
-    /// ranges. `None` for flat indexes, vacuum-degraded IVF indexes
+    /// ranges, and the cached coarse-search state lets an iterative
+    /// refill WIDEN the probe set (IVF-3) without re-reading the
+    /// relfile. `None` for flat indexes, vacuum-degraded IVF indexes
     /// (`has_ivf() == false`), or a mutable handle (slot order
     /// diverged from the cell directory) — all of which use the flat
     /// `arc.search` path unchanged.
-    ivf_mask: Option<Vec<bool>>,
+    ivf: Option<IvfScanCtx>,
+}
+
+/// IVF coarse-search state cached across an iterative scan so a
+/// probe-widening refill (IVF-3) doesn't re-read the relfile. Built
+/// once by [`ivf_setup_and_search`] on the first `amgettuple`.
+struct IvfScanCtx {
+    /// Row-major `lists * dim` coarse centroids (rotated space).
+    centroids: Vec<f32>,
+    /// The cell directory (`code_offset` + `n_vectors` per cell).
+    directory: crate::index::ivf::CellDirectory,
+    /// Query already normalised + rotated into the clustering space,
+    /// so a refill re-runs `coarse_probe` without re-rotating.
+    q_rot: Vec<f32>,
+    /// Number of coarse cells in the index.
+    lists: usize,
+    /// Current probe-set width. Starts at `turbovec.probes` (clamped
+    /// to `lists`) and doubles on each widening refill, capped at
+    /// `min(max_probes, lists)`.
+    probes: usize,
+    /// The current slot mask for the `probes` nearest cells. Rebuilt
+    /// each time `probes` widens.
+    mask: Vec<bool>,
 }
 
 /// `ambeginscan`: allocate the IndexScanDesc and attach our opaque.
@@ -157,7 +180,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
             current_k: 0,
             n_live: 0,
             emitted: HashSet::new(),
-            ivf_mask: None,
+            ivf: None,
         },
     );
 
@@ -246,7 +269,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
     (*opaque).current_k = 0;
     (*opaque).n_live = 0;
     (*opaque).emitted.clear();
-    (*opaque).ivf_mask = None;
+    (*opaque).ivf = None;
 }
 
 /// `amgettuple`: on first call run the search and cache results;
@@ -487,12 +510,12 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             n_live,
         );
         let (scores, ids) = match ivf_results {
-            Some((mask, scores, ids)) => {
-                (*opaque).ivf_mask = Some(mask);
+            Some((ctx, scores, ids)) => {
+                (*opaque).ivf = Some(ctx);
                 (scores, ids)
             }
             None => {
-                (*opaque).ivf_mask = None;
+                (*opaque).ivf = None;
                 arc.search(&(*opaque).query, k)
             }
         };
@@ -565,11 +588,13 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}
 
-/// IVF-2 coarse search + cell-restricted fine search. Returns
-/// `Some((mask, scores, ids))` when the index is a live IVF index
+/// IVF-2/IVF-3 coarse search + cell-restricted fine search. Returns
+/// `Some((ctx, scores, ids))` when the index is a live IVF index
 /// (`meta.has_ivf()`) backed by a read-only handle whose slot order
-/// matches the on-disk cell directory; the caller stashes `mask` for
-/// iterative refills and uses `(scores, ids)` as the first batch.
+/// matches the on-disk cell directory; the caller stashes `ctx`
+/// (centroids + directory + rotated query + current probes/mask) for
+/// iterative **probe-widening** refills (IVF-3) and uses `(scores,
+/// ids)` as the first batch.
 ///
 /// Returns `None` — signalling the caller to take the flat
 /// `arc.search` path — when:
@@ -592,7 +617,7 @@ unsafe fn ivf_setup_and_search(
     query: &[f32],
     k: usize,
     n_live: usize,
-) -> Option<(Vec<bool>, Vec<f32>, Vec<u64>)> {
+) -> Option<(IvfScanCtx, Vec<f32>, Vec<u64>)> {
     let meta = relfile::read_meta((*scan).indexRelation)?;
     if !meta.has_ivf() {
         return None;
@@ -632,7 +657,15 @@ unsafe fn ivf_setup_and_search(
     // Mutable handle (slot order diverged) → flat fallback.
     let mask = directory.probe_mask(&probed, n_live);
     let (scores, ids) = arc.search_masked(query, k, &mask)?;
-    Some((mask, scores, ids))
+    let ctx = IvfScanCtx {
+        centroids,
+        directory,
+        q_rot,
+        lists,
+        probes,
+        mask,
+    };
+    Some((ctx, scores, ids))
 }
 
 /// Append the candidates in `(scores, ids)` that haven't already been
@@ -653,14 +686,34 @@ unsafe fn populate_batch(opaque: *mut ScanOpaque, scores: &[f32], ids: &[u64]) {
     }
 }
 
-/// Iterative refill (turbovec.iterative_scan != off). Grows `k` (doubling,
-/// capped at `min(max_scan_tuples, n_live)`), re-runs the search, and
-/// appends the newly-seen candidates to the current batch.
+/// Iterative refill (`turbovec.iterative_scan != off`).
 ///
-/// Returns `true` if the caller should keep draining (either new
-/// candidates were appended, or another, larger refill is still
-/// possible). Returns `false` only when the scan is exhausted: either
-/// iterative scan is off, or `k` has reached its ceiling.
+/// **Flat indexes (v1.8.0 behaviour, unchanged):** grow `k`
+/// (doubling, capped at `min(max_scan_tuples, n_live)`), re-run the
+/// flat search, append the newly-seen candidates.
+///
+/// **IVF indexes (IVF-3):** WIDEN the probe set first — double the
+/// number of probed cells (`probes`, `2*probes`, `4*probes`, …) up to
+/// `min(max_probes, lists)`, re-run the coarse search to pick that
+/// many nearest cells, rebuild the cell mask, and re-run the
+/// cell-restricted fine search. `k` (the candidate count *within* the
+/// probed cells) also grows so the wider cell set can surface more
+/// candidates. This is the IVF analogue of `ivfflat.max_probes`: it
+/// fixes under-return when a selective `WHERE` filter's matches live
+/// in cells that weren't in the initial `probes` nearest set —
+/// growing `k` alone (IVF-2) could never reach them because they
+/// weren't in the probed cells at all. When `probes` reaches `lists`
+/// the whole corpus has been scanned; once `k` is also maxed the scan
+/// is exhausted. `max_scan_tuples` still caps `k` as a backstop.
+///
+/// Dedup across widening batches reuses the existing emitted-TID set
+/// in [`populate_batch`], so re-probing a wider cell set that includes
+/// already-returned ids never double-emits.
+///
+/// Returns `true` if the caller should keep draining (new candidates
+/// appended, or another widening/k-growth is still possible). Returns
+/// `false` only when the scan is exhausted: iterative scan is off, or
+/// the probe set is at its cap AND `k` has reached its ceiling.
 unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
     if crate::guc::ITERATIVE_SCAN.get() == crate::guc::IterativeScanMode::Off {
         return false;
@@ -675,21 +728,71 @@ unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
     // the max_scan_tuples budget.
     let k_ceiling = n_live.min(max_scan);
     let old_k = (*opaque).current_k;
+
+    // IVF path: widen the probe set, then re-run the cell-restricted
+    // search. Borrow-check: take the ctx out, mutate, put it back.
+    if (*opaque).ivf.is_some() {
+        let mut ctx = (*opaque).ivf.take().unwrap();
+        // Cap on probe widening: min(max_probes, lists).
+        let max_probes = (crate::guc::MAX_PROBES.get() as usize).clamp(1, ctx.lists);
+        let can_widen = ctx.probes < max_probes;
+        let can_grow_k = old_k < k_ceiling;
+        if !can_widen && !can_grow_k {
+            // Probe set is at its cap and k is maxed — exhausted.
+            // (When max_probes == lists this means the whole corpus
+            // has been scanned.) Put the ctx back so a later call
+            // sees a consistent state.
+            (*opaque).ivf = Some(ctx);
+            return false;
+        }
+        // Widen probes (double, capped). Rebuild the mask only when
+        // the probe set actually grew.
+        if can_widen {
+            let new_probes = (ctx.probes.saturating_mul(2))
+                .min(max_probes)
+                .max(ctx.probes + 1);
+            let probed = crate::index::ivf::coarse_probe(
+                &ctx.centroids,
+                ctx.lists,
+                ctx.q_rot.len(),
+                &ctx.q_rot,
+                new_probes,
+            );
+            ctx.mask = ctx.directory.probe_mask(&probed, n_live);
+            ctx.probes = new_probes;
+        }
+        // Grow k within the (possibly wider) cell set so the extra
+        // cells can contribute candidates. Floor at old_k + 1 to
+        // guarantee forward progress even when probes alone widened.
+        let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
+        let before = (*opaque).results.len();
+        let (scores, ids) = arc
+            .search_masked(&(*opaque).query, new_k, &ctx.mask)
+            // Defensive: the ReadOnly arm this ctx came from always
+            // returns Some; fall back to flat only if that ever
+            // changes (e.g. handle swapped mid-scan).
+            .unwrap_or_else(|| arc.search(&(*opaque).query, new_k));
+        (*opaque).current_k = new_k;
+        (*opaque).ivf = Some(ctx);
+        populate_batch(opaque, &scores, &ids);
+        if (*opaque).results.len() > before {
+            return true;
+        }
+        // Nothing new this round. Keep going only if the probe set or
+        // k can still grow on the next attempt.
+        let ctx_ref = (*opaque).ivf.as_ref().unwrap();
+        let max_probes2 = (crate::guc::MAX_PROBES.get() as usize).clamp(1, ctx_ref.lists);
+        return ctx_ref.probes < max_probes2 || (*opaque).current_k < k_ceiling;
+    }
+
+    // Flat path (v1.8.0): grow k only.
     if old_k >= k_ceiling {
         // Already examined as many candidates as we're allowed to.
         return false;
     }
     let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
     let before = (*opaque).results.len();
-    let (scores, ids) = match &(*opaque).ivf_mask {
-        // IVF scan: keep the search cell-restricted on refill so we
-        // don't silently widen to the whole corpus. (search_masked
-        // returns Some for the ReadOnly arm this mask came from.)
-        Some(mask) => arc
-            .search_masked(&(*opaque).query, new_k, mask)
-            .unwrap_or_else(|| arc.search(&(*opaque).query, new_k)),
-        None => arc.search(&(*opaque).query, new_k),
-    };
+    let (scores, ids) = arc.search(&(*opaque).query, new_k);
     (*opaque).current_k = new_k;
     populate_batch(opaque, &scores, &ids);
     if (*opaque).results.len() > before {

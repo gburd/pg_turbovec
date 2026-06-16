@@ -4,6 +4,48 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.1] — 2026-06-16
+
+**Bench-results-only release. Wire format unchanged from v1.11.0
+(`MetaPageData::version = 4`); no REINDEX.** Zero source change.
+
+### Benchmark — IVF latency frontier vs HNSW + ivfflat (Phase A-2)
+
+The honest at-scale measurement (isolated AVX2 on `arnold`,
+`taskset`-pinned, contention-gated, warm, 300 queries/config,
+Cohere-wiki 500k×1024-d) answering "does IVF beat/equal HNSW at
+scale." At recall@10 ≈ 0.96:
+
+| engine | config | recall@10 | warm p50 |
+|---|---|---:|---:|
+| **pgvector HNSW** | ef=200 | 0.966 | **7.9 ms** |
+| **pg_turbovec IVF** | lists=707, probes=64 | 0.960 | 18.5 ms |
+| pgvector ivfflat | probes=100 | 0.978 | 117.4 ms |
+| pg_turbovec flat (exact) | all cells | 1.000 | 41.4 ms |
+
+**Honest verdict:** HNSW wins latency at 0.96 (7.9 vs 18.5 ms,
+~2.3×). But IVF is now in HNSW's **order of magnitude** (not the
+490× flat-scan gap), **beats pgvector's own ivfflat 3–6×** at every
+matched recall, beats its own exact flat scan, **wins the ≥0.99
+recall tail** (0.99 @ 25 ms via probes=256; this HNSW config never
+reaches 0.99), and is **7.5× smaller** (518 MB vs HNSW 3902 MB).
+The earlier ~40 ms projection was pessimistic; real p50 at 0.95 is
+18.5 ms.
+
+### Critical finding — 1M IVF build OOMs (motivates Phase B-4)
+
+The **1M IVF build OOM-killed the postmaster** (~14 GiB peak on a
+31 GiB host): the `lists > 0` build holds the full flat corpus + a
+permuted copy + k-means scratch — a structural peak
+`maintenance_work_mem` does not bound. Largest IVF index that built
+on arnold: **500k**. 1M/5M IVF are **blocked on Phase B-4**
+(streaming / out-of-core build, designed in `docs/PHASE_B_OUT_OF_CORE.md`).
+The IVF *query* path is unaffected.
+
+Files: `benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json`,
+`docs/BENCHMARKS.md`, `docs/COMPETITIVE_ANALYSIS.md`,
+`docs/PHASE_B_OUT_OF_CORE.md`, `docs/ROADMAP_BEAT_COMPETITORS.md`.
+
 ## [1.11.0] — 2026-06-16
 
 Production hardening for IVF: it now **survives VACUUM** instead of

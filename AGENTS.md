@@ -85,18 +85,18 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.11.0, 2026-06-16)
+### Current (as of v1.11.1, 2026-06-16)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.11.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.11.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.11.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.11.x     | 1.11.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.11.1   | `REINDEX INDEX` once |
+| 1.2.x              | 1.11.1   | `REINDEX INDEX` once |
+| 1.3.x              | 1.11.1   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.11.x     | 1.11.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
 `MetaPageData::version` is **4** (v1.10.0+); the v1.11.0 tombstone
 bitmap + `ivf_degraded` flag are additive within v4, so v1.4.x–
-v1.10.x indexes need **no REINDEX**. IVF is opt-in via
+v1.11.x indexes need **no REINDEX**. IVF is opt-in via
 `WITH (lists = N)`.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it

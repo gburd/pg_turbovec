@@ -252,11 +252,13 @@ pre-filter) its per-query `O(n·d)` cost shrinks proportionally.
 > evidence that the `turbovec.probes` dial trades recall for scan-work exactly
 > as IVF is designed to. **Absolute warm-p50 latency on AVX2 is a separate
 > measurement** (see [AVX2 latency frontier](#avx2-latency-frontier-arnold-i9-12900h)
-> for the flat-scan frontier); the IVF warm-p50 sweep on a quiet `arnold`
-> window is **TODO** — not run here because `arnold` is currently contended
-> with the user's PostgreSQL test suite. The `blocks_skipped_by_mask` fraction
-> below is the CPU-independent proxy for that latency win: a query that skips
-> F% of the corpus's 32-vector blocks does proportionally less scan work.
+> for the flat-scan frontier). The IVF warm-p50 latency win is now confirmed on
+> AVX2 (see [IVF warm-p50](#ivf-warm-p50-avx2-floki--the-latency-win-confirmed)
+> — ~5× vs full scan at `probes = 16`); a full isolated 1M+ × 1024-d sweep on a
+> quiet `arnold` window remains **TODO** (`arnold` was contended). The
+> `blocks_skipped_by_mask` fraction below is the CPU-independent proxy for that
+> latency win: a query that skips F% of the corpus's 32-vector blocks does
+> proportionally less scan work.
 
 The frontier is produced by the `ivf_recall_vs_probes_frontier` `#[pg_test]`
 (it both asserts the contract and writes the artefact). Corpus: 16,334
@@ -293,6 +295,41 @@ Soft multi-assignment (`WITH (assign_dups = M)`, IVF-4) raises recall@10 at any
 fixed `probes` by storing boundary vectors in their top-M nearest cells, at a
 bounded storage cost — see [Migrating from pgvector](MIGRATING_FROM_PGVECTOR.md)
 and `docs/IVF_PLAN.md`.
+
+## IVF warm-p50 (AVX2, `floki` — the latency win, confirmed)
+
+A small in-process AVX2 warm-p50 test confirming the IVF cell-skipping
+**latency** win that `meh` (pre-AVX2, scalar fallback) physically could not
+measure. Host `floki` (Intel Core Ultra 7 258V, AVX2), v1.10.0 **release**
+build, 200k × 256-d, `lists = 448`, 4-bit, warm cache (3 throwaway queries
+before timing), 50 timed queries per `probes` via `clock_timestamp()` around
+`ORDER BY emb <=> q LIMIT 10`.
+
+| probes | warm p50 | p95 | vs full scan |
+|-------:|---------:|----:|-------------:|
+| 1   | 0.91 ms | 1.21 ms | |
+| 4   | **0.74 ms** | 1.09 ms | **5.4× faster** |
+| 16  | 0.78 ms | 0.97 ms | 5.1× faster |
+| 64  | 1.16 ms | 1.36 ms | 3.4× faster |
+| 448 (= `lists`, the exact full scan) | 3.97 ms | 4.21 ms | baseline |
+
+**At `probes = 16`, warm p50 is 0.78 ms vs the 3.97 ms full exact scan —
+~5× faster**, on AVX2, release. `probes = lists` (= 448) is the flat exact
+scan baseline; IVF cuts it to sub-millisecond by skipping cells. This is the
+latency win IVF was designed for, now demonstrated on AVX2 hardware.
+
+**Honest caveat:** recall@10 = 1.000 at *every* `probes` (even `probes = 1`)
+in this run is an **artifact of the synthetic corpus's strong cluster
+structure** (200 latent clusters; each query's true neighbours all live in its
+own cell). It is **not** a general recall guarantee — see the host-independent
+recall-vs-probes frontier above (on a *hard* random corpus, recall climbs with
+probes as designed). This bench measures **latency** honestly; the recall/probes
+trade-off is the separate frontier. 200k × 256-d is small — absolute p50s grow
+at 1M+ × 1024-d, but the probes-vs-full-scan **ratio** (the IVF win) is the
+point. Lightly-loaded dev box, in-process (not the isolated `taskset` protocol
+of the `arnold` run); indicative, not a published frontier.
+
+Artefact: [`benches/results/ivf_warmp50_floki_avx2_2026-06-16.json`](../benches/results/ivf_warmp50_floki_avx2_2026-06-16.json).
 
 ## Caveats
 

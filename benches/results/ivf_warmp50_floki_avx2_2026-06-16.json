@@ -1,0 +1,32 @@
+{
+  "bench": "ivf_warm_p50_avx2",
+  "date": "2026-06-16",
+  "host": "floki (Intel Core Ultra 7 258V, AVX2; 8 cores)",
+  "note": "Small in-process AVX2 warm-p50 test. Confirms the IVF latency win on AVX2 hardware (the measurement meh, pre-AVX2, could not produce). Release build, warm cache (3 throwaway queries before timing), 50 timed queries per probes via clock_timestamp() around ORDER BY emb <=> q LIMIT 10.",
+  "build": "v1.10.0 (cd0d11f), release .so, turbovec fork d3d468e (v0.9.0)",
+  "corpus": {
+    "n_vectors": 200000,
+    "dim": 256,
+    "bit_width": 4,
+    "lists": 448,
+    "distribution": "200 latent clusters (one hot coord per cluster) + per-row jitter, L2-normalised",
+    "heap_mb": 521,
+    "ivf_index_mb": 52,
+    "storage_ratio": "10x smaller than heap"
+  },
+  "warm_p50_ms": [
+    {"probes": 1,   "p50": 0.909, "p95": 1.212, "min": 0.529, "recall_at_10": 1.000},
+    {"probes": 4,   "p50": 0.738, "p95": 1.089, "min": 0.543, "recall_at_10": 1.000},
+    {"probes": 16,  "p50": 0.776, "p95": 0.973, "min": 0.655, "recall_at_10": 1.000},
+    {"probes": 64,  "p50": 1.163, "p95": 1.357, "min": 0.998, "recall_at_10": 1.000},
+    {"probes": 448, "p50": 3.974, "p95": 4.214, "min": 3.790, "recall_at_10": 1.000, "is_full_scan": true}
+  ],
+  "headline": "probes=16 warm p50 0.78 ms vs probes=lists (full exact scan) 3.97 ms = 5.1x faster, on AVX2, release. The IVF cell-skipping latency win is real on AVX2 hardware.",
+  "caveats": [
+    "recall@10 = 1.000 at EVERY probes (even probes=1) is an artifact of this synthetic corpus's strong cluster structure (each query's true neighbours all live in its own cell). It is NOT a general recall guarantee. On a harder distribution (e.g. the random-unit-vector corpus in ivf_recall_vs_probes_2026-06-16.json) recall climbs with probes as expected. This bench measures LATENCY honestly; for the recall/probes trade-off see the host-independent frontier.",
+    "200k x 256-d is a small corpus; absolute p50s would be larger at 1M+ x 1024-d, but the probes-vs-full-scan RATIO (the IVF win) is the point.",
+    "floki exposes AVX2 (not AVX-512) to /proc/cpuinfo, so turbovec takes the AVX2 SIMD path -- representative of typical modern x86 server hardware.",
+    "Single-host, in-process, lightly-loaded dev box (not a dedicated isolated bench like the v1.9.1 arnold protocol). Numbers are indicative, not a published frontier."
+  ],
+  "verdict": "ivf_latency_win_confirmed_on_avx2"
+}

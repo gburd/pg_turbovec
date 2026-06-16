@@ -26,27 +26,33 @@ aggregates, `||` concat + halfvec arithmetic, **iterative scans**,
 **parallel build**, **oversampling**, and now an **IVF index** with
 `probes`/`max_probes`/`assign_dups` tuning.
 
-**Latency — the v1.10 story.** pg_turbovec offers TWO index modes:
+**Latency — the v1.10/v1.11 story.** pg_turbovec offers TWO index modes:
 - **Flat** (`lists = 0`, default): exact recall (1.000), tiny
   storage, but `O(n·dim)` per query — ~2.5 s at 1M×1024-d (AVX2),
   ~490× slower than HNSW. Right for small corpora, exact-recall
   needs, or pre-filtered subsets.
 - **IVF** (`WITH (lists = N)`): sublinear — scans only the `probes`
-  nearest cells. Measured AVX2 win: at `probes = 16`, warm p50
-  **0.78 ms vs the 3.97 ms full scan = ~5× faster** (200k×256-d).
-  Same order of magnitude as HNSW's tens-of-ms, while keeping the
-  7–15× storage advantage. The recall/latency dial is `probes`
-  (the `ivfflat.probes` / `hnsw.ef_search` analogue).
+  nearest cells. **Measured head-to-head at 500k×1024-d (AVX2,
+  isolated, v1.11.0):** at recall@10 ≥ 0.95, **IVF warm p50 = 18.5 ms
+  (probes=64) vs HNSW 7.9 ms (ef=200)** — HNSW wins the 0.95 point by
+  ~2.3×, but IVF is the **same order of magnitude** (tens of ms, not
+  the 490× flat gap) and **wins the ≥ 0.99 recall tail**: IVF hits
+  0.99 at 25.3 ms while this HNSW config never exceeds 0.983. IVF
+  crushes ivfflat at every matched recall (18.5 ms vs ~80–117 ms).
+  The recall/latency dial is `probes` (the `ivfflat.probes` /
+  `hnsw.ef_search` analogue), all while keeping the 7–15× storage win.
 
-**Honest positioning (v1.10.1):** "compact (7–15× smaller) PG vector
+**Honest positioning (v1.11.0):** "compact (7–15× smaller) PG vector
 index with a tunable exact↔fast dial — flat for exactness, IVF for
-sublinear latency." The remaining gaps vs the leaders are
+sublinear latency that lands in HNSW's neighbourhood and wins the
+high-recall tail." The remaining gaps vs the leaders are
 **metadata-filter PUSHDOWN** (we post-filter + iteratively widen
 probes, not true in-traversal filtering like Qdrant/VectorChord),
-**out-of-core / >RAM** (pgvectorscale's DiskANN bet), and a
-**published large-scale (1M+, isolated AVX2) IVF latency frontier**
-(only a small in-process AVX2 run + a host-independent recall curve
-exist so far).
+**out-of-core / >RAM** (pgvectorscale's DiskANN bet) — which now also
+**blocks the IVF build above ~500k–600k on a 31 GiB host** (the build
+accumulates the full corpus + a permuted copy in RAM; Phase B-4), and a
+**published 1M+ IVF latency frontier** (currently capped at 500k by
+that build ceiling).
 
 ---
 
@@ -72,11 +78,11 @@ Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 | Multivector / named / hybrid | app-side RRF | native fusion | none | minor (scope) | XL |
 | Replication / HA | WAL → replication + PITR | native Raft | inherits PG WAL | none | — |
 | Observability | `pg_stat_progress_create_index`, EXPLAIN BUFFERS | dashboards | works w/ PG tooling; `blocks_skipped_by_mask` proxy; no build phases | minor | M |
-| **Query latency (1M×1024-d, AVX2)** | HNSW ~5 ms (R@10 0.96) | in-mem ms | flat ~2.5 s (R 1.0); **IVF ~0.78 ms @ probes=16** (200k×256-d) | flat loses / IVF competitive | ✅ IVF (v1.10.0) |
-| **Storage (1M×1024-d)** | 7806 MB | larger | **1026 MB (4-bit) / 512 MB (2-bit)** | ✅ we win 7.6–15.2× | — |
+| **Query latency (recall@10 ≥ 0.95, AVX2)** | HNSW ~8 ms (R 0.97, 500k) | in-mem ms | flat ~2.5 s/1M (R 1.0); **IVF 18.5 ms @ probes=64 (R 0.96, 500k); wins ≥0.99 tail @ 25 ms** | flat loses / IVF competitive (~2.3× behind HNSW @ 0.95, ahead @ 0.99) | ✅ IVF measured (v1.11.0, 500k) |
+| **Storage (500k / 1M×1024-d)** | 3902 MB / 7806 MB | larger | **518 MB IVF / 1026 MB flat-4bit / 512 MB 2-bit** | ✅ we win 7.5–15× | — |
 | Cold-scan latency | ~100 ms | in-mem | lazy `id_to_slot` cut the dominant term (v1.8.0); flat first-scan still O(n) | minor | L |
-| Out-of-core (>RAM) | no (HNSW in-RAM) | spill | **no** (RAM-resident) | major vs pgvectorscale | XL |
-| Large-scale published bench | ann-benchmarks, VectorDBBench | VectorDBBench | Cohere-wiki 1M (storage/recall/flat-latency); IVF latency only small+host-indep so far | major | M (isolated AVX2 1M+ run) |
+| Out-of-core (>RAM) | no (HNSW in-RAM) | spill | **no** — also caps IVF BUILD at ~500k–600k on 31 GiB (Phase B-4) | major vs pgvectorscale | XL |
+| Large-scale published bench | ann-benchmarks, VectorDBBench | VectorDBBench | Cohere-wiki 1M (storage/recall/flat-latency); **IVF-vs-HNSW frontier measured at 500k** (1M+ blocked on B-4 build) | major | M (B-4 unblocks 1M+) |
 
 ---
 

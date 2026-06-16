@@ -197,6 +197,37 @@ fn vec_to_text(v: Vector) -> String {
     out
 }
 
+/// `turbovec.index_is_degraded(regclass) -> bool` — Phase E-2
+/// operator signal. Returns `true` when the given turbovec index was
+/// built `WITH (lists > 0)` (an IVF index) but has degraded to a flat
+/// O(n) scan (its IVF cell metadata was invalidated). A churning
+/// production deployment can poll this to detect the silent latency
+/// cliff and `REINDEX` before it bites.
+///
+/// Returns `false` for a healthy IVF index, a flat (`lists = 0`)
+/// index, and a non-turbovec or empty index (nothing to degrade).
+/// With the tombstone-vacuum path an IVF index survives VACUUM and
+/// stays healthy, so this should normally read `false`; a `true`
+/// means a fallback path fired and a REINDEX is warranted.
+///
+/// ```ignore
+/// SELECT turbovec.index_is_degraded('my_ivf_idx'::regclass);
+/// ```
+#[pg_extern(stable, parallel_safe)]
+fn index_is_degraded(index: pg_sys::Oid) -> bool {
+    unsafe {
+        let rel = pg_sys::index_open(index, pg_sys::AccessShareLock as i32);
+        if rel.is_null() {
+            return false;
+        }
+        let degraded = crate::index::relfile::read_meta(rel)
+            .map(|m| m.is_degraded())
+            .unwrap_or(false);
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        degraded
+    }
+}
+
 extension_sql!(
     r"
     -- jsonb <-> vector explicit casts.

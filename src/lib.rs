@@ -5229,6 +5229,352 @@ mod tests {
         assert_distinct_ids(&ivf);
     }
 
+    // ----------------------------------------------------------------
+    // IVF-2 (an internal design note §5/§7): coarse search + cell-restricted
+    // fine search in amgettuple, gated on turbovec.probes. The latency
+    // win. probes >= lists reduces to the exact flat scan (the
+    // correctness anchor); vacuum-degraded IVF indexes fall back to
+    // flat.
+    // ----------------------------------------------------------------
+
+    /// Build a smoothly-structured IVF corpus and return the table
+    /// name. Shared by the IVF-2 scan tests. `n` rows, dim 16.
+    fn ivf2_make_corpus(table: &str, n: i64) {
+        Spi::run(&format!("CREATE TABLE {table} (id bigint, emb vector)")).unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, {n}) g"
+        ))
+        .unwrap();
+    }
+
+    /// THE correctness anchor: with `probes >= lists`, the IVF scan
+    /// probes every cell (an all-true mask), which must be
+    /// byte-for-byte identical to scanning the SAME physical index
+    /// with no mask at all (the flat path). We prove it on one index:
+    /// capture the probes=lists result, then degrade the same index
+    /// to flat (blank the IVF meta) so the next scan takes the
+    /// maskless flat path over the identical codes — the two results
+    /// must be exactly equal (same ids, same order). Probing all
+    /// cells IS the full scan.
+    #[pg_test]
+    fn ivf_probes_all_equals_flat() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_pa", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+
+        let query = "(SELECT emb FROM ivf_pa WHERE id = 777)";
+        let pull = || -> Vec<i64> {
+            let q = format!("SELECT id FROM ivf_pa ORDER BY emb <=> {query} LIMIT 10");
+            Spi::connect(|client| {
+                client
+                    .select(&q, None, &[])
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run(
+            "CREATE INDEX ivf_pa_idx ON ivf_pa \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        // IVF scan probing every cell (all-true mask).
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let ivf_all = pull();
+
+        // Degrade the SAME index to flat: blank the v4 IVF fields so
+        // has_ivf() is false and the scan takes the maskless flat
+        // path over the identical codes. probes=lists (all-true mask)
+        // must equal the maskless scan exactly — same bytes scanned,
+        // the mask differs only in that it allows everything.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_pa_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_blank_ivf(rel);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+        let flat_same = pull();
+
+        assert_eq!(
+            ivf_all, flat_same,
+            "probes>=lists (all cells) must equal the maskless flat scan of \
+             the identical index exactly: ivf_all={ivf_all:?} flat={flat_same:?}"
+        );
+        assert_eq!(ivf_all.len(), 10);
+        assert!(ivf_all.contains(&777), "all-cells scan must find the query row");
+        assert_distinct_ids(&ivf_all);
+    }
+
+    /// Build WITH (lists = N), query, and assert recall@10 vs a
+    /// brute-force ground truth is high at a reasonable nprobe, with
+    /// distinct ids. The IVF correctness/recall property.
+    #[pg_test]
+    fn ivf_scan_returns_correct_topk() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_tk", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+
+        let query = "(SELECT emb FROM ivf_tk WHERE id = 1234)";
+
+        // Brute-force ground truth: exact distance, no index. A
+        // seqscan ORDER BY computes the true neighbours.
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let gt: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(gt.len(), 10);
+
+        // IVF scan at a reasonable nprobe.
+        Spi::run(
+            "CREATE INDEX ivf_tk_idx ON ivf_tk \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        let ivf: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(ivf.len(), 10, "IVF top-10");
+        assert_distinct_ids(&ivf);
+
+        let gt_set: std::collections::HashSet<i64> = gt.iter().copied().collect();
+        let hits = ivf.iter().filter(|id| gt_set.contains(id)).count();
+        let recall = hits as f64 / gt.len() as f64;
+        assert!(
+            recall >= 0.9,
+            "IVF recall@10 must be >= 0.9 at probes=8/lists=16, got {recall} \
+             (gt={gt:?} ivf={ivf:?})"
+        );
+    }
+
+    /// Cell restriction actually reduces scan work: with a small
+    /// `probes`, turbovec's blocked kernel skips more 32-vector blocks
+    /// than with `probes = lists`. We read the process-global
+    /// `blocks_skipped_by_mask()` counter before/after a scan to prove
+    /// the unprobed (contiguous) cell ranges are short-circuited — the
+    /// IVF latency mechanism, not just result filtering. Correctness
+    /// (distinct ids, query row found) is asserted alongside.
+    #[pg_test]
+    fn ivf_low_probes_faster_fewer_cells() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_lp", 4000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 100").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_lp_idx ON ivf_lp \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_lp WHERE id = 1500)";
+        let run_and_count = |probes: i32| -> (Vec<i64>, u64) {
+            Spi::run(&format!("SET turbovec.probes = {probes}")).unwrap();
+            // Fresh handle each time so the search runs (cache stays
+            // valid; the counter is process-global so reset right
+            // before the query).
+            crate::cache::invalidate_all();
+            turbovec::search::reset_blocks_skipped_by_mask();
+            let ids: Vec<i64> = Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_lp ORDER BY emb <=> {query} LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            });
+            let skipped = turbovec::search::blocks_skipped_by_mask();
+            (ids, skipped)
+        };
+
+        let (ids_low, skipped_low) = run_and_count(2);
+        let (ids_all, skipped_all) = run_and_count(32);
+
+        // Correctness on both.
+        assert_eq!(ids_low.len(), 10);
+        assert_distinct_ids(&ids_low);
+        assert_distinct_ids(&ids_all);
+        assert!(
+            ids_low.contains(&1500),
+            "probes=2 should still find the query's own row (its cell is probed)"
+        );
+
+        // The latency signal: probing 2/32 cells skips strictly more
+        // blocks than probing all 32 cells (which skips ~none). This
+        // is the proof that fewer cells == less scan work.
+        assert!(
+            skipped_low > skipped_all,
+            "low probes must skip more blocks than all-cells: \
+             skipped(probes=2)={skipped_low} skipped(probes=32)={skipped_all}"
+        );
+        // Probing all cells should skip essentially nothing (the
+        // whole corpus is allowed).
+        assert_eq!(
+            skipped_all, 0,
+            "probes=lists must allow every block (skip none), got {skipped_all}"
+        );
+    }
+
+    /// probes > lists behaves exactly like probes == lists (the
+    /// coarse search clamps nprobe to lists, so the extra probes are a
+    /// no-op).
+    #[pg_test]
+    fn ivf_probes_clamped_to_lists() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_cl", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_cl_idx ON ivf_cl \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_cl WHERE id = 500)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_cl ORDER BY emb <=> {query} LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let exact = pull();
+        Spi::run("SET turbovec.probes = 9999").unwrap();
+        let clamped = pull();
+        assert_eq!(
+            exact, clamped,
+            "probes > lists must behave like probes == lists: \
+             probes=16 {exact:?} vs probes=9999 {clamped:?}"
+        );
+        assert_distinct_ids(&clamped);
+    }
+
+    /// A vacuum-degraded IVF index (meta v4 IVF fields blanked, as
+    /// `write_meta_shrink_in_place` does after a swap-remove) reports
+    /// `has_ivf() == false` and the scan falls back to the flat path,
+    /// returning correct top-k. We simulate the degradation by
+    /// forcing the meta page's `lists` field to 0 in place via a
+    /// REINDEX-free meta rewrite.
+    #[pg_test]
+    fn ivf_vacuum_degraded_falls_back_to_flat() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_vd", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_vd_idx ON ivf_vd \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_vd WHERE id = 1000)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_vd ORDER BY emb <=> {query} LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // Healthy IVF scan first (sanity).
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let healthy = pull();
+        assert_eq!(healthy.len(), 10);
+        assert!(healthy.contains(&1000));
+
+        // Degrade the meta page: blank the v4 IVF fields in place so
+        // has_ivf() returns false (exactly what the vacuum
+        // swap-remove path does via write_meta_shrink_in_place).
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_vd_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_blank_ivf(rel);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        // Confirm has_ivf() is now false.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert!(
+                !meta.has_ivf(),
+                "degraded index must report has_ivf() == false"
+            );
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // The degraded index scans flat (probes is ignored) and still
+        // returns correct, distinct top-k.
+        Spi::run("SET turbovec.probes = 2").unwrap();
+        let degraded = pull();
+        assert_eq!(degraded.len(), 10, "flat fallback must return full top-10");
+        assert_distinct_ids(&degraded);
+        assert!(
+            degraded.contains(&1000),
+            "flat fallback must find the query row"
+        );
+    }
+
     /// Helper: slurp the DATA REGION (bytes after the 24-byte PG page
     /// header) of every block of an index relation's main fork into
     /// one byte vector via the buffer manager. We skip the page

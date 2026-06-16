@@ -1541,3 +1541,42 @@ pub(crate) unsafe fn force_meta_version(rel: pg_sys::Relation, version: u8) {
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
 }
+
+/// Test-only helper: blank the v4 IVF meta fields (`lists`,
+/// `coarse_first/count`, `cell_dir_first/count`) in place, leaving
+/// the version byte at 4 and every other field untouched. This
+/// simulates a vacuum-degraded IVF index: `write_meta_shrink_in_place`
+/// blanks exactly these fields after a swap-remove (cell contiguity
+/// breaks), so the index keeps its v4 codes/scales/ids but reports
+/// `has_ivf() == false` and must be scanned via the flat fallback.
+///
+/// The five u32 fields are packed contiguously at payload offset
+/// `v4_base = 224` (see `MetaPageData::decode`); on the page they
+/// start at `PAGE_HEADER_BYTES + 224`. Zeroing 5 * 4 = 20 bytes
+/// clears all of them.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock and have ensured the
+/// relation has at least one block. Only compiled into the test
+/// build.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_meta_blank_ivf(rel: pg_sys::Relation) {
+    assert!(
+        nblocks(rel) > 0,
+        "force_meta_blank_ivf: relation has no blocks"
+    );
+    let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
+    let state = pg_sys::GenericXLogStart(rel);
+    let page = pg_sys::GenericXLogRegisterBuffer(
+        state,
+        buf,
+        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+    );
+    // v4 IVF fields: payload offset 224, 5 contiguous u32s = 20 bytes.
+    const V4_BASE: usize = 224;
+    let ivf_fields = page.cast::<u8>().add(PAGE_HEADER_BYTES + V4_BASE);
+    std::ptr::write_bytes(ivf_fields, 0u8, 20);
+    pg_sys::GenericXLogFinish(state);
+    pg_sys::UnlockReleaseBuffer(buf);
+}

@@ -198,6 +198,30 @@ impl ReadOnlyIndex {
         }
         (res.scores, ids)
     }
+
+    /// IVF cell-restricted top-`k` search: identical to [`Self::search`]
+    /// but only slots whose `mask` entry is `true` contribute to the
+    /// top-`k`. `mask.len()` must equal [`Self::len`].
+    ///
+    /// turbovec's blocked kernel short-circuits whole 32-vector blocks
+    /// whose mask window is all-zero (see `block_has_allowed` in
+    /// turbovec/src/search.rs), so when the `true` slots are clustered
+    /// into a few contiguous cell ranges (as the IVF build lays them
+    /// out) the masked-out blocks skip their LUT scoring work entirely
+    /// — this is the IVF latency win, not just a result filter.
+    pub fn search_masked(
+        &self,
+        queries: &[f32],
+        k: usize,
+        mask: &[bool],
+    ) -> (Vec<f32>, Vec<u64>) {
+        let res: SearchResults = self.inner.search_with_mask(queries, k, Some(mask));
+        let mut ids = Vec::with_capacity(res.indices.len());
+        for &slot in &res.indices {
+            ids.push(self.slot_to_id[slot as usize]);
+        }
+        (res.scores, ids)
+    }
 }
 
 /// A scan-facing handle over a cached index, regardless of which
@@ -232,6 +256,24 @@ impl ScanHandle {
         match self {
             ScanHandle::ReadOnly(a) => a.search(queries, k),
             ScanHandle::Mutable(a) => a.read().search(queries, k),
+        }
+    }
+
+    /// IVF cell-restricted search. Returns `Some((scores, ids))` only for
+    /// the [`ScanHandle::ReadOnly`] arm, where slot order matches the
+    /// on-disk cell directory the `mask` was derived from. Returns `None`
+    /// for the [`ScanHandle::Mutable`] arm (a post-insert / dirty-xact
+    /// mirror), whose slot order has diverged from the build-time cell
+    /// layout — the caller must fall back to the flat [`Self::search`].
+    pub fn search_masked(
+        &self,
+        queries: &[f32],
+        k: usize,
+        mask: &[bool],
+    ) -> Option<(Vec<f32>, Vec<u64>)> {
+        match self {
+            ScanHandle::ReadOnly(a) => Some(a.search_masked(queries, k, mask)),
+            ScanHandle::Mutable(_) => None,
         }
     }
 }

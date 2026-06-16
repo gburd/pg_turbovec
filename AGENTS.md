@@ -28,7 +28,7 @@ line. Patch releases may:
 
 Patch releases must NOT:
 
-- Change `MetaPageData::version` (currently 3).
+- Change `MetaPageData::version` (currently 4).
 - Change page layout, chain ordering, meta-page field layout.
 - Change the SQL surface (operators, type names, function signatures).
 - Require any user action to upgrade. `ALTER EXTENSION ... UPDATE` must
@@ -38,7 +38,7 @@ This is enforced mechanically by:
 - `scripts/drift-check.sh` § 7 (forbids `VERSION` constant change in a
   patch bump).
 - `wire_format_version_is_stable` `#[pg_test]` in `src/lib.rs`
-  (`EXPECTED_WIRE_FORMAT_VERSION = 3` constant).
+  (`EXPECTED_WIRE_FORMAT_VERSION = 4` constant).
 
 ### Minor releases (X.Y.Z → X.Y+1.0)
 
@@ -79,21 +79,25 @@ The bar:
 - A release note in `docs/UPGRADING.md` summarises why the break was
   necessary.
 
-The current major (1.x) line has been wire-format-stable since v1.4.0
-(`MetaPageData::version = 3`, persisted rotation matrix). Future
-majors should attempt to remain online-upgradable from the 1.x line
-unless the cost of doing so is prohibitive.
+The current major (1.x) line held `MetaPageData::version = 3` from
+v1.4.0 through v1.9.x; v1.10.0 bumped it to **4** for the IVF layer,
+backward-compatibly (a v4 binary reads v3 indexes as flat, no
+REINDEX). Future majors should attempt to remain online-upgradable
+from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.9.1, 2026-06-15)
+### Current (as of v1.10.0, 2026-06-16)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.9.1    | `REINDEX INDEX` once |
-| 1.2.x              | 1.9.1    | `REINDEX INDEX` once |
-| 1.3.x              | 1.9.1    | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.9.x      | 1.9.1    | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.10.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.10.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.10.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.10.x     | 1.10.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version = 3` has held across **v1.4.0 → v1.9.1**.
+`MetaPageData::version` is **4** as of v1.10.0 (was 3 for v1.4.0–
+v1.9.x). The bump is backward-compatible: a v1.10.0 binary reads a
+v3 index as a flat (`lists = 0`) index, so v1.4.x–v1.9.x indexes
+need **no REINDEX**. IVF is opt-in per index via `WITH (lists = N)`.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.

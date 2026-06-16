@@ -5822,6 +5822,258 @@ mod tests {
         Spi::run("SET turbovec.oversample = 1.0").unwrap();
     }
 
+    // ----------------------------------------------------------------
+    // IVF-3 Part B (docs/IVF_PLAN.md §7): the recall-vs-probes
+    // frontier. Recall is CPU-independent (a function of which cells
+    // are probed vs where true neighbours live, not of SIMD speed),
+    // so this runs locally on any host and is the host-independent
+    // evidence that IVF trades recall for scan-work as designed. The
+    // absolute warm-p50 latency on AVX2 is a separate measurement
+    // deferred to a quiet `arnold` window (TODO in BENCHMARKS.md).
+    // ----------------------------------------------------------------
+
+    /// Generate `n` deterministic pseudo-random unit vectors of
+    /// dimension `dim` into `table(id bigint, emb vector)`. Each
+    /// coordinate is a hash-derived value in (-1, 1); the `::vector`
+    /// cast does not normalise, but `turbovec.normalize_on_insert`
+    /// (on by default) unit-normalises at index time and the coarse
+    /// search normalises the query, so the cells live on the unit
+    /// sphere. Deterministic (hashtext of id:coord), so the frontier
+    /// is reproducible.
+    fn ivf_make_random_corpus(table: &str, n: i64, dim: i64) {
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint PRIMARY KEY, emb vector)"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 20001) / 10000.0)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, {n}) AS gs(i), \
+                  generate_series(1, {dim}) AS sub(k) \
+             GROUP BY i"
+        ))
+        .unwrap();
+    }
+
+    /// THE IVF-3 Part B contract test + bench-artefact producer.
+    ///
+    /// Builds a real-ish corpus of distinct pseudo-random unit
+    /// vectors, builds an IVF index `WITH (lists ≈ √n)`, computes
+    /// brute-force exact top-10 ground truth for a set of held-out
+    /// queries (seqscan), then sweeps `turbovec.probes` and records
+    /// recall@10 and the fraction of 32-vector blocks skipped by the
+    /// cell mask (the CPU-independent latency-win proxy) at each
+    /// probe count.
+    ///
+    /// Asserts the core IVF correctness/quality guarantee:
+    ///   1. recall@10 is monotonically non-decreasing in probes;
+    ///   2. at `probes = lists` recall@10 == the exact flat scan's
+    ///      recall (≈1.0) — probing every cell IS the full scan;
+    ///   3. small probes skips a large fraction of blocks (the
+    ///      latency-win proxy: fewer blocks scanned ⇒ proportionally
+    ///      faster, host-independent).
+    ///
+    /// Persists `benches/results/ivf_recall_vs_probes_<DATE>.json`
+    /// with the per-probes curve + corpus metadata.
+    #[pg_test]
+    fn ivf_recall_vs_probes_frontier() {
+        use_turbovec();
+        // CI-friendly scale that still gives meaningful cells:
+        // n=16k, dim=64 ⇒ lists≈128 (√16384). The recall/scan-work
+        // trade-off is scale-invariant in *shape*; BENCHMARKS.md
+        // notes the larger-corpus run is the same curve.
+        let n: i64 = 16_384;
+        let dim: i64 = 64;
+        let lists: i64 = 128; // √16384
+        let n_queries: i64 = 50;
+        ivf_make_random_corpus("ivf_frontier", n, dim);
+
+        // Hold the query ids OUT of the index by deleting them before
+        // the build (they're real corpus members, so GT and IVF see
+        // the same heap; we just ensure a query never trivially
+        // matches its own indexed copy at distance 0). Query ids are
+        // the last `n_queries` rows.
+        let q_lo = n - n_queries + 1;
+        // Snapshot the query vectors into a side table, then remove
+        // them from the corpus so neither the GT nor the IVF scan can
+        // return a query as its own neighbour.
+        Spi::run(&format!(
+            "CREATE TABLE ivf_frontier_q AS \
+             SELECT id, emb FROM ivf_frontier WHERE id >= {q_lo}"
+        ))
+        .unwrap();
+        Spi::run(&format!("DELETE FROM ivf_frontier WHERE id >= {q_lo}")).unwrap();
+
+        Spi::run(
+            "CREATE INDEX ivf_frontier_idx ON ivf_frontier \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 128)",
+        )
+        .unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+
+        // Collect the held-out query rows.
+        let queries: Vec<(i64, String)> = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT id, emb::text FROM ivf_frontier_q ORDER BY id",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|r| {
+                    (
+                        r.get::<i64>(1).unwrap().unwrap(),
+                        r.get::<String>(2).unwrap().unwrap(),
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(queries.len() as i64, n_queries);
+
+        // Brute-force exact top-10 GT per query (seqscan, no index).
+        Spi::run("SET enable_seqscan = on").unwrap();
+        Spi::run("SET enable_indexscan = off").unwrap();
+        let gt: Vec<std::collections::HashSet<i64>> = queries
+            .iter()
+            .map(|(_, emb)| {
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM ivf_frontier \
+                     ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                ids.into_iter().collect()
+            })
+            .collect();
+
+        // Sweep probes. recall@10 averaged over queries + blocks
+        // skipped (summed across queries) per probe count.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+        let probe_sweep: Vec<i64> = vec![1, 2, 4, 8, 16, 32, lists];
+        // Curve rows: (probes, recall@10, blocks_skipped_fraction).
+        let mut curve: Vec<(i64, f64, f64)> = Vec::new();
+        for &probes in &probe_sweep {
+            Spi::run(&format!("SET turbovec.probes = {probes}")).unwrap();
+            let mut hit_sum = 0usize;
+            let mut blocks_skipped_sum = 0u64;
+            let mut blocks_total_sum = 0u64;
+            for (qi, (_, emb)) in queries.iter().enumerate() {
+                // Fresh handle so each query's scan re-runs; the
+                // counter is process-global, reset right before.
+                crate::cache::invalidate_all();
+                turbovec::search::reset_blocks_skipped_by_mask();
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM ivf_frontier \
+                     ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                let skipped = turbovec::search::blocks_skipped_by_mask();
+                blocks_skipped_sum += skipped;
+                // Total blocks scanned per query = ceil(n_live / 32).
+                // n_live is the corpus minus the held-out queries.
+                let n_live = (n - n_queries) as u64;
+                blocks_total_sum += n_live.div_ceil(32);
+                let hits = ids.iter().filter(|id| gt[qi].contains(id)).count();
+                hit_sum += hits;
+            }
+            let recall = hit_sum as f64 / (n_queries as usize * 10) as f64;
+            let skipped_frac = if blocks_total_sum == 0 {
+                0.0
+            } else {
+                blocks_skipped_sum as f64 / blocks_total_sum as f64
+            };
+            curve.push((probes, recall, skipped_frac));
+        }
+
+        // ---- Contract assertions ----
+
+        // (1) recall@10 monotonically non-decreasing in probes.
+        for w in curve.windows(2) {
+            let (p0, r0, _) = w[0];
+            let (p1, r1, _) = w[1];
+            assert!(
+                r1 >= r0 - 1e-9,
+                "recall@10 must be monotone non-decreasing in probes: \
+                 recall({p0})={r0} > recall({p1})={r1}"
+            );
+        }
+
+        // (2) at probes=lists recall@10 == the exact flat recall
+        // (≈1.0). Probing every cell IS the full scan; the only
+        // residual loss is the lossy quantized ranking inside the
+        // (now-complete) candidate set, which the reorder-queue
+        // exact recheck mostly absorbs. We require ≥ 0.99.
+        let (last_probes, last_recall, _) = *curve.last().unwrap();
+        assert_eq!(last_probes, lists, "final sweep point must be probes=lists");
+        assert!(
+            last_recall >= 0.99,
+            "recall@10 at probes=lists must equal the exact flat scan \
+             (≈1.0); got {last_recall}"
+        );
+
+        // (3) the latency-win proxy: at the low end (probes=1) the
+        // cell mask must skip a large fraction of blocks. With
+        // lists=128 and probes=1, ~1/128 of cells are probed, so we
+        // expect to skip the vast majority of blocks. Require ≥ 0.8.
+        let (p_lo, _, skipped_lo) = curve[0];
+        assert_eq!(p_lo, 1);
+        assert!(
+            skipped_lo >= 0.8,
+            "probes=1 must skip a large fraction of blocks (the \
+             latency-win proxy); skipped only {skipped_lo} of blocks"
+        );
+        // At probes=lists the mask allows everything ⇒ skip ≈ 0.
+        let (_, _, skipped_all) = *curve.last().unwrap();
+        assert!(
+            skipped_all < 0.05,
+            "probes=lists must allow ≈ every block (skip ≈ 0); \
+             skipped {skipped_all}"
+        );
+
+        // ---- Persist the bench artefact ----
+        ivf_write_frontier_json(n, dim, lists, n_queries, &curve);
+    }
+
+    /// Write the recall-vs-probes curve to
+    /// `benches/results/ivf_recall_vs_probes_<DATE>.json`. Best-effort:
+    /// a write failure (e.g. read-only CI checkout) is a warning, not
+    /// a test failure — the contract assertions above are the gate;
+    /// the JSON is the published evidence.
+    fn ivf_write_frontier_json(
+        n: i64,
+        dim: i64,
+        lists: i64,
+        n_queries: i64,
+        curve: &[(i64, f64, f64)],
+    ) {
+        let date = "2026-06-16";
+        let rows: Vec<String> = curve
+            .iter()
+            .map(|(p, r, f)| {
+                format!(
+                    "    {{ \"probes\": {p}, \"recall_at_10\": {r:.6}, \"blocks_skipped_fraction\": {f:.6} }}"
+                )
+            })
+            .collect();
+        let json = format!(
+            "{{\n  \"bench\": \"ivf_recall_vs_probes\",\n  \"date\": \"{date}\",\n  \"host_independent\": true,\n  \"note\": \"Recall is CPU-independent (which cells are probed vs where true neighbours live). Absolute warm-p50 latency on AVX2 is a separate measurement deferred to a quiet arnold window.\",\n  \"corpus\": {{ \"n_vectors\": {n_live}, \"dim\": {dim}, \"distribution\": \"deterministic pseudo-random unit vectors\", \"bit_width\": 4 }},\n  \"lists\": {lists},\n  \"queries\": {n_queries},\n  \"ground_truth\": \"brute-force exact top-10 by cosine (seqscan, enable_indexscan=off)\",\n  \"curve\": [\n{rows}\n  ]\n}}\n",
+            n_live = n - n_queries,
+            rows = rows.join(",\n"),
+        );
+        let path = format!(
+            "{}/benches/results/ivf_recall_vs_probes_{date}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        if let Err(e) = std::fs::write(&path, json) {
+            // Not a hard failure; the contract assertions are the
+            // gate. Surface it so a missing artefact is noticed.
+            eprintln!("warning: could not write frontier artefact {path}: {e}");
+        } else {
+            eprintln!("wrote IVF recall-vs-probes frontier artefact: {path}");
+        }
+    }
+
     /// Helper: slurp the DATA REGION (bytes after the 24-byte PG page
     /// header) of every block of an index relation's main fork into
     /// one byte vector via the buffer manager. We skip the page

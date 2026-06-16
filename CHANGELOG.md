@@ -4,6 +4,83 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] — 2026-06-16
+
+**Adds the IVF coarse-quantizer layer — a real sublinear ANN
+structure over the quantized codes.** First wire-format change since
+v1.4.0 (`MetaPageData::version` 3 → 4), but **existing v3 indexes
+do NOT need a `REINDEX`**: a v1.10.0 binary reads a v3 index as a
+flat (`lists = 0`) index. Only users who opt into IVF rebuild.
+See an internal design note.
+
+### Why
+
+The v1.9.1 AVX2 benchmark established that pg_turbovec's flat
+`O(n·dim)` quantized scan is ~490× slower than pgvector HNSW at
+1M×1024-d. IVF partitions the corpus into `lists` Voronoi cells
+(coarse k-means centroids) and scans only the `probes` nearest
+cells per query, dropping query work to roughly `(probes/lists)`
+of the corpus — the architectural path to a competitive latency
+story while keeping the 10–15× storage win.
+
+### Added — IVF (opt-in)
+
+- `WITH (lists = N)` reloption (default 0 = flat / today's exact
+  scan; `N` = number of coarse cells, recommended `≈ sqrt(n)`).
+- `WITH (assign_dups = M)` reloption (default 1 = single
+  assignment; `M > 1` = soft assignment: boundary vectors stored
+  in their top-M nearest cells to raise recall@10 at a fixed
+  `probes`).
+- `turbovec.probes` GUC (default 8) — cells scanned per query; the
+  recall/latency dial (the `ivfflat.probes` / `hnsw.ef_search`
+  analogue). `probes >= lists` reduces exactly to the flat exact
+  scan.
+- `turbovec.max_probes` GUC (default 64) — under
+  `iterative_scan = relaxed_order`, a selective `WHERE` filter that
+  under-returns triggers probe-WIDENING (scan more cells) up to
+  this cap; the `ivfflat.max_probes` analogue.
+
+### How it composes
+
+- **Iterative scan** (v1.8.0): refill widens `probes` for IVF
+  indexes (vs growing `k` for flat).
+- **Oversampling** (v1.9.0): widens the candidate set within the
+  probed cells.
+- **Reorder queue**: exact-distance recheck, unchanged.
+- turbovec's SIMD mask SKIPS scan work (block-level early-exit),
+  and cells are stored contiguous, so fewer probed cells = real
+  latency reduction.
+
+### Performance / determinism
+
+- The IVF build (k-means + assignment) is GEMM-batched (corpus
+  rotation as `block @ R^T`, cell assignment via a `V @ C^T`
+  cross-term GEMM + scalar top-2 tie-break). Without this the
+  per-vector scalar loops were ~10^12 FLOPs and a 1M build ran
+  60+ min. Single-threaded `gemm` keeps it bit-deterministic.
+- Builds are deterministic: same table + same `lists`/`assign_dups`
+  ⇒ byte-identical relfile (seeded k-means++, `IVF_SEED`).
+- Recall-vs-probes frontier (host-independent; recall is
+  CPU-independent): on a hard random 16k×64-d corpus, `probes=16`
+  → R@10 0.53 skipping 85% of blocks, `probes=lists` → 1.000.
+  Real clustered embeddings reach high recall at far lower probes.
+  Absolute AVX2 warm-p50 latency is deferred to a quiet `arnold`
+  window (`meh` is pre-AVX2). See `docs/BENCHMARKS.md`.
+
+### Migration
+
+**No REINDEX for existing (v3, flat) indexes** — they read as
+`lists = 0` under the v1.10.0 binary. Opt into IVF by rebuilding
+with `WITH (lists = N)`. `ALTER EXTENSION pg_turbovec UPDATE TO
+'1.10.0';` registers the new reloptions + GUCs. `MetaPageData::version`
+is 4; `EXPECTED_WIRE_FORMAT_VERSION = 4`.
+
+### Tests
+
+150 → 185 on pg16 (IVF build/scan/soft-assign/determinism/
+probes-frontier coverage; distinct-id assertions throughout).
+drift-check clean.
+
 ## [1.9.1] — 2026-06-15
 
 **Bench-results-only release. Wire format unchanged from v1.9.0

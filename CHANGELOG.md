@@ -4,6 +4,36 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.1] — 2026-06-16
+
+**Bench-results-only release. Wire format unchanged from v1.10.0
+(`MetaPageData::version = 4`); no REINDEX.** Zero source-code change.
+
+### Benchmark — IVF warm-p50 on AVX2
+
+Records the AVX2 IVF warm-p50 measurement confirming the IVF
+cell-skipping **latency** win that `meh` (pre-AVX2 scalar fallback)
+could not produce. Host `floki` (Intel Core Ultra 7 258V, AVX2),
+v1.10.0 release build, 200k × 256-d, `lists = 448`, 4-bit, warm
+cache, 50 timed queries per `probes`:
+
+| probes | warm p50 | vs full scan |
+|-------:|---------:|-------------:|
+| 4   | 0.74 ms | 5.4× faster |
+| 16  | 0.78 ms | 5.1× faster |
+| 448 (= lists, full exact scan) | 3.97 ms | baseline |
+
+**At `probes = 16`, ~5× faster than the full exact scan**, on AVX2.
+The IVF latency win is real on AVX2 hardware. Honest caveat:
+recall@10 = 1.000 at all probes in this run is an artifact of the
+synthetic corpus's strong cluster structure, not a general
+guarantee — the host-independent recall-vs-probes frontier
+(v1.10.0) is the honest recall/probes trade-off. A full isolated
+1M+ × 1024-d sweep on a quiet AVX2 host remains future work.
+
+Files: `benches/results/ivf_warmp50_floki_avx2_2026-06-16.json`,
+`docs/BENCHMARKS.md` ("IVF warm-p50 (AVX2)" section).
+
 ## [1.10.0] — 2026-06-16
 
 **Adds the IVF coarse-quantizer layer — a real sublinear ANN

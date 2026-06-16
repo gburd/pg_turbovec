@@ -1014,9 +1014,9 @@ mod tests {
     /// `docs/UPGRADING.md` migration matrix.
     #[pg_test]
     fn wire_format_version_is_stable() {
-        // The version emitted by v1.4.0. Bump this only as part of
-        // a deliberate minor/major release with a migration story.
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 3;
+        // The version emitted by IVF-1 (v4). Bump this only as part
+        // of a deliberate minor/major release with a migration story.
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 4;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,
@@ -1048,6 +1048,18 @@ mod tests {
         let v: Option<f64> =
             Spi::get_one("SELECT current_setting('turbovec.oversample')::float8").unwrap();
         assert_eq!(v, Some(4.0));
+    }
+
+    #[pg_test]
+    fn max_probes_guc_round_trip() {
+        // Default is 64 (IVF-3: 8x the turbovec.probes default of 8).
+        let dflt: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.max_probes')").unwrap();
+        assert_eq!(dflt.as_deref(), Some("64"));
+        Spi::run("SET turbovec.max_probes = 128").unwrap();
+        let v: Option<String> =
+            Spi::get_one("SELECT current_setting('turbovec.max_probes')").unwrap();
+        assert_eq!(v.as_deref(), Some("128"));
     }
 
     /// `count(*)` and other non-orderby queries used to ERROR out
@@ -3832,7 +3844,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(meta.version, 3, "new index must use the v3 wire format");
+        assert_eq!(meta.version, 4, "new index must use the v4 wire format");
         assert!(
             meta.has_prepared_layout(),
             "meta must record blocked + codebook: blocked_bytes={} cb_levels={}",
@@ -4000,14 +4012,14 @@ mod tests {
             Spi::get_one("SELECT 't_old_idx'::regclass::oid::int8").unwrap();
         let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
-        // Initial meta is v3 (the only version we write today).
+        // Initial meta is v4 (the version we write today; IVF-1).
         let v_current_meta: MetaPageData = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v_current_meta.version, 3);
+        assert_eq!(v_current_meta.version, 4);
         assert!(!v_current_meta.is_legacy_v1());
         assert!(!v_current_meta.is_legacy_v2());
         assert!(v_current_meta.has_prepared_layout());
@@ -4103,7 +4115,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v3_meta.version, 3);
+        assert_eq!(v3_meta.version, 4);
         assert!(!v3_meta.is_legacy_v1());
         assert!(!v3_meta.is_legacy_v2());
 
@@ -4233,7 +4245,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (m, c, s, i, b, cents, bnds, rot)
         };
-        assert_eq!(meta.version, 3);
+        assert_eq!(meta.version, 4);
         assert!(meta.has_prepared_layout());
         assert_eq!(meta.rotation_dim, meta.dim);
         assert!(meta.rotation_count >= 1);
@@ -4905,6 +4917,1296 @@ mod tests {
             )
         });
         assert!(bad.is_err(), "concat exceeding MAX_DIM should ERROR");
+    }
+
+    // ----------------------------------------------------------------
+    // IVF-1 (docs/IVF_PLAN.md): build path + on-disk layout for the
+    // inverted-file layer. The scan path stays FLAT in IVF-1; these
+    // tests prove the v3->v4 wire change round-trips and that flat
+    // v3/lists=0 indexes need no REINDEX.
+    // ----------------------------------------------------------------
+
+    /// k-means trains deterministically: same sample + same lists =>
+    /// byte-identical centroids. The determinism anchor (mirrors the
+    /// rotation's fixed ROTATION_SEED precedent).
+    #[pg_test]
+    fn ivf_kmeans_deterministic() {
+        use crate::index::ivf;
+        let dim = 16;
+        let n = 500;
+        // Deterministic pseudo-random sample.
+        let mut sample = vec![0.0f32; n * dim];
+        let mut x = 0xC0FFEEu64;
+        for v in sample.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+        }
+        let m1 = ivf::train_kmeans(&sample, n, 32, dim);
+        let m2 = ivf::train_kmeans(&sample, n, 32, dim);
+        assert_eq!(
+            m1.centroids, m2.centroids,
+            "IVF k-means must be byte-deterministic"
+        );
+    }
+
+    /// Every slot is assigned to exactly one cell and the cell
+    /// directory partitions all vectors. Pure-permutation property
+    /// checked at the SQL boundary via the build path.
+    #[pg_test]
+    fn ivf_cell_assignment_covers_all_vectors() {
+        use crate::index::ivf;
+        // Hand-built assignment over 7 slots, 3 cells.
+        let assignment = [2u32, 0, 0, 1, 2, 1, 0];
+        let (perm, dir) = ivf::build_permutation(&assignment, 3);
+        dir.validate_partition(7).unwrap();
+        assert_eq!(dir.total_vectors(), 7);
+        // Every old slot appears exactly once in the permutation.
+        let mut seen = [false; 7];
+        for &old in &perm {
+            assert!(!seen[old as usize], "slot assigned to two cells");
+            seen[old as usize] = true;
+        }
+        assert!(seen.iter().all(|&b| b), "some slot unassigned");
+    }
+
+    /// Building `WITH (lists = 0)` produces a relfile byte-identical
+    /// to a no-lists (default) build, modulo the meta-page version
+    /// byte. Proves the v4 flat layout is backward-compatible with
+    /// v3 (no REINDEX for non-IVF users).
+    #[pg_test]
+    fn ivf_build_lists0_is_byte_identical_to_flat() {
+        use_turbovec();
+        // Deterministic corpus; dim multiple of 8.
+        Spi::run("CREATE TABLE ivf_b0 (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_b0 \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 31 + s * 17) % 97)::float8 / 97.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 400) g",
+        )
+        .unwrap();
+
+        // Default build (no lists reloption).
+        Spi::run(
+            "CREATE INDEX ivf_b0_default ON ivf_b0 \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        // Explicit lists = 0 build over the SAME data.
+        Spi::run(
+            "CREATE INDEX ivf_b0_lists0 ON ivf_b0 \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        )
+        .unwrap();
+
+        // Compare the two relfiles block-for-block, ignoring only the
+        // meta-page version byte. Both are v4 here (lists=0 is
+        // structurally v3-equivalent), so they should be fully equal.
+        let (def_oid, l0_oid): (pg_sys::Oid, pg_sys::Oid) = (
+            Spi::get_one("SELECT 'ivf_b0_default'::regclass::oid")
+                .unwrap()
+                .unwrap(),
+            Spi::get_one("SELECT 'ivf_b0_lists0'::regclass::oid")
+                .unwrap()
+                .unwrap(),
+        );
+        let (def_bytes, l0_bytes) = unsafe {
+            let a = read_relfile_blocks(def_oid);
+            let b = read_relfile_blocks(l0_oid);
+            (a, b)
+        };
+        assert_eq!(
+            def_bytes.len(),
+            l0_bytes.len(),
+            "lists=0 relfile must have same block count as default"
+        );
+        // Meta page is block 0; its version byte lives at PG header
+        // (24) + magic (4) = offset 28. Both should already be v4, so
+        // assert full byte-equality including the version byte.
+        assert_eq!(
+            def_bytes, l0_bytes,
+            "lists=0 build must be byte-identical to the default flat build"
+        );
+    }
+
+    /// A forged v3 index (version byte = 3, v4 IVF fields absent)
+    /// must still scan flat under the v4 binary, returning correct
+    /// top-k. The no-REINDEX guarantee.
+    #[pg_test]
+    fn ivf_v3_index_still_scans_under_v4_binary() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_v3 (id bigint, emb vector)").unwrap();
+        // Orthogonal-ish basis so the nearest neighbour is
+        // unambiguous.
+        Spi::run(
+            "INSERT INTO ivf_v3 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]'), \
+                 (3, '[0,0,1,0,0,0,0,0]'), \
+                 (4, '[0,0,0,1,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_v3_idx ON ivf_v3 \
+             USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+
+        // Force the on-disk meta page back to version 3. The v4 IVF
+        // fields are already zero (lists=0), so a v3-stamped page is
+        // a legitimate flat v3 index as far as the decoder is
+        // concerned.
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ivf_v3_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_version(rel, 3);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        // A v3 index must NOT trip the legacy ERROR path; it scans
+        // flat. Query nearest to id=2's vector.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let top: Option<i64> = Spi::get_one(
+            "SELECT id FROM ivf_v3 \
+             ORDER BY emb <=> '[0,1,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(top, Some(2), "v3 flat scan under v4 binary must be correct");
+    }
+
+    /// Build `WITH (lists = 16)` over a few thousand rows; read back
+    /// the coarse centroids + cell directory and assert the
+    /// directory partitions all n_vectors exactly. A FLAT scan over
+    /// the (cell-reordered) codes must still return correct top-k
+    /// (IVF-1 scan is flat, so recall is unchanged vs lists=0), with
+    /// distinct ids.
+    #[pg_test]
+    fn ivf_build_with_lists_roundtrips() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_rt (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_rt \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 13 + s * 7 + (g % 5) * 1000) % 211)::float8 / 211.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 3000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_rt_idx ON ivf_rt \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ivf_rt_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+
+        // Read back the meta, coarse centroids, and cell directory.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel)
+                .expect("ivf index has a meta page");
+            assert_eq!(meta.version, 4, "IVF index must be wire v4");
+            assert!(meta.has_ivf(), "meta.has_ivf() must be true for lists=16");
+            assert_eq!(meta.lists, 16);
+            assert_eq!(meta.n_vectors, 3000);
+
+            let coarse =
+                crate::index::relfile::read_coarse_centroids(rel, &meta);
+            assert_eq!(
+                coarse.len(),
+                16 * 16,
+                "coarse chain must hold lists*dim f32"
+            );
+            // Centroids are finite (trained, not garbage).
+            assert!(coarse.iter().all(|x| x.is_finite()));
+
+            let dir = crate::index::relfile::read_cell_directory(rel, &meta)
+                .expect("lists>0 index has a cell directory");
+            assert_eq!(dir.len(), 16);
+            // The cell directory must partition all 3000 vectors
+            // exactly: contiguous, non-overlapping, summing to n.
+            dir.validate_partition(3000).unwrap();
+            assert_eq!(dir.total_vectors(), 3000);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // A flat scan over the cell-reordered codes must still return
+        // a correct, distinct-id top-k. Pull back several neighbours
+        // and assert distinctness (the cheapest wrong-ranking guard).
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let ids: Vec<i64> = Spi::connect(|client| {
+            let tup = client
+                .select(
+                    "SELECT id FROM ivf_rt \
+                     ORDER BY emb <=> '[0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,\
+                                        0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5]'::vector \
+                     LIMIT 20",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            tup.map(|r| r.get::<i64>(1).unwrap().unwrap()).collect()
+        });
+        assert_eq!(ids.len(), 20, "top-20 over a 3000-row IVF index");
+        assert_distinct_ids(&ids);
+    }
+
+    /// IVF-1 recall anchor: a flat scan over a lists=16 index must
+    /// return essentially the SAME top-k as a lists=0 (flat) build of
+    /// the same data. IVF-1 doesn't probe cells, so reordering the
+    /// codes can't change *which corpus* is scanned — every vector is
+    /// still scored.
+    ///
+    /// The result isn't bit-identical, though: turbovec's TQ+
+    /// calibration is fit on the first ~1000 vectors *in slot order*,
+    /// and cell reordering changes that prefix, so the per-coordinate
+    /// calibration (and thus the exact quantized codes) shifts
+    /// slightly. The executor's exact-distance recheck
+    /// (`xs_recheckorderby`) absorbs most of that, so the returned
+    /// neighbour SET overlaps the flat scan's heavily. We assert a
+    /// strong overlap (the recall-unchanged guarantee) plus distinct
+    /// ids (the wrong-ranking guard), not byte-exact ranking.
+    #[pg_test]
+    fn ivf_lists_scan_matches_flat() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_eq (id bigint, emb vector)").unwrap();
+        // A corpus with clear, well-separated structure so the top-k
+        // is robust to small quantization shifts: each row gets a
+        // smoothly-varying signal (sinusoidal in the id) rather than
+        // the near-tie modular noise that makes ranking pathological.
+        Spi::run(
+            "INSERT INTO ivf_eq \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 2000) g",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Query = a specific row's vector (id 777), so the true top-1
+        // is unambiguous and the surrounding neighbours are stable.
+        let query = "(SELECT emb FROM ivf_eq WHERE id = 777)";
+
+        let pull = |idx_sql: &str| -> Vec<i64> {
+            Spi::run(idx_sql).unwrap();
+            let q = format!(
+                "SELECT id FROM ivf_eq ORDER BY emb <=> {query} LIMIT 10"
+            );
+            let r: Vec<i64> = Spi::connect(|client| {
+                client
+                    .select(&q, None, &[])
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            });
+            r
+        };
+
+        let flat = pull(
+            "CREATE INDEX ivf_eq_idx ON ivf_eq \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        );
+        Spi::run("DROP INDEX ivf_eq_idx").unwrap();
+        let ivf = pull(
+            "CREATE INDEX ivf_eq_idx ON ivf_eq \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        );
+        // Strong set overlap (the recall-unchanged guarantee). TQ+
+        // calibration's order-sensitivity means the ranking isn't
+        // byte-identical, but the neighbour sets must overlap heavily
+        // (>= 8/10 — in practice they match exactly on most queries).
+        let flat_set: std::collections::HashSet<i64> = flat.iter().copied().collect();
+        let overlap = ivf.iter().filter(|id| flat_set.contains(id)).count();
+        assert!(
+            overlap >= 8,
+            "IVF-1 flat scan (lists=16) must recall the flat top-10 set \
+             (overlap {overlap}/10): flat={flat:?} ivf={ivf:?}"
+        );
+        // The true neighbour (id 777, the query row itself) must be
+        // present in both — a flat scan over the whole corpus can't
+        // miss the query's own vector.
+        assert!(flat.contains(&777), "flat scan must find the query row");
+        assert!(ivf.contains(&777), "IVF flat scan must find the query row");
+        assert_distinct_ids(&ivf);
+    }
+
+    // ----------------------------------------------------------------
+    // IVF-2 (docs/IVF_PLAN.md §5/§7): coarse search + cell-restricted
+    // fine search in amgettuple, gated on turbovec.probes. The latency
+    // win. probes >= lists reduces to the exact flat scan (the
+    // correctness anchor); vacuum-degraded IVF indexes fall back to
+    // flat.
+    // ----------------------------------------------------------------
+
+    /// Build a smoothly-structured IVF corpus and return the table
+    /// name. Shared by the IVF-2 scan tests. `n` rows, dim 16.
+    fn ivf2_make_corpus(table: &str, n: i64) {
+        Spi::run(&format!("CREATE TABLE {table} (id bigint, emb vector)")).unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, {n}) g"
+        ))
+        .unwrap();
+    }
+
+    /// THE correctness anchor: with `probes >= lists`, the IVF scan
+    /// probes every cell (an all-true mask), which must be
+    /// byte-for-byte identical to scanning the SAME physical index
+    /// with no mask at all (the flat path). We prove it on one index:
+    /// capture the probes=lists result, then degrade the same index
+    /// to flat (blank the IVF meta) so the next scan takes the
+    /// maskless flat path over the identical codes — the two results
+    /// must be exactly equal (same ids, same order). Probing all
+    /// cells IS the full scan.
+    #[pg_test]
+    fn ivf_probes_all_equals_flat() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_pa", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+
+        let query = "(SELECT emb FROM ivf_pa WHERE id = 777)";
+        let pull = || -> Vec<i64> {
+            let q = format!("SELECT id FROM ivf_pa ORDER BY emb <=> {query} LIMIT 10");
+            Spi::connect(|client| {
+                client
+                    .select(&q, None, &[])
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run(
+            "CREATE INDEX ivf_pa_idx ON ivf_pa \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        // IVF scan probing every cell (all-true mask).
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let ivf_all = pull();
+
+        // Degrade the SAME index to flat: blank the v4 IVF fields so
+        // has_ivf() is false and the scan takes the maskless flat
+        // path over the identical codes. probes=lists (all-true mask)
+        // must equal the maskless scan exactly — same bytes scanned,
+        // the mask differs only in that it allows everything.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_pa_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_blank_ivf(rel);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+        let flat_same = pull();
+
+        assert_eq!(
+            ivf_all, flat_same,
+            "probes>=lists (all cells) must equal the maskless flat scan of \
+             the identical index exactly: ivf_all={ivf_all:?} flat={flat_same:?}"
+        );
+        assert_eq!(ivf_all.len(), 10);
+        assert!(ivf_all.contains(&777), "all-cells scan must find the query row");
+        assert_distinct_ids(&ivf_all);
+    }
+
+    /// Build WITH (lists = N), query, and assert recall@10 vs a
+    /// brute-force ground truth is high at a reasonable nprobe, with
+    /// distinct ids. The IVF correctness/recall property.
+    #[pg_test]
+    fn ivf_scan_returns_correct_topk() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_tk", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+
+        let query = "(SELECT emb FROM ivf_tk WHERE id = 1234)";
+
+        // Brute-force ground truth: exact distance, no index. A
+        // seqscan ORDER BY computes the true neighbours.
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let gt: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(gt.len(), 10);
+
+        // IVF scan at a reasonable nprobe.
+        Spi::run(
+            "CREATE INDEX ivf_tk_idx ON ivf_tk \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        let ivf: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"
+                    ),
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(ivf.len(), 10, "IVF top-10");
+        assert_distinct_ids(&ivf);
+
+        let gt_set: std::collections::HashSet<i64> = gt.iter().copied().collect();
+        let hits = ivf.iter().filter(|id| gt_set.contains(id)).count();
+        let recall = hits as f64 / gt.len() as f64;
+        assert!(
+            recall >= 0.9,
+            "IVF recall@10 must be >= 0.9 at probes=8/lists=16, got {recall} \
+             (gt={gt:?} ivf={ivf:?})"
+        );
+    }
+
+    /// Cell restriction actually reduces scan work: with a small
+    /// `probes`, turbovec's blocked kernel skips more 32-vector blocks
+    /// than with `probes = lists`. We read the process-global
+    /// `blocks_skipped_by_mask()` counter before/after a scan to prove
+    /// the unprobed (contiguous) cell ranges are short-circuited — the
+    /// IVF latency mechanism, not just result filtering. Correctness
+    /// (distinct ids, query row found) is asserted alongside.
+    #[pg_test]
+    fn ivf_low_probes_faster_fewer_cells() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_lp", 4000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 100").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_lp_idx ON ivf_lp \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_lp WHERE id = 1500)";
+        let run_and_count = |probes: i32| -> (Vec<i64>, u64) {
+            Spi::run(&format!("SET turbovec.probes = {probes}")).unwrap();
+            // Fresh handle each time so the search runs (cache stays
+            // valid; the counter is process-global so reset right
+            // before the query).
+            crate::cache::invalidate_all();
+            turbovec::search::reset_blocks_skipped_by_mask();
+            let ids: Vec<i64> = Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_lp ORDER BY emb <=> {query} LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            });
+            let skipped = turbovec::search::blocks_skipped_by_mask();
+            (ids, skipped)
+        };
+
+        let (ids_low, skipped_low) = run_and_count(2);
+        let (ids_all, skipped_all) = run_and_count(32);
+
+        // Correctness on both.
+        assert_eq!(ids_low.len(), 10);
+        assert_distinct_ids(&ids_low);
+        assert_distinct_ids(&ids_all);
+        assert!(
+            ids_low.contains(&1500),
+            "probes=2 should still find the query's own row (its cell is probed)"
+        );
+
+        // The latency signal: probing 2/32 cells skips strictly more
+        // blocks than probing all 32 cells (which skips ~none). This
+        // is the proof that fewer cells == less scan work.
+        assert!(
+            skipped_low > skipped_all,
+            "low probes must skip more blocks than all-cells: \
+             skipped(probes=2)={skipped_low} skipped(probes=32)={skipped_all}"
+        );
+        // Probing all cells should skip essentially nothing (the
+        // whole corpus is allowed).
+        assert_eq!(
+            skipped_all, 0,
+            "probes=lists must allow every block (skip none), got {skipped_all}"
+        );
+    }
+
+    /// probes > lists behaves exactly like probes == lists (the
+    /// coarse search clamps nprobe to lists, so the extra probes are a
+    /// no-op).
+    #[pg_test]
+    fn ivf_probes_clamped_to_lists() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_cl", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_cl_idx ON ivf_cl \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_cl WHERE id = 500)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_cl ORDER BY emb <=> {query} LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let exact = pull();
+        Spi::run("SET turbovec.probes = 9999").unwrap();
+        let clamped = pull();
+        assert_eq!(
+            exact, clamped,
+            "probes > lists must behave like probes == lists: \
+             probes=16 {exact:?} vs probes=9999 {clamped:?}"
+        );
+        assert_distinct_ids(&clamped);
+    }
+
+    /// A vacuum-degraded IVF index (meta v4 IVF fields blanked, as
+    /// `write_meta_shrink_in_place` does after a swap-remove) reports
+    /// `has_ivf() == false` and the scan falls back to the flat path,
+    /// returning correct top-k. We simulate the degradation by
+    /// forcing the meta page's `lists` field to 0 in place via a
+    /// REINDEX-free meta rewrite.
+    #[pg_test]
+    fn ivf_vacuum_degraded_falls_back_to_flat() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_vd", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_vd_idx ON ivf_vd \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_vd WHERE id = 1000)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_vd ORDER BY emb <=> {query} LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // Healthy IVF scan first (sanity).
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let healthy = pull();
+        assert_eq!(healthy.len(), 10);
+        assert!(healthy.contains(&1000));
+
+        // Degrade the meta page: blank the v4 IVF fields in place so
+        // has_ivf() returns false (exactly what the vacuum
+        // swap-remove path does via write_meta_shrink_in_place).
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_vd_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_blank_ivf(rel);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        // Confirm has_ivf() is now false.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert!(
+                !meta.has_ivf(),
+                "degraded index must report has_ivf() == false"
+            );
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // The degraded index scans flat (probes is ignored) and still
+        // returns correct, distinct top-k.
+        Spi::run("SET turbovec.probes = 2").unwrap();
+        let degraded = pull();
+        assert_eq!(degraded.len(), 10, "flat fallback must return full top-10");
+        assert_distinct_ids(&degraded);
+        assert!(
+            degraded.contains(&1000),
+            "flat fallback must find the query row"
+        );
+    }
+
+    // ---- IVF-3: probes-widening iterative scan ----
+
+    /// Build a clustered IVF corpus where `category` aligns with the
+    /// angular cluster of the embedding, so a selective `WHERE
+    /// category = X` filter targets rows that live in a *few* cells
+    /// that are angularly far from a query pointed at a *different*
+    /// cluster. This is the fixture that exercises probe-widening:
+    /// at probes=1 the scan only sees the query's own cell (no
+    /// category-X rows); widening probes reaches the category-X
+    /// cells.
+    ///
+    /// `nclust` distinct angular directions in 16-D; row `i` belongs
+    /// to cluster `i % nclust`, and `category = i % nclust` too, so
+    /// category C == cluster C. The embedding is the cluster's basis
+    /// direction (a single hot coordinate scaled per cluster) plus a
+    /// tiny per-row jitter so rows within a cluster are near but
+    /// distinct. Clusters are mutually near-orthogonal (different hot
+    /// coordinate), so cluster C is far from cluster D under cosine.
+    fn ivf3_make_clustered_corpus(table: &str, n: i64, nclust: i64) {
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint PRIMARY KEY, category int, emb vector)"
+        ))
+        .unwrap();
+        // emb[k] = (k == (i % nclust)) ? 1.0 : small jitter. The hot
+        // coordinate is the cluster id, so each cluster occupies a
+        // distinct near-orthogonal direction in the 16-D space
+        // (nclust must be <= 16). The jitter
+        // (hashtext-derived, ~+/-0.03) keeps rows within a cluster
+        // distinct without collapsing the inter-cluster separation.
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT i, (i % {nclust})::int, \
+                 ('[' || string_agg( \
+                     (CASE WHEN (k - 1) = (i % {nclust}) THEN 1.0 \
+                           ELSE (hashtext(i::text || ':' || k::text) % 100) / 1600.0 \
+                      END)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, {n}) AS gs(i), \
+                  generate_series(1, 16) AS sub(k) \
+             GROUP BY i"
+        ))
+        .unwrap();
+    }
+
+    /// IVF-3 core regression: under a selective `WHERE category = X`
+    /// filter whose matching rows live in cells NOT in the initial
+    /// `probes` nearest set, `iterative_scan = relaxed_order` must
+    /// WIDEN the probe set and return the full LIMIT, while
+    /// `iterative_scan = off` (single probe batch) under-returns.
+    /// The IVF analogue of `index_am_iterative_scan_selective_filter`.
+    #[pg_test]
+    fn ivf_iterative_widens_probes_under_filter() {
+        use_turbovec();
+        // 16 clusters over 3200 rows => 200 rows/cluster. category C
+        // == cluster C. lists = 16 so (ideally) one cell per cluster.
+        ivf3_make_clustered_corpus("ivf_w", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_w_idx ON ivf_w \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE ivf_w").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        // Query points at cluster 7's direction (a row in cluster 7),
+        // but we filter for category = 11 (cluster 11) — a DIFFERENT,
+        // angularly-far cluster. At probes=1 the scan only sees the
+        // cells nearest cluster 7; the category-11 rows are in a far
+        // cell that only a widened probe set reaches.
+        let query = "(SELECT emb FROM ivf_w WHERE id = 7)";
+        // search_k modest so a single batch can't accidentally pull
+        // the whole corpus.
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET turbovec.probes = 1").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+
+        let count_q = format!(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM ivf_w WHERE category = 11 \
+                 ORDER BY emb <=> {query} LIMIT 10 \
+             ) sub"
+        );
+
+        // off mode: single probe batch (probes=1) under-returns —
+        // the category-11 rows aren't in the one probed cell.
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        crate::cache::invalidate_all();
+        let off_count: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert!(
+            off_count.unwrap() < 10,
+            "iterative_scan=off with probes=1 should under-return on a \
+             selective filter whose matches live in an un-probed cell; \
+             got {off_count:?} (expected < 10)"
+        );
+
+        // relaxed_order: widens probes until the category-11 cell is
+        // probed and the LIMIT is satisfied.
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        crate::cache::invalidate_all();
+        let relaxed_count: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert_eq!(
+            relaxed_count,
+            Some(10),
+            "iterative_scan=relaxed_order must widen probes and return the \
+             full LIMIT under a selective filter on an un-probed cell"
+        );
+
+        // Distinct ids across the widening batches.
+        let relaxed_ids = fetch_ids(&format!(
+            "SELECT id FROM ivf_w WHERE category = 11 \
+             ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_distinct_ids(&relaxed_ids);
+        // Every returned row really is category 11 (the executor
+        // applies the filter, but assert it to catch any mask /
+        // dedup bug that smuggled a wrong-cell row through).
+        for id in &relaxed_ids {
+            assert_eq!(
+                id % 16,
+                11,
+                "widened scan returned a non-category-11 row: id={id}"
+            );
+        }
+    }
+
+    /// `max_probes` caps the widening: with a low cap, a selective
+    /// filter whose matches sit beyond the cap can't be fully
+    /// satisfied (the scan stops widening instead of looping to all
+    /// cells), AND the scan terminates (no infinite refill). We prove
+    /// termination by the query returning at all, and the cap by
+    /// contrasting a low cap (under-returns) with a high cap (full
+    /// LIMIT) on the same fixture.
+    #[pg_test]
+    fn ivf_max_probes_caps_widening() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_mp", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_mp_idx ON ivf_mp \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE ivf_mp").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET turbovec.probes = 1").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+
+        let query = "(SELECT emb FROM ivf_mp WHERE id = 7)";
+        let count_q = format!(
+            "SELECT count(*)::bigint FROM ( \
+                 SELECT id FROM ivf_mp WHERE category = 11 \
+                 ORDER BY emb <=> {query} LIMIT 10 \
+             ) sub"
+        );
+
+        // Low cap: probes can grow at most to 2 (1 -> 2, capped).
+        // The category-11 cell is unlikely to be within the 2
+        // nearest cells to cluster 7, so the scan stops widening and
+        // under-returns rather than looping to all 16 cells.
+        Spi::run("SET turbovec.max_probes = 2").unwrap();
+        crate::cache::invalidate_all();
+        let capped: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert!(
+            capped.unwrap() < 10,
+            "max_probes=2 should stop widening before reaching the \
+             category-11 cell; got {capped:?} (expected < 10). If this \
+             fails the cap isn't being honoured (scan looped to all cells)."
+        );
+
+        // High cap (== lists): widening reaches every cell, full LIMIT.
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let uncapped: Option<i64> = Spi::get_one(&count_q).unwrap();
+        assert_eq!(
+            uncapped,
+            Some(10),
+            "max_probes=lists must let the widening reach the category-11 \
+             cell and satisfy the full LIMIT"
+        );
+    }
+
+    /// Oversample composes with probe-widening: oversample sets the
+    /// initial `k` within the probed cells, probes-widening grows the
+    /// cell set, and the scan returns the correct distinct top-k
+    /// matching the brute-force ground truth. Both knobs active at
+    /// once must not corrupt ordering or dedup.
+    #[pg_test]
+    fn ivf_oversample_composes_with_probes() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_ov", 3200, 16);
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // Unfiltered query: top-10 nearest to a cluster-3 row. With
+        // oversample widening k and probes widening the cell set, the
+        // result must match the exact brute-force GT.
+        let query = "(SELECT emb FROM ivf_ov WHERE id = 3)";
+
+        // Brute-force ground truth via seqscan.
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let gt = fetch_ids(&format!(
+            "SELECT id FROM ivf_ov ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(gt.len(), 10);
+
+        Spi::run(
+            "CREATE INDEX ivf_ov_idx ON ivf_ov \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        Spi::run("SET turbovec.search_k = 20").unwrap();
+        Spi::run("SET turbovec.oversample = 2.0").unwrap();
+        Spi::run("SET turbovec.probes = 2").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+
+        let ivf = fetch_ids(&format!(
+            "SELECT id FROM ivf_ov ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(ivf.len(), 10, "oversample+probes top-10");
+        assert_distinct_ids(&ivf);
+        // Recall@10 vs the exact GT must be high — oversample +
+        // widening should recover the true neighbours for the
+        // query's own (well-clustered) cell.
+        let gt_set: std::collections::HashSet<i64> = gt.iter().copied().collect();
+        let hits = ivf.iter().filter(|id| gt_set.contains(id)).count();
+        let recall = hits as f64 / gt.len() as f64;
+        assert!(
+            recall >= 0.9,
+            "oversample=2 + probes-widening recall@10 must be >= 0.9, \
+             got {recall} (gt={gt:?} ivf={ivf:?})"
+        );
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
+    }
+
+    /// IVF-4a: soft assignment (`WITH (assign_dups = M)`, M>1) must
+    /// raise recall@10 at a FIXED small `probes` vs single assignment
+    /// (`assign_dups = 1`) on the same corpus/queries — the whole
+    /// point of soft assignment. A true neighbour in a cell adjacent
+    /// to the query's cell is missed by single-assign at low probes
+    /// but recovered when boundary vectors are duplicated into both
+    /// cells.
+    #[pg_test]
+    fn ivf_soft_assignment_raises_recall() {
+        use_turbovec();
+        // Clustered corpus: 16 clusters, rows near cluster directions.
+        // Boundary jitter puts some rows near two clusters' border.
+        ivf3_make_clustered_corpus("ivf_soft_h", 3200, 16);
+        ivf3_make_clustered_corpus("ivf_soft_s", 3200, 16);
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let query = "(SELECT emb FROM ivf_soft_h WHERE id = 7)";
+        let gt = fetch_ids(&format!(
+            "SELECT id FROM ivf_soft_h ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(gt.len(), 10);
+        let gt_set: std::collections::HashSet<i64> = gt.iter().copied().collect();
+
+        // Single-assignment index (assign_dups = 1, the default).
+        Spi::run(
+            "CREATE INDEX ivf_soft_h_idx ON ivf_soft_h \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 1)",
+        )
+        .unwrap();
+        // Soft index (assign_dups = 2): boundary rows in top-2 cells.
+        Spi::run(
+            "CREATE INDEX ivf_soft_s_idx ON ivf_soft_s \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 2)",
+        )
+        .unwrap();
+
+        // Fixed small probes; iterative widening OFF so probes is the
+        // only cell-set lever — isolates the soft-assignment effect.
+        let recall_at = |table: &str| -> f64 {
+            Spi::run("SET enable_seqscan = off").unwrap();
+            Spi::run("SET turbovec.iterative_scan = off").unwrap();
+            Spi::run("SET turbovec.search_k = 40").unwrap();
+            Spi::run("SET turbovec.probes = 1").unwrap();
+            crate::cache::invalidate_all();
+            let q = format!("(SELECT emb FROM {table} WHERE id = 7)");
+            let ids = fetch_ids(&format!(
+                "SELECT id FROM {table} ORDER BY emb <=> {q} LIMIT 10"
+            ));
+            assert_distinct_ids(&ids);
+            let hits = ids.iter().filter(|id| gt_set.contains(id)).count();
+            hits as f64 / gt.len() as f64
+        };
+
+        let recall_hard = recall_at("ivf_soft_h");
+        let recall_soft = recall_at("ivf_soft_s");
+        assert!(
+            recall_soft >= recall_hard,
+            "soft assignment (assign_dups=2) recall@10 ({recall_soft}) must be \
+             >= single-assignment ({recall_hard}) at fixed probes=1"
+        );
+    }
+
+    /// IVF-4a: a query over a soft index must return DISTINCT ids even
+    /// when a boundary vector lives in two probed cells (slot_to_id is
+    /// non-injective under soft assignment; the scan must dedup by id).
+    #[pg_test]
+    fn ivf_soft_assignment_no_duplicate_ids() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_soft_dd", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_soft_dd_idx ON ivf_soft_dd \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 3)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        // Probe many cells so duplicated boundary vectors are very
+        // likely to appear in more than one probed cell.
+        Spi::run("SET turbovec.probes = 12").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let ids = fetch_ids(
+            "SELECT id FROM ivf_soft_dd \
+             ORDER BY emb <=> (SELECT emb FROM ivf_soft_dd WHERE id = 11) LIMIT 25",
+        );
+        assert!(!ids.is_empty(), "soft-index scan returned no rows");
+        assert_distinct_ids(&ids);
+    }
+
+    // ----------------------------------------------------------------
+    // IVF-3 Part B (docs/IVF_PLAN.md §7): the recall-vs-probes
+    // frontier. Recall is CPU-independent (a function of which cells
+    // are probed vs where true neighbours live, not of SIMD speed),
+    // so this runs locally on any host and is the host-independent
+    // evidence that IVF trades recall for scan-work as designed. The
+    // absolute warm-p50 latency on AVX2 is a separate measurement
+    // deferred to a quiet `arnold` window (TODO in BENCHMARKS.md).
+    // ----------------------------------------------------------------
+
+    /// Generate `n` deterministic pseudo-random unit vectors of
+    /// dimension `dim` into `table(id bigint, emb vector)`. Each
+    /// coordinate is a hash-derived value in (-1, 1); the `::vector`
+    /// cast does not normalise, but `turbovec.normalize_on_insert`
+    /// (on by default) unit-normalises at index time and the coarse
+    /// search normalises the query, so the cells live on the unit
+    /// sphere. Deterministic (hashtext of id:coord), so the frontier
+    /// is reproducible.
+    fn ivf_make_random_corpus(table: &str, n: i64, dim: i64) {
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint PRIMARY KEY, emb vector)"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 20001) / 10000.0)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, {n}) AS gs(i), \
+                  generate_series(1, {dim}) AS sub(k) \
+             GROUP BY i"
+        ))
+        .unwrap();
+    }
+
+    /// THE IVF-3 Part B contract test + bench-artefact producer.
+    ///
+    /// Builds a real-ish corpus of distinct pseudo-random unit
+    /// vectors, builds an IVF index `WITH (lists ≈ √n)`, computes
+    /// brute-force exact top-10 ground truth for a set of held-out
+    /// queries (seqscan), then sweeps `turbovec.probes` and records
+    /// recall@10 and the fraction of 32-vector blocks skipped by the
+    /// cell mask (the CPU-independent latency-win proxy) at each
+    /// probe count.
+    ///
+    /// Asserts the core IVF correctness/quality guarantee:
+    ///   1. recall@10 is monotonically non-decreasing in probes;
+    ///   2. at `probes = lists` recall@10 == the exact flat scan's
+    ///      recall (≈1.0) — probing every cell IS the full scan;
+    ///   3. small probes skips a large fraction of blocks (the
+    ///      latency-win proxy: fewer blocks scanned ⇒ proportionally
+    ///      faster, host-independent).
+    ///
+    /// Persists `benches/results/ivf_recall_vs_probes_<DATE>.json`
+    /// with the per-probes curve + corpus metadata.
+    #[pg_test]
+    fn ivf_recall_vs_probes_frontier() {
+        use_turbovec();
+        // CI-friendly scale that still gives meaningful cells:
+        // n=16k, dim=64 ⇒ lists≈128 (√16384). The recall/scan-work
+        // trade-off is scale-invariant in *shape*; BENCHMARKS.md
+        // notes the larger-corpus run is the same curve.
+        let n: i64 = 16_384;
+        let dim: i64 = 64;
+        let lists: i64 = 128; // √16384
+        let n_queries: i64 = 50;
+        ivf_make_random_corpus("ivf_frontier", n, dim);
+
+        // Hold the query ids OUT of the index by deleting them before
+        // the build (they're real corpus members, so GT and IVF see
+        // the same heap; we just ensure a query never trivially
+        // matches its own indexed copy at distance 0). Query ids are
+        // the last `n_queries` rows.
+        let q_lo = n - n_queries + 1;
+        // Snapshot the query vectors into a side table, then remove
+        // them from the corpus so neither the GT nor the IVF scan can
+        // return a query as its own neighbour.
+        Spi::run(&format!(
+            "CREATE TABLE ivf_frontier_q AS \
+             SELECT id, emb FROM ivf_frontier WHERE id >= {q_lo}"
+        ))
+        .unwrap();
+        Spi::run(&format!("DELETE FROM ivf_frontier WHERE id >= {q_lo}")).unwrap();
+
+        Spi::run(
+            "CREATE INDEX ivf_frontier_idx ON ivf_frontier \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 128)",
+        )
+        .unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+
+        // Collect the held-out query rows.
+        let queries: Vec<(i64, String)> = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT id, emb::text FROM ivf_frontier_q ORDER BY id",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|r| {
+                    (
+                        r.get::<i64>(1).unwrap().unwrap(),
+                        r.get::<String>(2).unwrap().unwrap(),
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(queries.len() as i64, n_queries);
+
+        // Brute-force exact top-10 GT per query (seqscan, no index).
+        Spi::run("SET enable_seqscan = on").unwrap();
+        Spi::run("SET enable_indexscan = off").unwrap();
+        let gt: Vec<std::collections::HashSet<i64>> = queries
+            .iter()
+            .map(|(_, emb)| {
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM ivf_frontier \
+                     ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                ids.into_iter().collect()
+            })
+            .collect();
+
+        // Sweep probes. recall@10 averaged over queries + blocks
+        // skipped (summed across queries) per probe count.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+        let probe_sweep: Vec<i64> = vec![1, 2, 4, 8, 16, 32, lists];
+        // Curve rows: (probes, recall@10, blocks_skipped_fraction).
+        let mut curve: Vec<(i64, f64, f64)> = Vec::new();
+        for &probes in &probe_sweep {
+            Spi::run(&format!("SET turbovec.probes = {probes}")).unwrap();
+            let mut hit_sum = 0usize;
+            let mut blocks_skipped_sum = 0u64;
+            let mut blocks_total_sum = 0u64;
+            for (qi, (_, emb)) in queries.iter().enumerate() {
+                // Fresh handle so each query's scan re-runs; the
+                // counter is process-global, reset right before.
+                crate::cache::invalidate_all();
+                turbovec::search::reset_blocks_skipped_by_mask();
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM ivf_frontier \
+                     ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                let skipped = turbovec::search::blocks_skipped_by_mask();
+                blocks_skipped_sum += skipped;
+                // Total blocks scanned per query = ceil(n_live / 32).
+                // n_live is the corpus minus the held-out queries.
+                let n_live = (n - n_queries) as u64;
+                blocks_total_sum += n_live.div_ceil(32);
+                let hits = ids.iter().filter(|id| gt[qi].contains(id)).count();
+                hit_sum += hits;
+            }
+            let recall = hit_sum as f64 / (n_queries as usize * 10) as f64;
+            let skipped_frac = if blocks_total_sum == 0 {
+                0.0
+            } else {
+                blocks_skipped_sum as f64 / blocks_total_sum as f64
+            };
+            curve.push((probes, recall, skipped_frac));
+        }
+
+        // ---- Contract assertions ----
+
+        // (1) recall@10 monotonically non-decreasing in probes.
+        for w in curve.windows(2) {
+            let (p0, r0, _) = w[0];
+            let (p1, r1, _) = w[1];
+            assert!(
+                r1 >= r0 - 1e-9,
+                "recall@10 must be monotone non-decreasing in probes: \
+                 recall({p0})={r0} > recall({p1})={r1}"
+            );
+        }
+
+        // (2) at probes=lists recall@10 == the exact flat recall
+        // (≈1.0). Probing every cell IS the full scan; the only
+        // residual loss is the lossy quantized ranking inside the
+        // (now-complete) candidate set, which the reorder-queue
+        // exact recheck mostly absorbs. We require ≥ 0.99.
+        let (last_probes, last_recall, _) = *curve.last().unwrap();
+        assert_eq!(last_probes, lists, "final sweep point must be probes=lists");
+        assert!(
+            last_recall >= 0.99,
+            "recall@10 at probes=lists must equal the exact flat scan \
+             (≈1.0); got {last_recall}"
+        );
+
+        // (3) the latency-win proxy: at the low end (probes=1) the
+        // cell mask must skip a large fraction of blocks. With
+        // lists=128 and probes=1, ~1/128 of cells are probed, so we
+        // expect to skip the vast majority of blocks. Require ≥ 0.8.
+        let (p_lo, _, skipped_lo) = curve[0];
+        assert_eq!(p_lo, 1);
+        assert!(
+            skipped_lo >= 0.8,
+            "probes=1 must skip a large fraction of blocks (the \
+             latency-win proxy); skipped only {skipped_lo} of blocks"
+        );
+        // At probes=lists the mask allows everything ⇒ skip ≈ 0.
+        let (_, _, skipped_all) = *curve.last().unwrap();
+        assert!(
+            skipped_all < 0.05,
+            "probes=lists must allow ≈ every block (skip ≈ 0); \
+             skipped {skipped_all}"
+        );
+
+        // ---- Persist the bench artefact ----
+        ivf_write_frontier_json(n, dim, lists, n_queries, &curve);
+    }
+
+    /// Write the recall-vs-probes curve to
+    /// `benches/results/ivf_recall_vs_probes_<DATE>.json`. Best-effort:
+    /// a write failure (e.g. read-only CI checkout) is a warning, not
+    /// a test failure — the contract assertions above are the gate;
+    /// the JSON is the published evidence.
+    fn ivf_write_frontier_json(
+        n: i64,
+        dim: i64,
+        lists: i64,
+        n_queries: i64,
+        curve: &[(i64, f64, f64)],
+    ) {
+        let date = "2026-06-16";
+        let rows: Vec<String> = curve
+            .iter()
+            .map(|(p, r, f)| {
+                format!(
+                    "    {{ \"probes\": {p}, \"recall_at_10\": {r:.6}, \"blocks_skipped_fraction\": {f:.6} }}"
+                )
+            })
+            .collect();
+        let json = format!(
+            "{{\n  \"bench\": \"ivf_recall_vs_probes\",\n  \"date\": \"{date}\",\n  \"host_independent\": true,\n  \"note\": \"Recall is CPU-independent (which cells are probed vs where true neighbours live). Absolute warm-p50 latency on AVX2 is a separate measurement deferred to a quiet arnold window.\",\n  \"corpus\": {{ \"n_vectors\": {n_live}, \"dim\": {dim}, \"distribution\": \"deterministic pseudo-random unit vectors\", \"bit_width\": 4 }},\n  \"lists\": {lists},\n  \"queries\": {n_queries},\n  \"ground_truth\": \"brute-force exact top-10 by cosine (seqscan, enable_indexscan=off)\",\n  \"curve\": [\n{rows}\n  ]\n}}\n",
+            n_live = n - n_queries,
+            rows = rows.join(",\n"),
+        );
+        let path = format!(
+            "{}/benches/results/ivf_recall_vs_probes_{date}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        if let Err(e) = std::fs::write(&path, json) {
+            // Not a hard failure; the contract assertions are the
+            // gate. Surface it so a missing artefact is noticed.
+            eprintln!("warning: could not write frontier artefact {path}: {e}");
+        } else {
+            eprintln!("wrote IVF recall-vs-probes frontier artefact: {path}");
+        }
+    }
+
+    /// Helper: slurp the DATA REGION (bytes after the 24-byte PG page
+    /// header) of every block of an index relation's main fork into
+    /// one byte vector via the buffer manager. We skip the page
+    /// header deliberately: `pd_lsn` / `pd_checksum` live there and
+    /// differ between two independently-written relations even when
+    /// the logical payload is identical. The turbovec payload lives
+    /// entirely in the data region. Used by the byte-identity test.
+    ///
+    /// # Safety
+    /// Caller passes a valid index relation oid.
+    unsafe fn read_relfile_blocks(indexrelid: pg_sys::Oid) -> Vec<u8> {
+        let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+        let nblocks = pg_sys::RelationGetNumberOfBlocksInFork(
+            rel,
+            pg_sys::ForkNumber::MAIN_FORKNUM,
+        );
+        let mut out = Vec::new();
+        for blk in 0..nblocks {
+            let buf = pg_sys::ReadBufferExtended(
+                rel,
+                pg_sys::ForkNumber::MAIN_FORKNUM,
+                blk,
+                pg_sys::ReadBufferMode::RBM_NORMAL,
+                std::ptr::null_mut(),
+            );
+            pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+            let page = pg_sys::BufferGetPage(buf);
+            // Skip the 24-byte page header; compare only the data
+            // region (LSN/checksum-free).
+            let data = page
+                .cast::<u8>()
+                .add(crate::index::page::PAGE_HEADER_BYTES);
+            let slice = std::slice::from_raw_parts(
+                data,
+                crate::index::page::BLCKSZ - crate::index::page::PAGE_HEADER_BYTES,
+            );
+            out.extend_from_slice(slice);
+            pg_sys::UnlockReleaseBuffer(buf);
+        }
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        out
     }
 }
 

@@ -518,6 +518,7 @@ pub(crate) unsafe fn write_full(
         slot_to_id,
         am_version,
         None,
+        None,
     );
 }
 
@@ -539,6 +540,22 @@ pub(crate) struct PreparedParts<'a> {
     pub centroids: &'a [f32],
     pub boundaries: &'a [f32],
     pub rotation: &'a [f32],
+}
+
+/// IVF coarse-quantizer parts persisted in v4 (IVF-1). Written by
+/// [`write_full_with_prepared_ivf`] when an index is built
+/// `WITH (lists > 0)`.
+///
+/// `lists` is `nlist`; `coarse_centroids` is the row-major
+/// `lists * dim` f32 coarse codebook in the **rotated** space
+/// (cells live in the same space the fine quantizer and query
+/// use); `cell_dir_bytes` is the packed cell directory
+/// (`lists * CellEntry::ENCODED_BYTES` little-endian bytes,
+/// produced by `ivf::CellDirectory::encode`).
+pub(crate) struct IvfParts<'a> {
+    pub lists: u32,
+    pub coarse_centroids: &'a [f32],
+    pub cell_dir_bytes: &'a [u8],
 }
 
 /// High-level helper: write a fully-built `IdMapIndex` plus the
@@ -573,6 +590,44 @@ pub(crate) unsafe fn write_full_with_prepared(
         slot_to_id,
         am_version,
         Some(prepared),
+        None,
+    );
+}
+
+/// High-level helper: same as [`write_full_with_prepared`] but also
+/// persists the v4 IVF chains (coarse centroids + cell directory).
+/// The caller must have already reordered `packed_codes` / `scales`
+/// / `slot_to_id` into cell-contiguous order matching `ivf`'s cell
+/// directory (IVF-1 build path in `build.rs`).
+///
+/// # Safety
+///
+/// Same constraints as [`write_full`]: caller holds an exclusive
+/// relation lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn write_full_with_prepared_ivf(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    scales: &[f32],
+    slot_to_id: &[u64],
+    am_version: u32,
+    prepared: PreparedParts<'_>,
+    ivf: IvfParts<'_>,
+) {
+    write_full_inner(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        packed_codes,
+        scales,
+        slot_to_id,
+        am_version,
+        Some(prepared),
+        Some(ivf),
     );
 }
 
@@ -876,6 +931,7 @@ unsafe fn write_full_inner(
     slot_to_id: &[u64],
     am_version: u32,
     prepared: Option<PreparedParts<'_>>,
+    ivf: Option<IvfParts<'_>>,
 ) {
     // v1.7.1 revert: restored to v1.6.0's single-pass batched-
     // GenericXLog flow. Phase W-2 (v1.7.0) split this into
@@ -910,6 +966,17 @@ unsafe fn write_full_inner(
     );
     if let Some(p) = &prepared {
         meta.set_codebook(p.centroids, p.boundaries);
+    }
+    // v4 IVF: lay the coarse-centroid + cell-directory chains out
+    // after the rotation chain and stamp `lists`. Must happen before
+    // `total_blocks()` / `write_meta` so the planned offsets are on
+    // the meta page readers see. A `lists == 0` (or `None`) build is
+    // a no-op here, leaving the meta byte-identical to the v3 flat
+    // layout modulo the version byte.
+    if let Some(iv) = &ivf {
+        let coarse_bytes = std::mem::size_of_val(iv.coarse_centroids) as u64;
+        let cell_dir_bytes = iv.cell_dir_bytes.len() as u64;
+        meta.set_ivf_chains(iv.lists, coarse_bytes, cell_dir_bytes);
     }
     let new_total = meta.total_blocks().max(1);
 
@@ -1002,6 +1069,37 @@ unsafe fn write_full_inner(
                     1,
                     crate::index::page::PAYLOAD_BYTES as u32,
                     rotation_bytes_buf.len() as u64,
+                );
+            }
+        }
+
+        // v4 IVF: coarse centroids (f32, rotated space) + cell
+        // directory. Same flat-byte chain shape as blocked/rotation.
+        // Only written when lists > 0 (the chains were planned by
+        // set_ivf_chains above).
+        if let Some(iv) = &ivf {
+            if iv.lists > 0 && !iv.coarse_centroids.is_empty() {
+                let coarse_buf: &[u8] = std::slice::from_raw_parts(
+                    iv.coarse_centroids.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(iv.coarse_centroids),
+                );
+                write_chain_at(
+                    rel,
+                    meta.coarse_first,
+                    coarse_buf,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    coarse_buf.len() as u64,
+                );
+            }
+            if iv.lists > 0 && !iv.cell_dir_bytes.is_empty() {
+                write_chain_at(
+                    rel,
+                    meta.cell_dir_first,
+                    iv.cell_dir_bytes,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    iv.cell_dir_bytes.len() as u64,
                 );
             }
         }
@@ -1200,6 +1298,20 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
         // shuffles, so we keep the existing rotation_first /
         // rotation_count / rotation_dim intact. Readers still
         // get the persisted rotation back even after a vacuum.
+        //
+        // IVF-1: a swap-remove vacuum shuffles slot order, which
+        // breaks the cell-contiguity invariant the cell directory
+        // encodes. Blank the v4 IVF fields so the index degrades to
+        // flat (lists = 0) until the next full rewrite re-clusters.
+        // The IVF-1 scan path is flat regardless, so this is purely
+        // forward-looking hygiene for IVF-2; the stale coarse / cell
+        // chains are left on disk (mid-file gaps) and reclaimed by
+        // the next write_full_with_prepared_ivf.
+        lists: 0,
+        coarse_first: 0,
+        coarse_count: 0,
+        cell_dir_first: 0,
+        cell_dir_count: 0,
         ..*old
     };
     write_meta(rel, &new_meta);
@@ -1335,6 +1447,63 @@ pub(crate) unsafe fn read_rotation(
         .collect()
 }
 
+/// Read the v4 coarse-centroid chain into a row-major `lists * dim`
+/// `Vec<f32>` (rotated space). Returns an empty vector for flat
+/// (v3, or v4 `lists == 0`) indexes.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_coarse_centroids(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Vec<f32> {
+    if meta.lists == 0 || meta.coarse_first == 0 || meta.coarse_count == 0 {
+        return Vec::new();
+    }
+    let n_elems = (meta.lists as usize) * (meta.dim as usize);
+    let n_bytes = (n_elems * std::mem::size_of::<f32>()) as u64;
+    let bytes = read_chain(
+        rel,
+        meta.coarse_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        n_bytes,
+    );
+    debug_assert_eq!(bytes.len(), n_bytes as usize);
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Read the v4 cell directory into an [`crate::index::ivf::CellDirectory`].
+/// Returns `None` for flat (v3, or v4 `lists == 0`) indexes.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_cell_directory(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Option<crate::index::ivf::CellDirectory> {
+    use crate::index::ivf::{CellDirectory, CellEntry};
+    if meta.lists == 0 || meta.cell_dir_first == 0 || meta.cell_dir_count == 0 {
+        return None;
+    }
+    let lists = meta.lists as usize;
+    let n_bytes = (lists * CellEntry::ENCODED_BYTES) as u64;
+    let bytes = read_chain(
+        rel,
+        meta.cell_dir_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        n_bytes,
+    );
+    debug_assert_eq!(bytes.len(), n_bytes as usize);
+    Some(CellDirectory::decode(&bytes, lists))
+}
+
 /// Test-only helper: forge the on-disk meta-page version byte to
 /// `version`, leaving every other byte untouched. Used by the
 /// upgrade-path #[pg_test]s in `src/lib.rs` to simulate an index
@@ -1369,6 +1538,45 @@ pub(crate) unsafe fn force_meta_version(rel: pg_sys::Relation, version: u8) {
     // and codebook stay valid so the decoder accepts the page.
     let version_byte = page.cast::<u8>().add(PAGE_HEADER_BYTES + 4);
     *version_byte = version;
+    pg_sys::GenericXLogFinish(state);
+    pg_sys::UnlockReleaseBuffer(buf);
+}
+
+/// Test-only helper: blank the v4 IVF meta fields (`lists`,
+/// `coarse_first/count`, `cell_dir_first/count`) in place, leaving
+/// the version byte at 4 and every other field untouched. This
+/// simulates a vacuum-degraded IVF index: `write_meta_shrink_in_place`
+/// blanks exactly these fields after a swap-remove (cell contiguity
+/// breaks), so the index keeps its v4 codes/scales/ids but reports
+/// `has_ivf() == false` and must be scanned via the flat fallback.
+///
+/// The five u32 fields are packed contiguously at payload offset
+/// `v4_base = 224` (see `MetaPageData::decode`); on the page they
+/// start at `PAGE_HEADER_BYTES + 224`. Zeroing 5 * 4 = 20 bytes
+/// clears all of them.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock and have ensured the
+/// relation has at least one block. Only compiled into the test
+/// build.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_meta_blank_ivf(rel: pg_sys::Relation) {
+    assert!(
+        nblocks(rel) > 0,
+        "force_meta_blank_ivf: relation has no blocks"
+    );
+    let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
+    let state = pg_sys::GenericXLogStart(rel);
+    let page = pg_sys::GenericXLogRegisterBuffer(
+        state,
+        buf,
+        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+    );
+    // v4 IVF fields: payload offset 224, 5 contiguous u32s = 20 bytes.
+    const V4_BASE: usize = 224;
+    let ivf_fields = page.cast::<u8>().add(PAGE_HEADER_BYTES + V4_BASE);
+    std::ptr::write_bytes(ivf_fields, 0u8, 20);
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
 }

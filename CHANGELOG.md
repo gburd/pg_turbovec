@@ -4,6 +4,67 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] — 2026-06-16
+
+Production hardening for IVF: it now **survives VACUUM** instead of
+silently degrading, and builds **~7.8× faster**. Wire format stays
+`MetaPageData::version = 4` (additive); **no REINDEX**. Driven by
+the >5M production deployment + `docs/ROADMAP_BEAT_COMPETITORS.md`
+(Phases A-1, E-2).
+
+### Fixed — IVF survives VACUUM (Phase E-2, the production landmine)
+
+An IVF index used to **silently degrade to a flat `O(n)` scan after
+VACUUM** — swap-remove moved the last vector into the deleted slot,
+breaking cell contiguity, so `has_ivf()` flipped false and queries
+fell back to the ~seconds full scan with no operator signal. On a
+churning multi-million-row index that's a latency cliff.
+
+- **Tombstones.** The IVF `ambulkdelete` path now leaves dead slots
+  in place and ORs them into a **persisted per-slot tombstone
+  bitmap** (a new v4-additive relfile chain). No rows move,
+  `n_vectors` and the cell directory are untouched, cells stay
+  contiguous, `has_ivf()` stays true, and the scan keeps
+  cell-restricting. The flat (`lists = 0`) path keeps the unchanged
+  swap-remove. Tombstoned slots are masked out of the initial scan
+  **and every probe-widening refill**, so deleted rows are never
+  returned.
+- **Observability** for any residual fallback: a throttled scan-time
+  `WARNING` (once per backend per index, with a `HINT: REINDEX`) and
+  a new SQL function **`turbovec.index_is_degraded(regclass) ->
+  bool`**. `write_meta_shrink_in_place` now preserves `lists` and
+  flips an `ivf_degraded` meta flag rather than blanking the IVF
+  identity, so the cliff is detectable.
+- `docs/PRODUCTION.md` gains an IVF + VACUUM operational section.
+
+### Performance — 7.8× faster IVF k-means (Phase A-1)
+
+A 200k×256-d / lists=448 build's k-means training was ~295 s
+(scalar Lloyd, fixed 25 iters) — prohibitive at 5M+. Now
+GEMM-batched Lloyd assignment (each iteration's nearest-centroid
+step is one `V@Cᵀ` cross-term GEMM, single-threaded
+`Parallelism::None` + exact top-2 scalar tie-break) + convergence
+early-exit (`KMEANS_TOL = 1e-6`). Training **295 s → 38 s = 7.8×**;
+per-iteration centroids byte-identical to the scalar path,
+determinism preserved. Training cost is bounded by the
+`256×lists` reservoir sample regardless of corpus size, so 5M
+builds train in low-minutes. Build-internal; no surface or wire
+change.
+
+### Migration
+
+**No REINDEX.** Wire stays v4; the tombstone bitmap and
+`ivf_degraded` flag are additive — pre-1.11.0 v4 indexes read as
+not-degraded / no-tombstones. The new `index_is_degraded()`
+function is registered by `ALTER EXTENSION pg_turbovec UPDATE TO
+'1.11.0';`.
+
+### Tests
+
+187 → 193 on pg16 (+`ivf_survives_vacuum`,
+`ivf_tombstoned_rows_not_returned`, `ivf_degradation_is_observable`,
+fast-k-means + page.rs wire-format coverage). drift-check clean.
+
 ## [1.10.1] — 2026-06-16
 
 **Bench-results-only release. Wire format unchanged from v1.10.0

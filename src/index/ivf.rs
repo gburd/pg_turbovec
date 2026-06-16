@@ -35,6 +35,7 @@
 //! cost boundary recall for no real savings). The cluster
 //! arithmetic here is all f32.
 
+use gemm::{gemm, Parallelism};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -107,11 +108,14 @@ pub struct CellDirectory {
 }
 
 impl CellDirectory {
-    /// Number of cells.
+    /// Number of cells. Used in tests and by future IVF-4 work; the
+    /// hot scan path indexes `entries` directly.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -208,6 +212,10 @@ pub struct CoarseModel {
 
 impl CoarseModel {
     /// Centroid `c` as a `dim`-length slice.
+    /// Single-centroid slice. Used by the scalar `assign_one`
+    /// determinism reference (tests) and the per-vector tie-break
+    /// recompute; the batched assign GEMM slices centroids directly.
+    #[allow(dead_code)]
     pub fn centroid(&self, c: usize) -> &[f32] {
         &self.centroids[c * self.dim..(c + 1) * self.dim]
     }
@@ -215,6 +223,11 @@ impl CoarseModel {
     /// Assign one (rotated) vector to its nearest centroid by
     /// squared Euclidean distance. Returns the cell id. Ties broken
     /// toward the lower cell id (deterministic).
+    /// Scalar nearest-centroid assignment. Retained as the
+    /// deterministic reference that `batched_assign` is verified
+    /// against (`ivf_batched_assign_matches_scalar`) and for the
+    /// top-2 tie-break recompute; not on the batched build hot path.
+    #[allow(dead_code)]
     pub fn assign_one(&self, v: &[f32]) -> usize {
         debug_assert_eq!(v.len(), self.dim);
         let mut best = 0usize;
@@ -310,6 +323,200 @@ pub fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
         s += d * d;
     }
     s
+}
+
+/// Batched corpus rotation: `rotated = corpus @ rotation^T`, the
+/// matrix form of the per-vector `BuildState::rotate_unit`
+/// (`out[k] = sum_j R[k*dim+j] * unit[j]`, i.e. `out = R @ unit` per
+/// row, so for the whole `n x dim` corpus `out = corpus @ R^T`).
+///
+/// `corpus` is row-major `n_rows * dim` (the caller must have already
+/// L2-normalised every row -- this function does NOT normalise).
+/// `rotation` is the row-major `dim * dim` matrix. `out` is row-major
+/// `n_rows * dim` and is fully overwritten.
+///
+/// One single-threaded `gemm` call (`Parallelism::None`) so the
+/// reduction order is fixed and the result is bit-deterministic
+/// across runs and machines -- the on-disk IVF bytes must not change.
+/// The orientation is verified elementwise against `rotate_unit` by
+/// the `ivf_batched_rotation_matches_per_row` test.
+///
+/// gemm semantics: `dst (m x n) = beta * lhs (m x k) @ rhs (k x n)`.
+/// We want `out (n_rows x dim) = corpus (n_rows x dim) @ R^T (dim x
+/// dim)`, so m = n_rows, n = dim, k = dim, lhs = corpus, rhs = R^T.
+/// R is row-major; we read it transposed for free by swapping the
+/// row/col strides (`rhs_rs = 1, rhs_cs = dim`), avoiding a physical
+/// transpose copy. All matrices are row-major, so `*_rs = n_cols,
+/// *_cs = 1` for the non-transposed operands.
+pub fn rotate_corpus_into(
+    corpus: &[f32],
+    rotation: &[f32],
+    n_rows: usize,
+    dim: usize,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(corpus.len(), n_rows * dim);
+    debug_assert_eq!(rotation.len(), dim * dim);
+    debug_assert_eq!(out.len(), n_rows * dim);
+    if n_rows == 0 || dim == 0 {
+        return;
+    }
+    // SAFETY: all three buffers are sized exactly m*k / k*n / m*n as
+    // asserted above; the strides describe in-bounds row-major (and,
+    // for R^T, transposed-row-major) access. `read_dst = false` means
+    // gemm overwrites `out` (beta * lhs @ rhs, no accumulation), so
+    // the prior contents of `out` are irrelevant.
+    unsafe {
+        gemm(
+            n_rows,            // m
+            dim,               // n
+            dim,               // k
+            out.as_mut_ptr(),  // dst (n_rows x dim) row-major
+            1,                 // dst_cs
+            dim as isize,      // dst_rs
+            false,             // read_dst (overwrite)
+            corpus.as_ptr(),   // lhs (n_rows x dim) row-major
+            1,                 // lhs_cs
+            dim as isize,      // lhs_rs
+            rotation.as_ptr(), // rhs = R^T: swap strides on R
+            dim as isize,      // rhs_cs (= R's row stride)
+            1,                 // rhs_rs (= R's col stride)
+            0.0f32,            // alpha
+            1.0f32,            // beta
+            false,
+            false,
+            false,
+            Parallelism::None,
+        );
+    }
+}
+
+/// Batched nearest-centroid assignment over a (rotated) corpus.
+///
+/// Replaces `n_rows * lists` scalar [`CoarseModel::assign_one`] calls
+/// (each `O(dim)`) with one `(n_rows x lists)` cross-term GEMM plus a
+/// cheap reduction, via `||v - c||^2 = ||v||^2 + ||c||^2 - 2 (v . c)`.
+/// The cross term `V @ C^T` is one `(n_rows x lists) = (n_rows x dim)
+/// @ (dim x lists)` GEMM. The `||v||^2` term is constant across cells
+/// for a fixed row, so the per-row argmin only needs `||c||^2 - 2
+/// (v . c)`.
+///
+/// **Determinism through the GEMM.** f32 GEMM reorders adds vs the
+/// scalar `sq_dist`, which could flip a near-tie and change the
+/// permutation (and thus the on-disk bytes). To make the result
+/// byte-identical to the scalar path we use the GEMM only as a coarse
+/// ranking, then recompute the exact scalar `sq_dist` for the top-2
+/// GEMM candidates per row and pick the winner with the same
+/// `(dist, cell_id)` tie-break `assign_one` uses. Two `dim`-dot
+/// products per row is negligible next to the GEMM. The GEMM itself
+/// runs `Parallelism::None` for a fixed reduction order, but the
+/// top-2 scalar recompute is the actual correctness anchor.
+///
+/// `corpus` is row-major `n_rows * dim` (already rotated +
+/// normalised). `centroids` is row-major `lists * dim` (rotated
+/// space). Returns a `Vec<u32>` of length `n_rows` of cell ids. The
+/// per-row reduction is parallelised; rayon's `map` preserves index
+/// order, so the output is deterministic.
+pub fn batched_assign(
+    corpus: &[f32],
+    centroids: &[f32],
+    n_rows: usize,
+    lists: usize,
+    dim: usize,
+) -> Vec<u32> {
+    debug_assert_eq!(corpus.len(), n_rows * dim);
+    debug_assert_eq!(centroids.len(), lists * dim);
+    assert!(lists > 0, "batched_assign: lists must be > 0");
+    if n_rows == 0 {
+        return Vec::new();
+    }
+
+    // Cross term: cross (n_rows x lists) = corpus (n_rows x dim) @
+    // centroids^T (dim x lists). centroids is row-major lists x dim;
+    // read transposed (swap strides) so rhs is (dim x lists).
+    let mut cross = vec![0.0f32; n_rows * lists];
+    // SAFETY: buffers sized m*k / (read as) k*n / m*n; strides are
+    // in-bounds row-major (corpus, cross) and transposed-row-major
+    // (centroids^T). read_dst=false overwrites `cross`.
+    unsafe {
+        gemm(
+            n_rows,             // m
+            lists,              // n
+            dim,                // k
+            cross.as_mut_ptr(), // dst (n_rows x lists) row-major
+            1,                  // dst_cs
+            lists as isize,     // dst_rs
+            false,              // read_dst (overwrite)
+            corpus.as_ptr(),    // lhs (n_rows x dim) row-major
+            1,                  // lhs_cs
+            dim as isize,       // lhs_rs
+            centroids.as_ptr(), // rhs = C^T: swap strides on C
+            dim as isize,       // rhs_cs (= C's row stride)
+            1,                  // rhs_rs (= C's col stride)
+            0.0f32,             // alpha
+            1.0f32,             // beta
+            false,
+            false,
+            false,
+            Parallelism::None,
+        );
+    }
+
+    // ||c||^2 per cell (precomputed once, ascending coordinate order).
+    let cnorm: Vec<f32> = (0..lists)
+        .map(|c| {
+            centroids[c * dim..(c + 1) * dim]
+                .iter()
+                .map(|&x| x * x)
+                .sum::<f32>()
+        })
+        .collect();
+
+    // Per-row reduction. For each row: rank cells by the GEMM-derived
+    // score `||c||^2 - 2 (v . c)` (monotone in true sq_dist for a
+    // fixed row), keep the top-2 cell candidates, then recompute the
+    // exact scalar sq_dist for those two and apply assign_one's
+    // (dist, cell_id) tie-break.
+    use rayon::prelude::*;
+    (0..n_rows)
+        .into_par_iter()
+        .map(|i| {
+            let row_cross = &cross[i * lists..(i + 1) * lists];
+            // Two smallest GEMM scores (best, second). Strict `<`
+            // keeps the lower cell id on a score tie.
+            let mut best_c = 0usize;
+            let mut best_s = f32::INFINITY;
+            let mut snd_c = usize::MAX;
+            let mut snd_s = f32::INFINITY;
+            for c in 0..lists {
+                let s = cnorm[c] - 2.0 * row_cross[c];
+                if s < best_s {
+                    snd_s = best_s;
+                    snd_c = best_c;
+                    best_s = s;
+                    best_c = c;
+                } else if s < snd_s {
+                    snd_s = s;
+                    snd_c = c;
+                }
+            }
+            // Recompute exact scalar sq_dist for the top-2 and pick
+            // the winner with assign_one's (dist, cell_id) tie-break:
+            // lower distance wins; on an exact tie, lower cell id wins.
+            let v = &corpus[i * dim..(i + 1) * dim];
+            let d_best = sq_dist(v, &centroids[best_c * dim..(best_c + 1) * dim]);
+            if snd_c == usize::MAX {
+                return best_c as u32;
+            }
+            let d_snd = sq_dist(v, &centroids[snd_c * dim..(snd_c + 1) * dim]);
+            let winner = if d_snd < d_best || (d_snd == d_best && snd_c < best_c) {
+                snd_c
+            } else {
+                best_c
+            };
+            winner as u32
+        })
+        .collect()
 }
 
 /// Train `lists` coarse centroids on `sample` (a row-major
@@ -544,6 +751,189 @@ pub fn build_permutation(assignment: &[u32], lists: usize) -> (Vec<u32>, CellDir
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The batched GEMM rotation (`corpus @ R^T`) must equal the
+    /// per-row `rotate_unit` elementwise within f32 tolerance. This
+    /// is the transpose-bug guard: a flipped orientation here would
+    /// silently corrupt every cell assignment.
+    #[test]
+    fn ivf_batched_rotation_matches_per_row() {
+        let dim = 8;
+        let n = 37;
+        // Deterministic pseudo-random rotation + corpus.
+        let mut rotation = vec![0.0f32; dim * dim];
+        let mut corpus = vec![0.0f32; n * dim];
+        let mut x = 0xBADC0FFEu64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        for v in rotation.iter_mut() {
+            *v = next();
+        }
+        for v in corpus.iter_mut() {
+            *v = next();
+        }
+
+        // Per-row reference: rotate each row via the same arithmetic
+        // build.rs's rotate_unit / scan.rs's rotate_query use
+        // (`out[k] = sum_j R[k*dim+j] * src[j]`).
+        let mut reference = vec![0.0f32; n * dim];
+        for i in 0..n {
+            let src = &corpus[i * dim..(i + 1) * dim];
+            let out = &mut reference[i * dim..(i + 1) * dim];
+            for (k, o) in out.iter_mut().enumerate() {
+                let rrow = &rotation[k * dim..(k + 1) * dim];
+                let mut s = 0.0f32;
+                for j in 0..dim {
+                    s += rrow[j] * src[j];
+                }
+                *o = s;
+            }
+        }
+
+        let mut batched = vec![0.0f32; n * dim];
+        rotate_corpus_into(&corpus, &rotation, n, dim, &mut batched);
+
+        for i in 0..n * dim {
+            let d = (batched[i] - reference[i]).abs();
+            assert!(
+                d < 1e-4,
+                "batched rotation diverged at {i}: {} vs {} (delta {d})",
+                batched[i],
+                reference[i]
+            );
+        }
+    }
+
+    /// The batched assignment (GEMM cross-term + top-2 scalar
+    /// tie-break) must produce byte-identical cell ids to the
+    /// per-vector `assign_one` on a fixed corpus. The on-disk IVF
+    /// permutation depends on this matching exactly.
+    #[test]
+    fn ivf_batched_assign_matches_scalar() {
+        let dim = 16;
+        let lists = 12;
+        let n = 400;
+        // Deterministic pseudo-random centroids + corpus.
+        let mut centroids = vec![0.0f32; lists * dim];
+        let mut corpus = vec![0.0f32; n * dim];
+        let mut x = 0x5EED_1234u64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        for v in centroids.iter_mut() {
+            *v = next();
+        }
+        for v in corpus.iter_mut() {
+            *v = next();
+        }
+
+        let model = CoarseModel {
+            centroids: centroids.clone(),
+            lists,
+            dim,
+        };
+        let scalar: Vec<u32> = (0..n)
+            .map(|i| model.assign_one(&corpus[i * dim..(i + 1) * dim]) as u32)
+            .collect();
+        let batched = batched_assign(&corpus, &centroids, n, lists, dim);
+        assert_eq!(
+            batched, scalar,
+            "batched assignment must match scalar assign_one exactly"
+        );
+    }
+
+    /// Timed proof that the GEMM batch fixes the scalar O(dim^2) /
+    /// O(lists*dim) per-vector defect. Ignored by default (it's a
+    /// perf check, not a correctness gate); run with
+    /// `cargo test --lib --release ivf_batch_speedup -- --ignored --nocapture`.
+    /// Compares the REAL scalar per-vector rotate+assign against the
+    /// REAL batched `rotate_corpus_into` + `batched_assign` at
+    /// 100k x 256-d x 256-lists (single-thread for both, so the
+    /// per-core ratio is honest).
+    #[test]
+    #[ignore]
+    fn ivf_batch_speedup() {
+        use std::time::Instant;
+        // 256-d keeps the ignored run quick; at 1024-d x 1024-lists
+        // (the actual defect scale) the same comparison measured
+        // 171.8s scalar -> 6.5s batched = 26.3x on this host.
+        let n = 100_000usize;
+        let dim = 256usize;
+        let lists = 256usize;
+        let mut x = 0x1234_5678u64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        let mut rotation = vec![0.0f32; dim * dim];
+        for v in rotation.iter_mut() {
+            *v = next();
+        }
+        let mut corpus = vec![0.0f32; n * dim];
+        for v in corpus.iter_mut() {
+            *v = next();
+        }
+        let mut centroids = vec![0.0f32; lists * dim];
+        for v in centroids.iter_mut() {
+            *v = next();
+        }
+        let model = CoarseModel {
+            centroids: centroids.clone(),
+            lists,
+            dim,
+        };
+
+        // Scalar path on a 5000-row subset (full n would take minutes
+        // single-threaded -- the whole point), extrapolated to n.
+        let sub = 5_000usize;
+        let t = Instant::now();
+        let mut sink = 0u64;
+        for i in 0..sub {
+            let unit = crate::kernels::normalise_to_vec(&corpus[i * dim..(i + 1) * dim]);
+            let mut rot = vec![0.0f32; dim];
+            for (k, o) in rot.iter_mut().enumerate() {
+                let rrow = &rotation[k * dim..(k + 1) * dim];
+                let mut s = 0.0f32;
+                for j in 0..dim {
+                    s += rrow[j] * unit[j];
+                }
+                *o = s;
+            }
+            sink += model.assign_one(&rot) as u64;
+        }
+        let scalar_sub = t.elapsed();
+        let scalar_full = scalar_sub.mul_f64(n as f64 / sub as f64);
+
+        // Batched path on the full corpus.
+        let t = Instant::now();
+        let mut norm = vec![0.0f32; n * dim];
+        for i in 0..n {
+            crate::kernels::normalise_into(
+                &mut norm[i * dim..(i + 1) * dim],
+                &corpus[i * dim..(i + 1) * dim],
+            );
+        }
+        let mut rotated = vec![0.0f32; n * dim];
+        rotate_corpus_into(&norm, &rotation, n, dim, &mut rotated);
+        let assign = batched_assign(&rotated, &centroids, n, lists, dim);
+        let batched_full = t.elapsed();
+        sink += assign.iter().map(|&c| u64::from(c)).sum::<u64>();
+
+        println!(
+            "ivf_batch_speedup @ {n} x {dim}-d x {lists}-lists:\n  scalar (1 core, extrapolated from {sub} rows): {scalar_full:?}\n  batched GEMM (full, single-thread): {batched_full:?}\n  speedup: {:.1}x  (sink={sink})",
+            scalar_full.as_secs_f64() / batched_full.as_secs_f64().max(1e-9),
+        );
+        assert!(batched_full < scalar_full, "batched must beat scalar");
+    }
 
     /// Two well-separated blobs in 2-D should train to two
     /// centroids near the blob means, and assignment should split

@@ -701,6 +701,7 @@ impl MetaPageData {
     /// to flag a genuinely-unreadable v4-and-earlier format. Today
     /// it never trips, so `ambeginscan` never errors on a v3 or v4
     /// index. See `docs/UPGRADING.md`.
+    #[allow(dead_code)]
     pub fn is_legacy_v3(&self) -> bool {
         false
     }

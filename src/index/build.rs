@@ -467,6 +467,21 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     result
 }
 
+/// Row-block size for the batched IVF assignment GEMM. We bound the
+/// transient rotated row-block by 75% of `maintenance_work_mem`
+/// (the same policy `compute_chunk_rows` uses for the flat staging
+/// buffer), capped at 64k rows so a large `maintenance_work_mem`
+/// doesn't make one GEMM tile absurdly tall. At dim = 1024 a 64k-row
+/// block is ~256 MiB of f32; the full 1M-row rotated corpus would be
+/// 4 GiB, so chunking keeps peak bounded. Floor of 1 row.
+fn ivf_assign_block_rows(dim: usize) -> usize {
+    const MAX_BLOCK_ROWS: usize = 64 * 1024;
+    // Reuse the staging-buffer sizing: 75% of maintenance_work_mem,
+    // capped at 1 GiB, divided by the per-row f32 byte cost.
+    let by_mem = BuildState::compute_chunk_rows(dim);
+    by_mem.clamp(1, MAX_BLOCK_ROWS)
+}
+
 /// IVF-1 build finisher (`lists > 0`). Trains coarse centroids on the
 /// reservoir sample, single-assigns every accumulated vector to its
 /// nearest centroid (in the rotated space), computes a stable
@@ -526,25 +541,50 @@ unsafe fn ivf_build_and_write(
     });
     drop(sample);
 
-    // 2. Assign every (rotated) vector to its nearest centroid. One
-    //    streamed sweep over the accumulated flat corpus; we rotate
-    //    each L2-normalised vector on the fly (matching the sample
-    //    space) so we don't keep a second rotated copy of the corpus.
-    //    Parallelised over the build pool with a stable map (rayon
-    //    preserves index order in `map`), so the assignment is
-    //    deterministic.
+    // 2. Assign every vector to its nearest centroid. The old path
+    //    did this per-vector (n scalar rotations of dim^2 each + n*
+    //    lists scalar sq_dist of dim each ~= 10^12 scalar FLOPs at
+    //    1M x 1024-d x 1024-lists). Both are now batched BLAS GEMMs:
+    //    rotate a row-block as `block @ R^T`, then assign the block
+    //    via a `V @ C^T` cross-term GEMM + ||c||^2 + top-2 scalar
+    //    tie-break (see ivf::rotate_corpus_into / batched_assign).
+    //
+    //    We chunk into row-blocks so the transient rotated matrix
+    //    stays bounded by maintenance_work_mem (at 1M x 1024 x 4B the
+    //    full rotated corpus is 4 GiB; a 64k-row block is ~256 MiB at
+    //    dim=1024). The block's normalised + rotated copy is built,
+    //    fed to assignment, then discarded -- we never hold two full
+    //    copies of the corpus. `flat` itself is the only full corpus
+    //    buffer alive here.
     let flat = std::mem::take(&mut state.ivf_flat);
+    let block_rows = ivf_assign_block_rows(dim);
     let assignment: Vec<u32> = super::build_pool::install(build_pool, || {
-        use rayon::prelude::*;
-        (0..n_vectors)
-            .into_par_iter()
-            .map(|i| {
-                let raw = &flat[i * dim..(i + 1) * dim];
-                let unit = kernels::normalise_to_vec(raw);
-                let rotated = BuildState::rotate_unit(&rotation, &unit, dim);
-                model.assign_one(&rotated) as u32
-            })
-            .collect()
+        let mut assignment = Vec::with_capacity(n_vectors);
+        // Reused per-block scratch: normalised block + rotated block.
+        let mut norm_block = vec![0.0f32; block_rows * dim];
+        let mut rot_block = vec![0.0f32; block_rows * dim];
+        let mut start = 0usize;
+        while start < n_vectors {
+            let rows = (n_vectors - start).min(block_rows);
+            // Normalise each raw row into norm_block (matching the
+            // old per-vector `kernels::normalise_to_vec(raw)` so the
+            // sample space and the assignment space agree).
+            for r in 0..rows {
+                let src = &flat[(start + r) * dim..(start + r + 1) * dim];
+                kernels::normalise_into(
+                    &mut norm_block[r * dim..(r + 1) * dim],
+                    src,
+                );
+            }
+            let norm = &norm_block[..rows * dim];
+            let rot = &mut rot_block[..rows * dim];
+            ivf::rotate_corpus_into(norm, &rotation, rows, dim, rot);
+            let block_assign =
+                ivf::batched_assign(rot, &model.centroids, rows, lists, dim);
+            assignment.extend_from_slice(&block_assign);
+            start += rows;
+        }
+        assignment
     });
 
     // 3. Stable cell-contiguous permutation + cell directory.

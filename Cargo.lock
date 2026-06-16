@@ -1734,6 +1734,7 @@ name = "pg_turbovec"
 version = "1.9.1"
 dependencies = [
  "criterion",
+ "gemm",
  "half 2.7.1",
  "libc",
  "memmap2",

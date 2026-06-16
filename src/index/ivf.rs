@@ -49,12 +49,30 @@ use rand_chacha::ChaCha8Rng;
 /// deterministic subsystems don't share an RNG stream by accident.
 pub const IVF_SEED: u64 = 0x1F_F5EE_D00D_u64;
 
-/// Number of Lloyd's iterations. FAISS's default coarse-quantizer
-/// training runs ~10–25 iterations; 25 converges the small coarse
-/// codebook (`nlist ≈ √n` centroids over a `256·nlist`-bounded
-/// sample) well within diminishing returns. Iteration count is part
-/// of the determinism contract — changing it changes the centroids.
+/// Maximum number of Lloyd's iterations. FAISS's default
+/// coarse-quantizer training runs ~10–25 iterations; 25 converges the
+/// small coarse codebook (`nlist ≈ √n` centroids over a
+/// `256·nlist`-bounded sample) well within diminishing returns. This
+/// is now an upper bound: [`train_kmeans`] early-exits once centroid
+/// movement drops below [`KMEANS_TOL`] (k-means typically converges in
+/// well under 25 iterations). The cap, the tolerance, and the
+/// (deterministic) movement metric are part of the determinism
+/// contract — same sample + same `lists` always runs the same number
+/// of iterations and produces byte-identical centroids.
 pub const KMEANS_ITERS: usize = 25;
+
+/// Convergence tolerance for the Lloyd early-exit. After each update
+/// step we measure the total centroid movement as the sum over all
+/// cells of `||c_new - c_old||^2` (squared L2, the same fixed-order
+/// reduction the rest of the module uses). When that total drops below
+/// `KMEANS_TOL` the centroids have stopped moving meaningfully and we
+/// stop — no point spending GEMMs on iterations that don't change the
+/// partition. Deterministic: a fixed threshold over a deterministic
+/// movement metric means the same input always stops at the same
+/// iteration. `1e-6` is below the f32 noise floor for unit-norm
+/// centroids (coordinates are O(1/√dim)); the partition is stable well
+/// before this. Part of the determinism contract.
+pub const KMEANS_TOL: f64 = 1e-6;
 
 /// IVF-4a soft-assignment boundary factor. A vector is also assigned
 /// to a 2nd..Mth nearest cell `j` only when its squared distance to
@@ -538,6 +556,114 @@ pub fn batched_assign(
         .collect()
 }
 
+/// GEMM-batched nearest-centroid assignment used by [`train_kmeans`]'s
+/// Lloyd step. Fills `assign[0..n_rows]` with each row's nearest cell
+/// id, byte-identical to the scalar argmin (`if d < best_d`, ties →
+/// lower cell id) [`CoarseModel::assign_one`] uses — the same
+/// cross-term-GEMM + exact top-2 scalar recompute that
+/// [`batched_assign`] is verified against by
+/// `ivf_batched_assign_matches_scalar`. Replacing the scalar
+/// `n_sample × lists × dim` double-loop with one
+/// `(n_sample × lists) = (n_sample × dim) @ (dim × lists)` GEMM per
+/// Lloyd iteration is the build-time win: at lists=448, sample=114k,
+/// dim=256 that is one BLAS GEMM instead of ~13 billion scalar FLOPs
+/// per iteration.
+///
+/// `cross` is `n_rows * lists` caller-owned scratch (reused across
+/// iterations to avoid a per-iteration alloc); its prior contents are
+/// overwritten. `cnorm` is the precomputed `||c||^2` per cell, which
+/// the caller refreshes after each centroid update. The GEMM runs
+/// `Parallelism::None` (fixed reduction order); the exact scalar
+/// recompute of the top-2 candidates is the determinism anchor, so an
+/// f32 GEMM reorder near a tie can never flip the assignment vs the
+/// scalar reference.
+fn gemm_lloyd_assign(
+    sample: &[f32],
+    centroids: &[f32],
+    cnorm: &[f32],
+    n_rows: usize,
+    lists: usize,
+    dim: usize,
+    cross: &mut [f32],
+    assign: &mut [u32],
+) {
+    debug_assert_eq!(cross.len(), n_rows * lists);
+    debug_assert_eq!(assign.len(), n_rows);
+    if n_rows == 0 {
+        return;
+    }
+    // Cross term: cross (n_rows x lists) = sample @ centroids^T.
+    // Identical GEMM shape/strides to batched_assign.
+    // SAFETY: buffers sized m*k / (read transposed) k*n / m*n; strides
+    // are in-bounds row-major (sample, cross) and transposed-row-major
+    // (centroids^T). read_dst=false overwrites `cross`.
+    unsafe {
+        gemm(
+            n_rows,
+            lists,
+            dim,
+            cross.as_mut_ptr(),
+            1,
+            lists as isize,
+            false,
+            sample.as_ptr(),
+            1,
+            dim as isize,
+            centroids.as_ptr(),
+            dim as isize,
+            1,
+            0.0f32,
+            1.0f32,
+            false,
+            false,
+            false,
+            Parallelism::None,
+        );
+    }
+    for i in 0..n_rows {
+        let row_cross = &cross[i * lists..(i + 1) * lists];
+        // Two smallest GEMM scores `||c||^2 - 2 (v . c)` (monotone in
+        // true sq_dist for a fixed row). Strict `<` keeps the lower
+        // cell id on a score tie.
+        let mut best_c = 0usize;
+        let mut best_s = f32::INFINITY;
+        let mut snd_c = usize::MAX;
+        let mut snd_s = f32::INFINITY;
+        for c in 0..lists {
+            let s = cnorm[c] - 2.0 * row_cross[c];
+            if s < best_s {
+                snd_s = best_s;
+                snd_c = best_c;
+                best_s = s;
+                best_c = c;
+            } else if s < snd_s {
+                snd_s = s;
+                snd_c = c;
+            }
+        }
+        // Recompute exact scalar sq_dist for the top-2 and pick the
+        // winner with assign_one's (dist, cell_id) tie-break: lower
+        // distance wins; on an exact tie, lower cell id wins. This
+        // matches the scalar Lloyd assignment (`if d < best_d`)
+        // byte-for-byte per iteration, so the per-iteration centroids
+        // are unchanged vs the old scalar path; the only end-state
+        // difference is the convergence early-exit truncating
+        // no-op iterations.
+        let v = &sample[i * dim..(i + 1) * dim];
+        let d_best = sq_dist(v, &centroids[best_c * dim..(best_c + 1) * dim]);
+        if snd_c == usize::MAX {
+            assign[i] = best_c as u32;
+            continue;
+        }
+        let d_snd = sq_dist(v, &centroids[snd_c * dim..(snd_c + 1) * dim]);
+        assign[i] = if d_snd < d_best || (d_snd == d_best && snd_c < best_c) {
+            snd_c as u32
+        } else {
+            best_c as u32
+        };
+    }
+}
+
 /// Train `lists` coarse centroids on `sample` (a row-major
 /// `n_sample * dim` buffer of **rotated** vectors) via deterministic
 /// k-means++ seeding + Lloyd's iterations.
@@ -555,17 +681,34 @@ pub fn batched_assign(
 ///   re-seeded from the largest cell (standard rule). Such a cluster
 ///   set is still valid (assignment picks the nearest of `lists`).
 pub fn train_kmeans(sample: &[f32], n_sample: usize, lists: usize, dim: usize) -> CoarseModel {
+    train_kmeans_iters(sample, n_sample, lists, dim).0
+}
+
+/// As [`train_kmeans`], but also returns the number of Lloyd's
+/// iterations actually run (`1..=KMEANS_ITERS`). The count is a
+/// deterministic function of the input (fixed convergence threshold
+/// over a deterministic movement metric); tests use it to prove the
+/// early-exit fires on well-separated data and is reproducible.
+fn train_kmeans_iters(
+    sample: &[f32],
+    n_sample: usize,
+    lists: usize,
+    dim: usize,
+) -> (CoarseModel, usize) {
     assert!(lists > 0, "train_kmeans: lists must be > 0");
     assert!(dim > 0, "train_kmeans: dim must be > 0");
     debug_assert_eq!(sample.len(), n_sample * dim);
 
     let mut centroids = vec![0.0f32; lists * dim];
     if n_sample == 0 {
-        return CoarseModel {
-            centroids,
-            lists,
-            dim,
-        };
+        return (
+            CoarseModel {
+                centroids,
+                lists,
+                dim,
+            },
+            0,
+        );
     }
 
     let mut rng = ChaCha8Rng::seed_from_u64(IVF_SEED);
@@ -618,21 +761,39 @@ pub fn train_kmeans(sample: &[f32], n_sample: usize, lists: usize, dim: usize) -
     }
 
     // ---- Lloyd's iterations ----
+    // GEMM-batched assignment (one (n_sample x lists) cross-term GEMM
+    // per iteration via gemm_lloyd_assign) replaces the old
+    // n_sample x lists x dim scalar double-loop — the build-time
+    // bottleneck on large samples. The assignment is byte-identical
+    // to the scalar argmin (same exact-scalar (dist, cell_id)
+    // tie-break), so the centroids are unchanged vs the pre-GEMM
+    // path. A convergence early-exit (KMEANS_TOL on total centroid
+    // movement) caps wasted iterations; both the GEMM (single-thread)
+    // and the threshold are deterministic, so the iteration count is
+    // a fixed function of the input.
     let mut assign = vec![0u32; n_sample];
+    let mut cross = vec![0.0f32; n_sample * lists];
+    let mut cnorm = vec![0.0f32; lists];
+    let mut prev_centroids = vec![0.0f32; lists * dim];
+    let mut iters_run = 0usize;
     for _iter in 0..KMEANS_ITERS {
-        // Assignment step (ascending order ⇒ deterministic ties).
-        for i in 0..n_sample {
-            let mut best = 0usize;
-            let mut best_d = f32::INFINITY;
-            for c in 0..lists {
-                let d = sq_dist(row(i), &centroids[c * dim..(c + 1) * dim]);
-                if d < best_d {
-                    best_d = d;
-                    best = c;
-                }
-            }
-            assign[i] = best as u32;
+        iters_run += 1;
+        // Snapshot centroids to measure end-of-iteration movement.
+        prev_centroids.copy_from_slice(&centroids);
+
+        // Assignment step. ||c||^2 per cell (fixed ascending
+        // coordinate order), then the GEMM cross-term + exact top-2
+        // scalar tie-break. Equivalent to the scalar
+        // `for c { sq_dist(...) }` argmin, ties → lower cell id.
+        for (c, cn) in cnorm.iter_mut().enumerate() {
+            *cn = centroids[c * dim..(c + 1) * dim]
+                .iter()
+                .map(|&x| x * x)
+                .sum::<f32>();
         }
+        gemm_lloyd_assign(
+            sample, &centroids, &cnorm, n_sample, lists, dim, &mut cross, &mut assign,
+        );
 
         // Update step: mean of assigned points.
         let mut sums = vec![0.0f64; lists * dim];
@@ -712,13 +873,33 @@ pub fn train_kmeans(sample: &[f32], n_sample: usize, lists: usize, dim: usize) -
             counts[c] = 1;
             counts[big] -= 1;
         }
+
+        // Convergence early-exit: total centroid movement this
+        // iteration (sum of ||c_new - c_old||^2 over all cells,
+        // measured AFTER the update + empty-cell reseed so it
+        // reflects the centroids the next iteration would assign
+        // against). Deterministic fixed-order reduction; a fixed
+        // KMEANS_TOL means the same input always stops at the same
+        // iteration. Once the centroids have effectively stopped
+        // moving, further iterations can't change the partition.
+        let mut movement = 0.0f64;
+        for j in 0..lists * dim {
+            let d = (centroids[j] - prev_centroids[j]) as f64;
+            movement += d * d;
+        }
+        if movement < KMEANS_TOL {
+            break;
+        }
     }
 
-    CoarseModel {
-        centroids,
-        lists,
-        dim,
-    }
+    (
+        CoarseModel {
+            centroids,
+            lists,
+            dim,
+        },
+        iters_run,
+    )
 }
 
 /// Build the cell-contiguous permutation and directory from a
@@ -1220,6 +1401,97 @@ mod tests {
         let m1 = train_kmeans(&sample, n, 16, dim);
         let m2 = train_kmeans(&sample, n, 16, dim);
         assert_eq!(m1.centroids, m2.centroids, "k-means must be deterministic");
+    }
+
+    /// GEMM-Lloyd k-means + convergence early-exit must still produce
+    /// a low-distortion partition. On a well-separated clustered
+    /// sample the within-cluster distortion (sum of each point's
+    /// sq_dist to its assigned centroid, normalised per point) must be
+    /// tiny relative to the inter-cluster spacing — i.e. the GEMM
+    /// assignment + early-exit didn't regress quality vs a clean
+    /// Lloyd's run. We also assert it converges in well under the
+    /// KMEANS_ITERS cap (the early-exit fires).
+    #[test]
+    fn ivf_kmeans_converges_fast() {
+        let dim = 8;
+        let k = 8;
+        let pts_per = 60;
+        let n = k * pts_per;
+        // k well-separated blobs: blob c centred at 100*c on every
+        // axis, with small deterministic jitter.
+        let mut sample = vec![0.0f32; n * dim];
+        let mut x = 0xC0DE_F00Du64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        for c in 0..k {
+            let centre = 100.0 * c as f32;
+            for p in 0..pts_per {
+                let base = (c * pts_per + p) * dim;
+                for j in 0..dim {
+                    sample[base + j] = centre + 0.1 * next();
+                }
+            }
+        }
+        let (model, iters) = train_kmeans_iters(&sample, n, k, dim);
+        // Distortion: mean sq_dist from each point to its assigned
+        // centroid. With jitter ~0.1 and blobs 100 apart, a correct
+        // partition has distortion ~ dim*0.0033 (var of uniform on
+        // [-0.1,0.1]); allow generous slack.
+        let mut distortion = 0.0f64;
+        for i in 0..n {
+            let c = model.assign_one(&sample[i * dim..(i + 1) * dim]);
+            distortion += sq_dist(&sample[i * dim..(i + 1) * dim], model.centroid(c)) as f64;
+        }
+        distortion /= n as f64;
+        assert!(
+            distortion < 1.0,
+            "GEMM-Lloyd distortion {distortion} too high; expected a clean partition"
+        );
+        // Early-exit must fire well before the cap on easy data.
+        assert!(
+            iters < KMEANS_ITERS,
+            "expected convergence well under {KMEANS_ITERS} iters, ran {iters}"
+        );
+    }
+
+    /// The convergence early-exit is deterministic: same input runs
+    /// the same number of Lloyd iterations every time, and on a
+    /// well-separated sample it stops early (does not burn all
+    /// KMEANS_ITERS).
+    #[test]
+    fn ivf_kmeans_early_exit_deterministic() {
+        let dim = 6;
+        let k = 5;
+        let pts_per = 40;
+        let n = k * pts_per;
+        let mut sample = vec![0.0f32; n * dim];
+        let mut x = 0x1357_9BDFu64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        for c in 0..k {
+            let centre = 50.0 * c as f32;
+            for p in 0..pts_per {
+                let base = (c * pts_per + p) * dim;
+                for j in 0..dim {
+                    sample[base + j] = centre + 0.05 * next();
+                }
+            }
+        }
+        let (_m1, i1) = train_kmeans_iters(&sample, n, k, dim);
+        let (_m2, i2) = train_kmeans_iters(&sample, n, k, dim);
+        assert_eq!(i1, i2, "early-exit iteration count must be deterministic");
+        assert!(
+            i1 < KMEANS_ITERS,
+            "well-separated sample must converge before the cap (ran {i1})"
+        );
     }
 
     /// n < k: fewer sample points than centroids. Must not panic;

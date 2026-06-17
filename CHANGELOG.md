@@ -4,6 +4,44 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.15.1] — 2026-06-17
+
+**Cross-version build fix (pg13 / pg14 / pg15 / pg18).** Build-only
+patch; **no wire change** (`MetaPageData::version = 4`), **no
+behaviour change** on the versions that already compiled (pg16 /
+pg17), **no REINDEX**.
+
+### Fixed
+
+- The Phase B-4 out-of-core IVF build (v1.12.0) called
+  `pg_sys::BufFileReadExact` (PG16+ only) and passed `BufFileWrite`
+  a `*const` pointer (PG13–15 declare it `*mut`). The extension
+  compiled on pg16/pg17 — the local dev target — but **failed to
+  compile on pg13, pg14, pg15, and pg18**, silently breaking those
+  CI matrix legs from **v1.12.0 through v1.15.0**. Now both calls go
+  through version-gated shims (`buffile_write` /
+  `buffile_read_exact` in `src/index/build.rs`), backing the read
+  with the universally-present `BufFileRead` + an explicit
+  short-read check. All six PG features (13–18) compile again.
+
+### Added (CI hardening)
+
+- **`scripts/compile-matrix.sh`** — `cargo check`s every `pgNN`
+  feature in `Cargo.toml` (compile-only, ~20s each, no test
+  cluster), so version-specific C-API breaks are caught locally
+  before tagging. Wired into `.githooks/pre-push` alongside
+  `drift-check.sh`. Skips via `COMPILE_MATRIX_SKIP=1` on hosts
+  without every pgrx toolchain. This is the gate that would have
+  caught the v1.12.0 regression; `cargo pgrx test pg16` alone never
+  could.
+
+### Migration
+
+**No REINDEX.** Build-only; wire stays v4; pg16/pg17 runtime
+unchanged. `ALTER EXTENSION pg_turbovec UPDATE TO '1.15.1';` is
+sufficient. Tests: 224 (unchanged) on pg16; the fix is verified by
+all six PG features compiling.
+
 ## [1.15.0] — 2026-06-17
 
 **Phase C follow-up — operator-path allowlist on flat + IVF.**

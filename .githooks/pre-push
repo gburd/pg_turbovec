@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# .githooks/pre-push — drift-check before any push
+# .githooks/pre-push — drift-check + cross-version compile gate
+# before any push.
 #
 # Installed via `bash scripts/install-hooks.sh`. Skips on
-# `git push --no-verify`.
+# `git push --no-verify`. The compile-matrix step skips on hosts
+# without every pg-version toolchain via COMPILE_MATRIX_SKIP=1
+# (CI still covers the full matrix).
 
 set -euo pipefail
-exec bash "$(git rev-parse --show-toplevel)/scripts/drift-check.sh"
+root="$(git rev-parse --show-toplevel)"
+bash "$root/scripts/drift-check.sh"
+bash "$root/scripts/compile-matrix.sh"

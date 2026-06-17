@@ -17,6 +17,7 @@
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
 //! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
+//! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
 
 use core::ffi::CStr;
 
@@ -54,6 +55,90 @@ pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(8);
 /// `turbovec.max_scan_tuples` still caps total candidate work as a
 /// backstop regardless of probe widening.
 pub static MAX_PROBES: GucSetting<i32> = GucSetting::<i32>::new(64);
+
+/// Phase B-1/B-2 (out-of-core query): when on (the default), an
+/// IVF index scanned cold from the relfile is served **cell-scoped**
+/// — the backend caches only bounded metadata (coarse centroids,
+/// cell directory, rotation, codebook, and the small per-slot
+/// scales/ids tables) plus a `MAP_PRIVATE` mmap of the relfile, and
+/// per query copies ONLY the probed cells' contiguous code ranges
+/// off the mmap to build a compact throwaway sub-index. The
+/// per-backend resident set is then `O(probes * cell_size + faulted
+/// pages)` instead of `O(n)`, so an IVF index larger than RAM can be
+/// served: the OS page cache holds hot (recently-probed) cells and
+/// cold cells fault from disk on demand.
+///
+/// When `off`, the scan loads the WHOLE index into a per-backend
+/// `Arc` (the pre-B-1 behaviour) — lowest per-query latency once
+/// warm, but resident set `O(n)`, so the index must fit in RAM.
+///
+/// When `auto` (**the default**), the scan goes cell-scoped ONLY
+/// when the index's codes are large relative to the per-backend
+/// cache budget (`turbovec.cache_size_mb`) — i.e. the index that
+/// actually needs out-of-core serving. An IVF index that comfortably
+/// fits the budget loads whole (no per-query gather/reblock cost),
+/// so `auto` pays the cell-scoped CPU tax only when it buys the
+/// memory bound. `on` forces cell-scoped regardless of size; `off`
+/// forces whole-load. See [`out_of_core_cell_scoped`].
+///
+/// **No effect on flat (`lists = 0`) or vacuum-degraded indexes:**
+/// they have no cells to scope and always load whole (and are
+/// therefore still `O(n)`-resident — use IVF for a >RAM corpus). No
+/// effect on the mutable (post-insert) or dirty-fallback paths,
+/// which keep their in-memory mirror. Results are identical to the
+/// whole-load IVF path (`probes >= lists` still reduces to the flat
+/// exact scan; tombstones are still masked; soft-assign duplicates
+/// are still deduped by the scan's emitted-id set).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
+pub enum OutOfCoreMode {
+    /// Always load the whole index into the per-backend `Arc`
+    /// (`O(n)` resident; lowest warm latency; must fit in RAM).
+    #[name = c"off"]
+    Off,
+    /// Cell-scoped only when the codes are large relative to
+    /// `turbovec.cache_size_mb` (the default).
+    #[name = c"auto"]
+    Auto,
+    /// Always serve IVF cell-scoped (`O(probes*cell_size)` resident;
+    /// pays the per-query gather/reblock tax regardless of size).
+    #[name = c"on"]
+    On,
+}
+
+pub static OUT_OF_CORE: GucSetting<OutOfCoreMode> =
+    GucSetting::<OutOfCoreMode>::new(OutOfCoreMode::Auto);
+
+/// Decide whether an IVF scan should be served cell-scoped given the
+/// mode and the index's codes size. `auto` goes cell-scoped when the
+/// codes exceed [`AUTO_OOC_FRACTION`] of `turbovec.cache_size_mb`
+/// (the codes are the `O(n)` term the whole-load path would make
+/// resident; everything else cached cell-scoped is bounded).
+pub fn out_of_core_cell_scoped(codes_bytes: u64) -> bool {
+    let budget_bytes = (CACHE_SIZE_MB.get() as u64).saturating_mul(1024 * 1024);
+    out_of_core_decide(OUT_OF_CORE.get(), codes_bytes, budget_bytes)
+}
+
+/// Pure decision used by [`out_of_core_cell_scoped`] (factored out so
+/// it can be unit-tested without touching the live GUCs). `auto`
+/// goes cell-scoped when the codes exceed [`AUTO_OOC_FRACTION`] of
+/// the cache budget; the codes are the `O(n)` term the whole-load
+/// path would make resident.
+pub fn out_of_core_decide(mode: OutOfCoreMode, codes_bytes: u64, budget_bytes: u64) -> bool {
+    match mode {
+        OutOfCoreMode::Off => false,
+        OutOfCoreMode::On => true,
+        OutOfCoreMode::Auto => {
+            let threshold = (budget_bytes as f64 * AUTO_OOC_FRACTION) as u64;
+            codes_bytes > threshold
+        }
+    }
+}
+
+/// Fraction of `turbovec.cache_size_mb` above which `auto` switches
+/// an IVF index to cell-scoped serving. 0.5 means: if the codes
+/// alone are more than half the cache budget, prefer the memory
+/// bound over the warm-latency win.
+const AUTO_OOC_FRACTION: f64 = 0.5;
 
 /// Differentiator #5 (oversampling): candidate-set widener for tunable
 /// recall, matching Qdrant's `oversampling` / VectorChord's rerank knob.
@@ -260,6 +345,17 @@ pub fn register_gucs() {
         &MAX_PROBES,
         1,
         65_536,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_enum_guc(
+        c_str(b"turbovec.out_of_core\0"),
+        c_str(b"Serve large IVF indexes cell-scoped so an index larger than RAM can be queried (off | auto | on; default auto).\0"),
+        c_str(
+            b"Controls out-of-core IVF serving. auto (the default) serves an IVF index (built WITH (lists > 0)) cell-scoped ONLY when its codes are large relative to turbovec.cache_size_mb (codes > 0.5 * cache_size_mb): the backend then caches only bounded metadata (coarse centroids, cell directory, rotation, codebook, per-slot scales/ids) plus a MAP_PRIVATE mmap of the relfile, and per query copies only the probed cells' contiguous code ranges off the mmap into a compact throwaway sub-index, so the per-backend resident set is O(probes * cell_size + faulted pages) instead of O(n) and a >RAM IVF index can be served (hot cells stay in the OS page cache; cold cells fault on demand). An IVF index that fits the cache budget loads whole under auto (no per-query gather/reblock cost). on forces cell-scoped regardless of size (pays the per-query reblock tax even on small indexes); off forces the whole-index load into a per-backend Arc (lowest warm latency, O(n) resident, must fit in RAM). No effect on flat (lists = 0) or vacuum-degraded indexes (no cells to scope; always O(n)-resident \xe2\x80\x94 use IVF for >RAM), nor on the post-insert / dirty-fallback paths. Results are identical to the whole-load IVF path.\0",
+        ),
+        &OUT_OF_CORE,
         GucContext::Userset,
         GucFlags::default(),
     );

@@ -47,6 +47,7 @@ use pgrx::prelude::*;
 use turbovec::{IdMapIndex, SearchResults, TurboQuantIndex};
 
 use crate::guc;
+use crate::index::ivf::{coarse_probe, rotate_query, CellDirectory};
 use crate::index::mmap_static::StaticRegionsMap;
 
 /// Read-only materialisation of a turbovec index for the index-AM
@@ -224,6 +225,283 @@ impl ReadOnlyIndex {
     }
 }
 
+/// Out-of-core (Phase B-1/B-2) cell-scoped IVF index. Unlike
+/// [`ReadOnlyIndex`], which holds the WHOLE blocked-codes buffer
+/// resident (per-backend `O(n)`), this variant keeps only the
+/// **bounded** index metadata resident — the coarse centroids, the
+/// cell directory, the rotation matrix, the Lloyd-Max codebook, and
+/// the small per-slot tables (`scales` 4 B/vec, `slot_to_id`
+/// 8 B/vec) — plus a `MAP_PRIVATE` mmap of the relfile. The big
+/// `O(n)` codes buffer is **never** materialised whole.
+///
+/// Per query (see [`Self::search_ooc`]) it coarse-probes the cached
+/// centroids, then copies ONLY the probed cells' contiguous packed
+/// code ranges off the mmap into a compact, gapless buffer, builds a
+/// throwaway [`TurboQuantIndex`] over just those rows, and runs an
+/// unmasked top-`k` search on it. The resident set is therefore
+/// `O(probes * cell_size + faulted mmap pages)`, not `O(n)`: the OS
+/// page cache holds hot (recently-probed) cells; cold cells fault
+/// from disk on demand and evict under memory pressure. **This is
+/// the out-of-core serving path** — an IVF index can exceed RAM as
+/// long as the working set (hot cells) fits.
+///
+/// Only IVF indexes (`lists > 0`, live cell directory) get this
+/// path; flat indexes have no cells to scope and keep the
+/// whole-index [`ReadOnlyIndex`] load. The compact sub-index is
+/// built with identity TQ+ calibration, matching the relfile codes
+/// (which were encoded under identity TQ+, exactly as the
+/// whole-index [`ReadOnlyIndex`] path assumes).
+pub(crate) struct OocIvfIndex {
+    /// The relfile mmap, when available (production: a committed,
+    /// flushed relfile). `gather_slot_ranges` reads the probed
+    /// cells' code bytes off it per query; cold pages fault on
+    /// demand. Dropped (unmapped) when the cache entry is.
+    ///
+    /// `None` when the relfile isn't mmappable (e.g. a freshly-built
+    /// index in the same transaction, before the dirty buffers have
+    /// been flushed to the segment file). In that case the per-query
+    /// gather falls back to reading the probed cells' code pages
+    /// through PG's buffer manager (still cell-scoped: only the
+    /// probed pages are pulled, not the whole chain). Either way the
+    /// resident codes are bounded by `probes * cell_size`.
+    map: Option<StaticRegionsMap>,
+    bit_width: usize,
+    dim: usize,
+    n_vectors: usize,
+    /// Codes chain layout for `gather_slot_ranges`.
+    codes_first: u32,
+    codes_stride: u32,
+    rows_per_codes_page: u32,
+    /// Coarse centroids (row-major `lists * dim`, rotated space).
+    coarse_centroids: Vec<f32>,
+    lists: usize,
+    /// Rotation matrix (row-major `dim * dim`) for the coarse probe.
+    rotation: Vec<f32>,
+    /// Cell directory: each cell's `[code_offset, +n_vectors)` range.
+    directory: CellDirectory,
+    /// Lloyd-Max codebook for the compact sub-index search caches.
+    codebook_centroids: Vec<f32>,
+    codebook_boundaries: Vec<f32>,
+    /// Per-slot scale (4 B/vec; small, kept resident — gathered per
+    /// query into the compact sub-index).
+    scales: Vec<f32>,
+    /// Slot -> external id (8 B/vec; small, kept resident). Compact
+    /// sub-index slots are remapped to global slots, then to ids.
+    slot_to_id: Vec<u64>,
+}
+
+impl OocIvfIndex {
+    /// Build an OOC IVF index. The caller (the scan path) has
+    /// already read the meta page and the (bounded) static regions;
+    /// this just moves them into the cache-resident container.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        map: Option<StaticRegionsMap>,
+        bit_width: usize,
+        dim: usize,
+        n_vectors: usize,
+        codes_first: u32,
+        codes_stride: u32,
+        rows_per_codes_page: u32,
+        coarse_centroids: Vec<f32>,
+        lists: usize,
+        rotation: Vec<f32>,
+        directory: CellDirectory,
+        codebook_centroids: Vec<f32>,
+        codebook_boundaries: Vec<f32>,
+        scales: Vec<f32>,
+        slot_to_id: Vec<u64>,
+    ) -> Self {
+        Self {
+            map,
+            bit_width,
+            dim,
+            n_vectors,
+            codes_first,
+            codes_stride,
+            rows_per_codes_page,
+            coarse_centroids,
+            lists,
+            rotation,
+            directory,
+            codebook_centroids,
+            codebook_boundaries,
+            scales,
+            slot_to_id,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.n_vectors
+    }
+
+    pub(crate) fn lists(&self) -> usize {
+        self.lists
+    }
+
+    /// Coarse-probe the cached centroids for the `probes` nearest
+    /// cells to `query` (already normalised by the caller). Mirrors
+    /// the whole-index path's `ivf_setup_and_search` so OOC results
+    /// match whole-load exactly. Returns the probed cell ids
+    /// (ascending distance, deterministic tie-break).
+    pub(crate) fn coarse_probe_cells(&self, query_unit: &[f32], probes: usize) -> Vec<u32> {
+        let q_rot = rotate_query(&self.rotation, query_unit, self.dim);
+        let probes = probes.clamp(1, self.lists.max(1));
+        coarse_probe(&self.coarse_centroids, self.lists, self.dim, &q_rot, probes)
+    }
+
+    /// Cell-scoped top-`k` search over the `probed` cells. Copies
+    /// ONLY those cells' contiguous code ranges off the mmap into a
+    /// compact gapless buffer, builds a throwaway [`TurboQuantIndex`]
+    /// over just those rows, runs an unmasked top-`k` search, and
+    /// remaps the compact slot indices back to global slots and then
+    /// to external ids. `dead` is the per-slot tombstone bitmap
+    /// (LSB-first, bit set ⇒ slot dead, Phase E-2); tombstoned slots
+    /// are skipped during the gather so they never enter the compact
+    /// index. Returns `None` if the gather runs off the mapping
+    /// (corrupt index / post-truncate race) so the caller falls back
+    /// to the whole-index load path.
+    pub(crate) fn search_ooc(
+        &self,
+        rel: pg_sys::Relation,
+        query: &[f32],
+        k: usize,
+        probed: &[u32],
+        dead: &[u8],
+    ) -> Option<(Vec<f32>, Vec<u64>)> {
+        // Collect the probed cells' contiguous slot ranges, in cell
+        // order, deduping cell ids. Track the global slot of each
+        // compact slot for the remap. We expand tombstoned slots out
+        // here so the compact index never scores a dead row.
+        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(probed.len());
+        let mut seen = vec![false; self.lists];
+        // global_slots[compact_slot] = global slot index.
+        let mut global_slots: Vec<u32> = Vec::new();
+        let tombstoned = |slot: usize| -> bool {
+            if dead.is_empty() {
+                return false;
+            }
+            let byte = slot / 8;
+            byte < dead.len() && (dead[byte] >> (slot % 8)) & 1 != 0
+        };
+        for &c in probed {
+            let c = c as usize;
+            if c >= self.lists || seen[c] {
+                continue;
+            }
+            seen[c] = true;
+            let e = self.directory.entries[c];
+            let start = e.code_offset;
+            let end = (e.code_offset + u64::from(e.n_vectors)).min(self.n_vectors as u64);
+            // The gather copies code bytes for [start, end); the
+            // tombstone skip is applied to the compact slot list so
+            // dead rows are dropped after the gather (the gather is
+            // contiguous and cheap; filtering bytes mid-gather would
+            // fragment it). We record the live global slots and, when
+            // there ARE tombstones in the range, gather per-live-run
+            // instead of the whole cell.
+            if dead.is_empty() {
+                if end > start {
+                    ranges.push((start, end - start));
+                    for s in start..end {
+                        global_slots.push(s as u32);
+                    }
+                }
+            } else {
+                // Build contiguous live runs within the cell so the
+                // gather only copies live slots' bytes.
+                let mut run_start: Option<u64> = None;
+                let mut s = start;
+                while s < end {
+                    if tombstoned(s as usize) {
+                        if let Some(rs) = run_start.take() {
+                            ranges.push((rs, s - rs));
+                        }
+                    } else {
+                        if run_start.is_none() {
+                            run_start = Some(s);
+                        }
+                        global_slots.push(s as u32);
+                    }
+                    s += 1;
+                }
+                if let Some(rs) = run_start.take() {
+                    ranges.push((rs, end - rs));
+                }
+            }
+        }
+        let n_compact = global_slots.len();
+        if n_compact == 0 {
+            return Some((Vec::new(), Vec::new()));
+        }
+
+        // Gather the compact packed codes for the probed cells
+        // (cell-scoped: only the probed cells' pages are touched).
+        // Prefer the mmap (production: committed, flushed relfile;
+        // cold pages fault on demand). Fall back to the buffer
+        // manager when the mmap isn't available (fresh same-xact
+        // index) — still bounded, since only the probed cell pages
+        // are read, not the whole chain.
+        let compact_codes = match &self.map {
+            Some(map) => map.gather_slot_ranges(
+                self.codes_first,
+                self.codes_stride,
+                self.rows_per_codes_page,
+                &ranges,
+            )?,
+            None => {
+                // SAFETY: `rel` is a live index relation reference
+                // held by the scan for the call's duration.
+                unsafe {
+                    crate::index::relfile::gather_codes_ranges(
+                        rel,
+                        self.codes_first,
+                        self.codes_stride,
+                        self.rows_per_codes_page,
+                        &ranges,
+                    )
+                }
+            }
+        };
+        debug_assert_eq!(compact_codes.len(), n_compact * self.codes_stride as usize);
+
+        // Gather the matching scales (resident; cheap).
+        let mut compact_scales = Vec::<f32>::with_capacity(n_compact);
+        for &gs in &global_slots {
+            compact_scales.push(self.scales[gs as usize]);
+        }
+
+        // Build a throwaway compact index over just the probed rows.
+        // Identity TQ+ (matches the relfile codes). Rotation /
+        // codebook are handed over as prepared caches so only the
+        // SIMD re-block (`pack::repack`) is recomputed — bounded by
+        // the compact row count, not `n`.
+        let dim_opt = if self.dim == 0 { None } else { Some(self.dim) };
+        let prepared = turbovec::PreparedCachesBorrowed {
+            blocked_codes: None,
+            n_blocks: 0,
+            centroids: Some(std::borrow::Cow::Borrowed(&self.codebook_centroids)),
+            boundaries: Some(std::borrow::Cow::Borrowed(&self.codebook_boundaries)),
+            rotation: Some(std::borrow::Cow::Borrowed(&self.rotation)),
+        };
+        let compact = TurboQuantIndex::from_parts_with_prepared_borrowed(
+            dim_opt,
+            self.bit_width,
+            n_compact,
+            std::borrow::Cow::Owned(compact_codes),
+            std::borrow::Cow::Owned(compact_scales),
+            prepared,
+        );
+        let res = compact.search(query, k);
+        let mut ids = Vec::with_capacity(res.indices.len());
+        for &cslot in &res.indices {
+            let global = global_slots[cslot as usize] as usize;
+            ids.push(self.slot_to_id[global]);
+        }
+        Some((res.scores, ids))
+    }
+}
+
 /// A scan-facing handle over a cached index, regardless of which
 /// [`Stored`] variant backs it. Lets the index-AM scan path reuse a
 /// warm [`Stored::Mutable`] entry (e.g. one left behind by a
@@ -234,9 +512,13 @@ impl ReadOnlyIndex {
 /// surface; the `Mutable` arm takes a read guard for the duration
 /// of the call (uncontended in a single-threaded backend).
 #[derive(Clone)]
-pub enum ScanHandle {
+pub(crate) enum ScanHandle {
     ReadOnly(Arc<ReadOnlyIndex>),
     Mutable(Arc<RwLock<IdMapIndex>>),
+    /// Out-of-core cell-scoped IVF (Phase B-1/B-2). The big codes
+    /// buffer is faulted per-probed-cell off the mmap; the resident
+    /// set is bounded by `probes * cell_size`, not `O(n)`.
+    Ooc(Arc<OocIvfIndex>),
 }
 
 impl ScanHandle {
@@ -244,10 +526,12 @@ impl ScanHandle {
         match self {
             ScanHandle::ReadOnly(a) => a.len(),
             ScanHandle::Mutable(a) => a.read().len(),
+            ScanHandle::Ooc(a) => a.len(),
         }
     }
 
     /// True if the index has no live vectors.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -256,6 +540,22 @@ impl ScanHandle {
         match self {
             ScanHandle::ReadOnly(a) => a.search(queries, k),
             ScanHandle::Mutable(a) => a.read().search(queries, k),
+            // An OOC handle has no whole-index search; the scan path
+            // never calls this arm (it always routes OOC through the
+            // cell-scoped path). Returning empty is the safe inert
+            // fallback should a future caller hit it.
+            ScanHandle::Ooc(_) => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// The out-of-core [`OocIvfIndex`], when this handle is the OOC
+    /// variant. The IVF scan path uses it to coarse-probe + gather
+    /// the probed cells off the mmap. `None` for the flat / mutable
+    /// arms, which keep the whole-index search.
+    pub(crate) fn ooc(&self) -> Option<Arc<OocIvfIndex>> {
+        match self {
+            ScanHandle::Ooc(a) => Some(a.clone()),
+            _ => None,
         }
     }
 
@@ -274,6 +574,9 @@ impl ScanHandle {
         match self {
             ScanHandle::ReadOnly(a) => Some(a.search_masked(queries, k, mask)),
             ScanHandle::Mutable(_) => None,
+            // OOC never uses the whole-index mask path; the scan
+            // routes it through `OocIvfIndex::search_ooc` instead.
+            ScanHandle::Ooc(_) => None,
         }
     }
 }
@@ -320,6 +623,11 @@ enum Stored {
     /// Read-only positional index + slot table, no `id_to_slot`
     /// map. Used by the index-AM scan path.
     ReadOnly(Arc<ReadOnlyIndex>),
+    /// Out-of-core cell-scoped IVF (Phase B-1/B-2): bounded resident
+    /// metadata + a relfile mmap; the codes buffer is faulted per
+    /// probed cell. Installed by the IVF scan path when
+    /// `turbovec.out_of_core` is on.
+    Ooc(Arc<OocIvfIndex>),
 }
 
 impl Stored {
@@ -328,6 +636,7 @@ impl Stored {
         match self {
             Stored::Mutable(a) => ScanHandle::Mutable(a.clone()),
             Stored::ReadOnly(a) => ScanHandle::ReadOnly(a.clone()),
+            Stored::Ooc(a) => ScanHandle::Ooc(a.clone()),
         }
     }
 }
@@ -420,6 +729,10 @@ pub fn lookup(
             Some(a)
         }
         Stored::ReadOnly(_) => None,
+        // OOC entries are installed only under the AM key (attnum=0);
+        // the knn `lookup` (positive attnum) never matches one. Treat
+        // it as a miss for the knn path (it can't be mutated in place).
+        Stored::Ooc(_) => None,
     }
 }
 
@@ -433,7 +746,7 @@ pub fn lookup(
 /// am_version)` mismatch evicts and returns `None` (unless the
 /// entry is dirty, in which case the mutating backend keeps its
 /// own un-flushed view).
-pub fn scan_lookup(
+pub(crate) fn scan_lookup(
     key: CacheKey,
     expected_relfile: u32,
     expected_n_rows: i64,
@@ -612,6 +925,42 @@ pub(crate) fn scan_install(
     ScanHandle::ReadOnly(arc)
 }
 
+/// Out-of-core IVF scan install (Phase B-1/B-2): cache an
+/// [`OocIvfIndex`] (bounded resident metadata; the codes buffer is
+/// faulted per probed cell off the colocated mmap that lives inside
+/// the `OocIvfIndex`). Returns a [`ScanHandle::Ooc`] the caller
+/// drains via the cell-scoped path. `bytes` is the (bounded)
+/// resident footprint estimate for the LRU cap — NOT `O(n)` codes,
+/// just the centroids/scales/ids/directory tables.
+pub(crate) fn scan_install_ooc(
+    key: CacheKey,
+    index: OocIvfIndex,
+    bytes: usize,
+    relfilenode: u32,
+    n_rows: i64,
+) -> ScanHandle {
+    let arc = Arc::new(index);
+    let mut g = CACHE.lock();
+    g.insert(
+        key,
+        Entry {
+            index: Stored::Ooc(arc.clone()),
+            // The mmap lives inside the OocIvfIndex (the Arc), not
+            // here; `Entry::mmap` is for the ReadOnly/Mutable
+            // borrowed-cache contract and stays None for OOC.
+            mmap: None,
+            bytes,
+            relfilenode,
+            n_rows,
+            seq: next_seq(),
+            dirty: false,
+            persist: None,
+        },
+    );
+    enforce_cap(&mut g);
+    ScanHandle::Ooc(arc)
+}
+
 /// AM-path install: insert or replace the entry for `key` and
 /// attach the supplied `PersistState` mirror so subsequent
 /// `aminsert` calls can mutate the in-memory index and defer the
@@ -745,6 +1094,37 @@ pub fn invalidate_all() {
 #[allow(dead_code)]
 pub fn len() -> usize {
     CACHE.lock().len()
+}
+
+/// Test/diagnostic: report the [`Stored`] variant cached for an AM
+/// (attnum = 0) entry on `rel_oid`, as a short tag (`"ooc"`,
+/// `"readonly"`, `"mutable"`), or `None` if no AM entry is cached.
+/// Used by the Phase B-1/B-2 mechanism test to prove an
+/// `out_of_core = on` IVF scan installs a cell-scoped `Ooc` entry
+/// (the codes are NOT loaded whole) while `off` installs the
+/// whole-index `ReadOnly` entry.
+#[allow(dead_code)]
+pub fn am_entry_variant(rel_oid: pg_sys::Oid) -> Option<&'static str> {
+    let g = CACHE.lock();
+    // Prefer an Ooc entry if any exists for this rel (the cache is
+    // process-global across pg_tests; report the variant the current
+    // GUC would have installed rather than an arbitrary iteration
+    // order). Fall back to the first AM entry's variant.
+    let mut fallback: Option<&'static str> = None;
+    for (k, e) in g.iter() {
+        if k.rel_oid == rel_oid && k.attnum == 0 {
+            let tag = match &e.index {
+                Stored::Ooc(_) => "ooc",
+                Stored::ReadOnly(_) => "readonly",
+                Stored::Mutable(_) => "mutable",
+            };
+            if tag == "ooc" {
+                return Some("ooc");
+            }
+            fallback.get_or_insert(tag);
+        }
+    }
+    fallback
 }
 
 fn enforce_cap(map: &mut HashMap<CacheKey, Entry>) {

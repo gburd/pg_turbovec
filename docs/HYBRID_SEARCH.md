@@ -116,37 +116,74 @@ The pooled-vector ANN is sublinear (index-accelerated); the MaxSim
 re-rank is `O(N · |Q| · |D| · dim)` over just the N candidates, which
 is cheap for N in the hundreds.
 
-### The honest limitation
+### The honest limitation — and what `colbert_search` (F-1) adds
 
-**pg_turbovec indexes one vector per row.** `max_sim` is a re-rank
-primitive over candidate documents' token arrays — it is **not** an
-index-accelerated late-interaction scan. Specifically:
+**pg_turbovec's persistent index stores one vector per row.**
+`max_sim` is a re-rank primitive over candidate documents' token
+arrays; the pooled-vector + `max_sim` pattern above is **not** an
+index-accelerated late-interaction scan, and its recall is capped by
+the pooled-vector ANN: if the right document's *pooled* vector isn't
+in the top-N candidates, MaxSim never sees it.
 
-- The token arrays (`docs.tokens`) are **not indexed**. Only the
-  pooled vector is. Recall of the two-stage pipeline is bounded by the
-  pooled-vector ANN recall — if the right document's pooled vector
-  isn't in the top-N candidates, MaxSim never sees it.
-- There is no per-token index traversal (the Qdrant-style "multivector
-  index" or PLAID-style centroid-interaction pruning).
+**`turbovec.colbert_search` (v1.16.0, Phase F-1) closes exactly that
+recall gap** — it retrieves candidates by **best single token**, not
+pooled mean:
 
-**Index-native late interaction is a future phase, not built.** A
-sketch of what it would require:
+```sql
+turbovec.colbert_search(
+    rel         regclass,
+    id_col      text,                 -- bigint doc key
+    token_col   text,                 -- a turbovec.vector[] column (per-doc tokens)
+    query       turbovec.vector[],    -- the query's token vectors
+    k           integer,              -- final top-k docs
+    per_token_k integer DEFAULT 64,   -- stage-1 hits per query token
+    candidate_n integer DEFAULT 256,  -- max candidate docs into stage 2
+    bit_width   integer DEFAULT 4
+) RETURNS TABLE(id bigint, score double precision)
+```
 
-- Per-token storage: either a side table `(doc_id, token_no, vec)` or
-  the `turbovec.vector[]` array column, with **each token vector**
-  entered into an ANN index (not just the pooled one).
-- A MaxSim-aware scan: retrieve candidate *tokens* per query token,
-  group by document, and accumulate the per-query maxima — i.e. the
-  index AM would have to emit token-level entries and a fused-scan
-  operator would reconstruct document scores. That is a multi-month
-  index-AM change (per-token entries + a MaxSim traversal + tuned
-  candidate pruning) and is explicitly out of scope for Phase D.
+```sql
+-- docs(id bigint, tokens turbovec.vector[])  -- per-doc token arrays
+SELECT id, score
+FROM turbovec.colbert_search('docs'::regclass, 'id', 'tokens',
+                             :q_tokens::turbovec.vector[], 10);
+```
 
-If you are coming from Qdrant's native multivector index expecting
-the index itself to do MaxSim traversal: **pg_turbovec does not do
-that today.** Use the pooled-vector + re-rank pattern above; it is
-correct and, for candidate sets in the hundreds, fast — but its recall
-ceiling is the pooled-ANN recall, not true late-interaction recall.
+How it works (two stages, same shape as the pattern above but with an
+indexed stage 1 over **all** tokens):
+
+1. **Stage 1 (index-accelerated).** A backend-cached flat **token**
+   index — one slot per token across all docs, the slot's id being its
+   doc id — is batch-searched with all `|Q|` query tokens; the hit
+   doc-ids are unioned into a candidate set (capped at `candidate_n`,
+   keeping the docs with the best stage-1 token score). Because every
+   token is indexed, a doc whose *pooled* vector is far but which has
+   **one** token near a query token is still retrieved — the recall
+   the pooled-vector pattern cannot get.
+2. **Stage 2 (exact).** Each candidate's full token array is read from
+   the heap and scored with the exact `max_sim` kernel; the top `k`
+   are returned.
+
+**What it is and isn't.** `colbert_search` is the *index-native
+stage-1* over `max_sim`'s *exact stage-2*. It is **not** the full
+persistent multivector index AM (per-token relfile, MaxSim-aware
+scan, PLAID centroid pruning) — the token index lives only in the
+backend cache (like `turbovec.knn`), so there is **no wire-format
+change** and no `CREATE INDEX` for it. It rebuilds per backend on a
+cold cache (fine for moderate corpora; the build is the same
+quantize-pack as `knn`). For very large token corpora a persistent
+token-index AM (Phase F-2) is the next step — gated on a measured
+recall/latency win over this F-1 path (see
+`docs/PHASE_F_COLBERT_PLAN.md`).
+
+**Tuning.** `per_token_k` (stage-1 hits per query token) and
+`candidate_n` (max docs into stage 2) trade recall for work; under
+heavy token quantization (2–3 bit) raise `per_token_k`. `bit_width`
+4 is the safe default for 128-d ColBERT tokens. The crossover where
+`colbert_search` beats the pooled-vector pattern is **workload-
+dependent** (it wins on entity / rare-term / long-doc queries where
+the pooled mean washes out the matching token; it ties on
+pooled-friendly semantic queries).
 
 ---
 

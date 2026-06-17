@@ -4,6 +4,59 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.16.0] — 2026-06-17
+
+**Phase F-1 — index-native late interaction (ColBERT stage-1).**
+Additive SQL function in the `turbovec` schema; **no wire change**
+(`MetaPageData::version = 4`), **no index-AM change**, **no
+REINDEX**. Closes the last acknowledged feature gap vs
+Qdrant/VectorChord at the level the analysis showed actually matters
+(stage-1 recall) — see `docs/PHASE_F_COLBERT_PLAN.md`.
+
+### Added
+
+- **`turbovec.colbert_search(rel, id_col, token_col, query vector[],
+  k, per_token_k = 64, candidate_n = 256, bit_width = 4)`**
+  (`src/colbert.rs`) — the index-accelerated stage-1 of ColBERT late
+  interaction. Stage 1 builds a **backend-cached flat token index**
+  (one slot per token across all docs, doc-id repeated; synthetic
+  unique slot-ids fed to `IdMapIndex`, real doc-ids kept separately
+  — the IVF soft-assign trick), batch-searches all `|Q|` query
+  tokens, and unions the hit doc-ids into a candidate set. Stage 2
+  reads each candidate's full token array from the heap and scores it
+  with the exact `max_sim` kernel (Phase D). Returns the top-`k`
+  documents.
+- **The value over the Phase D pooled-vector + `max_sim` re-rank
+  pattern is stage-1 recall:** a document is retrieved by its **best
+  single token**, not its pooled mean — so a doc whose pooled vector
+  is far but which has one token near a query token (the
+  entity/rare-term/long-doc case ColBERT is built for) is still
+  found. Proven by the `colbert_search_recovers_single_token_match`
+  test.
+
+### What it is / isn't
+
+The token index lives **only in the backend cache** (the
+`turbovec.knn` model) — there is **no relfile, no `CREATE INDEX`, and
+no wire-format change**. It is the index-native *stage 1* over
+`max_sim`'s exact *stage 2*; it is **not** the full persistent
+multivector index AM (per-token relfile + MaxSim-aware scan + PLAID
+pruning). That persistent AM (Phase F-2) is **gated** on a measured
+recall/latency win over this F-1 path on a real ColBERT corpus — the
+plan explicitly refuses to build a 32–512×-larger persistent index on
+faith. Tuning: `per_token_k` / `candidate_n` trade recall for work;
+raise `per_token_k` under heavy (2–3 bit) token quantization.
+
+### Migration
+
+Additive function; no wire change, no REINDEX. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.16.0';` is sufficient. Tests: 224 → 230
+(+`colbert_search_basic`,
+`colbert_search_recovers_single_token_match`,
+`colbert_search_matches_bruteforce_maxsim`,
+`colbert_search_empty_query`, `colbert_search_deterministic`,
+`colbert_search_rejects_bad_k`).
+
 ## [1.15.1] — 2026-06-17
 
 **Cross-version build fix (pg13 / pg14 / pg15 / pg18).** Build-only

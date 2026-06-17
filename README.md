@@ -153,7 +153,10 @@ For dimensions other than 1536, multiply storage through by `dim / 1536`.
 
 ## Installation
 
-`pg_turbovec` requires PostgreSQL 16+ and a Rust toolchain ≥ 1.85.
+`pg_turbovec` requires PostgreSQL 13–18 and a Rust toolchain ≥ 1.89
+(the `turbovec` kernel uses AVX-512 `target_feature`s that need
+≥ 1.89; the default stable toolchain works). PostgreSQL 16 is the
+reference development platform; 13/14/15/17/18 are tested in CI.
 
 ```bash
 # One-time setup.

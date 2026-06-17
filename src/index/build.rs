@@ -25,6 +25,39 @@ use turbovec::IdMapIndex;
 /// leaks a spill file. `BufFileCreateTemp(false)` makes it
 /// transaction-local (not inter-xact), which is correct: the build
 /// is a single transaction.
+/// `BufFileWrite` shim. PG13-15 declare the pointer as `*mut
+/// c_void`; PG16+ as `*const c_void`. Both return `void` (they
+/// ereport on I/O failure). This casts to the right pointer type per
+/// version so the build compiles across the pg13..pg18 matrix.
+///
+/// # Safety
+/// `file` is a valid `BufFile`; `[ptr, ptr+size)` is readable.
+#[inline]
+unsafe fn buffile_write(file: *mut pg_sys::BufFile, ptr: *const std::ffi::c_void, size: usize) {
+    #[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15"))]
+    pg_sys::BufFileWrite(file, ptr as *mut std::ffi::c_void, size);
+    #[cfg(not(any(feature = "pg13", feature = "pg14", feature = "pg15")))]
+    pg_sys::BufFileWrite(file, ptr, size);
+}
+
+/// `BufFileReadExact` shim. PG16+ ship `BufFileReadExact` (ereports
+/// on a short read); PG13-15 do not, so we use `BufFileRead` (which
+/// returns the bytes actually read, present on every version) and
+/// ERROR ourselves on a short read. Uniform "read exactly `size`
+/// bytes or error" semantics across the matrix.
+///
+/// # Safety
+/// `file` is a valid `BufFile`; `[ptr, ptr+size)` is writable.
+#[inline]
+unsafe fn buffile_read_exact(file: *mut pg_sys::BufFile, ptr: *mut std::ffi::c_void, size: usize) {
+    let got = pg_sys::BufFileRead(file, ptr, size);
+    if got != size {
+        error!(
+            "turbovec ambuild (ivf): short read from corpus spill (wanted {size} bytes, got {got}) -- truncated temp file?"
+        );
+    }
+}
+
 struct CorpusSpill {
     /// The PG temp BufFile. Non-null between `new` and `Drop`.
     file: *mut pg_sys::BufFile,
@@ -68,12 +101,12 @@ impl CorpusSpill {
         // panic that unwinds through Drop -> BufFileClose.
         unsafe {
             let id_le = id.to_le_bytes();
-            pg_sys::BufFileWrite(
+            buffile_write(
                 self.file,
                 id_le.as_ptr() as *const std::ffi::c_void,
                 id_le.len(),
             );
-            pg_sys::BufFileWrite(
+            buffile_write(
                 self.file,
                 vector.as_ptr() as *const std::ffi::c_void,
                 self.dim * std::mem::size_of::<f32>(),
@@ -147,13 +180,13 @@ impl CorpusSpill {
     /// record remaining.
     unsafe fn read_one_at_cursor(&self, id: &mut u64, vector: &mut [f32]) {
         let mut idbuf = [0u8; std::mem::size_of::<u64>()];
-        pg_sys::BufFileReadExact(
+        buffile_read_exact(
             self.file,
             idbuf.as_mut_ptr() as *mut std::ffi::c_void,
             idbuf.len(),
         );
         *id = u64::from_le_bytes(idbuf);
-        pg_sys::BufFileReadExact(
+        buffile_read_exact(
             self.file,
             vector.as_mut_ptr() as *mut std::ffi::c_void,
             self.dim * std::mem::size_of::<f32>(),

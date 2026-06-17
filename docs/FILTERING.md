@@ -24,7 +24,8 @@ selective `WHERE`.** The decision matrix in § 5 makes this precise.
 | Filter shape | Selectivity | Corpus | Use |
 |---|---|---|---|
 | Known/enumerable value (tenant, category) | any | any | **Partial index** (§ 2) |
-| Computed per query, an id set | **selective** (≤ ~5-10%) | flat-friendly (≤ ~1M) | **`knn(..., allowed)`** (§ 3) |
+| Computed per query, an id set | **selective** (≤ ~5-10%) | flat-friendly (≤ ~1M) | **`knn(..., allowed)`** (§ 3) or **`SET turbovec.allowlist`** on the `ORDER BY` path (§ 3.5) |
+| Computed per query, an id set | **selective** | IVF (large) | **`SET turbovec.allowlist`** — in-kernel block-skip scoped to probed cells ∧ the id set (§ 3.5) |
 | Computed per query, an id set | not selective (> ~10%) | any | plain ANN, then post-filter; or partial index |
 | Arbitrary `WHERE col = x` with `ORDER BY <=> q LIMIT k` | moderate | any | **Iterative scan** (§ 4) |
 | Arbitrary `WHERE`, very selective, huge corpus | very low | huge | partial index if value is known; else accept the `max_scan_tuples` ceiling (§ 4) |
@@ -40,12 +41,12 @@ AM path. See § 6.
 
 ## 1. The three mechanisms at a glance
 
-| | Partial index | `knn(..., allowed)` | Iterative scan |
+| | Partial index | `knn(..., allowed)` / `turbovec.allowlist` | Iterative scan |
 |---|---|---|---|
 | What pushes the filter | PostgreSQL planner (native) | the SIMD kernel (in-kernel) | nothing -- executor rechecks; AM just widens |
-| Where the filter lives | index predicate (`WHERE` on `CREATE INDEX`) | a `bigint[]` arg per query | the query's `WHERE` clause |
-| Index structure | flat **or** IVF | **flat only** (no IVF) | flat **or** IVF |
-| API | `ORDER BY emb <=> q LIMIT k` | `turbovec.knn(...)` function | `ORDER BY emb <=> q LIMIT k` |
+| Where the filter lives | index predicate (`WHERE` on `CREATE INDEX`) | a `bigint[]` arg (`knn`) or `turbovec.allowlist` GUC (operator path) | the query's `WHERE` clause |
+| Index structure | flat **or** IVF | `knn()` **flat only**; `turbovec.allowlist` **flat or IVF** | flat **or** IVF |
+| API | `ORDER BY emb <=> q LIMIT k` | `turbovec.knn(...)` function **or** `SET turbovec.allowlist` + `ORDER BY emb <=> q LIMIT k` | `ORDER BY emb <=> q LIMIT k` |
 | Wins when | filter value is known & enumerable | filter is selective & per-query | you want index-scan ergonomics |
 | Cost model | exact, smaller index | cheaper as filter tightens (§ 3) | extra candidates scanned under selective filter |
 
@@ -183,6 +184,104 @@ Reproduce: `cargo bench --bench allowlist_crossover --no-default-features --feat
 
 ---
 
+## 3.5. Operator-path allowlist: `SET turbovec.allowlist` (flat **and** IVF)
+
+**The same in-kernel block-skip pushdown as § 3, but on the normal
+`ORDER BY emb <=> q LIMIT k` operator path — and it works on IVF
+indexes too.** This is the Phase C follow-up to the `knn()` allowlist:
+it removes the two caveats above (function-only, flat-only). Instead of
+calling a function and joining back, you `SET` a per-query id set on a
+session GUC and run an ordinary ANN query.
+
+**Important: the id set is heap TIDs, not your `id` column.** The
+index AM keys every vector by its **heap TID** (item pointer), not by
+any heap `id` column — the index never sees your `id` column. So
+`turbovec.allowlist` is a CSV of **heap TIDs encoded as bigint**, using
+the `(block << 32) | offset` layout (`pgrx`'s
+`item_pointer_to_u64`). Use the `turbovec.tid_to_bigint(ctid)` helper
+to encode them — you never have to write the bit-twiddling yourself:
+
+```sql
+-- Encode the TIDs of the rows you want into the allowlist, then run
+-- the ordinary ORDER BY query:
+SELECT set_config(
+  'turbovec.allowlist',
+  (SELECT string_agg(turbovec.tid_to_bigint(ctid)::text, ',')
+   FROM items
+   WHERE tenant_id = $2 AND price < $3),     -- your selective filter
+  false);
+
+SELECT id FROM items ORDER BY emb <=> $1 LIMIT 10;
+
+RESET turbovec.allowlist;                     -- back to unfiltered
+```
+
+`turbovec.tid_to_bigint(tid) -> bigint` is the canonical encoder; it
+returns exactly the value the AM stores per slot, so the match is
+exact. (If you'd rather not use the helper, the raw equivalent is
+`(split_part(btrim(ctid::text,'()'),',',1)::bigint << 32) |
+split_part(btrim(ctid::text,'()'),',',2)::bigint`.)
+
+(If your filter naturally yields TIDs another way — e.g. a `BitmapAnd`
+over B-tree indexes — encode those instead. The point is the AM
+intersects a *set of physical rows*, identified by TID.)
+
+The scan parses the CSV **once per scan** into a TID set and ANDs a
+by-slot allow mask into the slot mask it hands the kernel:
+
+- **Flat index:** the allow mask alone drives `search_with_mask`, so
+  the kernel skips 32-vector blocks with no allowed slot — the same
+  block-skip `knn(..., allowed)` gets.
+- **IVF index:** the allow mask is ANDed with the **probed-cell** mask
+  (and the tombstone mask), so the block-skip is scoped to *probed
+  cells ∧ allowed slots*. The skip is the real latency win on a
+  selective allowlist; it applies within the cells `turbovec.probes`
+  selects. (Out-of-core / cell-scoped IVF gets it too: the allow mask
+  is pushed into the compact per-query sub-index.)
+
+Correctness: an allowlisted `ORDER BY` returns **only** rows in the
+allowlist, and the **same** allowed top-k as the unfiltered scan
+restricted to that row set (the allowlist restricts *which* allowed
+neighbours are eligible, it never reorders them). It composes with
+tombstones (a vacuum-deleted row is excluded even if allowlisted) and
+with `probes >= lists` (exact search over the allowed set). Pointing
+it at the TIDs of the SAME rows whose `id`s you'd pass to
+`turbovec.knn(..., allowed => ...)` returns the same rows — the
+operator path and the function path are equivalent (they just name the
+rows in different id spaces: the AM in TID space, `knn()` in your
+`id`-column space).
+
+**GUC semantics.** `turbovec.allowlist` is a string GUC (CSV of
+bigint TIDs; whitespace tolerated; empty tokens ignored). Empty /
+unset (the default `''`) is **unfiltered with zero added cost** — the
+slot-mask build is guarded behind a non-empty check, so the common
+un-allowlisted query path is byte-identical to before. A non-integer
+token (`'1,abc,3'`) **ERRORs the scan** clearly (the `SET` itself
+succeeds; the error is raised when the scan parses the value).
+
+**Ergonomics warts (be honest).** Two of them:
+1. It's a *session GUC you `SET`/`RESET` around the query*, not a
+   `WHERE` clause. You must materialize the row set yourself and inject
+   it as text, and remember to `RESET` it (a leftover allowlist
+   silently restricts later queries in the same session).
+2. The id space is **heap TID, not your `id` column** — you encode
+   `ctid`, you don't pass primary keys. That's because the AM only
+   ever sees item pointers; mapping an `id`-column value to a TID
+   would require the index to know your key column, which it doesn't.
+   If you want `id`-column ergonomics, use `turbovec.knn(..., allowed)`
+   (§ 3) — it walks the heap by your `id_col` and takes `bigint[]`
+   primary keys directly (flat only).
+
+It is **not** arbitrary-`WHERE` pushdown: the AM never interprets scan
+keys or evaluates predicates; it honours a *pre-materialized row set*,
+exactly like the `knn()` allowlist — now on the operator path and
+IVF-aware. The **crossover guidance from § 3 still applies**: the
+block-skip only pays off when the allowlist is *selective* (roughly
+≤ 7-10% of the corpus). For a non-selective row set, prefer a partial
+index or plain ANN + a cheap SQL post-filter.
+
+---
+
 ## 4. Iterative scan + `WHERE` -- the index-AM path
 
 **For the normal `ORDER BY emb <=> q LIMIT k` ergonomics with a
@@ -274,16 +373,21 @@ the heap. So the index physically cannot prune by an arbitrary
 predicate during traversal; it can only rank by distance and let the
 executor recheck.
 
-The `knn()` allowlist (§ 3) *is* true in-kernel pushdown, but it works
-because the caller pre-computes the id set and hands it in as a bit
-mask -- the index intersects a *materialized id set*, not a live
-predicate, and only on the flat path.
+The `knn()` allowlist (§ 3) and the operator-path `turbovec.allowlist`
+(§ 3.5) *are* true in-kernel pushdown, but they work because the
+caller pre-computes the id set and hands it in as a bit mask -- the
+index intersects a *materialized id set*, not a live predicate.
+`turbovec.allowlist` now does this on the **operator path** and on
+**IVF** (cell-scope ∧ allowlist), so the gap is narrower than it was:
+what remains missing is *arbitrary `WHERE` pushed into the cell scan*
+without the caller pre-materializing the id set.
 
 **Workarounds (covered above):** partial index (bake the filter into
-the index), allowlist `knn()` (pre-materialize a selective id set), or
-iterative scan (widen + recheck). Between them they cover most real
-filtering needs; the gap is specifically *arbitrary `WHERE` pushed
-into the IVF cell scan*.
+the index), allowlist `knn()` or `SET turbovec.allowlist` (§ 3 / § 3.5,
+pre-materialize a selective id set, flat **or** IVF), or iterative
+scan (widen + recheck). Between them they cover most real filtering
+needs; the gap is specifically *arbitrary `WHERE` pushed into the IVF
+cell scan* from a live predicate.
 
 ---
 
@@ -291,13 +395,20 @@ into the IVF cell scan*.
 
 Could the `knn()` allowlist be wired into the **IVF index-AM scan
 path** -- cell-scope ∧ allowlist -- so the operator path gets in-kernel
-filtering too? Assessment (design sketch only; not implemented):
+filtering too?
 
-**Tractable in principle, with a real obstacle.** The kernel already
-accepts a slot mask (`search_with_mask`) and the IVF scan already
-iterates cells. Intersecting "slots in the probed cells" with "slots
-in the allowlist" is a bitmap AND -- mechanically easy. The obstacle
-is **getting a filter into the AM in the first place:**
+**✅ DONE (Phase C follow-up, the "narrow, lower-risk first step"
+below).** Shipped as the `turbovec.allowlist` session GUC (§ 3.5): a
+pre-materialized id set flows into the IVF (and flat, and out-of-core)
+`ORDER BY` scan and is ANDed into the slot mask before
+`search_with_mask`, so the operator path gets the same 32-vector-block
+short-circuit on both flat and IVF indexes, without any scan-key
+rewrite or wire-format change. What it is *not*: arbitrary-`WHERE`
+pushdown. The remaining future work is the two routes below (companion
+bitmap / payload columns) that would push a **live predicate** — not a
+pre-materialized id set — into the scan.
+
+**The remaining routes (still future, not implemented):**
 
 - The AM receives **scan keys** but the executor owns `WHERE`
   evaluation; the AM does not (and per `AGENTS.md` / the Phase-17
@@ -312,21 +423,16 @@ is **getting a filter into the AM in the first place:**
   so it can evaluate predicates itself (a wire-format change -- new
   persisted state, a `MetaPageData::version` bump, a minor release
   with a REINDEX migration per `AGENTS.md`).
-- A **narrower, lower-risk** first step: expose an AM-level
-  `allowed bigint[]` channel (e.g. a GUC or a function-table variant)
-  that flows a pre-materialized id set into the IVF scan's
+- The **narrow, lower-risk first step** — now **DONE** — was exactly to
+  expose an AM-level pre-materialized id-set channel (the
+  `turbovec.allowlist` GUC) that flows the id set into the IVF scan's
   `search_with_mask`, reusing the existing flat-path machinery without
   touching scan-key handling. This gives operator-path users the
-  allowlist win on IVF without the predicate-evaluation rewrite. It is
-  still a feature with a wire-compatible surface, deferred to a future
-  phase.
+  allowlist win on IVF without the predicate-evaluation rewrite.
 
-**Verdict:** the bitmap/payload routes are each a multi-month (XL)
-build with a wire-format or planner-cooperation cost; the narrow
-"flow an id set into the IVF scan" route is a plausible medium-effort
-follow-up that avoids the dangerous scan-key rework. None is in scope
-for Phase C. This phase ships the three working patterns, the measured
-crossover, and an honest map of the gap.
+**Verdict:** the narrow id-set channel shipped (§ 3.5). The remaining
+bitmap/payload routes are each a multi-month (XL) build with a
+wire-format or planner-cooperation cost; neither is in scope yet.
 
 ---
 

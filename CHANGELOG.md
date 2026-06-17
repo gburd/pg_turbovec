@@ -4,6 +4,65 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.12.0] — 2026-06-17
+
+**Out-of-core IVF build** — IVF indexes can now be built at 1M–5M+
+rows on a RAM-constrained host. Wire format unchanged
+(`MetaPageData::version = 4`, byte-identical relfile); **no
+REINDEX**. Driven by the >5M production deployment
+(an internal design note Phase B-4).
+
+### Fixed — the 1M+ IVF build OOM (Phase B-4)
+
+The `WITH (lists = N)` build held the **full f32 corpus twice** in
+RAM (`ivf_flat` ~4 GiB + `perm_flat` ~4 GiB at 1M×1024-d) plus the
+growing index and GEMM scratch — a ~14 GiB peak that
+`maintenance_work_mem` did not bound, OOM-killing 1M+ builds on a
+31 GiB host. IVF was effectively unbuildable at the production
+scale.
+
+- **Disk spill.** The corpus now spills to a PostgreSQL `BufFile`
+  temp file (in `pgsql_tmp`, respecting `temp_tablespaces` /
+  `temp_file_limit`) during the heap scan, wrapped in a
+  `CorpusSpill` RAII type. Cleanup is double-covered: the resource
+  owner unlinks on (sub)transaction abort (even when
+  `ereport(ERROR)` longjmps past Rust destructors) and `Drop`
+  unlinks on success.
+- **Three streamed passes**, each bounded by `maintenance_work_mem`:
+  (1) spill + bounded reservoir sample for k-means; (2) GEMM-assign
+  cells over disk-backed row-blocks, keeping only the per-row
+  cell-id array (not a corpus copy); (3) feed the quantizer in cell
+  order by re-reading the spill at permuted offsets in bounded
+  chunks. The full f32 corpus is **never resident**; the only
+  RAM term that scales with row count is the **quantized**
+  `packed_codes` (7–15× smaller than the f32 corpus).
+- **Measured** (1M×1024-d, lists=1024, 30 GiB host): peak RSS
+  **~14 GiB (OOM) → ~7.1 GiB (completes)**; index 1030 MB, spill
+  ~3.9 GB on disk. **5M projected ~8–10 GiB** — buildable on the
+  31 GiB production host.
+
+### Determinism / compatibility
+
+Byte-identical relfile to a v1.11.x in-memory build for the same
+input, and **`maintenance_work_mem`-invariant** (TQ+ calibration is
+fit on a fixed cell-ordered prefix, independent of chunk size). The
+flat (`lists = 0`) build path is unchanged (already Phase-W
+streamed). No GUC added — `maintenance_work_mem` is the knob.
+
+### Migration
+
+**No REINDEX.** Build-internal; wire stays v4. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.12.0';` is sufficient. Existing indexes are
+unaffected; the benefit applies to the next `CREATE INDEX` /
+`REINDEX`.
+
+### Tests
+
+193 → 197 (+`ivf_streaming_build_determinism_byte_identical`,
+`ivf_streaming_build_chunk_size_invariant`,
+`ivf_streaming_build_bounded_memory_completes`,
+`ivf_streaming_build_temp_file_cleanup`). drift-check clean.
+
 ## [1.11.1] — 2026-06-16
 
 **Bench-results-only release. Wire format unchanged from v1.11.0

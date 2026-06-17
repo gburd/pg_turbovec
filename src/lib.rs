@@ -32,6 +32,7 @@ pub mod sparsevec;
 pub mod sparsevec_ops;
 pub mod bitvec;
 
+pub mod colbert;
 pub mod index;
 
 pub mod kernels;
@@ -4801,7 +4802,7 @@ mod tests {
             "0.1.0", "0.2.0", "0.4.0", "0.5.0",
             "1.3.0", "1.5.0", "1.6.0", "1.6.1",
             "1.7.0", "1.7.1", "1.7.2", "1.7.3",
-            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1",
+            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
         ];
         let expected_owned: Vec<String> =
             expected.iter().map(|s| s.to_string()).collect();
@@ -7700,6 +7701,210 @@ mod tests {
              SELECT id::bigint FROM fused ORDER BY score DESC, id LIMIT 4",
         );
         assert_eq!(top.first().copied(), Some(2), "RRF winner must be doc 2: {top:?}");
+    }
+
+    // ----------------------------------------------------------------
+    // Phase F-1: index-native late interaction (turbovec.colbert_search).
+    // The function builds a backend-cached flat TOKEN index (one slot
+    // per token, doc-id repeated), batch-searches all query tokens for
+    // stage-1 candidates, then exact-MaxSim-reranks from the heap. The
+    // value over Phase D is stage-1 recall (best-single-token, not
+    // pooled-mean). See an internal design note.
+    // ----------------------------------------------------------------
+
+    /// Build a `(id bigint, tokens turbovec.vector[])` table from a
+    /// list of (doc_id, list-of-8d-token-arrays). Each token is given
+    /// as 8 f32s.
+    fn colbert_make_table(table: &str, docs: &[(i64, Vec<[f32; 8]>)]) {
+        Spi::run(&format!(
+            "CREATE TEMP TABLE {table} (id bigint, tokens turbovec.vector[])"
+        ))
+        .unwrap();
+        for (id, toks) in docs {
+            let arr = toks
+                .iter()
+                .map(|t| {
+                    let nums =
+                        t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                    format!("'[{nums}]'::turbovec.vector")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            Spi::run(&format!(
+                "INSERT INTO {table} VALUES ({id}, ARRAY[{arr}]::turbovec.vector[])"
+            ))
+            .unwrap();
+        }
+    }
+
+    /// One-hot 8-d token in slot `i`.
+    fn onehot8(i: usize) -> [f32; 8] {
+        let mut v = [0.0f32; 8];
+        v[i] = 1.0;
+        v
+    }
+
+    fn colbert_search_ids(table: &str, query_tokens: &[[f32; 8]], k: i32) -> Vec<i64> {
+        let q = query_tokens
+            .iter()
+            .map(|t| {
+                let nums = t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                format!("'[{nums}]'::turbovec.vector")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id FROM turbovec.colbert_search( \
+               '{table}'::regclass, 'id', 'tokens', \
+               ARRAY[{q}]::turbovec.vector[], {k}) ORDER BY score DESC, id"
+        );
+        fetch_ids(&sql)
+    }
+
+    /// Basic: colbert_search returns only real doc-ids, and a doc whose
+    /// tokens exactly contain the query tokens scores highest.
+    #[pg_test]
+    fn colbert_search_basic() {
+        use_turbovec();
+        colbert_make_table(
+            "cb_basic",
+            &[
+                (1, vec![onehot8(0), onehot8(1)]),       // matches q exactly
+                (2, vec![onehot8(2), onehot8(3)]),       // disjoint
+                (3, vec![onehot8(0), onehot8(4)]),       // partial (token 0)
+            ],
+        );
+        let ids = colbert_search_ids("cb_basic", &[onehot8(0), onehot8(1)], 3);
+        assert!(!ids.is_empty(), "colbert_search returned no rows");
+        // every returned id is a real doc id
+        for id in &ids {
+            assert!((1..=3).contains(id), "unexpected doc id {id}");
+        }
+        assert_distinct_ids(&ids);
+        // doc 1 (both query tokens present) must outrank doc 2 (none).
+        let p1 = ids.iter().position(|&x| x == 1);
+        let p2 = ids.iter().position(|&x| x == 2);
+        assert!(p1.is_some(), "doc 1 must be retrieved: {ids:?}");
+        if let (Some(p1), Some(p2)) = (p1, p2) {
+            assert!(p1 < p2, "doc 1 (full match) must outrank doc 2 (no match): {ids:?}");
+        }
+    }
+
+    /// THE F-1 gap proof: a doc whose POOLED (mean) vector is far from
+    /// the query but which has ONE token very close to a query token
+    /// must still be retrieved. This is exactly what stage-1 over all
+    /// tokens buys over a pooled-vector first stage (Phase D's
+    /// ceiling). We give the target doc one matching token plus many
+    /// orthogonal tokens (so its mean is washed out), and assert
+    /// colbert_search still surfaces it.
+    #[pg_test]
+    fn colbert_search_recovers_single_token_match() {
+        use_turbovec();
+        // doc 1: one token == query token 0, plus 5 orthogonal tokens
+        //        in dims 2..7 -> its MEAN is dominated by the filler,
+        //        far from the query, but one token is a perfect match.
+        let mut doc1 = vec![onehot8(0)];
+        for d in 2..7 {
+            doc1.push(onehot8(d));
+        }
+        // docs 2,3: entirely in the filler dims, no match at all.
+        let doc2 = (2..7).map(onehot8).collect::<Vec<_>>();
+        let doc3 = (1..6).map(onehot8).collect::<Vec<_>>();
+        colbert_make_table("cb_gap", &[(1, doc1), (2, doc2), (3, doc3)]);
+
+        // Query is the single token in dim 0 (and a second in dim 7
+        // that nobody has, so only the dim-0 match drives ranking).
+        let ids = colbert_search_ids("cb_gap", &[onehot8(0), onehot8(7)], 3);
+        assert!(
+            ids.contains(&1),
+            "F-1 must recover doc 1 via its single matching token even though its \
+             pooled vector is far: {ids:?}"
+        );
+        assert_eq!(
+            ids.first().copied(),
+            Some(1),
+            "doc 1 (the only token-0 match) must rank first: {ids:?}"
+        );
+    }
+
+    /// colbert_search ranking matches an exhaustive MaxSim over the
+    /// whole corpus (when candidate_n covers all docs and per_token_k
+    /// is generous, stage 1 retrieves everyone and stage 2 is exact).
+    #[pg_test]
+    fn colbert_search_matches_bruteforce_maxsim() {
+        use_turbovec();
+        colbert_make_table(
+            "cb_bf",
+            &[
+                (10, vec![onehot8(0), onehot8(1)]),
+                (20, vec![onehot8(1), onehot8(2)]),
+                (30, vec![onehot8(0), onehot8(0)]),
+            ],
+        );
+        let query = [onehot8(0), onehot8(1)];
+        // colbert_search top-1
+        let ids = colbert_search_ids("cb_bf", &query, 1);
+        // Brute-force MaxSim via Phase D max_sim over every doc.
+        let bf_top: i64 = Spi::get_one(
+            "WITH q AS (SELECT ARRAY['[1,0,0,0,0,0,0,0]','[0,1,0,0,0,0,0,0]']\
+                 ::turbovec.vector[] AS toks) \
+             SELECT id FROM cb_bf, q \
+             ORDER BY turbovec.max_sim(q.toks, cb_bf.tokens) DESC, id LIMIT 1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ids.first().copied(),
+            Some(bf_top),
+            "colbert_search top-1 ({ids:?}) must match brute-force MaxSim top-1 ({bf_top})"
+        );
+    }
+
+    /// Empty query returns no rows (ColBERT convention, mirrors
+    /// Phase D max_sim).
+    #[pg_test]
+    fn colbert_search_empty_query() {
+        use_turbovec();
+        colbert_make_table("cb_empty", &[(1, vec![onehot8(0)])]);
+        let n: i64 = Spi::get_one(
+            "SELECT count(*) FROM turbovec.colbert_search( \
+               'cb_empty'::regclass, 'id', 'tokens', \
+               ARRAY[]::turbovec.vector[], 5)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 0, "empty query must return no rows");
+    }
+
+    /// Determinism: two identical calls return the identical ranking.
+    #[pg_test]
+    fn colbert_search_deterministic() {
+        use_turbovec();
+        colbert_make_table(
+            "cb_det",
+            &[
+                (1, vec![onehot8(0), onehot8(1)]),
+                (2, vec![onehot8(1), onehot8(2)]),
+                (3, vec![onehot8(0), onehot8(3)]),
+            ],
+        );
+        let q = [onehot8(0), onehot8(1)];
+        let a = colbert_search_ids("cb_det", &q, 3);
+        let b = colbert_search_ids("cb_det", &q, 3);
+        assert_eq!(a, b, "colbert_search must be deterministic across calls");
+    }
+
+    /// Bad arguments ERROR clearly.
+    #[pg_test]
+    #[should_panic(expected = "k must be positive")]
+    fn colbert_search_rejects_bad_k() {
+        use_turbovec();
+        colbert_make_table("cb_badk", &[(1, vec![onehot8(0)])]);
+        let _ = Spi::run(
+            "SELECT * FROM turbovec.colbert_search( \
+               'cb_badk'::regclass, 'id', 'tokens', \
+               ARRAY['[1,0,0,0,0,0,0,0]']::turbovec.vector[], 0)",
+        );
     }
 }
 

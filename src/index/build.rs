@@ -10,6 +10,171 @@ use pgrx::pg_sys;
 use pgrx::prelude::*;
 use turbovec::IdMapIndex;
 
+/// Phase B-4: a disk-backed corpus spill for the out-of-core IVF
+/// build. Each record is a fixed-stride `(u64 id, dim x f32 vector)`
+/// row, appended in heap-scan order. The IVF build streams the
+/// corpus through this file instead of holding the whole f32 corpus
+/// (and a second cell-permuted copy) resident in RAM.
+///
+/// Backed by PG's `BufFile` temp-file machinery: the file lands in
+/// `PGDATA/base/pgsql_tmp` (or a `temp_tablespaces` member), counts
+/// against `temp_file_limit`, and is registered with the current
+/// resource owner so it is unlinked at transaction end / on abort.
+/// `Drop` also calls `BufFileClose`, which closes + unlinks the
+/// segment files, so a build that errors partway (or panics) never
+/// leaks a spill file. `BufFileCreateTemp(false)` makes it
+/// transaction-local (not inter-xact), which is correct: the build
+/// is a single transaction.
+struct CorpusSpill {
+    /// The PG temp BufFile. Non-null between `new` and `Drop`.
+    file: *mut pg_sys::BufFile,
+    /// Vector dimensionality; the record stride is `8 + dim*4`.
+    dim: usize,
+    /// Bytes per record: `size_of::<u64>() + dim * size_of::<f32>()`.
+    stride: usize,
+    /// Number of records appended so far.
+    rows: usize,
+}
+
+impl CorpusSpill {
+    /// Create a fresh transaction-local spill file.
+    ///
+    /// # Safety
+    /// Must run inside a transaction with a valid CurrentResourceOwner
+    /// (true throughout `ambuild`).
+    unsafe fn new(dim: usize) -> Self {
+        let file = pg_sys::BufFileCreateTemp(false);
+        if file.is_null() {
+            error!("turbovec ambuild (ivf): BufFileCreateTemp returned null");
+        }
+        let stride = std::mem::size_of::<u64>() + dim * std::mem::size_of::<f32>();
+        CorpusSpill {
+            file,
+            dim,
+            stride,
+            rows: 0,
+        }
+    }
+
+    /// Append one `(id, vector)` record. `vector.len()` must equal
+    /// `dim`. Writes the 8-byte little-endian id then the dim f32s
+    /// (native-endian, matching how we read them back on the same
+    /// host within the same build).
+    fn push(&mut self, id: u64, vector: &[f32]) {
+        debug_assert_eq!(vector.len(), self.dim);
+        // SAFETY: `file` is a valid BufFile for our lifetime; the two
+        // writes total exactly `stride` bytes. BufFileWrite ereports
+        // (PG longjmp) on I/O failure, which pgrx converts to a Rust
+        // panic that unwinds through Drop -> BufFileClose.
+        unsafe {
+            let id_le = id.to_le_bytes();
+            pg_sys::BufFileWrite(
+                self.file,
+                id_le.as_ptr() as *const std::ffi::c_void,
+                id_le.len(),
+            );
+            pg_sys::BufFileWrite(
+                self.file,
+                vector.as_ptr() as *const std::ffi::c_void,
+                self.dim * std::mem::size_of::<f32>(),
+            );
+        }
+        self.rows += 1;
+    }
+
+    /// Sequentially read `rows` records starting at record index
+    /// `start`, filling `ids[0..rows]` and the row-major
+    /// `out[0..rows*dim]` vector block. Seeks to the start record
+    /// then reads contiguously (the cheap path for the assign sweep).
+    fn read_block(&self, start: usize, rows: usize, ids: &mut [u64], out: &mut [f32]) {
+        debug_assert!(start + rows <= self.rows);
+        debug_assert!(ids.len() >= rows);
+        debug_assert!(out.len() >= rows * self.dim);
+        unsafe {
+            self.seek(start);
+            for r in 0..rows {
+                self.read_one_at_cursor(
+                    &mut ids[r],
+                    &mut out[r * self.dim..(r + 1) * self.dim],
+                );
+            }
+        }
+    }
+
+    /// Read a single record at record index `idx` (random access).
+    /// Used by the cell-order write sweep, where the permutation
+    /// scatters reads across the file.
+    fn read_one(&self, idx: usize, id: &mut u64, vector: &mut [f32]) {
+        debug_assert!(idx < self.rows);
+        debug_assert_eq!(vector.len(), self.dim);
+        unsafe {
+            self.seek(idx);
+            self.read_one_at_cursor(id, vector);
+        }
+    }
+
+    /// Seek to the byte offset of record `idx`. `BufFileSeek` with
+    /// `whence = SEEK_SET` and `fileno = 0` takes an ABSOLUTE byte
+    /// offset from the start of the logical stream: its internal
+    /// `while (newOffset > MAX_PHYSICAL_FILESIZE)` loop walks the
+    /// 1 GiB segments to find the right (segment, in-segment-offset)
+    /// pair, so a single absolute offset addresses a multi-segment
+    /// (> 1 GiB) spill correctly. Verified against PG's buffile.c.
+    ///
+    /// # Safety
+    /// `file` must be valid; `idx <= rows`.
+    unsafe fn seek(&self, idx: usize) {
+        // SEEK_SET from <stdio.h>; not exposed by pgrx-pg-sys, and
+        // its value (0) is fixed by POSIX. BufFileSeek takes the same
+        // whence constants as fseek.
+        const SEEK_SET: i32 = 0;
+        let offset = (idx * self.stride) as pg_sys::off_t;
+        // BufFileSeek(file, fileno=0, offset, SEEK_SET): position the
+        // logical stream `offset` bytes from the start. BufFile maps
+        // the (fileno=0, offset) pair onto its 1 GiB segments
+        // internally, so a single absolute offset from segment 0 is
+        // the correct addressing for our < a-few-GiB-per-row stream.
+        let rc = pg_sys::BufFileSeek(self.file, 0, offset, SEEK_SET);
+        if rc != 0 {
+            error!("turbovec ambuild (ivf): BufFileSeek to record {idx} failed (rc={rc})");
+        }
+    }
+
+    /// Read one record at the current cursor into `id` + `vector`.
+    ///
+    /// # Safety
+    /// Cursor must be positioned at a record boundary with a full
+    /// record remaining.
+    unsafe fn read_one_at_cursor(&self, id: &mut u64, vector: &mut [f32]) {
+        let mut idbuf = [0u8; std::mem::size_of::<u64>()];
+        pg_sys::BufFileReadExact(
+            self.file,
+            idbuf.as_mut_ptr() as *mut std::ffi::c_void,
+            idbuf.len(),
+        );
+        *id = u64::from_le_bytes(idbuf);
+        pg_sys::BufFileReadExact(
+            self.file,
+            vector.as_mut_ptr() as *mut std::ffi::c_void,
+            self.dim * std::mem::size_of::<f32>(),
+        );
+    }
+}
+
+impl Drop for CorpusSpill {
+    fn drop(&mut self) {
+        if !self.file.is_null() {
+            // BufFileClose flushes, closes, and unlinks the temp
+            // segment file(s). Runs on the normal path AND on an
+            // unwinding panic (a failed build), so the spill never
+            // leaks. SAFETY: `file` was created by BufFileCreateTemp
+            // and not previously closed.
+            unsafe { pg_sys::BufFileClose(self.file) };
+            self.file = std::ptr::null_mut();
+        }
+    }
+}
+
 use crate::guc;
 use crate::index::ivf;
 use crate::index::{options, relfile};
@@ -78,15 +243,15 @@ struct BuildState {
     /// in exactly one cell); `M > 1` stores boundary vectors in their
     /// top-M nearest cells. Only consulted when `lists > 0`.
     assign_dups: usize,
-    /// When `lists > 0` we cannot flush incrementally: the
-    /// cell-contiguous permutation needs the whole flat corpus before
-    /// quantizing. We accumulate the (optionally normalised) flat
-    /// vectors and their ids here, then permute + build the
-    /// `IdMapIndex` once at end-of-scan. Bounded by the corpus size
-    /// (IVF is for medium corpora where this fits; the Phase W
-    /// streaming cap applies to the flat `lists == 0` path).
-    ivf_flat: Vec<f32>,
-    ivf_ids: Vec<u64>,
+    /// When `lists > 0` we no longer accumulate the full f32 corpus
+    /// in RAM. Phase B-4: the (optionally normalised) vectors + ids
+    /// are spilled to a PG temp file (`CorpusSpill`) during the heap
+    /// scan, then streamed back in `maintenance_work_mem`-bounded
+    /// chunks for assignment and cell-order quantization. This
+    /// eliminates the two full-corpus f32 copies (`ivf_flat` +
+    /// `perm_flat`) that OOM-killed 1M+ IVF builds. `None` until the
+    /// first non-NULL row pins `dim` (the record stride needs `dim`).
+    ivf_spill: Option<CorpusSpill>,
     /// Reservoir sample of ROTATED vectors for k-means training,
     /// capped at `256 * lists` rows (FAISS's rule of thumb). Filled
     /// during the scan so we don't double-scan. Row-major
@@ -276,8 +441,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         chunk_rows: usize::MAX,
         heap_seen: 0,
         pool: std::ptr::null(),
-        ivf_flat: Vec::new(),
-        ivf_ids: Vec::new(),
+        ivf_spill: None,
         ivf_sample: Vec::new(),
         ivf_sample_count: 0,
         ivf_seen: 0,
@@ -309,6 +473,10 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // can be rotated into the clustering space during the scan.
         if state.lists > 0 {
             state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(d));
+            // Phase B-4: open the disk spill now that the record
+            // stride (8 + d*4) is known. The heap scan streams every
+            // accepted vector into it instead of `ivf_flat`.
+            state.ivf_spill = Some(CorpusSpill::new(d));
         }
     }
 
@@ -489,16 +657,24 @@ fn ivf_assign_block_rows(dim: usize) -> usize {
     by_mem.clamp(1, MAX_BLOCK_ROWS)
 }
 
-/// IVF-1 build finisher (`lists > 0`). Trains coarse centroids on the
-/// reservoir sample, single-assigns every accumulated vector to its
-/// nearest centroid (in the rotated space), computes a stable
-/// cell-contiguous permutation, applies it to the flat corpus + ids,
-/// runs the EXISTING quantize+pack on the permuted order, then
-/// persists codes/scales/ids (cell-contiguous) plus the coarse
-/// centroids (f32) and the cell directory via the v4 relfile path.
+/// IVF-1 build finisher (`lists > 0`). Phase B-4: an OUT-OF-CORE
+/// streaming build. Trains coarse centroids on the bounded reservoir
+/// sample, assigns every vector to its cell(s) in a streamed sweep
+/// over the disk spill (keeping only the per-row cell-id assignment
+/// array, not a corpus copy), computes the stable cell-contiguous
+/// permutation, then feeds the quantizer in cell order by re-reading
+/// the spill at the permuted offsets in `maintenance_work_mem`-bounded
+/// chunks. Persists codes/scales/ids (cell-contiguous) plus the
+/// coarse centroids (f32) and the cell directory via the v4 relfile
+/// path.
 ///
-/// Returns the number of vectors written. Consumes `state.ivf_flat` /
-/// `state.ivf_ids` / `state.ivf_sample`.
+/// The full f32 corpus is NEVER resident: it lives on `state.ivf_spill`
+/// and only a bounded row-block / read-chunk is in RAM at a time. The
+/// assignment, permutation (stable sort) and quantize order are
+/// identical to the in-RAM path, so the on-disk bytes are unchanged.
+///
+/// Returns the number of vectors written. Consumes `state.ivf_spill`
+/// and `state.ivf_sample`.
 ///
 /// # Safety
 ///
@@ -511,10 +687,17 @@ unsafe fn ivf_build_and_write(
     bit_width: u8,
     build_pool: Option<&rayon::ThreadPool>,
 ) -> usize {
-    let n_vectors = state.ivf_ids.len();
+    // The spill is the authoritative corpus now; its row count is
+    // the number of distinct heap vectors seen.
+    let spill = state
+        .ivf_spill
+        .take()
+        .expect("ivf_build_and_write: spill not opened");
+    let n_vectors = spill.rows;
 
     // Empty corpus: write an empty (flat-shaped) meta page. An IVF
     // index over zero rows has no cells; readers treat it as empty.
+    // (The spill drops here, unlinking the temp file.)
     if n_vectors == 0 {
         relfile::write_full(
             index_relation,
@@ -548,22 +731,16 @@ unsafe fn ivf_build_and_write(
     });
     drop(sample);
 
-    // 2. Assign every vector to its nearest centroid. The old path
-    //    did this per-vector (n scalar rotations of dim^2 each + n*
-    //    lists scalar sq_dist of dim each ~= 10^12 scalar FLOPs at
-    //    1M x 1024-d x 1024-lists). Both are now batched BLAS GEMMs:
-    //    rotate a row-block as `block @ R^T`, then assign the block
-    //    via a `V @ C^T` cross-term GEMM + ||c||^2 + top-2 scalar
-    //    tie-break (see ivf::rotate_corpus_into / batched_assign).
-    //
-    //    We chunk into row-blocks so the transient rotated matrix
-    //    stays bounded by maintenance_work_mem (at 1M x 1024 x 4B the
-    //    full rotated corpus is 4 GiB; a 64k-row block is ~256 MiB at
-    //    dim=1024). The block's normalised + rotated copy is built,
-    //    fed to assignment, then discarded -- we never hold two full
-    //    copies of the corpus. `flat` itself is the only full corpus
-    //    buffer alive here.
-    let flat = std::mem::take(&mut state.ivf_flat);
+    // 2. Assign every vector to its nearest centroid in a STREAMED
+    //    sweep over the disk spill. We read row-blocks (bounded by
+    //    maintenance_work_mem), GEMM-rotate + GEMM-assign each block,
+    //    and keep ONLY the per-row cell-id assignment array
+    //    (`Vec<Vec<u32>>`, ~tiny) -- never a corpus copy. The spill
+    //    stores the already-(optionally-)normalised vectors the heap
+    //    scan wrote; we re-normalise each block exactly as the
+    //    in-RAM path did (idempotent when normalise_on_insert is on,
+    //    and matching the old `flat` re-normalise when it's off) so
+    //    the assignment space is byte-identical.
     let block_rows = ivf_assign_block_rows(dim);
     // IVF-4a: soft assignment when assign_dups > 1. Cap at lists.
     let assign_dups = state.assign_dups.clamp(1, lists);
@@ -572,40 +749,58 @@ unsafe fn ivf_build_and_write(
     // exactly one cell, so the downstream soft permutation reduces to
     // the single permutation bit-for-bit (verified by
     // ivf_build_permutation_soft_expands_duplicates's M=1 case).
-    let assignments: Vec<Vec<u32>> = super::build_pool::install(build_pool, || {
+    let assignments: Vec<Vec<u32>> = {
         let mut assignments: Vec<Vec<u32>> = Vec::with_capacity(n_vectors);
-        // Reused per-block scratch: normalised block + rotated block.
+        // Reused per-block scratch: spill-read block + normalised
+        // block + rotated block + id sink (ids discarded in pass 2).
+        let mut raw_block = vec![0.0f32; block_rows * dim];
         let mut norm_block = vec![0.0f32; block_rows * dim];
         let mut rot_block = vec![0.0f32; block_rows * dim];
+        let mut id_sink = vec![0u64; block_rows];
         let mut start = 0usize;
         while start < n_vectors {
             let rows = (n_vectors - start).min(block_rows);
-            // Normalise each raw row into norm_block (matching the
-            // old per-vector `kernels::normalise_to_vec(raw)` so the
-            // sample space and the assignment space agree).
-            for r in 0..rows {
-                let src = &flat[(start + r) * dim..(start + r + 1) * dim];
-                kernels::normalise_into(
-                    &mut norm_block[r * dim..(r + 1) * dim],
-                    src,
-                );
-            }
-            let norm = &norm_block[..rows * dim];
-            let rot = &mut rot_block[..rows * dim];
-            ivf::rotate_corpus_into(norm, &rotation, rows, dim, rot);
-            let block_assign = ivf::batched_assign_soft(
-                rot,
-                &model.centroids,
+            // Sequential read of this block straight from the spill.
+            // Done on THIS thread (BufFile is not thread-safe and
+            // `*mut BufFile` is not Send), outside the pool.
+            spill.read_block(
+                start,
                 rows,
-                lists,
-                dim,
-                assign_dups,
+                &mut id_sink[..rows],
+                &mut raw_block[..rows * dim],
             );
+            // The parallel kernels (normalise -> rotate GEMM ->
+            // batched assign) run on the bounded build pool; their
+            // inputs are plain `&[f32]` (Send), so the spill never
+            // crosses into the pool.
+            let raw = &raw_block[..rows * dim];
+            let norm = &mut norm_block[..rows * dim];
+            let rot = &mut rot_block[..rows * dim];
+            let model_centroids = &model.centroids;
+            let rotation_ref = &rotation;
+            let block_assign = super::build_pool::install(build_pool, || {
+                // Normalise each row (matching the old per-vector
+                // re-normalise of the `flat` corpus so the sample
+                // space and the assignment space agree).
+                for r in 0..rows {
+                    let src = &raw[r * dim..(r + 1) * dim];
+                    kernels::normalise_into(&mut norm[r * dim..(r + 1) * dim], src);
+                }
+                ivf::rotate_corpus_into(norm, rotation_ref, rows, dim, rot);
+                ivf::batched_assign_soft(
+                    rot,
+                    model_centroids,
+                    rows,
+                    lists,
+                    dim,
+                    assign_dups,
+                )
+            });
             assignments.extend(block_assign);
             start += rows;
         }
         assignments
-    });
+    };
 
     // 3. Stable cell-contiguous permutation + cell directory. With
     //    soft assignment a vector's old index appears once per cell
@@ -615,50 +810,96 @@ unsafe fn ivf_build_and_write(
     let n_slots = permutation.len();
     debug_assert!(directory.validate_partition(n_slots as u64).is_ok());
     debug_assert!(n_slots >= n_vectors, "soft expansion never shrinks");
+    drop(assignments);
 
-    // 4. Apply the permutation to the flat corpus + ids. `perm[new] =
-    //    old_index`, so new_slot i takes old vector perm[i]. A
-    //    boundary vector's data + id is copied into each of its
-    //    slots; the repeated id in `perm_ids` is exactly what makes
-    //    `slot_to_id` non-injective — the scan dedups by id across
-    //    probed cells.
-    let ids = std::mem::take(&mut state.ivf_ids);
-    let mut perm_flat = vec![0.0f32; n_slots * dim];
-    let mut perm_ids = vec![0u64; n_slots];
-    for new_slot in 0..n_slots {
-        let old_idx = permutation[new_slot] as usize;
-        perm_flat[new_slot * dim..(new_slot + 1) * dim]
-            .copy_from_slice(&flat[old_idx * dim..(old_idx + 1) * dim]);
-        perm_ids[new_slot] = ids[old_idx];
-    }
-    drop(flat);
-    drop(ids);
-
-    // 5. Run the EXISTING quantize+pack on the permuted (possibly
-    //    expanded) order. The fine quantizer doesn't care about
-    //    order. CRITICAL: `IdMapIndex::add_with_ids` enforces UNIQUE
-    //    ids, but soft assignment (assign_dups > 1) puts a boundary
-    //    vector's real external id in multiple slots. So we build the
-    //    IdMapIndex with SYNTHETIC unique slot-ids (0..n_slots) and
+    // 4 + 5. Build `perm_ids` (the real external ids in cell order,
+    //    with soft-assign duplicates) from the spill's id column, and
+    //    feed the quantizer in cell order by re-reading the spill at
+    //    the permuted offsets in bounded chunks. We NEVER materialise
+    //    `perm_flat` whole: only one `chunk_rows`-row block of
+    //    cell-ordered vectors is resident at a time. `add_with_ids`
+    //    is incremental and order-preserving, so feeding the slots in
+    //    contiguous chunks (synthetic ids start_slot..start_slot+rows)
+    //    produces byte-identical packed_codes/scales to one big add.
+    //
+    //    CRITICAL: `IdMapIndex::add_with_ids` enforces UNIQUE ids, but
+    //    soft assignment puts a boundary vector's real id in multiple
+    //    slots. So we feed SYNTHETIC unique slot-ids (0..n_slots) and
     //    persist the REAL external ids (`perm_ids`, with duplicates)
-    //    into the relfile ids chain separately (below). The scan
-    //    reconstructs via `ReadOnlyIndex::from_prepared_parts`, which
-    //    does NOT build the id_to_slot HashMap (the cold-scan lazy
-    //    optimisation) and therefore tolerates duplicate ids in
-    //    slot_to_id; `search` returns slots mapped through the
-    //    persisted real ids, and the scan's returned-TID dedup
-    //    collapses a boundary vector found via two probed cells.
-    //    For single assignment (assign_dups == 1) perm_ids has no
-    //    duplicates, so this is behaviour-identical to before.
-    let synthetic_ids: Vec<u64> = (0..n_slots as u64).collect();
+    //    into the relfile ids chain separately (below). The scan maps
+    //    slots through the persisted real ids and dedups returned
+    //    TIDs across probed cells. For assign_dups == 1 perm_ids has
+    //    no duplicates, behaviour-identical to before.
+    let mut perm_ids = vec![0u64; n_slots];
     let mut idx = IdMapIndex::new(dim, bit_width as usize)
         .expect("turbovec ambuild (ivf): invalid (dim, bit_width)");
-    super::build_pool::install(build_pool, || {
-        idx.add_with_ids(&perm_flat, &synthetic_ids)
-            .expect("turbovec ambuild (ivf): add_with_ids failed")
-    });
-    drop(perm_flat);
-    drop(synthetic_ids);
+    // Bounded cell-order read chunk for the streamed feed: same
+    // sizing as the assign block (mwm-bounded). One chunk of f32
+    // (chunk_rows * dim * 4) + the growing QUANTIZED packed_codes
+    // are the only large RAM terms; the full f32 corpus stays on the
+    // spill.
+    //
+    // DETERMINISM / chunk-invariance: turbovec locks the TQ+
+    // per-coord calibration on the FIRST `add_with_ids` batch (it
+    // fits empirical quantiles over that batch, then reuses them for
+    // all later adds). So the first batch's *size* is part of the
+    // on-disk bytes. To keep the relfile byte-identical regardless of
+    // `maintenance_work_mem`, we prime calibration with a FIXED-size
+    // cell-ordered prefix (`IVF_CALIB_ROWS`, independent of mwm) as
+    // the first add, then stream the remainder in mwm-bounded chunks.
+    // The prefix is deterministic (cell-order + stable sort), so the
+    // calibration is a fixed function of (table, lists, assign_dups)
+    // alone -- not of the chunk size. The calibration buffer is
+    // bounded (IVF_CALIB_ROWS * dim * 4).
+    //
+    // `IVF_CALIB_ROWS` is comfortably above turbovec's
+    // `TQPLUS_MIN_SAMPLES` (1000), so the prefix yields a stable
+    // calibration; capped so the priming buffer stays small even at
+    // large dim.
+    const IVF_CALIB_ROWS: usize = 16 * 1024;
+    let chunk_rows = block_rows;
+    let calib_rows = IVF_CALIB_ROWS.min(n_slots);
+    // First buffer must hold the larger of the calibration prefix and
+    // a normal stream chunk.
+    let first_cap = calib_rows.max(chunk_rows);
+    {
+        let mut chunk_flat = vec![0.0f32; first_cap * dim];
+        let mut chunk_ids = vec![0u64; first_cap];
+        let mut new_slot = 0usize;
+        while new_slot < n_slots {
+            // First batch is the fixed calibration prefix; subsequent
+            // batches are mwm-bounded stream chunks.
+            let want = if new_slot == 0 { calib_rows } else { chunk_rows };
+            let rows = (n_slots - new_slot).min(want);
+            // Random-access reads of this chunk's cell-ordered
+            // vectors + real ids from the spill, on THIS thread.
+            for r in 0..rows {
+                let old_idx = permutation[new_slot + r] as usize;
+                let mut id = 0u64;
+                spill.read_one(
+                    old_idx,
+                    &mut id,
+                    &mut chunk_flat[r * dim..(r + 1) * dim],
+                );
+                perm_ids[new_slot + r] = id;
+                // Synthetic contiguous slot id for the IdMapIndex.
+                chunk_ids[r] = (new_slot + r) as u64;
+            }
+            // The encode fan-out runs on the bounded build pool; its
+            // inputs are plain slices (Send).
+            let flat_chunk = &chunk_flat[..rows * dim];
+            let id_chunk = &chunk_ids[..rows];
+            super::build_pool::install(build_pool, || {
+                idx.add_with_ids(flat_chunk, id_chunk)
+                    .expect("turbovec ambuild (ivf): add_with_ids failed");
+            });
+            new_slot += rows;
+        }
+    }
+    // The spill is no longer needed; drop it now (unlinks the temp
+    // file) before the prepare_eager + write, freeing disk early.
+    drop(spill);
+    drop(permutation);
 
     let built = idx.slot_to_id().len();
     debug_assert_eq!(built, n_slots);
@@ -762,6 +1003,8 @@ unsafe extern "C-unwind" fn build_callback(
             if state.lists > 0 && state.ivf_rotation.is_none() {
                 state.ivf_rotation =
                     Some(turbovec::rotation::make_rotation_matrix(row_dim));
+                // Phase B-4: open the disk spill (stride needs dim).
+                state.ivf_spill = Some(CorpusSpill::new(row_dim));
             }
         }
         _ => {}
@@ -769,21 +1012,25 @@ unsafe extern "C-unwind" fn build_callback(
 
     let id = pgrx::itemptr::item_pointer_to_u64(*tid);
 
-    // IVF-1 build path (`lists > 0`): we can't flush incrementally
-    // — the cell-contiguous permutation needs the whole flat corpus
-    // before quantizing. Accumulate the (optionally normalised) flat
-    // vector + id, and reservoir-sample the ROTATED vector for
-    // k-means. The permute + quantize + IVF persist happens at
-    // end-of-scan in `ambuild`.
+    // IVF-1 build path (`lists > 0`): Phase B-4 spills each
+    // (optionally normalised) vector + id to the disk-backed
+    // `CorpusSpill` instead of accumulating the full f32 corpus in
+    // RAM. We also reservoir-sample the ROTATED vector for k-means.
+    // The train + streamed assign + cell-order quantize + IVF persist
+    // happens at end-of-scan in `ambuild` -> `ivf_build_and_write`,
+    // re-reading the spill in bounded chunks.
     if state.lists > 0 {
+        let spill = state
+            .ivf_spill
+            .as_mut()
+            .expect("turbovec ambuild (ivf): spill not opened before first row");
         if state.normalise {
             let mut buf = vec![0.0_f32; row_dim];
             kernels::normalise_into(&mut buf, value.as_slice());
-            state.ivf_flat.extend_from_slice(&buf);
+            spill.push(id, &buf);
         } else {
-            state.ivf_flat.extend_from_slice(value.as_slice());
+            spill.push(id, value.as_slice());
         }
-        state.ivf_ids.push(id);
         // Reservoir sample always rotates the L2-normalised vector
         // (cells live in the rotated unit-sphere space, matching
         // turbovec's encode), regardless of the `normalise` GUC.

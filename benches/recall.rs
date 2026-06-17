@@ -144,7 +144,7 @@ fn run_recall(n: usize, dim: usize, bit_width: usize, n_queries: usize) -> Repor
     let queries = random_corpus(n_queries, dim, 0xBADC0DE);
 
     // Build the index.
-    let mut idx = IdMapIndex::new(dim, bit_width);
+    let mut idx = IdMapIndex::new(dim, bit_width).expect("IdMapIndex::new (dim, bit_width)");
     let flat: Vec<f32> = corpus.iter().flat_map(|v| v.iter().copied()).collect();
     let ids: Vec<u64> = (0..corpus.len() as u64).collect();
     idx.add_with_ids(&flat, &ids).expect("add_with_ids");

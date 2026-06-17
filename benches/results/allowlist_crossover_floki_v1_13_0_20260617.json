@@ -1,0 +1,45 @@
+{
+  "benchmark": "allowlist selectivity crossover -- in-kernel pushdown vs naive post-filter (Phase C / C-2)",
+  "schema_version": 1,
+  "date": "2026-06-17",
+  "pg_turbovec_version": "1.13.0",
+  "claim_under_test": "a selective allowlist makes turbovec.knn(..., allowed) CHEAPER, not more expensive, because search_with_mask skips 32-vector blocks with zero allowed slots before any LUT work",
+  "path_measured": "turbovec::IdMapIndex::search_with_allowlist (byte-identical kernel path to src/knn.rs::run_search; knn() always builds a FLAT IdMapIndex, no IVF cells, so this bench is faithful to the shipped allowlist path)",
+  "baseline": "naive post-filter: unfiltered search at k*oversample candidates, then drop ids not in the allowed set, keep top-k (the pgvector-style post-filter a user would otherwise write in SQL)",
+  "host": {
+    "name": "floki (local NixOS worktree /tmp/pgtv-c)",
+    "cpu": "Intel(R) Core(TM) Ultra 7 258V",
+    "simd": "avx2 (compiled with -C target-cpu=native; AVX2 path exercised)",
+    "cores": 8,
+    "os": "NixOS"
+  },
+  "software": {
+    "turbovec_crate": "fork rev d72c29c (search.rs BLOCKS_SKIPPED_BY_MASK counter present)",
+    "rustflags": "-C target-cpu=native (AVX2)"
+  },
+  "corpus": {
+    "rows": 300000,
+    "dim": 256,
+    "distribution": "random unit vectors (seed 0xC0FFEE)",
+    "bit_width": 4
+  },
+  "params": {
+    "k": 10,
+    "baseline_oversample": 4.0,
+    "iters": 50,
+    "metric": "p50 latency, microseconds"
+  },
+  "notes": [
+    "Absolute numbers are host-dependent. The SHAPE is the point: allowlist p50 decreases monotonically as the allowlist tightens, while the naive post-filter is flat (it always scans the whole corpus at k*oversample regardless of selectivity).",
+    "blocks_skipped_total is the cumulative turbovec::search::BLOCKS_SKIPPED_BY_MASK counter over all `iters` queries at that fraction -- direct evidence the in-kernel block short-circuit fires.",
+    "Crossover (allowlist beats naive post-filter) lands at roughly 7-10% selectivity on this host. Below that the allowlist wins and the win grows as the filter tightens.",
+    "At the full-mask end (fraction 1.0) the allowlist path is ~2.6x SLOWER than the unfiltered baseline: building+checking a 300k-bit mask with zero blocks skipped is pure overhead. Use an allowlist only when it is selective; for non-selective filters prefer a partial index or plain ANN. See docs/FILTERING.md."
+  ],
+  "points": [
+    { "fraction": 1.000, "allowed": 300000, "allowlist_p50_us": 17860.3, "baseline_p50_us": 6759.0, "blocks_skipped_total": 0,      "returned": 10, "allowlist_speedup_vs_baseline": 0.38 },
+    { "fraction": 0.500, "allowed": 150000, "allowlist_p50_us": 14606.1, "baseline_p50_us": 6762.6, "blocks_skipped_total": 0,      "returned": 10, "allowlist_speedup_vs_baseline": 0.46 },
+    { "fraction": 0.100, "allowed": 30000,  "allowlist_p50_us": 8894.0,  "baseline_p50_us": 7022.0, "blocks_skipped_total": 15650,  "returned": 10, "allowlist_speedup_vs_baseline": 0.79 },
+    { "fraction": 0.010, "allowed": 3000,   "allowlist_p50_us": 2719.1,  "baseline_p50_us": 7094.8, "blocks_skipped_total": 338200, "returned": 10, "allowlist_speedup_vs_baseline": 2.61 },
+    { "fraction": 0.001, "allowed": 300,    "allowlist_p50_us": 481.5,   "baseline_p50_us": 7082.1, "blocks_skipped_total": 454050, "returned": 10, "allowlist_speedup_vs_baseline": 14.71 }
+  ]
+}

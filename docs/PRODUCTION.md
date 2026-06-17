@@ -278,6 +278,35 @@ bounded memory).
 
 ---
 
+## Filtering
+
+Three working metadata-filter patterns; pick by filter shape. Full
+guide, decision matrix, and the measured allowlist crossover:
+[`docs/FILTERING.md`](FILTERING.md).
+
+- **Partial index** — the default for known, low-cardinality filters
+  (`CREATE INDEX ... USING turbovec (...) WHERE tenant_id = X`). PG
+  pushes the predicate natively; the index is smaller and the scan is
+  exact. No GUC needed.
+- **In-kernel allowlist** — `turbovec.knn(..., allowed bigint[])` for
+  a selective per-query id set. The kernel skips 32-vector blocks with
+  zero allowed slots, so a selective filter gets *cheaper* (crossover
+  ~7–10% selectivity on AVX2). Flat-only (no IVF); use it when the
+  filter is genuinely selective — a non-selective allowlist is slower
+  than plain ANN.
+- **Iterative scan** — `turbovec.iterative_scan = relaxed_order` +
+  `turbovec.max_scan_tuples` for the `ORDER BY emb <=> q LIMIT k` AM
+  path with a moderately selective `WHERE`. The AM widens the
+  candidate set so the executor's post-filter still returns `k`,
+  bounded by `max_scan_tuples`.
+
+**Limitation:** there is no true in-traversal pushdown on the `ORDER
+BY` AM path — the index returns distance-ranked candidates and the
+executor rechecks the `WHERE` (the index stores only vector codes +
+TID, no payload columns). See [`docs/FILTERING.md`](FILTERING.md) § 6.
+
+---
+
 ## Replication and standbys
 
 `pg_turbovec` indexes are crash-safe and replicate cleanly:

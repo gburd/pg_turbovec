@@ -95,6 +95,10 @@ harness = false
 name = "recall_vs_pgvector"
 harness = false
 
+[[bench]]
+name = "allowlist_crossover"
+harness = false
+
 [profile.dev]
 panic = "unwind"
 

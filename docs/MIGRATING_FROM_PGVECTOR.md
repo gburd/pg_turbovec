@@ -116,8 +116,14 @@ ORDER  BY k.score DESC;
 ### Filtered ANN
 
 `pgvector` does post-filter: it asks the index for `k * 10` rows
-and discards those that don't match the WHERE. `pg_turbovec`
-pushes the filter into the SIMD kernel:
+and discards those that don't match the WHERE. `pg_turbovec` gives
+you **three patterns** ([full guide: `docs/FILTERING.md`](FILTERING.md)):
+a **partial index** (`CREATE INDEX ... WHERE tenant_id = X`) for
+known filter values, the **in-kernel allowlist** `turbovec.knn(...,
+allowed)` for selective per-query id sets, and **iterative scan**
+(`turbovec.iterative_scan = relaxed_order`) for the normal `ORDER
+BY ... LIMIT` ergonomics. The allowlist is the one shown here — it
+pushes the id set into the SIMD kernel:
 
 ```sql
 SELECT k.id
@@ -131,8 +137,12 @@ ORDER BY k.score DESC;
 ```
 
 The kernel short-circuits 32-vector blocks containing zero
-allowed slots before any LUT work, so selective filters get
-*cheaper*, not more expensive.
+allowed slots before any LUT work, so a **selective** allowlist
+gets *cheaper*, not more expensive (measured crossover at ~7–10%
+selectivity — see [`docs/FILTERING.md`](FILTERING.md) § 3). The
+allowlist path is flat-only (no IVF) and is the `turbovec.knn`
+function, not the `ORDER BY` operator; for known filter values a
+partial index is usually the better default.
 
 ## 5. Aggregates
 
@@ -157,7 +167,7 @@ on corpora ≥ 1 M rows.
 | Storage per 1536-dim row | 6 144 B  | ≈ 388 B (4-bit) | `pg_turbovec` is ~16× smaller    |
 | Distance ops             | `<-> <#> <=> <+>` | `<-> <#> <=> <+>` | dispatch by operand type        |
 | Index AMs                | `ivfflat`, `hnsw` | `turbovec` | one AM, two opclasses (IP, cosine) |
-| Filtered ANN             | post-filter | in-kernel allowlist | kernel short-circuits empty blocks |
+| Filtered ANN             | post-filter | partial idx / allowlist `knn()` / iterative scan | three patterns — see [`docs/FILTERING.md`](FILTERING.md) |
 | Halfvec / sparsevec      | yes      | no          | not on roadmap                         |
 | `subvector`              | yes      | yes         | identical SQL signature                |
 | JSONB casts              | no       | yes         | `vec_to_jsonb`, `jsonb_to_vec` |

@@ -12,8 +12,9 @@ your data. Supports:
   smaller than `pgvector` at 4-bit
 - L2 distance (`<->`), inner product (`<#>`), cosine distance (`<=>`),
   L1 distance (`<+>`)
-- in-kernel filtered ANN - push your `WHERE` predicate into the SIMD
-  scoring loop so selective filters get *cheaper*, not more expensive
+- filtered / hybrid ANN — partial index, **in-kernel allowlist**
+  (a selective filter gets *cheaper*, not more expensive), or
+  iterative scan ([guide](docs/FILTERING.md))
 - pgvector-compatible function names (`to_vec`, `array_to_vec`,
   `subvector`, `vector_dims`, `vector_norm`, `inner_product`,
   `l2_distance`, `cosine_distance`, `l1_distance`)
@@ -354,10 +355,16 @@ The `turbovec` AM supports the full PostgreSQL index lifecycle:
 
 ### Filtered (hybrid) search
 
-`pg_turbovec` pushes `WHERE` predicates into the SIMD scoring loop -
-selective filters get cheaper, not more expensive. The kernel
-short-circuits 32-vector blocks whose entire allowed-slot mask is
-empty before any LUT lookup.
+Three patterns, one decision matrix — full guide in
+[`docs/FILTERING.md`](docs/FILTERING.md): a **partial index**
+(`CREATE INDEX ... WHERE tenant_id = X`) for known filter values,
+the **in-kernel allowlist** `turbovec.knn(..., allowed)` for
+selective per-query id sets, and **iterative scan** for the normal
+`ORDER BY ... LIMIT` ergonomics. The allowlist (shown below) pushes
+the id set into the SIMD scoring loop — a *selective* filter gets
+cheaper, not more expensive (the kernel short-circuits 32-vector
+blocks whose allowed-slot mask is empty before any LUT lookup;
+measured crossover at ~7–10% selectivity).
 
 ```sql
 -- Top-10 nearest, restricted to a tenant or topic:
@@ -560,6 +567,10 @@ bridge is the supported interop path.
 - [`docs/MIGRATING_FROM_PGVECTOR.md`](docs/MIGRATING_FROM_PGVECTOR.md)
   - hands-on migration with query rewrite tables and a feature
   comparison.
+- [`docs/FILTERING.md`](docs/FILTERING.md) - **filtering & hybrid
+  search guide**: partial index vs in-kernel allowlist `knn()` vs
+  iterative scan, a decision matrix, and the measured allowlist
+  selectivity crossover.
 - [`docs/INDEXAM.md`](docs/INDEXAM.md) - implementation guide for
   the `turbovec` index access method.
 - [`docs/RECALL.md`](docs/RECALL.md) - recall benchmark methodology

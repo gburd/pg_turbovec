@@ -107,7 +107,7 @@ fn build_index(n: usize, dim: usize, bit_width: usize, seed: u64) -> IdMapIndex 
         flat.extend_from_slice(&unit);
         ids.push(i as u64);
     }
-    let mut idx = IdMapIndex::new(dim, bit_width);
+    let mut idx = IdMapIndex::new(dim, bit_width).expect("IdMapIndex::new (dim, bit_width)");
     idx.add_with_ids(&flat, &ids).expect("add_with_ids");
     idx
 }

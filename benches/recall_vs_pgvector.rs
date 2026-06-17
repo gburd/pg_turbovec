@@ -304,7 +304,7 @@ fn main() {
     for &bw in &bit_widths {
         eprintln!("building IdMapIndex at bit_width={}", bw);
         let t_build = Instant::now();
-        let mut idx = IdMapIndex::new(dim, bw);
+        let mut idx = IdMapIndex::new(dim, bw).expect("IdMapIndex::new (dim, bit_width)");
         let ids: Vec<u64> = (0..n_corpus as u64).collect();
         idx.add_with_ids(&corpus, &ids).expect("add_with_ids");
         idx.prepare();

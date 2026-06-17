@@ -18,8 +18,10 @@
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
 //! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
 //! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
+//! | `turbovec.allowlist`             | str  | `""`    | CSV of bigint ids |
 
 use core::ffi::CStr;
+use std::ffi::CString;
 
 use pgrx::guc::PostgresGucEnum;
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
@@ -245,6 +247,31 @@ pub static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(20_000);
 /// `parallel_build_matches_serial_query` `#[pg_test]`.
 pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+/// Phase C operator-path allowlist: a pre-materialized id-set the
+/// user `SET`s before an `ORDER BY emb <=> q LIMIT k` query to
+/// restrict the scan to those rows — the operator-path analogue of
+/// `turbovec.knn(..., allowed => ...)`. CSV of **heap TIDs** encoded
+/// as bigint (`(block << 32) | offset`, the
+/// `pgrx::itemptr::item_pointer_to_u64` layout). The index AM keys
+/// every vector by its heap TID (it never sees a heap `id` column),
+/// so the allowlist is in TID space; callers materialize it from
+/// `ctid` (see docs/FILTERING.md § 3.5). Whitespace is tolerated;
+/// empty tokens are ignored. Empty / unset (the default `""`) =
+/// unfiltered = exact prior behaviour, zero hot-path cost.
+///
+/// The scan parses this ONCE per scan into a `HashSet<u64>` and ANDs
+/// a by-slot bool into the slot mask before `search_masked`, so the
+/// blocked kernel's 32-vector block-skip applies (the in-kernel
+/// pushdown, on BOTH flat and IVF indexes; IVF-aware: the skip is
+/// scoped to probed cells AND the allowlist). This is still a
+/// pre-materialized id-set channel, NOT arbitrary-`WHERE` pushdown:
+/// the AM never interprets scan keys. A non-integer token ERRORs the
+/// scan clearly. Modelled as a string GUC (pgrx 0.17
+/// `define_string_guc`), `GucContext::Userset` so it's a per-session
+/// knob `SET`/`RESET` around the query.
+pub static ALLOWLIST: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
 /// Called from `_PG_init`. Safe to call exactly once per backend.
@@ -417,6 +444,17 @@ pub fn register_gucs() {
         &BUILD_PARALLELISM,
         0,
         128,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c_str(b"turbovec.allowlist\0"),
+        c_str(b"Per-query allowlist of heap TIDs for ORDER BY scans (CSV of bigints; empty = unfiltered).\0"),
+        c_str(
+            b"A pre-materialized id-set the operator-path scan restricts to, the ORDER BY analogue of turbovec.knn(..., allowed). The index AM keys vectors by heap TID (it never sees a heap id column), so the allowlist is a CSV of heap TIDs encoded as bigint via (block << 32) | offset (the pgrx item_pointer_to_u64 layout); build it from ctid. SET it before an ORDER BY emb <=> q LIMIT k query and the scan returns only those rows, with the same in-kernel 32-vector-block short-circuit pushdown the knn() function gets, on both flat and IVF indexes (IVF-aware: scoped to probed cells AND the allowlist). Whitespace is tolerated; empty tokens are ignored; a non-integer token ERRORs the scan. Empty / unset (the default) is unfiltered with zero added cost. This is NOT arbitrary-WHERE pushdown: the AM never interprets scan keys, it only honours this pre-materialized TID set. RESET turbovec.allowlist after the query.\0",
+        ),
+        &ALLOWLIST,
         GucContext::Userset,
         GucFlags::default(),
     );

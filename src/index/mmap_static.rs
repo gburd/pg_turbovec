@@ -174,6 +174,27 @@ impl StaticRegionsMap {
         Some(Self { inner: mmap })
     }
 
+    /// Public (crate) opener for the out-of-core IVF path: map the
+    /// relfile RO so [`Self::gather_slot_ranges`] can fault the
+    /// probed cells' code pages on demand. Same `MAP_PRIVATE`
+    /// read-only mapping as the static-regions path; the caller
+    /// colocates the returned map inside the `OocIvfIndex` so it
+    /// lives for the cache entry's lifetime.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold a relation reference for the duration of the
+    /// call; the mapping is independent of any PG buffer pin.
+    pub(crate) unsafe fn open_for_ooc(rel: pg_sys::Relation) -> Option<Self> {
+        Self::open(rel)
+    }
+
+    /// Return the data region of block `blkno`, public for the OOC
+    /// path's sanity re-decode of the meta page off the mapping.
+    pub(crate) fn page_data_pub(&self, blkno: u32) -> Option<&[u8]> {
+        self.page_data(blkno)
+    }
+
     /// Return the data region of block `blkno` (the bytes after
     /// the 24-byte PG page header). Returns `None` if the block
     /// is past the mapped file's tail.
@@ -186,6 +207,64 @@ impl StaticRegionsMap {
             return None;
         }
         Some(&self.inner[off..off + PAYLOAD_BYTES])
+    }
+
+    /// Gather a set of contiguous slot ranges out of a
+    /// uniform-stride chain into one compact, gapless `Vec<u8>`,
+    /// copying ONLY the requested slots' bytes off the mmap. This
+    /// is the out-of-core (Phase B-1) primitive: instead of
+    /// reading the whole `n_vectors * stride` chain (`read_chain`),
+    /// it touches only the pages backing the probed cells, so the
+    /// resident set is bounded by the gathered ranges (the OS page
+    /// cache holds the faulted-in pages; cold ones fault on demand).
+    ///
+    /// `ranges` are `(slot_start, slot_count)` pairs into the chain
+    /// (a cell's contiguous `[code_offset, code_offset + n_vectors)`
+    /// range from the cell directory). `stride` is the per-slot byte
+    /// width; `rows_per_page` the number of slots per chain page.
+    /// The output is the concatenation of each range's bytes in the
+    /// order given, length `sum(count) * stride`. Returns `None` if
+    /// any range runs off the end of the mapping (corrupt index or
+    /// post-truncate race) so the caller can fall back to the
+    /// whole-index load path.
+    pub(crate) fn gather_slot_ranges(
+        &self,
+        first_blkno: u32,
+        stride: u32,
+        rows_per_page: u32,
+        ranges: &[(u64, u64)],
+    ) -> Option<Vec<u8>> {
+        let stride = stride as usize;
+        let rpp = rows_per_page as usize;
+        if stride == 0 || rpp == 0 {
+            return Some(Vec::new());
+        }
+        let total_slots: u64 = ranges.iter().map(|&(_, c)| c).sum();
+        let mut out = Vec::<u8>::with_capacity((total_slots as usize).checked_mul(stride)?);
+        for &(start, count) in ranges {
+            let mut slot = start;
+            let end = start.checked_add(count)?;
+            while slot < end {
+                // Page that holds this slot, and the slot's offset
+                // within that page's payload.
+                let page_idx = slot / rpp as u64;
+                let in_page = (slot % rpp as u64) as usize;
+                let blkno = first_blkno.checked_add(u32::try_from(page_idx).ok()?)?;
+                let payload = self.page_data(blkno)?;
+                // How many slots remain on this page (don't run past
+                // its `rows_per_page` window or the requested range).
+                let slots_left_on_page = (rpp - in_page) as u64;
+                let take_slots = slots_left_on_page.min(end - slot) as usize;
+                let byte_off = in_page * stride;
+                let byte_len = take_slots * stride;
+                if byte_off + byte_len > payload.len() {
+                    return None;
+                }
+                out.extend_from_slice(&payload[byte_off..byte_off + byte_len]);
+                slot += take_slots as u64;
+            }
+        }
+        Some(out)
     }
 
     /// Walk a chain starting at `first_blkno` with payload

@@ -110,6 +110,13 @@ pub(crate) struct ScanOpaque {
     /// diverged from the cell directory) — all of which use the flat
     /// `arc.search` path unchanged.
     ivf: Option<IvfScanCtx>,
+    /// Phase C operator-path allowlist: the parsed `turbovec.allowlist`
+    /// id-set for this scan, or `None` when the GUC is empty/unset
+    /// (the unfiltered hot path — zero added work). Parsed ONCE on
+    /// the first `amgettuple` (not re-parsed per refill) and reused
+    /// for every (re)built mask, so the slot-bool build is the only
+    /// per-search cost and only when an allowlist is active.
+    allow: Option<HashSet<u64>>,
 }
 
 /// IVF coarse-search state cached across an iterative scan so a
@@ -245,6 +252,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
             n_live: 0,
             emitted: HashSet::new(),
             ivf: None,
+            allow: None,
         },
     );
 
@@ -305,6 +313,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         (*opaque).current_k = 0;
         (*opaque).n_live = 0;
         (*opaque).emitted.clear();
+        (*opaque).allow = None;
         return;
     }
     let order = orderbys.add(0);
@@ -334,6 +343,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
     (*opaque).n_live = 0;
     (*opaque).emitted.clear();
     (*opaque).ivf = None;
+    (*opaque).allow = None;
 }
 
 /// `amgettuple`: on first call run the search and cache results;
@@ -532,13 +542,19 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let k_oversampled = (k_pref as f64 * oversample).ceil() as usize;
         let k = k_oversampled.min(n_live.max(1)).max(1);
 
+        // Phase C operator-path allowlist: parse turbovec.allowlist
+        // ONCE per scan (not per refill). None = unfiltered hot path.
+        (*opaque).allow = parse_allowlist();
+
         // IVF-2: if this is an IVF index (has_ivf() == true, i.e.
         // lists > 0 AND the v4 cell metadata is present — NOT a
         // vacuum-degraded index, which blanks those fields), do the
         // coarse search and build a cell-restriction mask. The mask
         // is true for exactly the slots in the `probes` nearest cells;
         // turbovec's blocked kernel skips the contiguous unprobed
-        // ranges. Falls back to the flat path when:
+        // ranges. The Phase C allowlist (when active) is ANDed into
+        // that mask so the block-skip also drops blocks with no
+        // allowed slot. Falls back to the flat path when:
         //   - the index is flat or vacuum-degraded (has_ivf() false),
         //   - the handle is Mutable (post-insert / dirty-xact mirror,
         //     whose slot order has diverged from the cell directory —
@@ -549,6 +565,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             &(*opaque).query,
             k,
             n_live,
+            (*opaque).allow.as_ref(),
         );
         let (scores, ids) = match ivf_results {
             Some((ctx, scores, ids)) => {
@@ -557,7 +574,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             }
             None => {
                 (*opaque).ivf = None;
-                arc.search(&(*opaque).query, k)
+                flat_search(&arc, &(*opaque).query, k, (*opaque).allow.as_ref())
             }
         };
         (*opaque).arc = Some(arc);
@@ -895,6 +912,7 @@ unsafe fn ivf_setup_and_search(
     query: &[f32],
     k: usize,
     n_live: usize,
+    allow: Option<&HashSet<u64>>,
 ) -> Option<(IvfScanCtx, Vec<f32>, Vec<u64>)> {
     // Phase B-1/B-2: out-of-core cell-scoped path. The handle owns
     // the cached centroids / directory / rotation / codebook + the
@@ -904,7 +922,7 @@ unsafe fn ivf_setup_and_search(
     // ranking over the same codes (just gathered into a compact
     // buffer instead of masked in place).
     if let Some(ooc) = arc.ooc() {
-        return ivf_setup_and_search_ooc(scan, &ooc, query, k);
+        return ivf_setup_and_search_ooc(scan, &ooc, query, k, allow);
     }
 
     let meta = relfile::read_meta((*scan).indexRelation)?;
@@ -951,6 +969,12 @@ unsafe fn ivf_setup_and_search(
     // Mutable handle (slot order diverged) → flat fallback.
     let mut mask = directory.probe_mask(&probed, n_live);
     apply_tombstones(&mut mask, &tombstones);
+    // Phase C: AND the operator-path allowlist into the probe mask
+    // (alongside tombstones) BEFORE search_masked, so the blocked
+    // kernel's 32-vector block-skip drops blocks with no
+    // probed+allowed+live slot — the real latency win on a selective
+    // allowlist. Built only when an allowlist is active.
+    apply_allowlist(&mut mask, arc, allow);
     let (scores, ids) = arc.search_masked(query, k, &mask)?;
     let ctx = IvfScanCtx {
         centroids,
@@ -988,6 +1012,7 @@ unsafe fn ivf_setup_and_search_ooc(
     ooc: &std::sync::Arc<cache::OocIvfIndex>,
     query: &[f32],
     k: usize,
+    allow: Option<&HashSet<u64>>,
 ) -> Option<(IvfScanCtx, Vec<f32>, Vec<u64>)> {
     let meta = relfile::read_meta((*scan).indexRelation)?;
     let lists = ooc.lists();
@@ -1001,7 +1026,12 @@ unsafe fn ivf_setup_and_search_ooc(
     let probes = (crate::guc::PROBES.get() as usize).clamp(1, lists);
     let probed = ooc.coarse_probe_cells(&unit, probes);
 
-    let (scores, ids) = ooc.search_ooc((*scan).indexRelation, query, k, &probed, &tombstones)?;
+    // Phase C: the allowlist is masked INSIDE search_ooc (it builds a
+    // compact-slot mask over the gathered cells and pushes it into
+    // the blocked kernel, so the block-skip applies on the OOC path
+    // too — not just a post-filter).
+    let (scores, ids) =
+        ooc.search_ooc((*scan).indexRelation, query, k, &probed, &tombstones, allow)?;
     let ctx = IvfScanCtx {
         // Unused on the OOC path (the OOC index holds its own copies);
         // kept empty to avoid duplicating the O(lists*dim) centroids.
@@ -1037,6 +1067,147 @@ fn apply_tombstones(mask: &mut [bool], tombstones: &[u8]) {
             *m = false;
         }
     }
+}
+
+/// AND the Phase C operator-path allowlist into a (probe+tombstone)
+/// slot mask in place. A `None` allowlist (the unfiltered hot path)
+/// leaves the mask untouched and costs nothing. For an allowlist over
+/// a [`cache::ScanHandle::ReadOnly`] handle, clear every mask slot
+/// whose external id is not in the allowlist; the blocked kernel then
+/// skips blocks with no surviving slot. The `arc.allow_slot_mask`
+/// returns `None` for non-ReadOnly handles (Mutable / Ooc), which the
+/// IVF path never reaches with a mask (Mutable falls back to flat;
+/// Ooc masks inside `search_ooc`).
+#[inline]
+fn apply_allowlist(mask: &mut [bool], arc: &cache::ScanHandle, allow: Option<&HashSet<u64>>) {
+    let Some(set) = allow else {
+        return;
+    };
+    let Some(allow_slot) = arc.allow_slot_mask(set) else {
+        return;
+    };
+    for (m, a) in mask.iter_mut().zip(allow_slot.iter()) {
+        *m = *m && *a;
+    }
+}
+
+/// Parse the `turbovec.allowlist` GUC (a CSV of heap TIDs) into a
+/// `HashSet<u64>` for this scan (Phase C operator-path allowlist).
+///
+/// The index AM keys every vector by its heap **TID** (the
+/// `pgrx::itemptr::item_pointer_to_u64` encoding, `(block << 32) |
+/// offset`), not by any heap `id` column — the index only ever sees
+/// item pointers. So the allowlist is a set of those TID-encoded
+/// bigints; the scan ANDs them into the slot mask by matching against
+/// the slot→TID table the read path keeps. Callers build the set from
+/// `ctid` (see docs/FILTERING.md § 3.5 for the SQL).
+///
+/// Returns `None` when the GUC is unset or empty (after trimming) —
+/// the unfiltered hot path, so the caller pays nothing. Whitespace
+/// around tokens is tolerated; empty tokens (e.g. a trailing comma)
+/// are ignored. A non-integer token ERRORs the scan clearly. Tokens
+/// are parsed as `i64` (the SQL bigint domain) then reinterpreted as
+/// the `u64` TID domain.
+fn parse_allowlist() -> Option<HashSet<u64>> {
+    let raw = guc::ALLOWLIST.get()?;
+    let s = raw.to_string_lossy();
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut set = HashSet::new();
+    for tok in s.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        match tok.parse::<i64>() {
+            Ok(v) => {
+                set.insert(v as u64);
+            }
+            Err(_) => error!(
+                "turbovec.allowlist: '{}' is not a valid bigint id (allowlist must be a CSV of bigint ids)",
+                tok
+            ),
+        }
+    }
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
+}
+
+/// Encode a heap `ctid` into the bigint TID domain the
+/// `turbovec.allowlist` GUC expects (Phase C operator-path
+/// allowlist). This is the ergonomic front door for building an
+/// allowlist from `ctid`: instead of the `(block << 32) | offset`
+/// `split_part` incantation, write
+///
+/// ```sql
+/// SELECT set_config('turbovec.allowlist',
+///     (SELECT string_agg(turbovec.tid_to_bigint(ctid)::text, ',')
+///      FROM items WHERE tenant_id = $1), false);
+/// ```
+///
+/// The encoding matches `pgrx::itemptr::item_pointer_to_u64`
+/// (`(block << 32) | offset`), i.e. exactly the value the AM stores
+/// per slot, so the scan's allow-mask match is exact. Reinterpreted
+/// as `i64` for the SQL `bigint` domain (TIDs never set the high
+/// bit in practice, but the round-trip is bit-preserving either
+/// way: the GUC parser reads `i64` then casts back to `u64`).
+#[pg_extern(immutable, parallel_safe)]
+fn tid_to_bigint(ctid: pg_sys::ItemPointerData) -> i64 {
+    pgrx::itemptr::item_pointer_to_u64(ctid) as i64
+}
+
+/// Flat (non-IVF) top-`k` search, honouring the Phase C operator-path
+/// allowlist. When `allow` is `None` this is exactly `arc.search` —
+/// the unfiltered hot path, zero added work. When `allow` is `Some`:
+///   - On a [`cache::ScanHandle::ReadOnly`] handle, build a by-slot
+///     allowlist mask and route through `search_masked`, so the
+///     blocked kernel skips 32-vector blocks with no allowed slot
+///     (the in-kernel block-skip, on the operator path).
+///   - On a `Mutable` handle (post-insert / dirty-xact mirror, whose
+///     slot order has diverged so no slot mask applies), fall back to
+///     a plain search and post-filter the returned ids by the
+///     allowlist — a correctness backstop (the rarer path). To keep
+///     the post-filtered top-`k` correct, the unfiltered search is
+///     widened so the allowlisted neighbours that would survive aren't
+///     starved by non-allowed ids ranking ahead of them.
+fn flat_search(
+    arc: &cache::ScanHandle,
+    query: &[f32],
+    k: usize,
+    allow: Option<&HashSet<u64>>,
+) -> (Vec<f32>, Vec<u64>) {
+    let Some(set) = allow else {
+        return arc.search(query, k);
+    };
+    if let Some(mask) = arc.allow_slot_mask(set) {
+        // ReadOnly: in-kernel block-skip over the allowlist mask.
+        if let Some(res) = arc.search_masked(query, k, &mask) {
+            return res;
+        }
+    }
+    // Mutable / Ooc fallback: search wide, then post-filter by the
+    // allowlist. Widen so allowed neighbours ranked behind non-allowed
+    // ids still surface (cap at the live corpus).
+    let n = arc.len();
+    let wide = k.saturating_mul(8).min(n.max(1)).max(k);
+    let (scores, ids) = arc.search(query, wide);
+    let mut out_s = Vec::with_capacity(k);
+    let mut out_i = Vec::with_capacity(k);
+    for (s, id) in scores.iter().zip(ids.iter()) {
+        if set.contains(id) {
+            out_s.push(*s);
+            out_i.push(*id);
+            if out_i.len() == k {
+                break;
+            }
+        }
+    }
+    (out_s, out_i)
 }
 
 /// Append the candidates in `(scores, ids)` that haven't already been
@@ -1134,7 +1305,7 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
             let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
             let before = (*opaque).results.len();
             let (scores, ids) = ooc
-                .search_ooc((*scan).indexRelation, &(*opaque).query, new_k, &ctx.probed_cells, &ctx.tombstones)
+                .search_ooc((*scan).indexRelation, &(*opaque).query, new_k, &ctx.probed_cells, &ctx.tombstones, (*opaque).allow.as_ref())
                 .unwrap_or_else(|| (Vec::new(), Vec::new()));
             (*opaque).current_k = new_k;
             let probes_now = ctx.probes;
@@ -1161,6 +1332,9 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
             );
             ctx.mask = ctx.directory.probe_mask(&probed, n_live);
             apply_tombstones(&mut ctx.mask, &ctx.tombstones);
+            // Phase C: re-AND the allowlist into the rebuilt mask so
+            // the widened probe set stays restricted to allowed slots.
+            apply_allowlist(&mut ctx.mask, &arc, (*opaque).allow.as_ref());
             ctx.probes = new_probes;
         }
         // Grow k within the (possibly wider) cell set so the extra
@@ -1173,7 +1347,7 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
             // Defensive: the ReadOnly arm this ctx came from always
             // returns Some; fall back to flat only if that ever
             // changes (e.g. handle swapped mid-scan).
-            .unwrap_or_else(|| arc.search(&(*opaque).query, new_k));
+            .unwrap_or_else(|| flat_search(&arc, &(*opaque).query, new_k, (*opaque).allow.as_ref()));
         (*opaque).current_k = new_k;
         (*opaque).ivf = Some(ctx);
         populate_batch(opaque, &scores, &ids);
@@ -1194,7 +1368,7 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
     }
     let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
     let before = (*opaque).results.len();
-    let (scores, ids) = arc.search(&(*opaque).query, new_k);
+    let (scores, ids) = flat_search(&arc, &(*opaque).query, new_k, (*opaque).allow.as_ref());
     (*opaque).current_k = new_k;
     populate_batch(opaque, &scores, &ids);
     if (*opaque).results.len() > before {

@@ -236,6 +236,35 @@ SET turbovec.max_probes = 64;
 SET turbovec.oversample = 1.0;  -- 1.0 .. 100.0
 ```
 
+### `turbovec.allowlist`
+
+```sql
+-- Phase C operator-path allowlist: a per-query, pre-materialized
+-- row set the ORDER BY index scan restricts to, with the same
+-- in-kernel 32-vector-block short-circuit pushdown turbovec.knn(
+-- ..., allowed) gives -- now on the operator path AND on IVF
+-- indexes (cell-scope AND allowlist). The index AM keys vectors by
+-- heap TID (NOT your id column), so this is a CSV of heap TIDs
+-- encoded as bigint via (block << 32) | offset; build it from ctid:
+SELECT set_config('turbovec.allowlist',
+  (SELECT string_agg(
+     ( (split_part(btrim(ctid::text,'()'),',',1)::bigint << 32)
+       | split_part(btrim(ctid::text,'()'),',',2)::bigint )::text, ',')
+   FROM items WHERE tenant_id = 5),   -- your selective filter -> TIDs
+  false);
+SELECT id FROM items ORDER BY emb <=> $1 LIMIT 10;
+RESET turbovec.allowlist;
+-- Whitespace tolerated; empty tokens ignored. SET it before the
+-- query and RESET it after; a leftover value silently restricts
+-- later queries in the same session. Empty / unset (the default)
+-- is unfiltered with ZERO added cost. A non-integer token ERRORs
+-- the scan. NOT arbitrary-WHERE pushdown: the AM honours a
+-- pre-materialized TID set, it never interprets scan keys. Only
+-- worth it when the row set is SELECTIVE (<= ~7-10% of the corpus);
+-- see docs/FILTERING.md sect 3.5. For id-column (primary-key)
+-- ergonomics on a flat index, use turbovec.knn(..., allowed) instead.
+```
+
 ---
 
 ## Operational tuning

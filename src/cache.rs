@@ -39,7 +39,7 @@
 //! from the cache so the next access reloads the committed state
 //! from the relfile pages. We do not journal undo information.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use parking_lot::{Mutex, RwLock};
@@ -223,6 +223,22 @@ impl ReadOnlyIndex {
         }
         (res.scores, ids)
     }
+
+    /// Build a by-slot allowlist mask from a set of EXTERNAL ids
+    /// (Phase C operator-path allowlist). `allow_slot[i] == true` iff
+    /// slot `i`'s external id (`slot_to_id[i]`) is in `allowed`. The
+    /// scan ANDs this into the IVF probe/tombstone mask (or uses it
+    /// alone on the flat path) before [`Self::search_masked`], so
+    /// turbovec's blocked kernel skips 32-vector blocks with no
+    /// allowed slot — the same in-kernel block-skip
+    /// `turbovec.knn(..., allowed)` gets, now on the ORDER BY path.
+    /// O(n) bools, built only when an allowlist is active.
+    pub fn allow_slot_mask(&self, allowed: &HashSet<u64>) -> Vec<bool> {
+        self.slot_to_id
+            .iter()
+            .map(|id| allowed.contains(id))
+            .collect()
+    }
 }
 
 /// Out-of-core (Phase B-1/B-2) cell-scoped IVF index. Unlike
@@ -368,6 +384,7 @@ impl OocIvfIndex {
         k: usize,
         probed: &[u32],
         dead: &[u8],
+        allow: Option<&HashSet<u64>>,
     ) -> Option<(Vec<f32>, Vec<u64>)> {
         // Collect the probed cells' contiguous slot ranges, in cell
         // order, deduping cell ids. Track the global slot of each
@@ -492,7 +509,21 @@ impl OocIvfIndex {
             std::borrow::Cow::Owned(compact_scales),
             prepared,
         );
-        let res = compact.search(query, k);
+        // Phase C operator-path allowlist: build a compact-slot mask
+        // (allow_compact[cslot] = id of that compact slot is allowed)
+        // and push it into the blocked kernel, so the 32-vector
+        // block-skip applies to the OOC path too — not just a
+        // post-filter. Only built when an allowlist is active.
+        let res = match allow {
+            None => compact.search(query, k),
+            Some(set) => {
+                let allow_compact: Vec<bool> = global_slots
+                    .iter()
+                    .map(|&gs| set.contains(&self.slot_to_id[gs as usize]))
+                    .collect();
+                compact.search_with_mask(query, k, Some(&allow_compact))
+            }
+        };
         let mut ids = Vec::with_capacity(res.indices.len());
         for &cslot in &res.indices {
             let global = global_slots[cslot as usize] as usize;
@@ -577,6 +608,19 @@ impl ScanHandle {
             // OOC never uses the whole-index mask path; the scan
             // routes it through `OocIvfIndex::search_ooc` instead.
             ScanHandle::Ooc(_) => None,
+        }
+    }
+
+    /// Build a by-slot allowlist mask (Phase C) from a set of external
+    /// ids, for the [`ScanHandle::ReadOnly`] arm whose slot order
+    /// matches the on-disk layout. Returns `None` for the `Mutable`
+    /// arm (slot order diverged — the caller post-filters by the
+    /// allowlist instead) and the `Ooc` arm (which masks the compact
+    /// sub-index inside `search_ooc`).
+    pub(crate) fn allow_slot_mask(&self, allowed: &HashSet<u64>) -> Option<Vec<bool>> {
+        match self {
+            ScanHandle::ReadOnly(a) => Some(a.allow_slot_mask(allowed)),
+            ScanHandle::Mutable(_) | ScanHandle::Ooc(_) => None,
         }
     }
 }

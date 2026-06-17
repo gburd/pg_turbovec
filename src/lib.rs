@@ -5628,6 +5628,464 @@ mod tests {
         assert_distinct_ids(&ivf_all);
     }
 
+    // ---- Phase C operator-path allowlist (turbovec.allowlist) ----
+
+    /// Helper: pull ids from an ORDER BY scan into a Vec, forcing the
+    /// index AM path (enable_seqscan = off).
+    fn allowlist_pull(sql: &str) -> Vec<i64> {
+        Spi::connect(|client| {
+            client
+                .select(sql, None, &[])
+                .unwrap()
+                .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                .collect()
+        })
+    }
+
+    /// Helper: build the `turbovec.allowlist` CSV for the rows of
+    /// `table` whose `id` is in `ids`. The index AM keys vectors by
+    /// heap TID, so the allowlist is the `item_pointer_to_u64`
+    /// encoding `(block << 32) | offset` of each row's ctid (NOT the
+    /// id-column value). This mirrors what a real caller does:
+    /// materialize the TIDs of the rows they want, then SET the GUC.
+    fn allowlist_tids_csv(table: &str, ids: &[i64]) -> String {
+        let in_list = ids.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+        // ctid -> (block << 32) | offset via the text representation
+        // '(block,offset)'. (ctid::text::point) gives a point whose
+        // [0]=block, [1]=offset; simpler to parse the text.
+        let sql = format!(
+            "SELECT string_agg( \
+               ( (split_part(btrim(ctid::text,'()'),',',1)::bigint << 32) \
+                 | split_part(btrim(ctid::text,'()'),',',2)::bigint )::text, \
+               ',') \
+             FROM {table} WHERE id IN ({in_list})"
+        );
+        Spi::get_one::<String>(&sql).unwrap().unwrap_or_default()
+    }
+
+    /// `turbovec.tid_to_bigint(ctid)` must produce exactly the same
+    /// bigint encoding as the raw `(block << 32) | offset` SQL the
+    /// allowlist docs fall back to (and that the AM stores per slot).
+    /// This is the ergonomic-helper correctness anchor: the clean
+    /// `turbovec.tid_to_bigint(ctid)` front door and the raw
+    /// incantation are interchangeable.
+    #[pg_test]
+    fn tid_to_bigint_matches_raw_encoding() {
+        use_turbovec();
+        Spi::run("CREATE TABLE tid_enc (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO tid_enc \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT (g + s)::float8 FROM generate_series(1, 8) s), ',') \
+                || ']')::vector \
+             FROM generate_series(1, 40) g",
+        )
+        .unwrap();
+        // For every row, the helper and the raw split_part encoding
+        // must agree; count any divergence.
+        let mismatches = Spi::get_one::<i64>(
+            "SELECT count(*) FROM tid_enc \
+             WHERE turbovec.tid_to_bigint(ctid) <> \
+               ( (split_part(btrim(ctid::text,'()'),',',1)::bigint << 32) \
+                 | split_part(btrim(ctid::text,'()'),',',2)::bigint )",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            mismatches, 0,
+            "turbovec.tid_to_bigint(ctid) must equal the raw (block<<32)|offset encoding"
+        );
+    }
+
+    /// Flat index: SET turbovec.allowlist, ORDER BY <=> LIMIT k
+    /// returns ONLY allowed ids, and the same allowed top-k as the
+    /// unfiltered scan post-filtered by the id-set.
+    #[pg_test]
+    fn allowlist_guc_restricts_ordered_scan_flat() {
+        use_turbovec();
+        Spi::run("CREATE TABLE al_flat (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO al_flat \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 30.0 + s::float8)::float8 \
+                FROM generate_series(1, 8) s), ',') || ']')::vector \
+             FROM generate_series(1, 500) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX al_flat_idx ON al_flat \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+
+        let q = "(SELECT emb FROM al_flat WHERE id = 42)";
+        let allowed = [3i64, 17, 42, 99, 123, 200, 311, 400, 450, 488];
+        let allow_csv = allowlist_tids_csv("al_flat", &allowed);
+
+        Spi::run(&format!("SET turbovec.allowlist = '{allow_csv}'")).unwrap();
+        crate::cache::invalidate_all();
+        let got = allowlist_pull(&format!(
+            "SELECT id FROM al_flat ORDER BY emb <=> {q} LIMIT 5"
+        ));
+        Spi::run("RESET turbovec.allowlist").unwrap();
+
+        assert!(!got.is_empty(), "allowlisted flat scan returned nothing");
+        let allow_set: std::collections::HashSet<i64> = allowed.iter().copied().collect();
+        for id in &got {
+            assert!(
+                allow_set.contains(id),
+                "id {id} not in allowlist {allowed:?} (got {got:?})"
+            );
+        }
+        assert_distinct_ids(&got);
+        assert!(got.contains(&42), "the exact-match allowed id 42 must win");
+    }
+
+    /// IVF index (lists > 0): same as the flat case — the allowlist is
+    /// ANDed into the cell mask; only allowed ids come back.
+    #[pg_test]
+    fn allowlist_guc_restricts_ordered_scan_ivf() {
+        use_turbovec();
+        ivf2_make_corpus("al_ivf", 3000);
+        Spi::run(
+            "CREATE INDEX al_ivf_idx ON al_ivf \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
+
+        let q = "(SELECT emb FROM al_ivf WHERE id = 777)";
+        // A spread of allowed ids across the corpus so several cells
+        // contain at least one allowed slot.
+        let allowed: Vec<i64> = (0..30).map(|i| 50 + i * 97).collect();
+        let allow_csv = allowlist_tids_csv("al_ivf", &allowed);
+        let allow_set: std::collections::HashSet<i64> = allowed.iter().copied().collect();
+
+        Spi::run(&format!("SET turbovec.allowlist = '{allow_csv}'")).unwrap();
+        crate::cache::invalidate_all();
+        let got = allowlist_pull(&format!(
+            "SELECT id FROM al_ivf ORDER BY emb <=> {q} LIMIT 10"
+        ));
+        Spi::run("RESET turbovec.allowlist").unwrap();
+
+        assert!(!got.is_empty(), "allowlisted IVF scan returned nothing");
+        for id in &got {
+            assert!(allow_set.contains(id), "id {id} not in allowlist (got {got:?})");
+        }
+        assert_distinct_ids(&got);
+    }
+
+    /// Equivalence anchor: the operator-path allowlist returns the
+    /// SAME ids as turbovec.knn(..., allowed) for the same id-set +
+    /// query (a flat index, where knn's IdMapIndex and the AM's
+    /// ReadOnlyIndex score identically).
+    #[pg_test]
+    fn allowlist_guc_matches_knn() {
+        use_turbovec();
+        Spi::run("CREATE TABLE al_eq (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO al_eq \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 30.0 + s::float8)::float8 \
+                FROM generate_series(1, 8) s), ',') || ']')::vector \
+             FROM generate_series(1, 400) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX al_eq_idx ON al_eq \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 400").unwrap();
+
+        // A sparse allowed set spread across the corpus so the
+        // nearest few are well-separated in distance (no near-ties at
+        // the k boundary that quantization could flip). knn() keys by
+        // the id COLUMN; the operator-path allowlist keys by heap TID
+        // (the index AM's native id space). We pass knn the id-column
+        // values and the operator path the TID-encoding of the SAME
+        // rows, so both restrict to the same physical rows. knn() and
+        // the AM encode through slightly different TQ+ calibrations, so
+        // we anchor on the SET of the top-k ids that win, not exact
+        // tie-order.
+        let allowed = [22i64, 60, 120, 180, 240, 300, 360];
+        let allow_tids = allowlist_tids_csv("al_eq", &allowed);
+        let allow_arr = format!(
+            "ARRAY[{}]::bigint[]",
+            allowed.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+        );
+        let qlit: String = Spi::get_one("SELECT (emb)::text FROM al_eq WHERE id = 22")
+            .unwrap()
+            .expect("query vec");
+
+        // knn() path (id-column allowlist).
+        let mut knn_ids: Vec<i64> = allowlist_pull(&format!(
+            "SELECT id FROM turbovec.knn('al_eq'::regclass, 'id', 'emb', \
+             '{qlit}'::turbovec.vector, 3, 4, {allow_arr}) ORDER BY score DESC"
+        ));
+
+        // Operator-path allowlist (TID-encoding of the same rows).
+        Spi::run(&format!("SET turbovec.allowlist = '{allow_tids}'")).unwrap();
+        crate::cache::invalidate_all();
+        let mut op_ids = allowlist_pull(&format!(
+            "SELECT id FROM al_eq ORDER BY emb <=> '{qlit}'::turbovec.vector LIMIT 3"
+        ));
+        Spi::run("RESET turbovec.allowlist").unwrap();
+
+        knn_ids.sort_unstable();
+        op_ids.sort_unstable();
+        assert_eq!(
+            knn_ids, op_ids,
+            "operator-path allowlist must return the same top-k id SET as \
+             turbovec.knn for the same id-set: knn={knn_ids:?} op={op_ids:?}"
+        );
+        assert!(op_ids.contains(&22), "the exact-match allowed id 22 must win");
+    }
+
+    /// Unset/empty GUC returns the full unfiltered top-k (no behaviour
+    /// change, zero added work on the hot path).
+    #[pg_test]
+    fn allowlist_guc_empty_is_unfiltered() {
+        use_turbovec();
+        ivf2_make_corpus("al_empty", 2000);
+        Spi::run(
+            "CREATE INDEX al_empty_idx ON al_empty \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap();
+
+        let q = "(SELECT emb FROM al_empty WHERE id = 333)";
+        let pull = || allowlist_pull(&format!(
+            "SELECT id FROM al_empty ORDER BY emb <=> {q} LIMIT 10"
+        ));
+
+        // Baseline: never-set GUC.
+        crate::cache::invalidate_all();
+        let baseline = pull();
+
+        // Explicit empty string = unfiltered = identical result.
+        Spi::run("SET turbovec.allowlist = ''").unwrap();
+        crate::cache::invalidate_all();
+        let empty = pull();
+        Spi::run("RESET turbovec.allowlist").unwrap();
+
+        assert_eq!(baseline.len(), 10);
+        assert_eq!(
+            baseline, empty,
+            "empty allowlist must be byte-identical to the unfiltered scan"
+        );
+        assert!(baseline.contains(&333));
+    }
+
+    /// Allowlist composes with tombstones: an allowlisted row that has
+    /// been ambulkdelete-tombstoned is NOT returned.
+    #[pg_test]
+    fn allowlist_guc_composes_with_tombstones() {
+        use std::collections::HashSet;
+        use_turbovec();
+        ivf2_make_corpus("al_tomb", 3000);
+        Spi::run(
+            "CREATE INDEX al_tomb_idx ON al_tomb \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 32").unwrap();
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'al_tomb_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // Tombstone the row with id = 100 (which is in our allowlist).
+        let dead_set: HashSet<u64> = {
+            let mut set = HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM al_tomb WHERE id = 100", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData =
+                        row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        assert_eq!(dead_set.len(), 1, "expected exactly one dead ctid");
+
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+
+        // Allowlist that INCLUDES the tombstoned id 100. Query nearest
+        // to id 100's vector so it would top the list if visible. The
+        // allowlist is the TID-encoding of rows 100..=105.
+        let q = "(SELECT emb FROM al_tomb WHERE id = 100)";
+        let allow_csv = allowlist_tids_csv("al_tomb", &[100, 101, 102, 103, 104, 105]);
+        Spi::run(&format!("SET turbovec.allowlist = '{allow_csv}'")).unwrap();
+        crate::cache::invalidate_all();
+        let got = allowlist_pull(&format!(
+            "SELECT id FROM al_tomb ORDER BY emb <=> {q} LIMIT 5"
+        ));
+        Spi::run("RESET turbovec.allowlist").unwrap();
+
+        assert!(
+            !got.contains(&100),
+            "tombstoned-but-allowlisted id 100 must not be returned (got {got:?})"
+        );
+        let allow_set: HashSet<i64> = [101, 102, 103, 104, 105].into_iter().collect();
+        for id in &got {
+            assert!(allow_set.contains(id), "id {id} not in (allowlist - tombstone)");
+        }
+    }
+
+    /// IVF, probes >= lists: the allowlist over an exact (all-cell)
+    /// scan stays exact over the allowed set — returns the true
+    /// nearest allowed neighbours.
+    #[pg_test]
+    fn allowlist_guc_probes_all_exact() {
+        use_turbovec();
+        ivf2_make_corpus("al_pa", 2000);
+        Spi::run(
+            "CREATE INDEX al_pa_idx ON al_pa \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap(); // probes >= lists
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
+
+        let q = "(SELECT emb FROM al_pa WHERE id = 555)";
+        let allowed: Vec<i64> = (0..40).map(|i| 7 + i * 47).collect();
+        let allow_csv = allowlist_tids_csv("al_pa", &allowed);
+        let allow_in = allowed
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        // Ground truth: BRUTE-FORCE exact top-5 over the allowed rows
+        // (sequential scan, no index) — the true "exact over the
+        // allowed set" anchor. We compare SETs (the ids that win),
+        // since quantized ranking can swap near-ties at the boundary.
+        let mut expected: Vec<i64> = allowlist_pull(&format!(
+            "SELECT id FROM al_pa WHERE id IN ({allow_in}) \
+             ORDER BY emb <=> {q} LIMIT 5"
+        ));
+
+        Spi::run(&format!("SET turbovec.allowlist = '{allow_csv}'")).unwrap();
+        crate::cache::invalidate_all();
+        let mut got = allowlist_pull(&format!(
+            "SELECT id FROM al_pa ORDER BY emb <=> {q} LIMIT 5"
+        ));
+        Spi::run("RESET turbovec.allowlist").unwrap();
+
+        assert_eq!(got.len(), 5, "allowlist scan must return a full LIMIT 5 (got {got:?})");
+        got.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            got, expected,
+            "probes>=lists allowlist must equal the brute-force exact top-5 over \
+             the allowed set: got={got:?} expected={expected:?}"
+        );
+    }
+
+    /// A non-integer token errors clearly (the scan that consumes the
+    /// GUC raises the error; SET itself succeeds since it's a plain
+    /// string GUC).
+    #[pg_test]
+    fn allowlist_guc_rejects_bad_token() {
+        use_turbovec();
+        Spi::run("CREATE TABLE al_bad (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO al_bad \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8)::float8 FROM generate_series(1, 8) s), ',') \
+                || ']')::vector \
+             FROM generate_series(1, 100) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX al_bad_idx ON al_bad \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 0)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        // SET succeeds (plain string GUC).
+        Spi::run("SET turbovec.allowlist = '1,abc,3'").unwrap();
+        crate::cache::invalidate_all();
+        // The scan that parses it must ERROR.
+        let res = std::panic::catch_unwind(|| {
+            allowlist_pull(
+                "SELECT id FROM al_bad ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+            )
+        });
+        Spi::run("RESET turbovec.allowlist").unwrap();
+        assert!(
+            res.is_err(),
+            "a non-integer allowlist token must ERROR the scan"
+        );
+    }
+
+    /// Out-of-core (cell-scoped) path: force out_of_core = on so the
+    /// IVF scan gathers cells off the mmap; the allowlist must still
+    /// restrict the result to allowed ids.
+    #[pg_test]
+    fn allowlist_guc_out_of_core() {
+        use_turbovec();
+        ivf2_make_corpus("al_ooc", 4000);
+        Spi::run(
+            "CREATE INDEX al_ooc_idx ON al_ooc \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap(); // force cell-scoped
+
+        let q = "(SELECT emb FROM al_ooc WHERE id = 1234)";
+        let allowed: Vec<i64> = (0..40).map(|i| 13 + i * 79).collect();
+        let allow_csv = allowlist_tids_csv("al_ooc", &allowed);
+        let allow_set: std::collections::HashSet<i64> = allowed.iter().copied().collect();
+
+        Spi::run(&format!("SET turbovec.allowlist = '{allow_csv}'")).unwrap();
+        crate::cache::invalidate_all();
+        let got = allowlist_pull(&format!(
+            "SELECT id FROM al_ooc ORDER BY emb <=> {q} LIMIT 10"
+        ));
+        Spi::run("RESET turbovec.allowlist").unwrap();
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+        assert!(!got.is_empty(), "OOC allowlisted scan returned nothing");
+        for id in &got {
+            assert!(
+                allow_set.contains(id),
+                "OOC: id {id} not in allowlist (got {got:?})"
+            );
+        }
+        assert_distinct_ids(&got);
+    }
+
     /// Build WITH (lists = N), query, and assert recall@10 vs a
     /// brute-force ground truth is high at a reasonable nprobe, with
     /// distinct ids. The IVF correctness/recall property.

@@ -277,6 +277,8 @@ does not define arithmetic for `sparsevec`, so neither do we.
 | `l2_normalize(vector)` | ✓ | ✓ (also `vec_normalize`) |
 | `vector_concat(vector, vector)` | ✓ | ✓ (also `\|\|` operator) |
 | `halfvec_concat(halfvec, halfvec)` | ✓ | ✓ (also `\|\|` operator) |
+| `max_sim` / `max_sim_cosine` (ColBERT MaxSim) | ✗ | ✓ — SQL re-rank over `vector[]`; see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md) |
+| `rrf_score` (reciprocal rank fusion) | ✗ | ✓ — `1/(k+rank)` hybrid-fusion helper; see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md) |
 
 ## Index AMs
 
@@ -306,6 +308,14 @@ does not define arithmetic for `sparsevec`, so neither do we.
 - ~~**Phase BV** - add `bitvec` type, Hamming + Jaccard.~~ ✓ done.
 - ~~**Phase L2** - indexed L2 / L1 ANN.~~ ✓ done via `vec_l2_ops` /
   `vec_l1_ops` and the existing recheck-orderby path.
+- ~~**Phase D (breadth)** - multivector / hybrid SQL surface.~~ ✓ done
+  (v1.13.x). `turbovec.max_sim` / `max_sim_cosine` (ColBERT MaxSim
+  re-rank over `vector[]`), `turbovec.rrf_score` (reciprocal rank
+  fusion), and the named-vector schema pattern. See
+  [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md). **Remaining gap:**
+  index-native late interaction (per-token index + MaxSim traversal)
+  is a documented future phase — MaxSim is a SQL re-rank primitive,
+  not an index-accelerated scan.
 - **Phase BV-IDX** - binary-vector ANN index. The TurboQuant kernel
   doesn't fit Hamming-space ANN; if we want indexed bitvec we'd
   need a separate kernel (LSH or multi-index hashing). Out of

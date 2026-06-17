@@ -4,6 +4,58 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**Phase D — breadth parity (multivector + hybrid fusion).** Additive
+SQL surface in the `turbovec` schema; **no wire-format change**
+(`MetaPageData::version = 4`), **no index-AM change**, **no REINDEX**.
+Closes the multivector / hybrid-fusion breadth gap vs VectorChord /
+Qdrant at the SQL layer.
+
+### Added
+
+- **`turbovec.max_sim(vector[], vector[])` / `max_sim_cosine(...)`**
+  (`src/hybrid.rs`) — ColBERT-style late-interaction MaxSim:
+  `sum_{q in Q} max_{d in D} sim(q, d)` over per-token `vector[]`
+  arrays. `max_sim` uses dot-product similarity (correct for
+  L2-normalised tokens); `max_sim_cosine` uses cosine similarity
+  (`1 - cosine_distance`). All token vectors across both arrays must
+  share one dimension (ERROR on mismatch); an empty query or empty
+  doc scores `0.0` (ColBERT convention). This is a **re-rank**
+  primitive (ANN-retrieve candidates on a pooled vector, MaxSim-rerank
+  the top-N) — the token arrays are not indexed, and index-native
+  late interaction remains a documented future phase.
+- **`turbovec.rrf_score(rank integer, k integer DEFAULT 60)`**
+  (`src/hybrid.rs`) — reciprocal rank fusion term `1.0 / (k + rank)`
+  for fusing a dense ANN ranking with a sparse / keyword ranking.
+  Pairs with the documented CTE recipe; non-positive denominator
+  raises ERROR.
+- **`docs/HYBRID_SEARCH.md`** — the canonical breadth guide:
+  multivector MaxSim re-rank (signature, conventions, the
+  two-stage retrieve-then-rerank pattern, the honest index-native
+  limitation), the dense+sparse RRF recipe (full `ROW_NUMBER()` +
+  `rrf_score` CTE for both full-text and `sparsevec`), and the
+  named-vector multi-column schema pattern.
+- Cross-links from `README.md`, `docs/PRODUCTION.md`,
+  `docs/PARITY_GAPS.md`, `docs/COMPETITIVE_ANALYSIS.md`, and
+  `docs/MIGRATING_FROM_PGVECTOR.md`; the multivector / hybrid rows
+  now read "SQL surface SHIPPED; index-native late interaction is a
+  future phase."
+
+### Notes
+
+- Out-of-core BUILD (roadmap Phase D-3) already shipped in v1.12.0
+  (streaming IVF build); no re-implementation.
+- Named vectors (multiple vector columns per row) are a documented
+  schema pattern, not new code.
+
+### Migration
+
+Additive SQL functions only; no wire change, no REINDEX. Tests:
+203 → 215 (+`max_sim_basic`, `max_sim_dim_mismatch_errors`,
+`max_sim_empty`, `max_sim_cosine_normalised`, `max_sim_rerank`,
+`rrf_score_values`, `hybrid_rrf_recipe`, plus 5 in-module unit tests).
+
 ## [1.13.1] — 2026-06-17
 
 **Phase C — metadata-filtering docs + measured allowlist crossover.**

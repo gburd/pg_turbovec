@@ -82,7 +82,7 @@ Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 | Hamming/Jaccard indexed | `<~>` `<%>` on hnsw/ivfflat | N/A | exact only, not indexable | minor | L |
 | Max dims (indexable) | vec 2k / half 4k / bit 64k / sparse 1k | — | `vector` opclass; others via `::vector` cast | minor | M |
 | **Parallel index build** | yes | yes | **yes** (`build_parallelism`, rayon) | none | ✅ done (v1.8.0) |
-| Multivector / named / hybrid | app-side RRF | native fusion | none | minor (scope) | XL |
+| Multivector / named / hybrid | app-side RRF | native fusion | **MaxSim re-rank (`max_sim`/`max_sim_cosine`) + `rrf_score` helper + named-vector pattern** — see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md) | minor (index-native late interaction only) | ✅ SQL surface done (v1.13.x); index-native ColBERT = XL future phase |
 | Replication / HA | WAL → replication + PITR | native Raft | inherits PG WAL | none | — |
 | Observability | `pg_stat_progress_create_index`, EXPLAIN BUFFERS | dashboards | works w/ PG tooling; `blocks_skipped_by_mask` proxy; no build phases | minor | M |
 | **Query latency (recall@10 ≥ 0.95, AVX2)** | HNSW ~8 ms (R 0.97, 500k) | in-mem ms | flat ~2.5 s/1M (R 1.0); **IVF 18.5 ms @ probes=64 (R 0.96, 500k); wins ≥0.99 tail @ 25 ms** | flat loses / IVF competitive (~2.3× behind HNSW @ 0.95, ahead @ 0.99) | ✅ IVF measured (v1.11.0, 500k) |
@@ -153,7 +153,15 @@ shipped:
    (k-means dominates). Worth a faster k-means (mini-batch, fewer
    Lloyd iters, or sampling) for 1M+ builds.
 4. **Multivector / named-vectors / hybrid fusion** (effort XL,
-   scope) — express via columns + app-side RRF unless a user asks.
+   scope) — ✅ **SQL surface SHIPPED** (v1.13.x): `turbovec.max_sim` /
+   `max_sim_cosine` (ColBERT MaxSim re-rank over `vector[]`),
+   `turbovec.rrf_score` (reciprocal rank fusion), and the
+   named-vector multi-column schema pattern. See
+   [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md). **Remaining gap:**
+   index-native late interaction (per-token index + MaxSim traversal,
+   Qdrant-style) is a documented future phase — MaxSim is a SQL
+   re-rank primitive (ANN-retrieve a pooled vector, MaxSim-rerank the
+   top-N), not an index-accelerated scan.
 5. **Indexed bitvec ANN** (effort L) — TurboQuant doesn't fit
    Hamming space; keep exact `<~>`/`<%>` only.
 
@@ -189,9 +197,14 @@ shipped:
 ### Won't-do (standalone-DB concerns)
 
 7. Own sharding/replication/consensus — Postgres owns this.
-8. Multivector / named-vectors / server-side RRF — schema/query
-   layer; express via multiple columns + app-side RRF unless a real
-   user asks.
+8. Multivector / named-vectors / server-side RRF — ✅ **SQL surface
+   shipped** (v1.13.x): `max_sim` re-rank + `rrf_score` helper + the
+   named-vector multi-column pattern (see
+   [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md)). The roadmap's
+   "server-side fusion only on demand" is met by the scalar
+   `rrf_score` + the documented CTE recipe; a bespoke fusion
+   aggregate stays unbuilt until a real need appears. Index-native
+   late interaction remains a future phase.
 9. Indexed bitvec ANN (hamming/jaccard opclass) — TurboQuant doesn't
    fit Hamming space; needs a separate LSH kernel. Keep exact only.
 

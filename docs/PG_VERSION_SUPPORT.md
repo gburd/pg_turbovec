@@ -4,12 +4,21 @@
 
 | Version | Tested patch | Status | Tests | Notes |
 |---|---|---|---|---|
-| 13.23 | ✅ | Supported | 109/109 | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.22 | ✅ | Supported | 109/109 | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.17 | ✅ | Supported | 109/109 | Same shape as 14. |
-| 16.14 | ✅ | Supported | 109/109 | Reference platform during development. |
-| 17.9  | ✅ | Supported | 109/109 | Benchmark platform (`arnold`). |
-| 18.3  | ✅ | Supported | 109/109 | `relopt_parse_elt` gained `isset_offset`. |
+| 13.23 | ✅ | Supported | 224/224 | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.22 | ✅ | Supported | 224/224 | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.17 | ✅ | Supported | 224/224 | Same shape as 14. |
+| 16.14 | ✅ | Supported | 224/224 | Reference platform during development. |
+| 17.9  | ✅ | Supported | 224/224 | Benchmark platform (`arnold`). |
+| 18.3  | ✅ | Supported | 224/224 | `relopt_parse_elt` gained `isset_offset`. |
+
+> The out-of-core IVF build (v1.12.0+) uses PG's `BufFile` temp-file
+> API, whose signatures differ across majors (`BufFileReadExact` is
+> PG16+; `BufFileWrite`'s pointer type changed). v1.15.1 added
+> `scripts/compile-matrix.sh` (a `cargo check` across every `pgNN`
+> feature, wired into the pre-push hook) so version-specific C-API
+> breaks are caught before tagging — a v1.12.0–v1.15.0 regression
+> that broke the pg13/14/15/18 build legs slipped through because
+> local dev was pg16-only.
 
 ## How tests are run
 

@@ -73,7 +73,7 @@ Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 | Index types | HNSW + IVFFlat | filterable HNSW | flat + **IVF** (`turbovec` AM) | none (ours wins storage) | ✅ done |
 | Index tunability | m, ef_construction, ef_search, lists, probes | m, ef_construct, ef | `bit_width`, `lists`, `assign_dups`, `search_k`, **`probes`**, `max_probes`, `oversample` | none | ✅ done |
 | **Iterative/streaming scan** | `iterative_scan`, `max_scan_tuples` | filter-aware traversal | **`iterative_scan` + `max_scan_tuples` + IVF probe-widening** | none | ✅ done (v1.8.0) |
-| **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | **three patterns: partial index (native) + in-kernel allowlist `knn()` (flat) + iterative-scan** — see [`FILTERING.md`](FILTERING.md) | minor | XL (true in-traversal pushdown on AM path) |
+| **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | **three patterns: partial index (native) + in-kernel allowlist — `knn()` (flat) and `turbovec.allowlist` GUC on the `ORDER BY` operator path (flat + IVF, cell-scope ∧ allowlist) + iterative-scan** — see [`FILTERING.md`](FILTERING.md) | minor | XL (true in-traversal pushdown of a live predicate on AM path) |
 | Quantization quality | halfvec, bit, binary_quantize | scalar/PQ/binary | TurboQuant 2/3/4-bit (best storage/recall) | none (we win) | — |
 | Quantization tuning | manual re-rank CTE | rescore + oversampling | **`oversample` + `probes` + `assign_dups`** | none | ✅ done (v1.9.0/v1.10.0) |
 | Vector arithmetic | `+ - *` and `\|\|` concat | N/A | **`+ - *` + `\|\|` (vector & halfvec)** | none | ✅ done (v1.8.0) |
@@ -141,9 +141,10 @@ shipped:
    arbitrary predicate with the cell scan (Qdrant filterable HNSW /
    VectorChord prefilter do). The three shipped patterns
    ([`FILTERING.md`](FILTERING.md)) — partial index, in-kernel
-   allowlist `knn()` (flat-only true pushdown), iterative scan —
-   cover most real cases; the remaining gap is specifically arbitrary
-   `WHERE` pushed into the IVF cell scan. The obstacle: the turbovec
+   allowlist (`knn()` on flat, plus the `turbovec.allowlist` GUC on
+   the `ORDER BY` operator path for flat **and** IVF), iterative scan
+   — cover most real cases; the remaining gap is specifically an
+   arbitrary live `WHERE` predicate pushed into the IVF cell scan. The obstacle: the turbovec
    index stores only vector codes + TID (no payload columns), and the
    AM must not be rewired to evaluate scan keys (Phase-17 `amrescan`
    crash). See [`FILTERING.md`](FILTERING.md) § 7 for the design
@@ -223,7 +224,9 @@ should not reimplement.
 The lessons worth importing: (a) the filtering story matters most
 to users — our answer is the **three PG-idiomatic patterns** in
 [`docs/FILTERING.md`](FILTERING.md) (partial index, in-kernel
-allowlist `knn()`, iterative scan); the in-kernel allowlist is true
-pushdown (flat-only), and the remaining gap is in-traversal pushdown
-on the `ORDER BY` AM path; (b) rescore/oversampling as explicit knobs
+allowlist via `knn()` and the `turbovec.allowlist` operator-path GUC,
+iterative scan); the in-kernel allowlist is true pushdown on **both**
+flat and IVF via the operator path, and the remaining gap is
+in-traversal pushdown of an arbitrary live predicate on the
+`ORDER BY` AM path; (b) rescore/oversampling as explicit knobs
 is a clean UX win (shipped v1.9.0).

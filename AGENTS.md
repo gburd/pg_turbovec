@@ -85,20 +85,21 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.12.0, 2026-06-17)
+### Current (as of v1.13.0, 2026-06-17)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.12.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.12.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.12.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.12.x     | 1.12.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.13.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.13.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.13.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.13.x     | 1.13.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version` is **4** (v1.10.0+); v1.11–v1.12 changes
-(tombstones, out-of-core build) are additive/build-internal within
-v4, so v1.4.x–v1.11.x indexes need **no REINDEX**. IVF is opt-in via
-`WITH (lists = N)`; v1.12.0 makes the IVF build out-of-core (1M–5M+
-buildable on RAM-constrained hosts).
+`MetaPageData::version` is **4** (v1.10.0+); v1.11–v1.13 changes
+(tombstones, out-of-core build, out-of-core query) are additive /
+build-internal / scan-path within v4, so v1.4.x–v1.12.x indexes need
+**no REINDEX**. IVF is opt-in via `WITH (lists = N)`; as of v1.13.0
+IVF is out-of-core end-to-end (build AND query), so a >RAM IVF index
+can be built and served on a RAM-constrained host.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.

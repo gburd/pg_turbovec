@@ -15,6 +15,9 @@ your data. Supports:
 - filtered / hybrid ANN — partial index, **in-kernel allowlist**
   (a selective filter gets *cheaper*, not more expensive), or
   iterative scan ([guide](docs/FILTERING.md))
+- multivector & dense+sparse hybrid — ColBERT-style MaxSim re-rank
+  (`max_sim`) + reciprocal rank fusion (`rrf_score`) + named-vector
+  schema pattern ([guide](docs/HYBRID_SEARCH.md))
 - pgvector-compatible function names (`to_vec`, `array_to_vec`,
   `subvector`, `vector_dims`, `vector_norm`, `inner_product`,
   `l2_distance`, `cosine_distance`, `l1_distance`)
@@ -571,6 +574,10 @@ bridge is the supported interop path.
   search guide**: partial index vs in-kernel allowlist `knn()` vs
   iterative scan, a decision matrix, and the measured allowlist
   selectivity crossover.
+- [`docs/HYBRID_SEARCH.md`](docs/HYBRID_SEARCH.md) - **multivector &
+  hybrid breadth guide**: ColBERT MaxSim re-rank (`max_sim`),
+  dense+sparse reciprocal rank fusion (`rrf_score` + CTE recipe), and
+  the named-vector multi-column pattern.
 - [`docs/INDEXAM.md`](docs/INDEXAM.md) - implementation guide for
   the `turbovec` index access method.
 - [`docs/RECALL.md`](docs/RECALL.md) - recall benchmark methodology

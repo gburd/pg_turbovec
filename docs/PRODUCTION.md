@@ -307,6 +307,29 @@ TID, no payload columns). See [`docs/FILTERING.md`](FILTERING.md) § 6.
 
 ---
 
+## Hybrid & multivector search
+
+Three query-layer patterns, all additive SQL surface (no wire-format
+or index-AM change). Full guide with worked CTEs:
+[`docs/HYBRID_SEARCH.md`](HYBRID_SEARCH.md).
+
+- **Dense + sparse hybrid (RRF)** — fuse a dense ANN ranking with a
+  keyword / full-text (or `sparsevec`) ranking using
+  `turbovec.rrf_score(rank, k=60)` = `1/(k+rank)`. Each ranker emits a
+  `ROW_NUMBER()` rank; sum the per-ranker `rrf_score`; order by the
+  sum. A document ranked highly by both rankers wins.
+- **Multivector / late interaction (MaxSim)** — `turbovec.max_sim`
+  (dot) / `max_sim_cosine` (cosine) score a (query, doc) pair of
+  per-token `vector[]` arrays as ColBERT MaxSim. This is a **re-rank**
+  primitive: ANN-retrieve candidates on a pooled vector, then
+  MaxSim-rerank the top-N. The token arrays are not indexed; recall is
+  bounded by the pooled-ANN recall (index-native late interaction is a
+  future phase).
+- **Named vectors** — multiple `turbovec.vector` columns per row, one
+  `turbovec` index each, fused at query time with RRF.
+
+---
+
 ## Replication and standbys
 
 `pg_turbovec` indexes are crash-safe and replicate cleanly:

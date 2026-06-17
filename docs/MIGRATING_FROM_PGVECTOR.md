@@ -186,6 +186,23 @@ on corpora ≥ 1 M rows.
 For everyone else, the storage savings and in-kernel filtered
 search make the swap worthwhile.
 
+## 8. Hybrid & multivector search
+
+pg_turbovec ships the breadth pieces VectorChord/Qdrant lead on, at
+the SQL layer (see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md)):
+
+- **Dense + sparse hybrid** — fuse a dense ANN ranking with a
+  full-text / `sparsevec` ranking via `turbovec.rrf_score` (reciprocal
+  rank fusion). Replaces an app-side RRF loop with a single CTE.
+- **Multivector / late interaction** — `turbovec.max_sim` /
+  `max_sim_cosine` re-rank ColBERT token arrays over an ANN candidate
+  set. (Re-rank primitive, not an index-native multivector scan.)
+- **Named vectors** — multiple `turbovec.vector` columns, one index
+  each, RRF-fused at query time.
+
+pgvector has none of these built in (you'd hand-roll RRF and MaxSim in
+SQL/app code), so this is a net gain on migration, not a gap.
+
 ## 11. Indexing halfvec / sparsevec via expression indexes
 
 `pg_turbovec`'s index AM natively indexes `vector`. To get the same

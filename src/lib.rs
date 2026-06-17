@@ -26,6 +26,7 @@ pub mod distance;
 pub mod extras;
 pub mod guc;
 pub mod halfvec;
+pub mod hybrid;
 pub mod halfvec_ops;
 pub mod sparsevec;
 pub mod sparsevec_ops;
@@ -7094,6 +7095,153 @@ mod tests {
         }
         pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
         out
+    }
+
+    // -----------------------------------------------------------------
+    // Phase D — MaxSim multivector + RRF hybrid fusion (src/hybrid.rs)
+    // -----------------------------------------------------------------
+
+    /// Fetch a column of `double precision` as a `Vec<f64>`, in order.
+    fn fetch_f64(sql: &str) -> Vec<f64> {
+        Spi::connect(|client| {
+            let tup = client.select(sql, None, &[]).unwrap();
+            tup.map(|r| r.get::<f64>(1).unwrap().unwrap()).collect()
+        })
+    }
+
+    #[pg_test]
+    fn max_sim_basic() {
+        // Q = { [1,0], [0,1] }, D = { [1,0], [0,1], [1,1] }
+        // q1 dot doc = {1,0,1} -> 1 ; q2 dot doc = {0,1,1} -> 1 ; sum 2
+        let got: f64 = Spi::get_one(
+            "SELECT turbovec.max_sim(
+               ARRAY['[1,0]','[0,1]']::turbovec.vector[],
+               ARRAY['[1,0]','[0,1]','[1,1]']::turbovec.vector[])",
+        )
+        .unwrap()
+        .unwrap();
+        assert!((got - 2.0).abs() < 1e-9, "max_sim got {got}");
+    }
+
+    #[pg_test]
+    fn max_sim_dim_mismatch_errors() {
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<f64>(
+                "SELECT turbovec.max_sim(
+                   ARRAY['[1,0]']::turbovec.vector[],
+                   ARRAY['[1,0,0]']::turbovec.vector[])",
+            )
+        });
+        assert!(res.is_err(), "expected ERROR on dim mismatch");
+    }
+
+    #[pg_test]
+    fn max_sim_empty() {
+        // Empty query -> 0 (ColBERT convention: nothing to match).
+        let q0: f64 = Spi::get_one(
+            "SELECT turbovec.max_sim(
+               ARRAY[]::turbovec.vector[],
+               ARRAY['[1,0]']::turbovec.vector[])",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(q0, 0.0);
+        // Empty doc -> 0 (nothing to match against).
+        let d0: f64 = Spi::get_one(
+            "SELECT turbovec.max_sim(
+               ARRAY['[1,0]']::turbovec.vector[],
+               ARRAY[]::turbovec.vector[])",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(d0, 0.0);
+    }
+
+    #[pg_test]
+    fn max_sim_cosine_normalised() {
+        // Unit query token; doc has the identical unit token -> cos 1.
+        let got: f64 = Spi::get_one(
+            "SELECT turbovec.max_sim_cosine(
+               ARRAY['[1,0]']::turbovec.vector[],
+               ARRAY['[0.6,0.8]','[1,0]']::turbovec.vector[])",
+        )
+        .unwrap()
+        .unwrap();
+        assert!((got - 1.0).abs() < 1e-6, "max_sim_cosine got {got}");
+    }
+
+    #[pg_test]
+    fn max_sim_rerank() {
+        // MaxSim re-orders an ANN candidate set: doc B shares two
+        // query tokens, doc A shares one; B must score higher even if
+        // a pooled-vector ANN had ranked A first.
+        let (a, b): (f64, f64) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT
+                       turbovec.max_sim(q, da) AS a,
+                       turbovec.max_sim(q, db) AS b
+                     FROM (SELECT
+                       ARRAY['[1,0,0]','[0,1,0]']::turbovec.vector[] AS q,
+                       ARRAY['[1,0,0]','[0,0,1]']::turbovec.vector[] AS da,
+                       ARRAY['[1,0,0]','[0,1,0]']::turbovec.vector[] AS db) s",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .first();
+            (
+                row.get::<f64>(1).unwrap().unwrap(),
+                row.get::<f64>(2).unwrap().unwrap(),
+            )
+        });
+        // da: q1 max=1, q2 max=0 -> 1 ; db: q1 max=1, q2 max=1 -> 2
+        assert!((a - 1.0).abs() < 1e-9, "a {a}");
+        assert!((b - 2.0).abs() < 1e-9, "b {b}");
+        assert!(b > a, "MaxSim must rank doc B above doc A: a={a} b={b}");
+    }
+
+    #[pg_test]
+    fn rrf_score_values() {
+        let r0: f64 = Spi::get_one("SELECT turbovec.rrf_score(0)")
+            .unwrap()
+            .unwrap();
+        assert!((r0 - 1.0 / 60.0).abs() < 1e-12, "rrf_score(0) {r0}");
+        let r1: f64 = Spi::get_one("SELECT turbovec.rrf_score(1, 10)")
+            .unwrap()
+            .unwrap();
+        assert!((r1 - 1.0 / 11.0).abs() < 1e-12, "rrf_score(1,10) {r1}");
+        // Monotone decreasing in rank.
+        let seq: Vec<f64> = fetch_f64(
+            "SELECT turbovec.rrf_score(g) FROM generate_series(0, 5) g ORDER BY g",
+        );
+        for w in seq.windows(2) {
+            assert!(w[0] > w[1], "rrf_score not decreasing: {:?}", seq);
+        }
+    }
+
+    #[pg_test]
+    fn hybrid_rrf_recipe() {
+        // A doc ranked high by BOTH a dense and a sparse ranker must
+        // win the RRF fusion. Two deterministic toy rankings over
+        // docs 1..4; doc 2 is #1 dense and #1 sparse.
+        Spi::run(
+            "CREATE TEMP TABLE rrf_dense(id int, rk int);
+             INSERT INTO rrf_dense VALUES (2,0),(1,1),(3,2),(4,3);
+             CREATE TEMP TABLE rrf_sparse(id int, rk int);
+             INSERT INTO rrf_sparse VALUES (2,0),(3,1),(1,2),(4,3);",
+        )
+        .unwrap();
+        let top: Vec<i64> = fetch_ids(
+            "WITH fused AS (
+               SELECT id, SUM(s) AS score FROM (
+                 SELECT id, turbovec.rrf_score(rk) AS s FROM rrf_dense
+                 UNION ALL
+                 SELECT id, turbovec.rrf_score(rk) AS s FROM rrf_sparse
+               ) u GROUP BY id)
+             SELECT id::bigint FROM fused ORDER BY score DESC, id LIMIT 4",
+        );
+        assert_eq!(top.first().copied(), Some(2), "RRF winner must be doc 2: {top:?}");
     }
 }
 

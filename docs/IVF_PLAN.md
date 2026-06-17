@@ -310,3 +310,31 @@ It does NOT obsolete HNSW's latency at the very low end, but it
 moves us from "490× slower" into "same order of magnitude, much
 smaller on disk" — the positioning that makes pg_turbovec a real
 choice for latency-sensitive workloads, not just storage-bound ones.
+
+## 11. External validation / borrowed ideas
+
+**Flash-KMeans** (svg-project, 2026-06; "IO-aware exact k-means,
+Triton GPU kernels, 200× FAISS on H200") was reviewed for relevance.
+Verdict: **no design/roadmap change.** Its headline is GPU-vs-GPU and
+doesn't transfer (pg_turbovec is CPU-only by design — portability to
+riscv64 / no-AVX2 hosts forbids a CUDA dependency), and k-means is no
+longer our bottleneck (v1.11.0 GEMM-batched Lloyd + convergence
+early-exit took training 295s→38s; Phase B-4 chunks the assignment
+by `maintenance_work_mem`). Its *core* insight — never materialize the
+full `(N, K)` distance matrix, stream the assignment — is **the same
+IO-aware approach `gemm_lloyd_assign` + the Phase B-4 row-blocking
+already implement on CPU** (`||v-c||² = ||v||²+||c||²-2(v·c)` cross-term
+GEMM over mwm-bounded blocks). So Flash-KMeans is independent
+validation of our architecture more than a gap.
+
+The one borrowable micro-optimization: Flash-KMeans keeps the
+`(BN, BK)` cross-accumulator **in registers across a tiled inner
+loop**, never writing the block to memory. The CPU analogue is a
+cache-blocked *fused* assign (tile over centroids, running argmin in
+L1) instead of our materialized per-block `(block_rows × lists)`
+cross-term + reduction. Deferred, low priority: (a) k-means is
+already fast, (b) our GEMM is OpenBLAS-cache-blocked internally, and
+(c) a hand-fused kernel must preserve the load-bearing determinism
+contract (single-threaded `gemm` + exact scalar top-2 tie-break =
+byte-identical centroids). Revisit only if profiling shows k-means
+assignment hot again at scale.

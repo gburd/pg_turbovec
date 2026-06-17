@@ -5161,6 +5161,266 @@ mod tests {
         assert_distinct_ids(&ids);
     }
 
+    /// Phase B-4 temp-file hygiene: a SUCCESSFUL out-of-core IVF
+    /// Phase B-4 temp-file hygiene: a build that ERRORS partway (a
+    /// dim-mismatch row aborting the heap scan while the spill is
+    /// open) leaks no spill file. The `CorpusSpill` is a PG `BufFile`
+    /// created via `BufFileCreateTemp(false)`, which registers the
+    /// file with `CurrentResourceOwner` so a (sub)transaction abort
+    /// closes + unlinks it even when a PG `ereport(ERROR)` longjmps
+    /// past the Rust `Drop` (the success path unlinks via
+    /// `Drop` -> `BufFileClose`). We measure the `pg_ls_tmpdir()`
+    /// count just before and just after the errored build: the abort
+    /// must return the temp-dir to the same steady-state count
+    /// (delta 0), proving nothing leaked.
+    #[pg_test]
+    fn ivf_streaming_build_temp_file_cleanup() {
+        use_turbovec();
+        let count_tmp = || -> i64 {
+            Spi::get_one::<i64>("SELECT count(*)::bigint FROM pg_ls_tmpdir()")
+                .unwrap()
+                .unwrap_or(0)
+        };
+
+        // Warm-up successful build, to reach a steady-state temp-dir
+        // population (the backend may keep a recycled fd / segment
+        // around; we measure the DELTA across the errored build, not
+        // an absolute zero, to be robust to that).
+        Spi::run("CREATE TABLE ivf_tf (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_tf \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 13 + s * 7) % 211)::float8 / 211.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 1500) g",
+        )
+        .unwrap();
+        Spi::run("SET maintenance_work_mem = '1MB'").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_tf_ok ON ivf_tf \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 8)",
+        )
+        .unwrap();
+
+        // --- Errored build: a dim-mismatch row aborts the heap scan
+        //     mid-build (the callback errors after the spill is open
+        //     and some rows have been written). We run the failing
+        //     CREATE INDEX inside a PL/pgSQL block with an EXCEPTION
+        //     handler so the error rolls back the build's subtxn
+        //     (releasing the resource owner that owns the spill)
+        //     WITHOUT poisoning the outer test transaction -- letting
+        //     us re-query pg_ls_tmpdir() afterwards. ---
+        Spi::run("CREATE TABLE ivf_tf_err (id bigint, emb vector)").unwrap();
+        // First rows are 16-d; a later row is 24-d -> dim mismatch
+        // ERROR inside build_callback while the spill holds the
+        // already-scanned 16-d rows.
+        Spi::run(
+            "INSERT INTO ivf_tf_err \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT (g % 7)::float8 / 7.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 500) g",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO ivf_tf_err VALUES \
+             (9999, '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::vector)",
+        )
+        .unwrap();
+        let before = count_tmp();
+        let errored: bool = Spi::get_one(
+            "DO $$ BEGIN \
+                CREATE INDEX ivf_tf_err_idx ON ivf_tf_err \
+                  USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 8); \
+             EXCEPTION WHEN OTHERS THEN NULL; END $$; \
+             SELECT to_regclass('ivf_tf_err_idx') IS NULL",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(errored, "dim-mismatch build must error (no index created)");
+        let after = count_tmp();
+        // The failed CREATE INDEX rolled back its subtransaction; PG
+        // released the resource owner, which (together with the
+        // CorpusSpill Drop) must have unlinked the spill: the
+        // temp-dir population must not have grown.
+        assert!(
+            after <= before,
+            "errored IVF build leaked a spill file in pgsql_tmp \
+             (before={before}, after={after})"
+        );
+    }
+
+    /// Phase B-4: the out-of-core streaming IVF build must be
+    /// byte-deterministic. Build the SAME table twice (single
+    /// assignment) and assert the two relfiles are byte-identical.
+    /// The spill is just a relocation of the corpus to disk; the
+    /// trained centroids, the (stable-sort) permutation, and the
+    /// cell-order quantize feed are all deterministic, so the
+    /// assembled v4 relfile must not vary run-to-run.
+    #[pg_test]
+    fn ivf_streaming_build_determinism_byte_identical() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_sb (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_sb \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 13 + s * 7 + (g % 5) * 1000) % 211)::float8 / 211.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 3000) g",
+        )
+        .unwrap();
+        // Force a SMALL maintenance_work_mem so the streamed assign +
+        // cell-order quantize feed actually iterate over MANY blocks
+        // (proving chunking doesn't perturb the bytes).
+        Spi::run("SET maintenance_work_mem = '1MB'").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_sb_a ON ivf_sb \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_sb_b ON ivf_sb \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        let (a_oid, b_oid): (pg_sys::Oid, pg_sys::Oid) = (
+            Spi::get_one("SELECT 'ivf_sb_a'::regclass::oid").unwrap().unwrap(),
+            Spi::get_one("SELECT 'ivf_sb_b'::regclass::oid").unwrap().unwrap(),
+        );
+        let (a, b) = unsafe {
+            (read_relfile_blocks(a_oid), read_relfile_blocks(b_oid))
+        };
+        assert_eq!(
+            a, b,
+            "streaming IVF build must produce byte-identical relfiles run-to-run"
+        );
+    }
+
+    /// Phase B-4: the streamed build is invariant to
+    /// `maintenance_work_mem` (the chunk-size knob). A single huge
+    /// chunk (large mwm) and many tiny chunks (small mwm) must
+    /// assemble the SAME v4 relfile bytes — the corpus lives on the
+    /// spill, and `add_with_ids` is incremental + order-preserving, so
+    /// the slot fill order (and thus packed_codes / scales /
+    /// slot_to_id) is independent of how the cell-ordered feed is
+    /// chunked. This is the load-bearing out-of-core determinism
+    /// guarantee: the disk relocation + chunking does not change the
+    /// wire format. Also exercises soft assignment (assign_dups = 2),
+    /// whose expanded slot count makes the chunk boundaries fall
+    /// mid-cell.
+    #[pg_test]
+    fn ivf_streaming_build_chunk_size_invariant() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_ci (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_ci \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 29 + s * 11 + (g % 7) * 500) % 197)::float8 / 197.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 20000) g",
+        )
+        .unwrap();
+        // Many tiny chunks.
+        Spi::run("SET maintenance_work_mem = '1MB'").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_ci_small ON ivf_ci \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 12, assign_dups = 2)",
+        )
+        .unwrap();
+        // One big chunk.
+        Spi::run("SET maintenance_work_mem = '1GB'").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_ci_big ON ivf_ci \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 12, assign_dups = 2)",
+        )
+        .unwrap();
+        let (s_oid, b_oid): (pg_sys::Oid, pg_sys::Oid) = (
+            Spi::get_one("SELECT 'ivf_ci_small'::regclass::oid").unwrap().unwrap(),
+            Spi::get_one("SELECT 'ivf_ci_big'::regclass::oid").unwrap().unwrap(),
+        );
+        let (small, big) = unsafe {
+            (read_relfile_blocks(s_oid), read_relfile_blocks(b_oid))
+        };
+        assert_eq!(
+            small, big,
+            "streamed IVF relfile must be byte-identical regardless of \
+             maintenance_work_mem (chunk size); the corpus spill + \
+             incremental add_with_ids make the bytes chunk-invariant"
+        );
+    }
+
+    /// Phase B-4: an out-of-core build over a corpus large enough that
+    /// the streamed assign + cell-order feed iterate over MANY spill
+    /// chunks (forced via a tiny `maintenance_work_mem`) must complete
+    /// and round-trip correctly. This is the in-harness proxy for the
+    /// memory bound (we can't easily read VmHWM mid-test; the external
+    /// timed build in the B-4 report measures peak RSS). It asserts:
+    /// the build completes, the cell directory partitions all n_slots,
+    /// and a flat scan over the cell-reordered codes returns a
+    /// correct, distinct-id top-k.
+    #[pg_test]
+    fn ivf_streaming_build_bounded_memory_completes() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_bm (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO ivf_bm \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 17 + s * 23 + (g % 11) * 300) % 233)::float8 / 233.0 \
+                FROM generate_series(1, 32) s), ',') || ']')::vector \
+             FROM generate_series(1, 15000) g",
+        )
+        .unwrap();
+        // 1MB mwm (the PG floor): at dim=32 (128 B/row) the assign
+        // block is ~6144 rows, so the 15000-row corpus streams over
+        // 3 blocks -- exercising the multi-block out-of-core assign
+        // sweep with bounded transient buffers.
+        Spi::run("SET maintenance_work_mem = '1MB'").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_bm_idx ON ivf_bm \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one(
+            "SELECT 'ivf_bm_idx'::regclass::oid",
+        )
+        .unwrap()
+        .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel)
+                .expect("streamed ivf index has a meta page");
+            assert_eq!(meta.version, 4);
+            assert!(meta.has_ivf());
+            assert_eq!(meta.lists, 32);
+            assert_eq!(meta.n_vectors, 15000);
+            let dir = crate::index::relfile::read_cell_directory(rel, &meta)
+                .expect("streamed lists>0 index has a cell directory");
+            assert_eq!(dir.len(), 32);
+            dir.validate_partition(15000).unwrap();
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+        // Correctness: flat scan over the cell-reordered codes.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let ids: Vec<i64> = Spi::connect(|client| {
+            let tup = client
+                .select(
+                    "SELECT id FROM ivf_bm \
+                     ORDER BY emb <=> ('[' || array_to_string(array(\
+                        SELECT 0.5 FROM generate_series(1,32)), ',') || ']')::vector \
+                     LIMIT 20",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            tup.map(|r| r.get::<i64>(1).unwrap().unwrap()).collect()
+        });
+        assert_eq!(ids.len(), 20, "top-20 over a streamed 15000-row IVF index");
+        assert_distinct_ids(&ids);
+    }
+
     /// IVF-1 recall anchor: a flat scan over a lists=16 index must
     /// return essentially the SAME top-k as a lists=0 (flat) build of
     /// the same data. IVF-1 doesn't probe cells, so reordering the

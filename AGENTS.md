@@ -85,14 +85,14 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.13.0, 2026-06-17)
+### Current (as of v1.13.1, 2026-06-17)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.13.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.13.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.13.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.13.x     | 1.13.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.13.1   | `REINDEX INDEX` once |
+| 1.2.x              | 1.13.1   | `REINDEX INDEX` once |
+| 1.3.x              | 1.13.1   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.13.x     | 1.13.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
 `MetaPageData::version` is **4** (v1.10.0+); v1.11–v1.13 changes
 (tombstones, out-of-core build, out-of-core query) are additive /

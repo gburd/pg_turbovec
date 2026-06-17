@@ -4,6 +4,64 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.1] — 2026-06-17
+
+**Phase C — metadata-filtering docs + measured allowlist crossover.**
+Docs + benchmark release; **no source-logic, SQL-surface, or wire
+change** (`MetaPageData::version = 4`); **no REINDEX**. Bench-results
+and documentation only.
+
+### Added
+
+- **`docs/FILTERING.md`** — the canonical guide to pg_turbovec's
+  three working metadata-filter mechanisms, with a
+  cardinality×selectivity×corpus decision matrix:
+  1. **Partial index** (`CREATE INDEX ... WHERE tenant_id = X`) —
+     native PG predicate pushdown; the default for known,
+     low-cardinality filters.
+  2. **In-kernel allowlist** `turbovec.knn(rel, id_col, vec_col,
+     query, k, bit_width, allowed bigint[])` — true in-kernel
+     pushdown (the SIMD kernel skips 32-vector blocks with no allowed
+     slots before any LUT work), flat-only, for selective per-query
+     id sets.
+  3. **Iterative scan + `WHERE`** (v1.8.0) — the `ORDER BY emb <=> q
+     LIMIT k` AM path; the executor rechecks the predicate, the AM
+     widens `k`/`probes` (capped by `max_scan_tuples`).
+  Includes the honest limitation: no true in-traversal pushdown on
+  the `ORDER BY` AM path (the index stores only vector codes + TID,
+  no payload columns), and a C-4 design sketch for a future phase.
+- **Measured allowlist selectivity crossover** (floki, AVX2, 300k×
+  256-d, 4-bit, k=10): allowlist latency decreases monotonically as
+  the filter tightens (17.9 ms → 0.48 ms, ~37×) while the naive
+  post-filter is flat (~7 ms); crossover at ~7–10% selectivity, up
+  to **14.7× faster at 0.1%**. `benches/allowlist_crossover.rs` +
+  `benches/results/allowlist_crossover_floki_v1_13_0_20260617.json`.
+
+### Fixed (docs drift)
+
+- an internal design note: refreshed v1.10.1/v1.11.0 →
+  v1.13.0; the **>500k IVF build ceiling** and the **>RAM** gaps are
+  now marked **CLOSED** (out-of-core build v1.12.0 + out-of-core
+  query v1.13.0); the metadata-filtering row reflects the three real
+  patterns instead of "post-filter only".
+- `docs/PARITY_GAPS.md`: added the metadata-filtering row; corrected
+  the stale "Parallel index build | GAP — single-threaded" row
+  (parallel build shipped v1.8.0, `turbovec.build_parallelism`).
+- `docs/MIGRATING_FROM_PGVECTOR.md`: filtered-ANN section lists all
+  three patterns and links `FILTERING.md`; `knn()` signature matches
+  `src/knn.rs`.
+- `README.md` + `docs/PRODUCTION.md`: cross-link `FILTERING.md`.
+- Fixed three pre-existing broken benchmark sources
+  (`concurrent_knn`, `recall_vs_pgvector`, `recall`) that referenced
+  the pre-`d3d468e` `IdMapIndex::new` signature (now returns
+  `Result`); `cargo check --benches` is green again. (`cargo pgrx
+  test` never compiled benches, so they did not gate tests.)
+
+### Migration
+
+**No REINDEX.** Docs + bench only; wire stays v4. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.13.1';` is sufficient. Tests unchanged (203).
+
 ## [1.13.0] — 2026-06-17
 
 **Out-of-core IVF query (>RAM serving)** — an IVF index larger than

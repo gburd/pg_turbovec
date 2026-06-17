@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.14.0] — 2026-06-17
 
 **Phase D — breadth parity (multivector + hybrid fusion).** Additive
 SQL surface in the `turbovec` schema; **no wire-format change**
@@ -51,7 +51,10 @@ Qdrant at the SQL layer.
 
 ### Migration
 
-Additive SQL functions only; no wire change, no REINDEX. Tests:
+Additive SQL functions only; no wire change, no REINDEX. `ALTER
+EXTENSION pg_turbovec UPDATE TO '1.14.0';` is sufficient (the new
+`turbovec.max_sim` / `max_sim_cosine` / `rrf_score` functions are
+created by the update script). Tests:
 203 → 215 (+`max_sim_basic`, `max_sim_dim_mismatch_errors`,
 `max_sim_empty`, `max_sim_cosine_normalised`, `max_sim_rerank`,
 `rrf_score_values`, `hybrid_rrf_recipe`, plus 5 in-module unit tests).

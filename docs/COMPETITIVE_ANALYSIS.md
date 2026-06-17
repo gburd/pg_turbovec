@@ -1,8 +1,8 @@
 # Competitive Analysis: pg_turbovec vs pgvector & Qdrant
 
-_Last updated: 2026-06-15. Source-of-truth read directly from
-`src/`, pgvector README @ master (v0.8.2), and Qdrant's documented
-feature set._
+_Last updated: 2026-06-17 (reflects v1.13.0). Source-of-truth read
+directly from `src/`, pgvector README @ master (v0.8.2), and
+Qdrant's documented feature set._
 
 This document drives roadmap decisions. It identifies where
 `pg_turbovec` already wins, where it has parity, and the one true
@@ -12,12 +12,15 @@ gap that bites users today.
 
 ## Bottom line
 
-> **2026-06-16 — reflects v1.10.1 (IVF shipped).** An earlier draft
-> said pg_turbovec "loses to HNSW on latency by ~490×" — true for the
-> *flat* scan, but v1.10.0 shipped the **IVF coarse-quantizer layer**
-> which closes most of that gap. Updated comparison below.
+> **2026-06-17 — reflects v1.13.0.** The IVF coarse-quantizer layer
+> (v1.10.0) closed most of the flat-scan latency gap; v1.12.0 (B-4)
+> removed the IVF **build** ceiling (5M now builds out-of-core); and
+> v1.13.0 (B-1/B-2) added **out-of-core IVF query** (>RAM serving).
+> The metadata-filtering story is now documented end-to-end in
+> [`docs/FILTERING.md`](FILTERING.md) (three working patterns).
+> Updated comparison below.
 
-`pg_turbovec` (v1.10.1) wins decisively on **storage** (4-bit: ~7.6×
+`pg_turbovec` (v1.13.0) wins decisively on **storage** (4-bit: ~7.6×
 smaller, 2-bit: ~15.2× smaller than pgvector HNSW, measured on
 Cohere-wiki 1M×1024-d), **build memory** (Phase W/W-2), and **exact
 or tunable recall** (flat: R@10 = 1.000; IVF: tunable via `probes`).
@@ -42,17 +45,21 @@ aggregates, `||` concat + halfvec arithmetic, **iterative scans**,
   The recall/latency dial is `probes` (the `ivfflat.probes` /
   `hnsw.ef_search` analogue), all while keeping the 7–15× storage win.
 
-**Honest positioning (v1.11.0):** "compact (7–15× smaller) PG vector
+**Honest positioning (v1.13.0):** "compact (7–15× smaller) PG vector
 index with a tunable exact↔fast dial — flat for exactness, IVF for
 sublinear latency that lands in HNSW's neighbourhood and wins the
-high-recall tail." The remaining gaps vs the leaders are
-**metadata-filter PUSHDOWN** (we post-filter + iteratively widen
-probes, not true in-traversal filtering like Qdrant/VectorChord),
-**out-of-core / >RAM** (pgvectorscale's DiskANN bet) — which now also
-**blocks the IVF build above ~500k–600k on a 31 GiB host** (the build
-accumulates the full corpus + a permuted copy in RAM; Phase B-4), and a
-**published 1M+ IVF latency frontier** (currently capped at 500k by
-that build ceiling).
+high-recall tail, now buildable AND servable out-of-core (>RAM)."
+Metadata filtering is **three working patterns** (partial index,
+in-kernel allowlist `knn()`, iterative scan — see
+[`docs/FILTERING.md`](FILTERING.md)); the one genuine remaining gap
+is **true in-traversal pushdown on the `ORDER BY` AM path** (the AM
+returns candidates and the executor rechecks the `WHERE`; it does not
+intersect an arbitrary predicate with the cell scan like Qdrant's
+filterable HNSW / VectorChord's prefilter). The out-of-core gaps that
+used to sit here are **closed**: v1.12.0 (B-4) removed the ~500k–600k
+IVF **build** ceiling (5M builds out-of-core) and v1.13.0 (B-1/B-2)
+added out-of-core IVF **query** (>RAM serving). A **published 1M+ IVF
+latency frontier** is still pending (measurement, not code).
 
 ---
 
@@ -61,12 +68,12 @@ that build ceiling).
 Severity from a pgvector user's perspective evaluating a swap.
 Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 
-| Feature | pgvector 0.8.2 | Qdrant | pg_turbovec v1.10.1 | Severity | Effort |
+| Feature | pgvector 0.8.2 | Qdrant | pg_turbovec v1.13.0 | Severity | Effort |
 |---|---|---|---|---|---|
 | Index types | HNSW + IVFFlat | filterable HNSW | flat + **IVF** (`turbovec` AM) | none (ours wins storage) | ✅ done |
 | Index tunability | m, ef_construction, ef_search, lists, probes | m, ef_construct, ef | `bit_width`, `lists`, `assign_dups`, `search_k`, **`probes`**, `max_probes`, `oversample` | none | ✅ done |
 | **Iterative/streaming scan** | `iterative_scan`, `max_scan_tuples` | filter-aware traversal | **`iterative_scan` + `max_scan_tuples` + IVF probe-widening** | none | ✅ done (v1.8.0) |
-| **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | post-filter + iterative probe-widening (NOT true in-traversal pushdown) | minor | XL (true pushdown) |
+| **Metadata filtering** | post-filter + iterative + partial idx | **integrated (killer feature)** | **three patterns: partial index (native) + in-kernel allowlist `knn()` (flat) + iterative-scan** — see [`FILTERING.md`](FILTERING.md) | minor | XL (true in-traversal pushdown on AM path) |
 | Quantization quality | halfvec, bit, binary_quantize | scalar/PQ/binary | TurboQuant 2/3/4-bit (best storage/recall) | none (we win) | — |
 | Quantization tuning | manual re-rank CTE | rescore + oversampling | **`oversample` + `probes` + `assign_dups`** | none | ✅ done (v1.9.0/v1.10.0) |
 | Vector arithmetic | `+ - *` and `\|\|` concat | N/A | **`+ - *` + `\|\|` (vector & halfvec)** | none | ✅ done (v1.8.0) |
@@ -81,14 +88,14 @@ Effort: S (<1wk), M (~2wk), L (~1mo), XL (multi-month).
 | **Query latency (recall@10 ≥ 0.95, AVX2)** | HNSW ~8 ms (R 0.97, 500k) | in-mem ms | flat ~2.5 s/1M (R 1.0); **IVF 18.5 ms @ probes=64 (R 0.96, 500k); wins ≥0.99 tail @ 25 ms** | flat loses / IVF competitive (~2.3× behind HNSW @ 0.95, ahead @ 0.99) | ✅ IVF measured (v1.11.0, 500k) |
 | **Storage (500k / 1M×1024-d)** | 3902 MB / 7806 MB | larger | **518 MB IVF / 1026 MB flat-4bit / 512 MB 2-bit** | ✅ we win 7.5–15× | — |
 | Cold-scan latency | ~100 ms | in-mem | lazy `id_to_slot` cut the dominant term (v1.8.0); flat first-scan still O(n) | minor | L |
-| Out-of-core (>RAM) | no (HNSW in-RAM) | spill | **no** — also caps IVF BUILD at ~500k–600k on 31 GiB (Phase B-4) | major vs pgvectorscale | XL |
-| Large-scale published bench | ann-benchmarks, VectorDBBench | VectorDBBench | Cohere-wiki 1M (storage/recall/flat-latency); **IVF-vs-HNSW frontier measured at 500k** (1M+ blocked on B-4 build) | major | M (B-4 unblocks 1M+) |
+| Out-of-core (>RAM) | no (HNSW in-RAM) | spill | **yes** — IVF builds out-of-core (B-4, v1.12.0; 5M) AND serves >RAM (B-1/B-2, v1.13.0) | ✅ done (was major vs pgvectorscale) | ✅ v1.12.0/v1.13.0 |
+| Large-scale published bench | ann-benchmarks, VectorDBBench | VectorDBBench | Cohere-wiki 1M (storage/recall/flat-latency); IVF-vs-HNSW frontier at 500k; out-of-core build/query to 5M (v1.12.0/v1.13.0); **1M+ IVF latency frontier still pending** | minor | M (measurement) |
 
 ---
 
 ## Prioritized roadmap
 
-### Done since this analysis was first drafted (v1.8.0 – v1.10.1)
+### Done since this analysis was first drafted (v1.8.0 – v1.13.0)
 
 Every "must-have for parity" item from the original draft has
 shipped:
@@ -109,6 +116,15 @@ shipped:
    `WITH (lists = N)` + `turbovec.probes`/`max_probes` +
    `assign_dups` (soft assignment). Turns the flat O(n) scan into a
    sublinear cell scan; measured ~5× AVX2 warm-p50 win at probes=16.
+7. **Out-of-core IVF build** — ✅ v1.12.0 (B-4). Removed the
+   ~500k–600k build ceiling on a 31 GiB host; 5M builds out-of-core.
+8. **Out-of-core IVF query (>RAM serving)** — ✅ v1.13.0 (B-1/B-2).
+   A corpus whose IVF index exceeds RAM now serves via streaming
+   traversal; the >RAM gap vs pgvectorscale is closed.
+9. **Metadata filtering documented end-to-end** — ✅ v1.13.0
+   (Phase C). [`docs/FILTERING.md`](FILTERING.md): partial index +
+   in-kernel allowlist `knn()` + iterative scan, with a decision
+   matrix and the measured allowlist crossover.
 
 ### Remaining roadmap (the real current gaps)
 
@@ -119,24 +135,26 @@ shipped:
    isolated 1M+ × 1024-d IVF latency sweep on a quiet AVX2 host
    (arnold), head-to-head vs pgvector HNSW + ivfflat — ideally a
    VectorDBBench entry. This is measurement, not code.
-2. **True metadata-filter pushdown** (effort XL) — we post-filter +
-   iteratively widen probes; Qdrant/VectorChord filter *inside* the
-   index traversal. Our approach is correct (no under-return) but
-   scans more candidates than a true filtered index under a very
-   selective predicate. The PG-idiomatic partial-index + iterative
-   combo covers most real cases; full pushdown is a large build.
-3. **Out-of-core / >RAM** (effort XL) — pgvectorscale's DiskANN bet.
-   pg_turbovec is RAM-resident; a corpus whose IVF index exceeds RAM
-   has no streaming-traversal story yet. The 7–15× storage win
-   raises the in-RAM ceiling substantially, but it is still a
-   ceiling.
-4. **IVF build speed at scale** (effort M) — the GEMM fix made it
+2. **True in-traversal metadata-filter pushdown on the `ORDER BY` AM
+   path** (effort XL) — the AM returns distance-ranked candidates and
+   the executor rechecks the `WHERE`; it does not intersect an
+   arbitrary predicate with the cell scan (Qdrant filterable HNSW /
+   VectorChord prefilter do). The three shipped patterns
+   ([`FILTERING.md`](FILTERING.md)) — partial index, in-kernel
+   allowlist `knn()` (flat-only true pushdown), iterative scan —
+   cover most real cases; the remaining gap is specifically arbitrary
+   `WHERE` pushed into the IVF cell scan. The obstacle: the turbovec
+   index stores only vector codes + TID (no payload columns), and the
+   AM must not be rewired to evaluate scan keys (Phase-17 `amrescan`
+   crash). See [`FILTERING.md`](FILTERING.md) § 7 for the design
+   sketch.
+3. **IVF build speed at scale** (effort M) — the GEMM fix made it
    feasible, but a 200k×256-d / lists=448 build still took ~2.7 min
    (k-means dominates). Worth a faster k-means (mini-batch, fewer
    Lloyd iters, or sampling) for 1M+ builds.
-5. **Multivector / named-vectors / hybrid fusion** (effort XL,
+4. **Multivector / named-vectors / hybrid fusion** (effort XL,
    scope) — express via columns + app-side RRF unless a user asks.
-6. **Indexed bitvec ANN** (effort L) — TurboQuant doesn't fit
+5. **Indexed bitvec ANN** (effort L) — TurboQuant doesn't fit
    Hamming space; keep exact `<~>`/`<%>` only.
 
 #### Legacy detail (kept for reference)
@@ -190,5 +208,9 @@ knobs. It owns sharding/replication/Raft, which a PG extension
 should not reimplement.
 
 The lessons worth importing: (a) the filtering story matters most
-to users — our iterative-scan fix (#1) is the PG-idiomatic answer;
-(b) rescore/oversampling as explicit knobs (#5) is a clean UX win.
+to users — our answer is the **three PG-idiomatic patterns** in
+[`docs/FILTERING.md`](FILTERING.md) (partial index, in-kernel
+allowlist `knn()`, iterative scan); the in-kernel allowlist is true
+pushdown (flat-only), and the remaining gap is in-traversal pushdown
+on the `ORDER BY` AM path; (b) rescore/oversampling as explicit knobs
+is a clean UX win (shipped v1.9.0).

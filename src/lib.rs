@@ -5705,6 +5705,13 @@ mod tests {
         Spi::run("SET enable_seqscan = off").unwrap();
         Spi::run("SET turbovec.search_k = 100").unwrap();
         Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        // This test asserts the WHOLE-INDEX masked-search
+        // block-skip mechanism (turbovec's blocks_skipped_by_mask
+        // counter). The out-of-core path serves cells via a compact
+        // per-query gather, not the masked-skip kernel, so disable it
+        // here to exercise the path under test. (OOC's own
+        // cell-scoping win is covered by the ivf_ooc_* tests.)
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
         Spi::run(
             "CREATE INDEX ivf_lp_idx ON ivf_lp \
              USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
@@ -5902,6 +5909,10 @@ mod tests {
         Spi::run("SET enable_seqscan = off").unwrap();
         Spi::run("SET turbovec.search_k = 100").unwrap();
         Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        // Asserts the whole-index masked-search block-skip counter;
+        // disable out-of-core so the masked-skip path is exercised
+        // (OOC's cell-gather doesn't touch that counter).
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
         Spi::run(
             "CREATE INDEX ivf_sv_idx ON ivf_sv \
              USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
@@ -6498,6 +6509,293 @@ mod tests {
         assert_distinct_ids(&ids);
     }
 
+    // ================================================================
+    // Phase B-1/B-2: out-of-core query (turbovec.out_of_core).
+    //
+    // These pin the correctness contract: an IVF scan served
+    // cell-scoped off the mmap (out_of_core = on) must return the
+    // SAME top-k as the whole-index load (out_of_core = off). The
+    // resident-set win itself is measured externally (the report's
+    // RSS sweep / cgroup test); these are the in-harness anchors.
+    // ================================================================
+
+    /// THE out-of-core correctness anchor: with `turbovec.out_of_core`
+    /// ON, an IVF scan that gathers only the probed cells off the
+    /// mmap must return the IDENTICAL top-k (same ids, same order) as
+    /// the whole-index load (OFF) over the same physical index. The
+    /// cell-scoped path changes only WHERE the codes come from (a
+    /// per-query gather off the mmap vs a whole-index buffer), not
+    /// WHICH cells are probed or how they're ranked.
+    #[pg_test]
+    fn ivf_ooc_results_match_whole_load() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_ooc_m", 3000);
+        Spi::run(
+            "CREATE INDEX ivf_ooc_m_idx ON ivf_ooc_m \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.probes = 6").unwrap();
+
+        let query = "(SELECT emb FROM ivf_ooc_m WHERE id = 1234)";
+        let pull = || -> Vec<i64> {
+            fetch_ids(&format!(
+                "SELECT id FROM ivf_ooc_m ORDER BY emb <=> {query} LIMIT 15"
+            ))
+        };
+
+        // Whole-index load (the pre-B-1 path).
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
+        crate::cache::invalidate_all();
+        let whole = pull();
+
+        // Cell-scoped out-of-core serving.
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+        crate::cache::invalidate_all();
+        let ooc = pull();
+
+        assert_eq!(whole.len(), 15, "whole-load returns a full top-15");
+        assert_eq!(ooc.len(), 15, "out-of-core returns a full top-15");
+        assert_distinct_ids(&ooc);
+        assert_eq!(
+            whole, ooc,
+            "out-of-core cell-scoped serving must return the IDENTICAL \
+             top-k as the whole-index load: whole={whole:?} ooc={ooc:?}"
+        );
+    }
+
+    /// With `out_of_core` ON, `probes >= lists` (all cells probed)
+    /// must still equal the exact flat scan — gathering every cell off
+    /// the mmap and scoring it is the full scan, just assembled
+    /// cell-by-cell. Ground truth is a brute-force seqscan.
+    #[pg_test]
+    fn ivf_ooc_probes_all_equals_flat() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_ooc_pa", 2500);
+        let query = "(SELECT emb FROM ivf_ooc_pa WHERE id = 999)";
+
+        // Brute-force ground truth (no index).
+        Spi::run("SET enable_seqscan = on").unwrap();
+        let gt = fetch_ids(&format!(
+            "SELECT id FROM ivf_ooc_pa ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(gt.len(), 10);
+
+        Spi::run(
+            "CREATE INDEX ivf_ooc_pa_idx ON ivf_ooc_pa \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let ooc_all = fetch_ids(&format!(
+            "SELECT id FROM ivf_ooc_pa ORDER BY emb <=> {query} LIMIT 10"
+        ));
+        assert_eq!(ooc_all.len(), 10);
+        assert_distinct_ids(&ooc_all);
+        assert_eq!(
+            ooc_all, gt,
+            "out-of-core probes>=lists must equal the exact (brute-force) \
+             top-k: ooc_all={ooc_all:?} gt={gt:?}"
+        );
+    }
+
+    /// Tombstoned (vacuum-deleted) rows must still be excluded under
+    /// out-of-core serving: the gather skips dead slots so a
+    /// tombstoned row is never copied off the mmap, never scored, and
+    /// never returned.
+    #[pg_test]
+    fn ivf_ooc_tombstones_masked() {
+        use std::collections::HashSet;
+        use_turbovec();
+        ivf2_make_corpus("ivf_ooc_tomb", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_ooc_tomb_idx ON ivf_ooc_tomb \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let query = "(SELECT emb FROM ivf_ooc_tomb WHERE id = 1500)";
+        let pull = || -> Vec<i64> {
+            fetch_ids(&format!(
+                "SELECT id FROM ivf_ooc_tomb ORDER BY emb <=> {query} LIMIT 10"
+            ))
+        };
+        crate::cache::invalidate_all();
+        let healthy = pull();
+        assert!(
+            healthy.contains(&1500),
+            "row 1500 should be its own nearest neighbour before delete: {healthy:?}"
+        );
+
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ivf_ooc_tomb_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+        let dead_set: HashSet<u64> = {
+            let mut set = HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM ivf_ooc_tomb WHERE id = 1500", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData =
+                        row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        assert_eq!(dead_set.len(), 1, "one ctid for id = 1500");
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+
+        let post = pull();
+        assert_eq!(post.len(), 10, "still returns a full top-10 after delete");
+        assert_distinct_ids(&post);
+        assert!(
+            !post.contains(&1500),
+            "out-of-core: tombstoned row 1500 must never be gathered or \
+             returned: {post:?}"
+        );
+    }
+
+    /// Soft-assigned (duplicated) boundary vectors must still be
+    /// deduped under out-of-core serving: a vector duplicated into two
+    /// probed cells is gathered twice (once per cell) but the scan's
+    /// emitted-id set drops the repeat, so each id appears at most
+    /// once in the result.
+    #[pg_test]
+    fn ivf_ooc_soft_assign_dedup() {
+        use_turbovec();
+        ivf3_make_clustered_corpus("ivf_ooc_soft", 3200, 16);
+        Spi::run(
+            "CREATE INDEX ivf_ooc_soft_idx ON ivf_ooc_soft \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 3)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+        // Probe many cells so a duplicated boundary vector is likely
+        // gathered from more than one cell.
+        Spi::run("SET turbovec.probes = 12").unwrap();
+        Spi::run("SET turbovec.max_probes = 16").unwrap();
+        crate::cache::invalidate_all();
+        let ids = fetch_ids(
+            "SELECT id FROM ivf_ooc_soft \
+             ORDER BY emb <=> (SELECT emb FROM ivf_ooc_soft WHERE id = 11) LIMIT 25",
+        );
+        assert!(!ids.is_empty(), "out-of-core soft-index scan returned no rows");
+        assert_distinct_ids(&ids);
+    }
+
+    /// Bounded-resident-set mechanism proof (in-harness proxy for the
+    /// report's external RSS sweep). With `out_of_core = on`, an IVF
+    /// scan must install a cell-scoped `Ooc` cache entry — which by
+    /// construction holds NO whole-index codes buffer (only bounded
+    /// metadata + the mmap; the codes are faulted per probed cell).
+    /// With `out_of_core = off` the SAME index installs the
+    /// whole-index `ReadOnly` entry (O(n)-resident codes). We can't
+    /// easily read VmHWM mid-test (see the B-4 note), so this asserts
+    /// the structural invariant that bounds the resident set instead:
+    /// the codes buffer is only ever materialised whole in the
+    /// `ReadOnly` path, never the `Ooc` one.
+    #[pg_test]
+    fn ivf_ooc_installs_cell_scoped_handle() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_ooc_h", 3000);
+        Spi::run(
+            "CREATE INDEX ivf_ooc_h_idx ON ivf_ooc_h \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET turbovec.probes = 6").unwrap();
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ivf_ooc_h_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+        let query =
+            "SELECT id FROM ivf_ooc_h ORDER BY emb <=> \
+             (SELECT emb FROM ivf_ooc_h WHERE id = 1234) LIMIT 5";
+
+        // out_of_core = on -> cell-scoped Ooc entry (no whole codes).
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+        crate::cache::invalidate_all();
+        let _ = fetch_ids(query);
+        assert_eq!(
+            crate::cache::am_entry_variant(indexrelid),
+            Some("ooc"),
+            "out_of_core = on must install a cell-scoped Ooc cache entry \
+             (codes faulted per probed cell, NOT loaded whole)"
+        );
+
+        // out_of_core = off -> whole-index ReadOnly entry (O(n) codes).
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
+        crate::cache::invalidate_all();
+        let _ = fetch_ids(query);
+        assert_eq!(
+            crate::cache::am_entry_variant(indexrelid),
+            Some("readonly"),
+            "out_of_core = off must load the whole index (ReadOnly entry)"
+        );
+    }
+
+    /// `out_of_core = auto` (the default) is size-aware: it goes
+    /// cell-scoped only when the index's codes are large relative to
+    /// turbovec.cache_size_mb. A tiny cache budget forces the same
+    /// IVF index cell-scoped; a generous budget loads it whole. This
+    /// is what keeps the default from taxing in-RAM indexes with the
+    /// per-query gather/reblock cost while still serving >RAM indexes
+    /// out-of-core.
+    #[pg_test]
+    fn ivf_ooc_auto_is_size_aware() {
+        use crate::guc::{out_of_core_decide, OutOfCoreMode};
+        let mb = 1024u64 * 1024;
+
+        // off / on ignore size.
+        assert!(!out_of_core_decide(OutOfCoreMode::Off, 1000 * mb, mb));
+        assert!(out_of_core_decide(OutOfCoreMode::On, 1, 1000 * mb));
+
+        // auto: cell-scoped iff codes > 0.5 * budget.
+        let budget = 256 * mb;
+        // Small index (10 MB codes) fits a 256 MB budget -> whole-load.
+        assert!(
+            !out_of_core_decide(OutOfCoreMode::Auto, 10 * mb, budget),
+            "auto must load whole when codes are small vs the budget"
+        );
+        // Large index (200 MB codes > 128 MB threshold) -> cell-scoped.
+        assert!(
+            out_of_core_decide(OutOfCoreMode::Auto, 200 * mb, budget),
+            "auto must go cell-scoped when codes exceed 0.5 * budget"
+        );
+        // Exactly at the threshold is NOT over it (strict >).
+        assert!(!out_of_core_decide(OutOfCoreMode::Auto, 128 * mb, budget));
+        assert!(out_of_core_decide(OutOfCoreMode::Auto, 128 * mb + 1, budget));
+    }
+
     // ----------------------------------------------------------------
     // IVF-3 Part B (docs/IVF_PLAN.md §7): the recall-vs-probes
     // frontier. Recall is CPU-independent (a function of which cells
@@ -6589,6 +6887,11 @@ mod tests {
         .unwrap();
         Spi::run("SET turbovec.search_k = 200").unwrap();
         Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        // The frontier reads the whole-index masked-search block-skip
+        // counter as its scan-work proxy; the out-of-core cell-gather
+        // path doesn't increment it. Disable OOC so the skip
+        // fraction is measured against the masked-skip kernel.
+        Spi::run("SET turbovec.out_of_core = off").unwrap();
 
         // Collect the held-out query rows.
         let queries: Vec<(i64, String)> = Spi::connect(|client| {

@@ -139,6 +139,18 @@ struct IvfScanCtx {
     /// tombstoned row is never scored or returned (Phase E-2). Cached
     /// here so a probe-widening refill doesn't re-read the chain.
     tombstones: Vec<u8>,
+    /// Phase B-1/B-2: when `Some`, this is the out-of-core
+    /// cell-scoped IVF index. The fine search goes through
+    /// [`cache::OocIvfIndex::search_ooc`] (gather probed cells off
+    /// the mmap) instead of `arc.search_masked` over a whole-index
+    /// handle, so the resident set stays O(probes*cell_size). The
+    /// `mask` field is unused on this path (the gather applies the
+    /// probe/tombstone restriction directly); we keep the probed
+    /// cell list in `probed_cells` for the refill.
+    ooc: Option<std::sync::Arc<cache::OocIvfIndex>>,
+    /// The probed cell ids for the current `probes` width (OOC path
+    /// only). Re-derived on each widen.
+    probed_cells: Vec<u32>,
 }
 
 /// `ambeginscan`: allocate the IndexScanDesc and attach our opaque.
@@ -429,95 +441,61 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 // `IdMapIndex` via `am_install` (deferred HashMap).
                 let meta = relfile::read_meta((*scan).indexRelation)
                     .expect("meta disappeared mid-scan");
-                let (codes, scales, ids) = relfile::read_full((*scan).indexRelation, &meta);
-                let mmap_enabled = guc::MMAP_STATIC_BLOCKED.get();
-                let mmap_load = if mmap_enabled && meta.has_prepared_layout() {
-                    mmap_static::load_static_regions((*scan).indexRelation, &meta)
-                } else {
-                    None
-                };
 
-                let (stored_index, mmap_handle): (cache::ReadOnlyIndex, _) =
-                    if let Some((handle, parts)) = mmap_load {
-                    // Mmap path: hand the chain bytes to turbovec
-                    // via the borrowed-cache constructor as
-                    // `Cow::Owned` (the chains had to be copied
-                    // off the mmap because the on-disk layout has
-                    // 24-byte page-header gaps every 8168 bytes).
-                    // The Mmap handle still lives in the cache
-                    // entry per the isolation contract.
-                    let prepared = PreparedCachesBorrowed {
-                        blocked_codes: Some(Cow::Owned(parts.blocked_codes)),
-                        n_blocks: parts.n_blocks,
-                        centroids: Some(Cow::Owned(parts.centroids)),
-                        boundaries: Some(Cow::Owned(parts.boundaries)),
-                        rotation: Some(Cow::Owned(parts.rotation)),
-                    };
-                    let idx = cache::ReadOnlyIndex::from_prepared_parts_borrowed(
-                        meta.bit_width as usize,
-                        meta.dim as usize,
-                        meta.n_vectors as usize,
-                        Cow::Owned(codes),
-                        Cow::Owned(scales),
-                        ids,
-                        prepared,
-                    );
-                    (idx, Some(handle))
-                } else if meta.has_prepared_layout() {
-                    // Buffer-manager fallback path with prepared
-                    // layout (matches v1.4.0 behaviour).
-                    let blocked = relfile::read_blocked(
+                // Phase B-1/B-2: out-of-core cell-scoped IVF. When
+                // `turbovec.out_of_core` is on AND this is a live
+                // IVF index (lists > 0, not vacuum-degraded) AND we
+                // can mmap the relfile, install a bounded-resident
+                // `OocIvfIndex` instead of the whole-index
+                // `ReadOnlyIndex`. The codes buffer is faulted per
+                // probed cell off the mmap, so the resident set is
+                // O(probes*cell_size) not O(n) — a >RAM index can be
+                // served. Flat / degraded indexes fall through to
+                // the whole-index load (they have no cells to scope).
+                // `auto` (default) goes cell-scoped only when the
+                // codes are large vs turbovec.cache_size_mb; `on`
+                // always, `off` never. The codes (packed quantized
+                // vectors) are the O(n) term the whole-load path
+                // would make resident.
+                let codes_bytes = (meta.n_vectors as u64)
+                    .saturating_mul(((meta.dim as u64) * (meta.bit_width as u64)) / 8);
+                if guc::out_of_core_cell_scoped(codes_bytes)
+                    && meta.has_ivf()
+                    && meta.has_prepared_layout()
+                    && guc::MMAP_STATIC_BLOCKED.get()
+                {
+                    if let Some(handle) = try_install_ooc(
                         (*scan).indexRelation,
                         &meta,
-                    );
-                    let centroids = meta.centroids_slice().to_vec();
-                    let boundaries = meta.boundaries_slice().to_vec();
-                    let rotation = relfile::read_rotation(
-                        (*scan).indexRelation,
-                        &meta,
-                    );
-                    let rotation_opt =
-                        if rotation.is_empty() { None } else { Some(rotation) };
-                    let idx = cache::ReadOnlyIndex::from_prepared_parts(
-                        meta.bit_width as usize,
-                        meta.dim as usize,
-                        meta.n_vectors as usize,
-                        codes,
-                        scales,
-                        ids,
-                        blocked,
-                        meta.n_blocks_blocked as usize,
-                        centroids,
-                        boundaries,
-                        rotation_opt,
-                    );
-                    (idx, None)
+                        key,
+                        relfile_node,
+                        version_as_i64,
+                    ) {
+                        handle
+                    } else {
+                        install_whole_index(
+                            (*scan).indexRelation,
+                            &meta,
+                            key,
+                            relfile_node,
+                            version_as_i64,
+                            n_in_index,
+                            dim_u32,
+                            bit_width_u8,
+                        )
+                    }
                 } else {
-                    // No prepared layout (legacy path; should be
-                    // unreachable post-Phase Q because
-                    // ambeginscan ERRORs on legacy_v1 / legacy_v2
-                    // up-front, but keep the fall-through for
-                    // defence in depth).
-                    let idx = cache::ReadOnlyIndex::from_parts(
-                        meta.bit_width as usize,
-                        meta.dim as usize,
-                        meta.n_vectors as usize,
-                        codes,
-                        scales,
-                        ids,
-                    );
-                    (idx, None)
-                };
-                let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
-                let total_bytes = bytes_per_vec * (n_in_index.max(1));
-                cache::scan_install(
-                    key,
-                    stored_index,
-                    total_bytes,
-                    relfile_node,
-                    version_as_i64,
-                    mmap_handle,
-                )
+                    install_whole_index(
+                        (*scan).indexRelation,
+                        &meta,
+                        key,
+                        relfile_node,
+                        version_as_i64,
+                        n_in_index,
+                        dim_u32,
+                        bit_width_u8,
+                    )
+                }
             }
         }};
         let n_live = arc.len();
@@ -599,7 +577,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         }
         // Current batch drained. Try to refill if iterative scan is on
         // and we haven't hit the caps.
-        if !try_refill(opaque) {
+        if !try_refill(scan, opaque) {
             return false;
         }
         // try_refill either appended new candidates (loop continues to
@@ -651,6 +629,243 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}
 
+/// Build and install the whole-index `ReadOnlyIndex` cache entry
+/// (the pre-Phase-B-1 behaviour: O(n) resident). Used for flat
+/// indexes, vacuum-degraded IVF, and as the IVF fallback when
+/// out-of-core is off or the mmap is unavailable. Returns the
+/// installed [`cache::ScanHandle`].
+///
+/// # Safety
+///
+/// `rel` holds a live index relation reference; `meta` came from
+/// `relfile::read_meta(rel)` on the same relation.
+#[allow(clippy::too_many_arguments)]
+unsafe fn install_whole_index(
+    rel: pg_sys::Relation,
+    meta: &crate::index::page::MetaPageData,
+    key: CacheKey,
+    relfile_node: u32,
+    version_as_i64: i64,
+    n_in_index: usize,
+    dim_u32: u32,
+    bit_width_u8: u8,
+) -> cache::ScanHandle {
+    let (codes, scales, ids) = relfile::read_full(rel, meta);
+    let mmap_enabled = guc::MMAP_STATIC_BLOCKED.get();
+    let mmap_load = if mmap_enabled && meta.has_prepared_layout() {
+        mmap_static::load_static_regions(rel, meta)
+    } else {
+        None
+    };
+
+    let (stored_index, mmap_handle): (cache::ReadOnlyIndex, _) = if let Some((handle, parts)) =
+        mmap_load
+    {
+        // Mmap path: hand the chain bytes to turbovec via the
+        // borrowed-cache constructor as `Cow::Owned` (the chains
+        // had to be copied off the mmap because the on-disk
+        // layout has 24-byte page-header gaps every 8168 bytes).
+        // The Mmap handle still lives in the cache entry per the
+        // isolation contract.
+        let prepared = PreparedCachesBorrowed {
+            blocked_codes: Some(Cow::Owned(parts.blocked_codes)),
+            n_blocks: parts.n_blocks,
+            centroids: Some(Cow::Owned(parts.centroids)),
+            boundaries: Some(Cow::Owned(parts.boundaries)),
+            rotation: Some(Cow::Owned(parts.rotation)),
+        };
+        let idx = cache::ReadOnlyIndex::from_prepared_parts_borrowed(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            Cow::Owned(codes),
+            Cow::Owned(scales),
+            ids,
+            prepared,
+        );
+        (idx, Some(handle))
+    } else if meta.has_prepared_layout() {
+        // Buffer-manager fallback path with prepared layout
+        // (matches v1.4.0 behaviour).
+        let blocked = relfile::read_blocked(rel, meta);
+        let centroids = meta.centroids_slice().to_vec();
+        let boundaries = meta.boundaries_slice().to_vec();
+        let rotation = relfile::read_rotation(rel, meta);
+        let rotation_opt = if rotation.is_empty() { None } else { Some(rotation) };
+        let idx = cache::ReadOnlyIndex::from_prepared_parts(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+            blocked,
+            meta.n_blocks_blocked as usize,
+            centroids,
+            boundaries,
+            rotation_opt,
+        );
+        (idx, None)
+    } else {
+        // No prepared layout (legacy path; should be unreachable
+        // post-Phase Q because ambeginscan ERRORs on legacy_v1 /
+        // legacy_v2 up-front, but keep the fall-through for
+        // defence in depth).
+        let idx = cache::ReadOnlyIndex::from_parts(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+        );
+        (idx, None)
+    };
+    let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
+    let total_bytes = bytes_per_vec * (n_in_index.max(1));
+    cache::scan_install(
+        key,
+        stored_index,
+        total_bytes,
+        relfile_node,
+        version_as_i64,
+        mmap_handle,
+    )
+}
+
+/// Phase B-1/B-2: build and install an out-of-core cell-scoped
+/// [`cache::OocIvfIndex`] for a live IVF index. Returns
+/// `Some(handle)` on success, or `None` (caller falls back to
+/// [`install_whole_index`]) if the mmap can't be opened, the static
+/// regions disagree with the buffer-managed meta page (a concurrent
+/// rewrite raced our `AccessShareLock`), or any bounded region is
+/// missing / inconsistent.
+///
+/// Only the BOUNDED regions are read here: coarse centroids, cell
+/// directory, rotation, codebook, and the small per-slot scales /
+/// ids tables. The big codes chain is NOT read — it's faulted per
+/// probed cell off the mmap at query time. That is what bounds the
+/// resident set to O(probes*cell_size) and lets a >RAM index be
+/// served.
+///
+/// # Safety
+///
+/// `rel` holds a live index relation reference; `meta` came from
+/// `relfile::read_meta(rel)` on the same relation. Caller holds at
+/// least `AccessShareLock`.
+unsafe fn try_install_ooc(
+    rel: pg_sys::Relation,
+    meta: &crate::index::page::MetaPageData,
+    key: CacheKey,
+    relfile_node: u32,
+    version_as_i64: i64,
+) -> Option<cache::ScanHandle> {
+    let dim = meta.dim as usize;
+    let lists = meta.lists as usize;
+    let n_vectors = meta.n_vectors as usize;
+    if dim == 0 || lists == 0 || n_vectors == 0 {
+        return None;
+    }
+
+    // Map the relfile. The codes chain is faulted off this map per
+    // Try to mmap the relfile. When it's available AND its meta
+    // page agrees with the buffer-managed one, the per-query gather
+    // reads probed cells off the mmap (production fast path, cold
+    // pages fault on demand). When the relfile isn't mmappable
+    // (freshly-built same-xact index whose dirty buffers aren't
+    // flushed to the segment file yet; non-default tablespace;
+    // mid-REINDEX rename) OR its meta disagrees (a concurrent
+    // rewrite raced our AccessShareLock), fall back to a
+    // buffer-manager gather — still cell-scoped (only probed cell
+    // pages are read), so the resident codes stay bounded.
+    let map: Option<mmap_static::StaticRegionsMap> =
+        match mmap_static::StaticRegionsMap::open_for_ooc(rel) {
+            Some(m) => {
+                let ok = m
+                    .page_data_pub(crate::index::page::META_BLKNO)
+                    .and_then(|b| crate::index::page::MetaPageData::decode(b).ok())
+                    .is_some_and(|mapped| {
+                        mapped.am_version == meta.am_version
+                            && mapped.n_vectors == meta.n_vectors
+                            && mapped.codes_first == meta.codes_first
+                            && mapped.lists == meta.lists
+                    });
+                if ok {
+                    Some(m)
+                } else {
+                    // mmap stale / unflushed — use the buffer-manager
+                    // gather instead (the buffer manager reads the
+                    // canonical, dirty-buffer-aware bytes).
+                    None
+                }
+            }
+            None => None,
+        };
+
+    // Bounded regions: coarse centroids + rotation + cell directory.
+    let coarse_centroids = relfile::read_coarse_centroids(rel, meta);
+    if coarse_centroids.len() != lists * dim {
+        return None;
+    }
+    let rotation = relfile::read_rotation(rel, meta);
+    if rotation.len() != dim * dim {
+        return None;
+    }
+    let directory = relfile::read_cell_directory(rel, meta)?;
+    if directory.total_vectors() != n_vectors as u64 {
+        return None;
+    }
+
+    // Codebook (inline in the meta page).
+    let codebook_centroids = meta.centroids_slice().to_vec();
+    let codebook_boundaries = meta.boundaries_slice().to_vec();
+
+    // Small per-slot tables (scales 4 B/vec, ids 8 B/vec). These are
+    // O(n) but tiny next to the codes (e.g. 768 B/vec at 1536-d
+    // 4-bit); keeping them resident lets the per-query gather pull
+    // only the codes off the mmap. The codes chain itself is NOT
+    // read here — that is what bounds the resident set.
+    let scales = relfile::read_scales_only(rel, meta);
+    let ids = relfile::read_ids_only(rel, meta);
+    if scales.len() != n_vectors || ids.len() != n_vectors {
+        return None;
+    }
+
+    let ooc = cache::OocIvfIndex::new(
+        map,
+        meta.bit_width as usize,
+        dim,
+        n_vectors,
+        meta.codes_first,
+        meta.stride_bytes,
+        meta.rows_per_codes_page,
+        coarse_centroids,
+        lists,
+        rotation,
+        directory,
+        codebook_centroids,
+        codebook_boundaries,
+        scales,
+        ids,
+    );
+
+    // Bounded resident-byte estimate for the LRU cap: centroids +
+    // rotation + directory + scales + ids (NOT O(n) codes).
+    let bytes = lists * dim * 4
+        + dim * dim * 4
+        + lists * 12
+        + n_vectors * 4
+        + n_vectors * 8
+        + 4096;
+    Some(cache::scan_install_ooc(
+        key,
+        ooc,
+        bytes,
+        relfile_node,
+        version_as_i64,
+    ))
+}
+
 /// IVF-2/IVF-3 coarse search + cell-restricted fine search. Returns
 /// `Some((ctx, scores, ids))` when the index is a live IVF index
 /// (`meta.has_ivf()`) backed by a read-only handle whose slot order
@@ -681,6 +896,17 @@ unsafe fn ivf_setup_and_search(
     k: usize,
     n_live: usize,
 ) -> Option<(IvfScanCtx, Vec<f32>, Vec<u64>)> {
+    // Phase B-1/B-2: out-of-core cell-scoped path. The handle owns
+    // the cached centroids / directory / rotation / codebook + the
+    // mmap; coarse-probe, then gather only the probed cells off the
+    // mmap (no whole-index buffer). Results match the whole-load
+    // IVF path exactly: same coarse_probe, same cells, same fine
+    // ranking over the same codes (just gathered into a compact
+    // buffer instead of masked in place).
+    if let Some(ooc) = arc.ooc() {
+        return ivf_setup_and_search_ooc(scan, &ooc, query, k);
+    }
+
     let meta = relfile::read_meta((*scan).indexRelation)?;
     if !meta.has_ivf() {
         return None;
@@ -734,6 +960,60 @@ unsafe fn ivf_setup_and_search(
         probes,
         mask,
         tombstones,
+        ooc: None,
+        probed_cells: Vec::new(),
+    };
+    Some((ctx, scores, ids))
+}
+
+/// Out-of-core (Phase B-1/B-2) IVF setup + first cell-scoped search.
+/// The [`cache::OocIvfIndex`] owns the cached centroids / directory /
+/// rotation / codebook + the relfile mmap; this coarse-probes the
+/// cells and gathers ONLY the probed cells off the mmap to score
+/// them, so the resident set stays O(probes*cell_size). The
+/// per-slot tombstone bitmap (Phase E-2) is read here (small) and
+/// applied during the gather so dead rows are never scored.
+///
+/// Returns `None` (caller falls back to the flat `arc.search` path)
+/// only on a defensive gather failure (corrupt index / post-truncate
+/// race) — but since the OOC handle has no whole-index buffer, that
+/// fallback would be an empty `arc.search`; in practice the gather
+/// succeeds for a healthy index.
+///
+/// # Safety
+///
+/// `scan` holds a live index relation reference for the duration.
+unsafe fn ivf_setup_and_search_ooc(
+    scan: pg_sys::IndexScanDesc,
+    ooc: &std::sync::Arc<cache::OocIvfIndex>,
+    query: &[f32],
+    k: usize,
+) -> Option<(IvfScanCtx, Vec<f32>, Vec<u64>)> {
+    let meta = relfile::read_meta((*scan).indexRelation)?;
+    let lists = ooc.lists();
+    // Per-slot tombstone bitmap (small). Applied during the gather.
+    let tombstones = relfile::read_tombstones((*scan).indexRelation, &meta);
+
+    // Coarse search: normalise + rotate the query, pick the probed
+    // cells — IDENTICAL to the whole-load path (same coarse_probe,
+    // same centroids, same rotation) so results match.
+    let unit = kernels::normalise_to_vec(query);
+    let probes = (crate::guc::PROBES.get() as usize).clamp(1, lists);
+    let probed = ooc.coarse_probe_cells(&unit, probes);
+
+    let (scores, ids) = ooc.search_ooc((*scan).indexRelation, query, k, &probed, &tombstones)?;
+    let ctx = IvfScanCtx {
+        // Unused on the OOC path (the OOC index holds its own copies);
+        // kept empty to avoid duplicating the O(lists*dim) centroids.
+        centroids: Vec::new(),
+        directory: crate::index::ivf::CellDirectory { entries: Vec::new() },
+        q_rot: Vec::new(),
+        lists,
+        probes,
+        mask: Vec::new(),
+        tombstones,
+        ooc: Some(ooc.clone()),
+        probed_cells: probed,
     };
     Some((ctx, scores, ids))
 }
@@ -805,7 +1085,7 @@ unsafe fn populate_batch(opaque: *mut ScanOpaque, scores: &[f32], ids: &[u64]) {
 /// appended, or another widening/k-growth is still possible). Returns
 /// `false` only when the scan is exhausted: iterative scan is off, or
 /// the probe set is at its cap AND `k` has reached its ceiling.
-unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
+unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bool {
     if crate::guc::ITERATIVE_SCAN.get() == crate::guc::IterativeScanMode::Off {
         return false;
     }
@@ -836,6 +1116,36 @@ unsafe fn try_refill(opaque: *mut ScanOpaque) -> bool {
             (*opaque).ivf = Some(ctx);
             return false;
         }
+
+        // Phase B-1/B-2 out-of-core refill: widen the probe set (the
+        // OOC index re-coarse-probes from its cached centroids),
+        // then gather the wider cell set off the mmap. Same widening
+        // schedule + same k-growth as the whole-load path, so the
+        // iterative results match.
+        if let Some(ooc) = ctx.ooc.clone() {
+            if can_widen {
+                let new_probes = (ctx.probes.saturating_mul(2))
+                    .min(max_probes)
+                    .max(ctx.probes + 1);
+                let unit = kernels::normalise_to_vec(&(*opaque).query);
+                ctx.probed_cells = ooc.coarse_probe_cells(&unit, new_probes);
+                ctx.probes = new_probes;
+            }
+            let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
+            let before = (*opaque).results.len();
+            let (scores, ids) = ooc
+                .search_ooc((*scan).indexRelation, &(*opaque).query, new_k, &ctx.probed_cells, &ctx.tombstones)
+                .unwrap_or_else(|| (Vec::new(), Vec::new()));
+            (*opaque).current_k = new_k;
+            let probes_now = ctx.probes;
+            (*opaque).ivf = Some(ctx);
+            populate_batch(opaque, &scores, &ids);
+            if (*opaque).results.len() > before {
+                return true;
+            }
+            return probes_now < max_probes || (*opaque).current_k < k_ceiling;
+        }
+
         // Widen probes (double, capped). Rebuild the mask only when
         // the probe set actually grew.
         if can_widen {

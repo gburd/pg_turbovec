@@ -126,7 +126,42 @@ SET turbovec.probes = 8;
 -- Each entry is the size of the index on disk (codes + scales +
 -- ids + blocked + caches + rotation). Default 256 MiB; set to
 -- ~ 2x the sum of hot turbovec indexes you query in one session.
+-- ALSO the budget that turbovec.out_of_core = auto compares the
+-- index codes against (see below).
 SET turbovec.cache_size_mb = 256;
+
+-- Out-of-core IVF serving (v1.13.0+): serve an IVF index larger
+-- than RAM by caching only bounded metadata (coarse centroids,
+-- cell directory, rotation, codebook, per-slot scales/ids) plus a
+-- MAP_PRIVATE mmap of the relfile, then per query copying ONLY the
+-- probed cells' contiguous code ranges off the mmap into a compact
+-- throwaway sub-index. The per-backend resident set is then
+-- O(probes * cell_size + faulted pages) instead of O(n) -- hot
+-- cells stay in the OS page cache, cold cells fault from disk on
+-- demand. This is THE mechanism that lets a >RAM IVF index be
+-- queried at all (pairs with the v1.12.0 out-of-core BUILD).
+--
+--   * auto (DEFAULT): cell-scoped only when the index codes exceed
+--     0.5 * cache_size_mb -- i.e. the index that actually needs
+--     out-of-core. An IVF index that fits the cache budget loads
+--     whole (no per-query gather/reblock cost). This is the right
+--     default: no latency tax on in-RAM indexes, automatic >RAM
+--     serving when the index is large.
+--   * on: always cell-scoped (pays the per-query reblock CPU even
+--     on small indexes). Use only to force the memory bound.
+--   * off: always load the whole index into a per-backend Arc
+--     (lowest warm latency once cached, but O(n) resident -- must
+--     fit in RAM). The pre-v1.13.0 behaviour.
+--
+-- Tradeoff: cell-scoped serving pays a per-query gather + reblock
+-- of the probed cells (measured ~2.4x the warm whole-load p50 on a
+-- cache-resident index), in exchange for an O(probes/lists)
+-- resident set. auto only pays that when the index is too large to
+-- keep whole, which is exactly when you need it. No effect on flat
+-- (lists = 0) or vacuum-degraded indexes: they have no cells to
+-- scope and always load whole (still O(n)-resident -- use IVF,
+-- WITH (lists = N), for a >RAM corpus).
+SET turbovec.out_of_core = auto;
 
 -- Use mmap-resident reads for the deterministic-after-build
 -- regions of the relfile (blocked codes + rotation matrix +

@@ -1237,6 +1237,85 @@ pub(crate) unsafe fn read_ids_only(rel: pg_sys::Relation, meta: &MetaPageData) -
         .collect()
 }
 
+/// Gather a set of contiguous slot ranges out of the codes chain
+/// into one compact, gapless `Vec<u8>` THROUGH THE BUFFER MANAGER,
+/// reading ONLY the pages backing the requested ranges. This is the
+/// out-of-core (Phase B-1) gather fallback used when the relfile
+/// can't be mmapped (e.g. a freshly-built index in the same
+/// transaction before its dirty buffers are flushed to the segment
+/// file). It reads each range's slots page-by-page via
+/// `ReadBufferExtended`, so the resident codes are bounded by the
+/// gathered ranges (`probes * cell_size`), not the whole chain.
+///
+/// `ranges` are `(slot_start, slot_count)` pairs into the chain.
+/// `stride` is the per-slot byte width; `rows_per_page` the number
+/// of slots per chain page. The output is the concatenation of each
+/// range's bytes in the given order, length `sum(count) * stride`.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference for the duration.
+pub(crate) unsafe fn gather_codes_ranges(
+    rel: pg_sys::Relation,
+    first_blkno: u32,
+    stride: u32,
+    rows_per_page: u32,
+    ranges: &[(u64, u64)],
+) -> Vec<u8> {
+    let stride_us = stride as usize;
+    let rpp = rows_per_page as u64;
+    if stride_us == 0 || rpp == 0 {
+        return Vec::new();
+    }
+    let total_slots: u64 = ranges.iter().map(|&(_, c)| c).sum();
+    let mut out = Vec::<u8>::with_capacity(total_slots as usize * stride_us);
+    for &(start, count) in ranges {
+        let end = start + count;
+        let mut slot = start;
+        while slot < end {
+            let page_idx = slot / rpp;
+            let in_page = (slot % rpp) as usize;
+            let blkno = first_blkno + page_idx as u32;
+            let slots_left_on_page = rpp - slot % rpp;
+            let take_slots = slots_left_on_page.min(end - slot) as usize;
+            let buf = read_block(rel, blkno, /*exclusive=*/ false);
+            let src = page_data(buf).add(in_page * stride_us);
+            let pos = out.len();
+            out.set_len(pos + take_slots * stride_us);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(pos), take_slots * stride_us);
+            pg_sys::UnlockReleaseBuffer(buf);
+            slot += take_slots as u64;
+        }
+    }
+    out
+}
+
+/// Read the scales chain (only) into a `Vec<f32>`. The out-of-core
+/// IVF path (Phase B-1) keeps scales resident (4 B/vec, small) so
+/// the per-query gather pulls only the codes off the mmap; reading
+/// scales alone avoids slurping the O(n) codes chain that
+/// `read_full` would.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_scales_only(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<f32> {
+    if meta.n_vectors == 0 {
+        return Vec::new();
+    }
+    let scales_bytes = read_chain(
+        rel,
+        meta.scales_first,
+        std::mem::size_of::<f32>() as u32,
+        meta.rows_per_scales_page,
+        meta.n_vectors,
+    );
+    scales_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 /// Rewrite the meta page in place with a smaller `n_vectors` and
 /// a bumped `am_version`. Used by `ambulkdelete`'s FLAT path after
 /// walking the page chains and swap-removing dead rows. The chain

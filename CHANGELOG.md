@@ -4,6 +4,71 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] — 2026-06-17
+
+**Out-of-core IVF query (>RAM serving)** — an IVF index larger than
+RAM can now be queried, not just built (v1.12.0). Wire format
+unchanged (`MetaPageData::version = 4`); **no REINDEX**. Completes
+the out-of-core arc for the >5M production deployment
+(an internal design note Phase B-1/B-2).
+
+### Added — cell-scoped IVF serving (Phase B-1/B-2)
+
+The scan previously loaded the **whole index** into a per-backend
+cache (`read_full` + a copy of the blocked-codes chain off the
+mmap), so the resident set was `O(n)` and an index that exceeded RAM
+could not be served.
+
+- **Cell-scoped scan.** The backend now caches only bounded metadata
+  (coarse centroids, cell directory, rotation, codebook, per-slot
+  scales/ids) plus a `MAP_PRIVATE` mmap of the relfile, and per
+  query copies **only the probed cells'** contiguous code ranges off
+  the mmap into a compact throwaway sub-index (cells are contiguous
+  from the build-time permutation). Resident set drops to
+  `O(probes * cell_size + faulted pages)`; hot cells stay in the OS
+  page cache, cold cells fault from disk on demand.
+- **`turbovec.out_of_core`** (enum `off | auto | on`, **default
+  `auto`**). `auto` goes cell-scoped only when the index codes
+  exceed `0.5 * turbovec.cache_size_mb` — an in-RAM index loads
+  whole (no per-query gather/reblock cost); only a genuinely large
+  index pays the bounded-memory-for-CPU tradeoff. `on` forces
+  cell-scoped; `off` forces the pre-v1.13.0 whole-load.
+- No wire change, no turbovec fork change (reuses
+  `from_parts_with_prepared_borrowed`). Added
+  `mmap_static::gather_slot_ranges` + a buffer-manager twin for the
+  fresh-index fallback.
+
+### Measured
+
+200k×256-d×4-bit IVF (52 MB on disk): per-backend `VmHWM`
+whole-load **140.8 MB → cell-scoped 44.1 MB** (~3.2× lower). Under a
+tight cgroup `MemoryMax`, the whole-load backend was OOM-killed
+(postmaster recovered cleanly, no corruption) where cell-scoped
+stayed within bound. Warm p50 **82 ms (whole-load) → 199 ms
+(cell-scoped)** — the expected per-query reblock cost, paid by
+`auto` only when the index is too large to keep whole.
+
+### Compatibility
+
+Scan-path only. Results identical to the whole-load path
+(`probes >= lists` still reduces to the exact flat scan; tombstones
+masked; soft-assign deduped). MVCC backstops (reorder queue + heap
+visibility) preserved. Flat (`lists = 0`) / vacuum-degraded indexes
+keep the whole-index load (no cells to scope; still `O(n)`-resident
+— use IVF for >RAM).
+
+### Migration
+
+**No REINDEX.** Scan-path change; wire stays v4. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.13.0';` is sufficient.
+
+### Tests
+
+197 → 203 (+`ivf_ooc_results_match_whole_load`,
+`ivf_ooc_probes_all_equals_flat`, `ivf_ooc_tombstones_masked`,
+`ivf_ooc_soft_assign_dedup`, `ivf_ooc_installs_cell_scoped_handle`,
+`ivf_ooc_auto_is_size_aware`). drift-check clean.
+
 ## [1.12.0] — 2026-06-17
 
 **Out-of-core IVF build** — IVF indexes can now be built at 1M–5M+

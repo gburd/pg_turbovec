@@ -4,6 +4,58 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] — 2026-06-17
+
+**Phase C follow-up — operator-path allowlist on flat + IVF.**
+Additive GUC + function in the `turbovec` schema; **no wire change**
+(`MetaPageData::version = 4`), **no index-AM scan-key rewrite**, **no
+REINDEX**. Brings the in-kernel allowlist pushdown (previously
+`turbovec.knn()`-only, flat-only) to the `ORDER BY emb <=> q LIMIT k`
+operator path.
+
+### Added
+
+- **`turbovec.allowlist`** (session string GUC, default `""`) — a
+  CSV of heap TIDs (encoded as bigint). When set, the index-AM scan
+  ANDs the allowed slots into the slot mask it hands the SIMD
+  kernel, so the kernel short-circuits 32-vector blocks with no
+  allowed slot before any LUT work — the same in-kernel block-skip
+  `knn(..., allowed)` gets, now on the operator path. On an **IVF**
+  index the allowlist is ANDed with the probed-cell mask, scoping
+  the skip to *probed cells ∧ allowed slots*; the out-of-core
+  cell-scoped path gets it too. Empty/unset = exact prior behaviour
+  with **zero added hot-path cost** (no slot-bool is ever built).
+  Parsed once per scan (refills reuse it); a non-integer token
+  ERRORs the scan.
+- **`turbovec.tid_to_bigint(tid) -> bigint`** — the ergonomic
+  encoder for building the allowlist from `ctid` (returns the
+  `(block << 32) | offset` value the AM stores per slot), so users
+  never hand-write the bit-twiddling. Verified bit-identical to the
+  raw encoding (`tid_to_bigint_matches_raw_encoding`).
+
+### Notes / honest limitation
+
+The allowlist is a set of **heap TIDs, not an `id` column** — the
+index AM keys vectors by heap TID, never a heap `id` column;
+`turbovec.knn(..., allowed)` remains the id-column path. This is a
+**pre-materialized id-set** channel, **not** arbitrary-`WHERE`
+pushdown (which would require scan-key reinterpretation — the
+forbidden `amrescan` rewrite — or payload columns in the index).
+See `docs/FILTERING.md` §§ 3.5, 6, 7. Composes with tombstones (a
+vacuum-deleted row is excluded even if allowlisted) and with
+`probes >= lists` (exact over the allowed set); returns the same
+rows as `knn()` for the same id-set.
+
+### Migration
+
+Additive GUC + function; no wire change, no REINDEX. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.15.0';` is sufficient. Tests: 215 → 224
+(+`allowlist_guc_restricts_ordered_scan_flat`/`_ivf`,
+`allowlist_guc_matches_knn`, `allowlist_guc_empty_is_unfiltered`,
+`allowlist_guc_composes_with_tombstones`,
+`allowlist_guc_probes_all_exact`, `allowlist_guc_rejects_bad_token`,
+`allowlist_guc_out_of_core`, `tid_to_bigint_matches_raw_encoding`).
+
 ## [1.14.0] — 2026-06-17
 
 **Phase D — breadth parity (multivector + hybrid fusion).** Additive

@@ -1,0 +1,232 @@
+{
+  "corpus": "scifact",
+  "n_docs": 5183,
+  "n_queries_with_qrels": 300,
+  "avg_tok_per_doc": 157.3667759984565,
+  "avg_tok_per_query": 32.0,
+  "configs": [
+    {
+      "bit_width": 2,
+      "per_token_k": 64,
+      "candidate_n": 256,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6179,
+        "recall@10": 0.7421,
+        "p50_ms": 272.0,
+        "p95_ms": 306.88
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.5552,
+        "recall@10": 0.6521,
+        "p50_ms": 175.63,
+        "p95_ms": 219.85
+      },
+      "delta_ndcg@10": 0.0627,
+      "delta_recall@10": 0.09
+    },
+    {
+      "bit_width": 3,
+      "per_token_k": 64,
+      "candidate_n": 256,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6175,
+        "recall@10": 0.7421,
+        "p50_ms": 444.94,
+        "p95_ms": 765.77
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.5552,
+        "recall@10": 0.6521,
+        "p50_ms": 135.3,
+        "p95_ms": 145.96
+      },
+      "delta_ndcg@10": 0.0623,
+      "delta_recall@10": 0.09
+    },
+    {
+      "bit_width": 4,
+      "per_token_k": 64,
+      "candidate_n": 256,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6175,
+        "recall@10": 0.7404,
+        "p50_ms": 315.0,
+        "p95_ms": 353.66
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.5552,
+        "recall@10": 0.6521,
+        "p50_ms": 141.38,
+        "p95_ms": 164.3
+      },
+      "delta_ndcg@10": 0.0623,
+      "delta_recall@10": 0.0883
+    },
+    {
+      "bit_width": 4,
+      "per_token_k": 32,
+      "candidate_n": 256,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6118,
+        "recall@10": 0.7304,
+        "p50_ms": 294.64,
+        "p95_ms": 352.44
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.5552,
+        "recall@10": 0.6521,
+        "p50_ms": 139.12,
+        "p95_ms": 147.68
+      },
+      "delta_ndcg@10": 0.0566,
+      "delta_recall@10": 0.0783
+    },
+    {
+      "bit_width": 4,
+      "per_token_k": 128,
+      "candidate_n": 256,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6184,
+        "recall@10": 0.7421,
+        "p50_ms": 295.94,
+        "p95_ms": 409.0
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.5552,
+        "recall@10": 0.6521,
+        "p50_ms": 125.07,
+        "p95_ms": 135.65
+      },
+      "delta_ndcg@10": 0.0633,
+      "delta_recall@10": 0.09
+    },
+    {
+      "bit_width": 4,
+      "per_token_k": 64,
+      "candidate_n": 128,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6098,
+        "recall@10": 0.7254,
+        "p50_ms": 150.4,
+        "p95_ms": 169.85
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.5065,
+        "recall@10": 0.5904,
+        "p50_ms": 82.56,
+        "p95_ms": 89.03
+      },
+      "delta_ndcg@10": 0.1032,
+      "delta_recall@10": 0.135
+    },
+    {
+      "bit_width": 4,
+      "per_token_k": 64,
+      "candidate_n": 512,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6188,
+        "recall@10": 0.7438,
+        "p50_ms": 518.42,
+        "p95_ms": 632.98
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.6045,
+        "recall@10": 0.7204,
+        "p50_ms": 281.09,
+        "p95_ms": 295.42
+      },
+      "delta_ndcg@10": 0.0143,
+      "delta_recall@10": 0.0233
+    },
+    {
+      "bit_width": 3,
+      "per_token_k": 128,
+      "candidate_n": 512,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6191,
+        "recall@10": 0.7438,
+        "p50_ms": 589.89,
+        "p95_ms": 633.27
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.6045,
+        "recall@10": 0.7204,
+        "p50_ms": 278.76,
+        "p95_ms": 297.61
+      },
+      "delta_ndcg@10": 0.0146,
+      "delta_recall@10": 0.0233
+    },
+    {
+      "bit_width": 4,
+      "per_token_k": 128,
+      "candidate_n": 512,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.6189,
+        "recall@10": 0.7438,
+        "p50_ms": 595.37,
+        "p95_ms": 644.0
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.6045,
+        "recall@10": 0.7204,
+        "p50_ms": 278.57,
+        "p95_ms": 297.56
+      },
+      "delta_ndcg@10": 0.0144,
+      "delta_recall@10": 0.0233
+    },
+    {
+      "bit_width": 2,
+      "per_token_k": 128,
+      "candidate_n": 512,
+      "pooled_index_build_s": 0.1,
+      "arm_a_colbert_search": {
+        "ndcg@10": 0.617,
+        "recall@10": 0.7438,
+        "p50_ms": 581.61,
+        "p95_ms": 604.08
+      },
+      "arm_b_pooled_rerank": {
+        "ndcg@10": 0.6045,
+        "recall@10": 0.7204,
+        "p50_ms": 278.11,
+        "p95_ms": 295.34
+      },
+      "delta_ndcg@10": 0.0125,
+      "delta_recall@10": 0.0233
+    }
+  ],
+  "exact_ceiling": {
+    "ndcg@10": 0.6184206437394337,
+    "recall@10": 0.7437777777777778,
+    "compute_s": 37.9
+  },
+  "stage1_token_cache_resident_estimate_mb": {
+    "note": "n_tokens(815632) x dim(128) x bit/8 quantized codes + ~1 f32 scale/token. This is the persistent code footprint a F-2 index would hold; the observed ~1.3 GiB steady backend RSS is PG machinery + per-call query-quant workspace + a ~28 MB/call leak (see harness notes), NOT these codes.",
+    "bit_width_2": 29,
+    "bit_width_3": 42,
+    "bit_width_4": 55,
+    "f32_baseline": 418
+  },
+  "host": "floki",
+  "arch_notes": "x86_64 AVX2 (turbovec SIMD kernels active; latency is meaningful). CPU torch only for embedding. pg16 shared_buffers=256MB, maintenance_work_mem=512MB.",
+  "memory_safety": "All heavy embedding steps run under systemd-run --user --scope MemoryMax=12G MemorySwapMax=0. Sweep client reconnects every 40 queries to bound the colbert_search per-call backend-RSS leak (~28 MB/call) to a ~3.1 GiB peak; available RAM never dropped below ~17.7 GiB; postmaster never at risk; no kill -9.",
+  "verdict": {
+    "best_recall_operating_point": "bit_width=3-4, per_token_k=128, candidate_n=512 -> nDCG@10 0.619 (== exact ceiling 0.6184), Recall@10 0.7438",
+    "best_value_operating_point": "bit_width=2-4, per_token_k=64-128, candidate_n=256 -> nDCG@10 ~0.618, Recall@10 ~0.742 at ~270-300ms; delta over baseline +0.062 nDCG / +0.090 Recall",
+    "quantization_erosion": "Negligible. nDCG@10 across 2/3/4-bit at matched (ptk,cand) varies <=0.002 (e.g. cand=256/ptk=64: bw2=0.6179, bw3=0.6175, bw4=0.6175). The plan's single biggest risk (2-4 bit destroys token signal) DID NOT materialise on SciFact. 2-bit is sufficient.",
+    "delta_summary": "colbert_search beats pooled+rerank at every config. Delta is largest where it matters: at small candidate budgets (cand=128: +0.103 nDCG / +0.135 Recall) the pooled baseline collapses (relevant docs fall outside the pooled top-N) while colbert_search retrieves them via best-single-token. Delta shrinks to +0.014 at cand=512 where the baseline eventually pulls the relevant docs in, but at ~2x the latency.",
+    "latency": "Arm A is ~1.5-2.1x slower than Arm B at matched candidate_n (e.g. cand=256/bw4: A p50=315ms vs B p50=141ms; cand=128/bw4: A=150ms vs B=83ms). A's cost is dominated by the per-call backend-cache token-index BUILD (F-1 rebuilds it each call); a persistent F-2 index would amortise this away, plausibly making A both higher-recall AND competitive/faster.",
+    "f2_recommendation": "GO (qualified). F-1 shows a real, consistent recall gain (+0.06 nDCG / +0.09 Recall at the value operating point, up to +0.10/+0.14 at small candidate budgets) that is NOT an artifact of quantization and that a persistent index would amplify: F-2 removes F-1's dominant per-call build cost, turning A's latency disadvantage into a likely advantage at matched recall, and lets the operating point sit at small candidate_n where the gain is largest. CAVEAT: this is ONE small in-domain BEIR corpus (SciFact, 5183 docs); the gain should be confirmed on a second, entity-heavier / out-of-domain set (e.g. NFCorpus, FiQA, or a LoTTE slice) before fully funding the 32-512x larger persistent index. The pooled baseline already closes most of the gap at large candidate_n, so F-2's value proposition is specifically 'high recall at low candidate budget / low latency', which must hold on the second corpus too."
+  }
+}

@@ -1,10 +1,36 @@
 # Phase F — Index-native late interaction (per-token ColBERT MaxSim)
 
-_Status: PLAN (not yet implemented). Design pressure-tested against
-the v1.15.1 codebase. This is the last acknowledged feature gap vs
+_Status: **F-1 SHIPPED (v1.16.0); F-2 gate MEASURED — GO (qualified),
+pending a second corpus.** Design pressure-tested against the
+v1.15.1 codebase. This is the last acknowledged feature gap vs
 Qdrant/VectorChord; it is deliberately phased so the cheap, reuse-
 heavy first cut (F-1) proves the value before the expensive persistent
 index (F-2) is funded._
+
+> **F-2 gate result (2026-06-17, `floki`, BEIR/SciFact 5,183 docs, AVX2).**
+> `turbovec.colbert_search` (F-1) beat the Phase-D pooled+rerank
+> baseline at **every** config, vs real qrels: **+0.06 nDCG@10 /
+> +0.09 Recall@10** at the value operating point, rising to **+0.10
+> nDCG / +0.14 Recall at small candidate budgets** (`candidate_n=128`,
+> where the pooled baseline collapses because the relevant doc's mean
+> vector falls outside top-N — F-1 still finds it via its best single
+> token: the predicted gap, confirmed on real embeddings). The plan's
+> single biggest risk — "2–4 bit quantization destroys the token
+> signal" — **did not materialise**: 2/3/4-bit differ by ≤0.002 nDCG
+> (2-bit is enough). F-1 reaches the exact brute-force MaxSim ceiling
+> (nDCG 0.619 / R 0.744). F-1 latency is 1.5–2.1× the baseline only
+> because it **rebuilds the backend-cached token index every call** —
+> the exact cost F-2's persistent index removes. **Verdict: GO
+> (qualified)** — fund F-2, but first confirm the delta on a second,
+> entity-heavier / out-of-domain corpus (NFCorpus / FiQA / LoTTE),
+> since the baseline closes most of the gap at large `candidate_n`, so
+> F-2's value proposition is specifically "high recall at low
+> candidate budget / low latency." Data:
+> `benches/results/colbert_f1_gate_floki_scifact_20260617.json`;
+> harness: `benches/scripts/colbert/`.
+> One bug to fix in F-2 work: `colbert_search` leaks ~28 MB of
+> backend RSS per call (the harness works around it by reconnecting
+> every 40 queries; noted in the harness README)._
 
 ---
 

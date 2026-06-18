@@ -534,9 +534,12 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 
         // The K knob: how many candidates to fetch per scan. v1.0
         // shipped a hard 1024 which made every ORDER BY on a million-
-        // row index ~17 s. Default lowered to 100 (turbovec.search_k
-        // GUC) - tune up for high LIMITs or higher recall, down for
-        // sub-ms latency.
+        // row index ~17 s. Default lowered to 100, then to 32 in
+        // v1.18 (turbovec.search_k GUC) once the recall-vs-search_k
+        // frontier showed recall@10 plateaus by ~25 (the per-query
+        // floor is the reorder-recheck of all search_k candidates:
+        // a heap fetch + exact recompute each). Tune up for high
+        // LIMITs or higher recall, down (toward 16) for lower latency.
         //
         // Iterative scan (v1.8.0): `search_k` is only the *first*
         // batch. When the executor drains it and asks for more (and

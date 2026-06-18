@@ -7676,7 +7676,7 @@ mod tests {
             .map(|(sk, r)| format!("    {{\"search_k\": {sk}, \"recall_at_10\": {r:.4}}}"))
             .collect();
         let json = format!(
-            "{{\n  \"experiment\": \"tier1_searchk_recall_frontier\",\n  \"note\": \"recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, an internal design note.\",\n  \"n\": {n},\n  \"dim\": {dim},\n  \"lists\": {lists},\n  \"probes\": {probes},\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"current_default_search_k\": 100,\n  \"curve\": [\n{rows}\n  ]\n}}\n",
+            "{{\n  \"experiment\": \"tier1_searchk_recall_frontier\",\n  \"note\": \"recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, an internal design note.\",\n  \"n\": {n},\n  \"dim\": {dim},\n  \"lists\": {lists},\n  \"probes\": {probes},\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"default_search_k\": 32,\n  \"prev_default_search_k\": 100,\n  \"curve\": [\n{rows}\n  ]\n}}\n",
             rows = rows.join(",\n"),
         );
         let path = format!(

@@ -214,6 +214,48 @@ use crate::index::{options, relfile};
 use crate::kernels;
 use crate::vec::Vector;
 
+/// Phase F-2: is this index a ColBERT / multivector token index?
+///
+/// Detected from the indexed attribute's type: a ColBERT index is
+/// built over a `turbovec.vector[]` column (opclass `vec_colbert_ops`),
+/// so attribute 1's type is an ARRAY type (`get_element_type` returns
+/// a valid element OID). A single-vector index is over a scalar
+/// `vector` column (`get_element_type` returns `InvalidOid`). The only
+/// way to reach the turbovec AM with an array column is via the
+/// `vec_colbert_ops` opclass, so "attribute type is an array" is an
+/// exact discriminator.
+///
+/// # Safety
+/// `index_relation` is a valid index relation with a populated
+/// tuple descriptor (true throughout `ambuild` / `ambuildempty`).
+unsafe fn is_colbert_index(index_relation: pg_sys::Relation) -> bool {
+    let tupdesc = (*index_relation).rd_att;
+    if tupdesc.is_null() {
+        return false;
+    }
+    // PgTupleDesc handles the pg13..pg18 attr-layout differences
+    // (pg18 switched to CompactAttribute), so read attribute 0
+    // through it rather than touching `.attrs` directly.
+    let desc = pgrx::PgTupleDesc::from_pg_unchecked(tupdesc);
+    let Some(att) = desc.get(0) else {
+        return false;
+    };
+    // get_element_type(arrayoid) -> element oid, or InvalidOid for a
+    // non-array type. A non-zero element type ⇒ the indexed column is
+    // an array ⇒ ColBERT.
+    pg_sys::get_element_type(att.atttypid) != pg_sys::InvalidOid
+}
+
+/// Default IVF `nlist` for a ColBERT token index built without an
+/// explicit `WITH (lists = N)`. A token index has many more slots
+/// than docs, so it is always IVF; this modest default lets a fresh
+/// `CREATE INDEX ... (tokens vec_colbert_ops)` build real cells on a
+/// small corpus without the user having to tune nlist. Production
+/// corpora should set `WITH (lists ~ sqrt(n_tokens))`. The build caps
+/// `lists` at the slot count, so an over-large default on a tiny
+/// corpus is harmless.
+const DEFAULT_COLBERT_LISTS: usize = 64;
+
 /// State threaded through `index_build_range_scan` into our callback.
 ///
 /// Phase W (v1.6.0): we no longer accumulate the entire heap-scan output
@@ -271,6 +313,16 @@ struct BuildState {
     /// IVF coarse-cell count from `WITH (lists = N)`. `0` = flat
     /// (today's behaviour); the IVF fields below stay unused.
     lists: usize,
+    /// Phase F-2: this is a ColBERT / multivector token index (the
+    /// indexed column is `turbovec.vector[]`, opclass
+    /// `vec_colbert_ops`). When set, `build_callback` UNNESTS each
+    /// heap tuple's `vector[]` into N token slots (each tagged with
+    /// the doc's TID, repeated), and the finished meta is stamped
+    /// `mark_colbert()` (wire v5). A token index is always IVF
+    /// (n_tokens is large; cell-contiguous layout makes OOC stage-1
+    /// work), so the colbert path forces `lists > 0`. The
+    /// single-vector path leaves this `false` and is UNCHANGED.
+    colbert: bool,
     /// IVF-4a soft-assignment multiplicity `M` from
     /// `WITH (assign_dups = M)`. `1` = single assignment (each vector
     /// in exactly one cell); `M > 1` stores boundary vectors in their
@@ -450,6 +502,24 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     let lists = cfg_lists.max(0) as usize;
     let assign_dups = cfg_assign_dups.clamp(1, options::MAX_ASSIGN_DUPS) as usize;
 
+    // Phase F-2: detect the ColBERT / multivector token index kind
+    // from the indexed column type (an array ⇒ `vec_colbert_ops`). A
+    // token index is intrinsically IVF (n_tokens is large; the
+    // cell-contiguous layout is what makes the out-of-core stage-1
+    // token search work), so when the user didn't pin `lists` we
+    // default it to a sane nlist. `assign_dups` is honoured as-is.
+    let colbert = is_colbert_index(index_relation);
+    let lists = if colbert && lists == 0 {
+        // Default nlist for a colbert build that didn't specify
+        // `WITH (lists = N)`. A token index has many more slots than
+        // docs; a modest fixed default keeps small synthetic corpora
+        // (the tests) building real cells while staying well under
+        // MAX_LISTS. Production users tune via WITH (lists = ...).
+        DEFAULT_COLBERT_LISTS
+    } else {
+        lists
+    };
+
     let initial_dim = if cfg_dim > 0 {
         if (cfg_dim as usize) % 8 != 0 {
             error!(
@@ -481,6 +551,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         ivf_rng: <rand_chacha::ChaCha8Rng as rand::SeedableRng>::seed_from_u64(ivf::IVF_SEED),
         ivf_rotation: None,
         lists,
+        colbert,
         assign_dups,
     };
     // Parity gap #2: a bounded rayon pool sized from
@@ -954,6 +1025,7 @@ unsafe fn ivf_build_and_write(
         lists: lists as u32,
         coarse_centroids: &model.centroids,
         cell_dir_bytes: &cell_dir_bytes,
+        colbert: state.colbert,
     };
     relfile::write_full_with_prepared_ivf(
         index_relation,
@@ -979,6 +1051,86 @@ unsafe fn ivf_build_and_write(
     built
 }
 
+/// Phase F-2: ColBERT token-index unnest, called from
+/// `build_callback` when `state.colbert`. Decodes the heap tuple's
+/// `turbovec.vector[]` (the doc's per-token vectors), pins the dim
+/// from the first token, lazily opens the rotation matrix + disk
+/// spill (identical to the single-vector IVF first-row path), then
+/// spills one record per token tagged with the doc's TID (`tid`,
+/// repeated across all the doc's tokens) and reservoir-samples each
+/// token for k-means. Tokens are processed in ARRAY ORDER, so the
+/// on-disk token order is deterministic.
+///
+/// # Safety
+/// `state` is the live `BuildState`; `datum` is the indexed
+/// `vector[]` value for this tuple (non-NULL, checked by the caller).
+unsafe fn colbert_build_callback(
+    state: &mut BuildState,
+    tid: pg_sys::ItemPointerData,
+    datum: pg_sys::Datum,
+) {
+    let tokens: Option<Vec<Vector>> = pgrx::FromDatum::from_datum(datum, false);
+    let Some(tokens) = tokens else {
+        return;
+    };
+    if tokens.is_empty() {
+        return;
+    }
+    let id = pgrx::itemptr::item_pointer_to_u64(tid);
+    for tok in &tokens {
+        let row_dim = tok.dim();
+        if row_dim == 0 {
+            continue;
+        }
+        if row_dim % 8 != 0 {
+            error!(
+                "turbovec ambuild (colbert): token dim must be a multiple of 8 (got {})",
+                row_dim
+            );
+        }
+        match state.dim {
+            Some(d) if d != row_dim => {
+                error!(
+                    "turbovec ambuild (colbert): dim mismatch — first token had dim {}, this token has {}",
+                    d, row_dim
+                );
+            }
+            None => {
+                state.dim = Some(row_dim);
+                state.idx = Some(
+                    IdMapIndex::new(row_dim, state.bit_width)
+                        .expect("turbovec ambuild (colbert): invalid (dim, bit_width)"),
+                );
+                state.chunk_rows = BuildState::compute_chunk_rows(row_dim);
+                // A colbert index is always IVF (lists > 0), so open
+                // the rotation matrix + disk spill on the first token,
+                // exactly as the single-vector IVF path does.
+                if state.ivf_rotation.is_none() {
+                    state.ivf_rotation =
+                        Some(turbovec::rotation::make_rotation_matrix(row_dim));
+                    state.ivf_spill = Some(CorpusSpill::new(row_dim));
+                }
+            }
+            _ => {}
+        }
+        let spill = state
+            .ivf_spill
+            .as_mut()
+            .expect("turbovec ambuild (colbert): spill not opened before first token");
+        if state.normalise {
+            let mut buf = vec![0.0_f32; row_dim];
+            kernels::normalise_into(&mut buf, tok.as_slice());
+            spill.push(id, &buf);
+        } else {
+            spill.push(id, tok.as_slice());
+        }
+        // Reservoir sample the rotated, L2-normalised token (cells
+        // live in the rotated unit-sphere space), regardless of the
+        // normalise GUC — mirrors the single-vector IVF reservoir.
+        state.ivf_reservoir_push(tok.as_slice(), row_dim);
+    }
+}
+
 /// Per-tuple callback invoked by `index_build_range_scan`. We treat
 /// dead tuples (`tuple_is_alive == false`) like NULL: they are skipped
 /// rather than indexed, matching pgvector's policy.
@@ -1000,6 +1152,21 @@ unsafe extern "C-unwind" fn build_callback(
         return;
     }
     let datum = *values;
+
+    // Phase F-2: ColBERT token index. The indexed value is a
+    // `turbovec.vector[]` (the doc's token arrays); unnest it into N
+    // token slots, each tagged with THIS doc's TID (repeated). The
+    // IVF soft-assign machinery already handles many-slots-one-id, so
+    // we feed the spill one record per token with the doc TID as the
+    // external id, and reservoir-sample each token for k-means. Token
+    // order = array order (determinism). All other build state
+    // (spill, sample, rotation) is shared with the single-vector IVF
+    // path and was opened the same way.
+    if state.colbert {
+        colbert_build_callback(state, *tid, datum);
+        return;
+    }
+
     let value: Option<Vector> = pgrx::FromDatum::from_datum(datum, false);
     let Some(value) = value else {
         return;

@@ -56,6 +56,7 @@ use turbovec::IdMapIndex;
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
+use crate::index::relfile;
 use crate::kernels;
 use crate::vec::Vector;
 
@@ -122,7 +123,35 @@ fn colbert_search(
 
     let normalise = guc::NORMALIZE_ON_INSERT.get();
 
-    // ---- Stage 1: candidate doc-ids from the token index ----
+    // ---- Phase F-2: persistent token index fast path ----
+    // If the table has a persistent ColBERT index on `token_col`
+    // (CREATE INDEX ... USING turbovec (token_col vec_colbert_ops)),
+    // stage 1 reads it from the relfile (via the AM cache / mmap
+    // path) INSTEAD of rebuilding the backend-cached token index
+    // every call. The persisted ids chain holds each token slot's doc
+    // TID, so the candidate doc TIDs come straight off the index with
+    // NO per-call SLOT_DOC rebuild — this is the F-1 ~28 MB/call leak
+    // fix (the leak was the per-call build + the thread-local
+    // slot→doc map; both are gone on this path). Stage 2 stays
+    // heap-reread MaxSim (here keyed by ctid, since the index returns
+    // TIDs). When no persistent index exists we fall through to the
+    // F-1 backend-cache rebuild below.
+    if let Some(scored) = colbert_search_persistent(
+        rel,
+        id_col,
+        token_col,
+        &query,
+        dim,
+        normalise,
+        k as usize,
+        per_token_k as usize,
+        candidate_n as usize,
+    ) {
+        return TableIterator::new(scored);
+    }
+
+    // ---- Stage 1 (F-1 fallback): candidate doc-ids from a
+    //      backend-cached token index rebuilt from the heap ----
     let candidates = stage1_candidates(
         rel,
         id_col,
@@ -172,6 +201,371 @@ fn colbert_search(
     scored.truncate(k as usize);
 
     TableIterator::new(scored)
+}
+
+/// Phase F-2 persistent-index flow. Returns `Some(top-k (id, score))`
+/// when a persistent ColBERT index exists on `(rel, token_col)` and
+/// was used; returns `None` (caller falls back to the F-1 backend-
+/// cache rebuild) when no such index exists.
+///
+/// Stage 1 reads the persistent token index from the relfile (warm
+/// from the shared cache after the first call), batch-searches the
+/// query tokens, and unions the hit doc TIDs into a candidate set
+/// capped at `candidate_n` (best stage-1 token score first). Stage 2
+/// fetches each candidate doc's full token array from the heap BY
+/// CTID (the index keys slots by TID, not by the bigint id column)
+/// and exact-MaxSim-reranks, returning the top-`k` `(id, score)`.
+#[allow(clippy::too_many_arguments)]
+fn colbert_search_persistent(
+    rel: pg_sys::Oid,
+    id_col: &str,
+    token_col: &str,
+    query: &[Vector],
+    dim: usize,
+    normalise: bool,
+    k: usize,
+    per_token_k: usize,
+    candidate_n: usize,
+) -> Option<Vec<(i64, f64)>> {
+    let indexoid = find_colbert_index(rel, token_col)?;
+
+    // Load (or warm-hit) the persistent token index as a read-only
+    // handle, plus its per-slot tombstone bitmap (VACUUM-deleted
+    // slots). `None` ⇒ the index exists in the catalog but isn't a
+    // usable colbert relfile (empty / not-yet-built / wrong kind);
+    // fall back to the F-1 rebuild.
+    let (handle, tombstones) = load_persistent_colbert(indexoid)?;
+    if handle.is_empty() {
+        // Empty persistent index: no candidates. Return an explicit
+        // empty result (the index WAS used) rather than falling back
+        // to a full heap rebuild.
+        return Some(Vec::new());
+    }
+
+    // Flatten + normalise the query tokens row-major (nq * dim).
+    let nq = query.len();
+    let mut q_flat: Vec<f32> = Vec::with_capacity(nq * dim);
+    for q in query {
+        if normalise {
+            q_flat.extend_from_slice(&kernels::normalise_to_vec(q.as_slice()));
+        } else {
+            q_flat.extend_from_slice(q.as_slice());
+        }
+    }
+
+    // Stage 1: one batched search of all query tokens. The handle maps
+    // each result slot through the persisted ids chain (= the token's
+    // doc TID, with duplicates), so `ids` are doc TIDs directly. No
+    // SLOT_DOC thread-local, no per-call index build.
+    //
+    // VACUUM masking: a deleted doc's TID kills ALL its token slots
+    // (every token slot carries that doc's TID), so they are tombstoned
+    // by `ivf_tombstone_dead`. We build a keep-mask that excludes the
+    // tombstoned slots and route through `search_masked` so dead
+    // tokens are never scored or returned. With no tombstones the mask
+    // is all-true and the result equals the unmasked search.
+    let take = per_token_k.min(handle.len()).max(1);
+    let (scores, tids) = if tombstones.is_empty() {
+        handle.search(&q_flat, take)
+    } else {
+        let n_live = handle.len();
+        let mut mask = vec![true; n_live];
+        for (slot, m) in mask.iter_mut().enumerate() {
+            let byte = slot / 8;
+            if byte < tombstones.len() && (tombstones[byte] >> (slot % 8)) & 1 != 0 {
+                *m = false;
+            }
+        }
+        match handle.search_masked(&q_flat, take, &mask) {
+            Some(r) => r,
+            // A Mutable/Ooc handle has no slot mask; colbert load only
+            // ever installs a ReadOnly handle, so this is unreachable
+            // in practice. Fall back to the unmasked search.
+            None => handle.search(&q_flat, take),
+        }
+    };
+
+    // Union by doc TID, keeping the best (max) stage-1 token score per
+    // doc, then cap at candidate_n by that score (deterministic:
+    // score desc, then TID asc).
+    let mut best: HashMap<u64, f32> = HashMap::new();
+    for (tid, score) in tids.iter().zip(scores.iter()) {
+        best.entry(*tid)
+            .and_modify(|s| {
+                if *score > *s {
+                    *s = *score;
+                }
+            })
+            .or_insert(*score);
+    }
+    let mut docs: Vec<(u64, f32)> = best.into_iter().collect();
+    docs.sort_unstable_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    docs.truncate(candidate_n);
+    let candidate_tids: Vec<u64> = docs.into_iter().map(|(t, _)| t).collect();
+    if candidate_tids.is_empty() {
+        return Some(Vec::new());
+    }
+
+    // Stage 2: exact MaxSim rerank from the heap token arrays, fetched
+    // by ctid.
+    let doc_tokens = fetch_doc_tokens_by_ctid(rel, id_col, token_col, dim, &candidate_tids);
+    let q_norm: Vec<Vec<f32>> = query
+        .iter()
+        .map(|q| {
+            if normalise {
+                kernels::normalise_to_vec(q.as_slice())
+            } else {
+                q.as_slice().to_vec()
+            }
+        })
+        .collect();
+    let mut scored: Vec<(i64, f64)> = doc_tokens
+        .into_iter()
+        .map(|(doc_id, tokens)| (doc_id, max_sim_dot(&q_norm, &tokens, dim)))
+        .collect();
+    scored.sort_unstable_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    scored.truncate(k);
+    Some(scored)
+}
+
+/// Find a persistent ColBERT index on `token_col` of `rel`: a
+/// `turbovec`-AM index whose single key column is `token_col`. Returns
+/// the index relation oid, or `None` if there isn't one. We confirm
+/// the colbert KIND by reading the index meta in
+/// [`load_persistent_colbert`] (the opclass alone is enough to find
+/// it; the meta byte is authoritative).
+fn find_colbert_index(rel: pg_sys::Oid, token_col: &str) -> Option<pg_sys::Oid> {
+    // pg_index.indkey is an int2vector of heap attnums; match the
+    // single-column index whose attnum is token_col's, on the
+    // turbovec access method. A colbert index is single-column over
+    // the vector[] token column.
+    let oid: Option<pg_sys::Oid> = Spi::get_one_with_args(
+        "SELECT i.indexrelid \
+         FROM   pg_index i \
+         JOIN   pg_class c   ON c.oid = i.indexrelid \
+         JOIN   pg_am   am  ON am.oid = c.relam \
+         JOIN   pg_attribute a ON a.attrelid = i.indrelid \
+                              AND a.attnum = i.indkey[0] \
+         WHERE  i.indrelid = $1 \
+           AND  am.amname = 'turbovec' \
+           AND  i.indnatts = 1 \
+           AND  a.attname = $2 \
+           AND  NOT a.attisdropped \
+         ORDER  BY i.indexrelid \
+         LIMIT  1",
+        &[rel.into(), token_col.into()],
+    )
+    .ok()
+    .flatten();
+    oid.filter(|o| *o != pg_sys::InvalidOid)
+}
+
+/// Load the persistent ColBERT token index as a read-only scan
+/// handle: a warm hit from the shared cache, or a cold relfile read
+/// that builds + installs a [`cache::ReadOnlyIndex`]. Returns `None`
+/// when the index relfile isn't a usable colbert index (empty,
+/// not-yet-built, or — defensively — not kind=colbert). The handle is
+/// cached keyed by `(indexoid, attnum=0, relfilenode, am_version)`,
+/// so repeated `colbert_search` calls in a backend reuse the SAME
+/// resident index instead of rebuilding one per call (the F-1 leak
+/// fix). The cache entry is dropped/reloaded automatically when the
+/// relfile changes (REINDEX) or am_version bumps (VACUUM).
+///
+/// # Safety note
+/// Opens the index relation under AccessShareLock for the duration of
+/// the read, then closes it (the cached `ReadOnlyIndex` owns copies
+/// of all the bytes it needs, so nothing borrows the relation after
+/// close).
+fn load_persistent_colbert(indexoid: pg_sys::Oid) -> Option<(cache::ScanHandle, Vec<u8>)> {
+    unsafe {
+        let index_rel = pg_sys::index_open(indexoid, pg_sys::AccessShareLock as i32);
+        if index_rel.is_null() {
+            return None;
+        }
+        // RAII-ish: ensure index_close runs on every return path.
+        let result = load_persistent_colbert_inner(index_rel, indexoid);
+        pg_sys::index_close(index_rel, pg_sys::AccessShareLock as i32);
+        result
+    }
+}
+
+/// Inner body of [`load_persistent_colbert`] with the index relation
+/// already open. Split out so the caller can guarantee `index_close`
+/// on every path.
+///
+/// # Safety
+/// `index_rel` is a live, locked index relation; `indexoid` is its
+/// oid.
+unsafe fn load_persistent_colbert_inner(
+    index_rel: pg_sys::Relation,
+    indexoid: pg_sys::Oid,
+) -> Option<(cache::ScanHandle, Vec<u8>)> {
+    let meta = relfile::read_meta(index_rel)?;
+    // Only a genuinely-colbert relfile with rows is usable here.
+    if !meta.is_colbert() || meta.n_vectors == 0 {
+        return None;
+    }
+    // Per-slot tombstone bitmap (VACUUM-deleted token slots). Empty
+    // when nothing has been deleted. Read each call (it's small and
+    // can change between calls without an am_version bump path that
+    // the handle cache keys on — actually a VACUUM DOES bump
+    // am_version, but reading it here is cheap and keeps the masking
+    // correct even on a warm handle hit).
+    let tombstones = relfile::read_tombstones(index_rel, &meta);
+    let relfile_node = cache::relfilenode_from_relation(index_rel);
+    let version_as_i64 = meta.am_version as i64;
+    let key = CacheKey {
+        rel_oid: indexoid,
+        attnum: 0,
+        bit_width: meta.bit_width,
+        dim: meta.dim,
+    };
+    // Warm hit: reuse the resident index (the leak fix — no per-call
+    // build, no growing thread-local).
+    if let Some(h) = cache::scan_lookup(key, relfile_node, version_as_i64) {
+        return Some((h, tombstones));
+    }
+    // Cold: read the relfile parts and build a ReadOnlyIndex. We read
+    // the WHOLE index (codes/scales/ids + prepared blocked + rotation)
+    // rather than the OOC cell-scoped path — colbert_search is a
+    // function call, not a planner scan; the whole-load path is the
+    // simplest correct reuse and the cache keeps it warm across calls.
+    let (codes, scales, ids) = relfile::read_full(index_rel, &meta);
+    let stored = if meta.has_prepared_layout() {
+        let blocked = relfile::read_blocked(index_rel, &meta);
+        let centroids = meta.centroids_slice().to_vec();
+        let boundaries = meta.boundaries_slice().to_vec();
+        let rotation = relfile::read_rotation(index_rel, &meta);
+        let rotation_opt = if rotation.is_empty() { None } else { Some(rotation) };
+        cache::ReadOnlyIndex::from_prepared_parts(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+            blocked,
+            meta.n_blocks_blocked as usize,
+            centroids,
+            boundaries,
+            rotation_opt,
+        )
+    } else {
+        cache::ReadOnlyIndex::from_parts(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+        )
+    };
+    let bytes_per_vec = (meta.dim as usize * meta.bit_width as usize) / 8 + 4 + 64;
+    let total_bytes = bytes_per_vec * (meta.n_vectors as usize).max(1);
+    let handle = cache::scan_install(
+        key,
+        stored,
+        total_bytes,
+        relfile_node,
+        version_as_i64,
+        None,
+    );
+    Some((handle, tombstones))
+}
+
+/// Stage-2 token fetch for the persistent path: the persistent index
+/// keys token slots by heap TID, so candidates are TIDs. Fetch each
+/// candidate doc's `(id_col, tokens)` from the heap BY CTID. Mirrors
+/// [`fetch_doc_tokens`] but matches on `ctid` instead of the bigint
+/// id column, and returns the doc's bigint `id_col` value (so the
+/// final result is keyed by the user's id, not the TID).
+fn fetch_doc_tokens_by_ctid(
+    rel: pg_sys::Oid,
+    id_col: &str,
+    token_col: &str,
+    dim: usize,
+    candidate_tids: &[u64],
+) -> Vec<(i64, Vec<f32>)> {
+    if candidate_tids.is_empty() {
+        return Vec::new();
+    }
+    let qualified = qualified_name(rel);
+    let id_q = pgrx::spi::quote_identifier(id_col);
+    let tok_q = pgrx::spi::quote_identifier(token_col);
+
+    // Decode each TID back to a (block, offset) ctid literal
+    // '(block,offset)'. item_pointer_to_u64 encodes (block << 16 |
+    // offset) in pgrx's canonical form; decode it the same way.
+    let in_list = candidate_tids
+        .iter()
+        .map(|t| {
+            let (block, off) = pgrx::itemptr::u64_to_item_pointer_parts(*t);
+            format!("'({block},{off})'::tid")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let sql = format!(
+        "SELECT ({id_q})::bigint AS doc_id, \
+                t::turbovec.vector::real[] AS tok \
+         FROM   {qualified}, unnest({tok_q}) WITH ORDINALITY AS u(t, ord) \
+         WHERE  ctid IN ({in_list}) \
+         ORDER  BY ctid, u.ord"
+    );
+
+    let mut out: Vec<(i64, Vec<f32>)> = Vec::new();
+    let mut cur_id: Option<i64> = None;
+    let mut cur_flat: Vec<f32> = Vec::new();
+    let mut cur_bad = false;
+    Spi::connect(|client| {
+        let tup_iter = match client.select(&sql, None, &[]) {
+            Ok(t) => t,
+            Err(e) => error!("turbovec.colbert_search: SPI select failed: {}", e),
+        };
+        for row in tup_iter {
+            let id: Option<i64> = row.get(1).ok().flatten();
+            let tok: Option<Vec<Option<f32>>> = row.get(2).ok().flatten();
+            let (Some(id), Some(tok)) = (id, tok) else {
+                continue;
+            };
+            if cur_id != Some(id) {
+                if let Some(prev) = cur_id.take() {
+                    if !cur_bad && !cur_flat.is_empty() {
+                        out.push((prev, std::mem::take(&mut cur_flat)));
+                    }
+                }
+                cur_id = Some(id);
+                cur_flat = Vec::new();
+                cur_bad = false;
+            }
+            if tok.len() != dim {
+                cur_bad = true;
+                continue;
+            }
+            for v in &tok {
+                let v = v.unwrap_or(f32::NAN);
+                if !v.is_finite() {
+                    cur_bad = true;
+                    break;
+                }
+                cur_flat.push(v);
+            }
+        }
+        if let Some(prev) = cur_id.take() {
+            if !cur_bad && !cur_flat.is_empty() {
+                out.push((prev, std::mem::take(&mut cur_flat)));
+            }
+        }
+    });
+    out
 }
 
 /// Stage 1: build/load the backend-cached flat token index and return
@@ -246,7 +640,18 @@ fn stage1_candidates(
             let total_bytes = bytes_per_tok * n_tokens;
             let idx_arc = cache::insert(key, idx, total_bytes, relfile, n_rows);
             SLOT_DOC.with(|m| {
-                m.borrow_mut().insert(key, slot_doc.clone());
+                // F-1 leak bound (Phase F-2): SLOT_DOC is a process-
+                // local map that the LRU cache cannot evict, so a
+                // backend that queries many distinct corpora (or whose
+                // cache entry was evicted and rebuilt) would otherwise
+                // accumulate one slot->doc Vec per key forever (the
+                // ~28 MB/call growth). We only ever read the entry for
+                // the CURRENT key on the warm path, so drop every other
+                // key before inserting: SLOT_DOC holds at most one
+                // (current corpus) map per backend.
+                let mut mb = m.borrow_mut();
+                mb.clear();
+                mb.insert(key, slot_doc.clone());
             });
             let guard = idx_arc.read();
             search_tokens(&guard, &slot_doc, &q_flat, nq, per_token_k)

@@ -1,7 +1,8 @@
 # Phase F — Index-native late interaction (per-token ColBERT MaxSim)
 
-_Status: **F-1 SHIPPED (v1.16.0); F-2 gate MEASURED — GO (qualified),
-pending a second corpus.** Design pressure-tested against the
+_Status: **F-1 SHIPPED (v1.16.0); F-2 SHIPPED (v1.17.0); recall win
+CONFIRMED across two corpora (SciFact + NFCorpus).** Design
+pressure-tested against the
 v1.15.1 codebase. This is the last acknowledged feature gap vs
 Qdrant/VectorChord; it is deliberately phased so the cheap, reuse-
 heavy first cut (F-1) proves the value before the expensive persistent
@@ -31,6 +32,25 @@ index (F-2) is funded._
 > One bug to fix in F-2 work: `colbert_search` leaks ~28 MB of
 > backend RSS per call (the harness works around it by reconnecting
 > every 40 queries; noted in the harness README)._
+
+> **F-2 CONFIRMATION (2026-06-18, `floki`, BEIR/NFCorpus 3,633 docs,
+> AVX2, persistent `vec_colbert_ops` index).** The SciFact gain
+> **REPLICATED** on a second, out-of-domain (medical/nutrition),
+> entity-heavier corpus, exercising the shipped F-2 persistent index:
+> **+0.044 nDCG@10 / +0.037 Recall@10** at the value point
+> (`candidate_n=256`), **+0.065 nDCG at low budget** (`candidate_n=128`,
+> where the pooled baseline collapses to 0.220 while `colbert_search`
+> holds at 0.285) — same sign, same mechanism, same low-candidate-budget
+> shape at *every* config. Absolute deltas are ~30% smaller than
+> SciFact (NFCorpus's dense graded qrels compress Recall@10), but the
+> win holds exactly where F-2's value lives. Quantization signal
+> intact (2-bit ≈ 4-bit, ≤0.0001 nDCG; 2-bit index = 43 MB).
+> **The persistent index built cleanly** (561k token slots, 42s/43 MB
+> at 2-bit, no OOM) and **served from disk — the F-1 ~28 MB/call leak
+> is GONE** (backend RSS plateaus flat at ~360 MB; ~1.4 KB/call warm).
+> **Verdict: the qualified GO is upgraded to an established
+> cross-domain recall win.** Data:
+> `benches/results/colbert_f2_confirm_floki_nfcorpus_20260618.json`._
 
 ---
 

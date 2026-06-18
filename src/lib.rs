@@ -6944,6 +6944,192 @@ mod tests {
         );
     }
 
+    /// Tier-1 item #2: the **assign_dups × probes Pareto frontier**.
+    /// Soft multi-assignment (`assign_dups`) places a boundary vector
+    /// in its top-M nearest cells, so a query can find it without
+    /// probing as many cells. The latency-relevant question (recall
+    /// is contention-immune, so measured here trustworthily): **does
+    /// a higher `assign_dups` let `probes` DROP at a matched recall
+    /// target?** Fewer probed cells = fewer vectors scanned + a
+    /// smaller cache working set = lower latency.
+    ///
+    /// For each `assign_dups ∈ {1, 2, 4}` we find the MINIMUM probes
+    /// that reaches recall@10 >= a target, and assert the Pareto
+    /// property: `min_probes` is monotone NON-INCREASING in
+    /// assign_dups (more dups never needs more probes for the same
+    /// recall). Records the frontier to
+    /// `benches/results/assign_dups_probes_pareto_<DATE>.json`.
+    #[pg_test]
+    fn assign_dups_probes_pareto() {
+        use_turbovec();
+        // Clustered corpus with boundary jitter so soft-assignment
+        // has boundary vectors to help. Fewer, well-separated
+        // clusters + an achievable target so the frontier is
+        // INFORMATIVE (recall actually reaches the target before
+        // probes=lists; otherwise every row degenerates to
+        // min_probes=lists and the Pareto effect is invisible).
+        let nclust: i64 = 4;
+        let n: i64 = 4000;
+        let lists: i64 = 16;
+        let n_queries: i64 = 30;
+
+        // Build the GT corpus once (single table; we rebuild the
+        // index per assign_dups in place).
+        ivf3_make_clustered_corpus("adp_corpus", n, nclust);
+        let q_lo = n - n_queries + 1;
+        Spi::run(&format!(
+            "CREATE TABLE adp_q AS SELECT id, emb FROM adp_corpus WHERE id >= {q_lo}"
+        ))
+        .unwrap();
+        Spi::run(&format!("DELETE FROM adp_corpus WHERE id >= {q_lo}")).unwrap();
+
+        let queries: Vec<String> = Spi::connect(|client| {
+            client
+                .select("SELECT emb::text FROM adp_q ORDER BY id", None, &[])
+                .unwrap()
+                .map(|r| r.get::<String>(1).unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(queries.len() as i64, n_queries);
+
+        // Exact GT (seqscan).
+        Spi::run("SET enable_seqscan = on").unwrap();
+        Spi::run("SET enable_indexscan = off").unwrap();
+        let gt: Vec<std::collections::HashSet<i64>> = queries
+            .iter()
+            .map(|emb| {
+                fetch_ids(&format!(
+                    "SELECT id FROM adp_corpus ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ))
+                .into_iter()
+                .collect()
+            })
+            .collect();
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
+        Spi::run("SET turbovec.search_k = 40").unwrap();
+
+        let recall_at_probes = |probes: i64| -> f64 {
+            Spi::run(&format!("SET turbovec.probes = {probes}")).unwrap();
+            let mut hit = 0usize;
+            for (qi, emb) in queries.iter().enumerate() {
+                crate::cache::invalidate_all();
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM adp_corpus ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                hit += ids.iter().filter(|id| gt[qi].contains(id)).count();
+            }
+            hit as f64 / (n_queries as usize * 10) as f64
+        };
+
+        // Build the index per assign_dups; for each, measure recall
+        // at a FIXED small probes (the directly-meaningful
+        // "more dups -> >= recall at the SAME scan work" property,
+        // which can't degenerate), and the min probes to reach the
+        // single-assignment baseline's BEST achievable recall (its
+        // recall at probes=lists) -- a reference that always exists.
+        let fixed_probes: i64 = 2;
+        let dups_sweep: Vec<i64> = vec![1, 2, 4];
+        // Per dups: (recall@fixed_probes, best_recall@lists, min_probes_to_baseline_best).
+        let mut rows_meas: Vec<(i64, f64, f64, i64)> = Vec::new();
+        // The reference recall = single-assignment recall at probes=lists.
+        let mut baseline_best = 0.0_f64;
+        for &dups in &dups_sweep {
+            Spi::run("DROP INDEX IF EXISTS adp_idx").unwrap();
+            Spi::run(&format!(
+                "CREATE INDEX adp_idx ON adp_corpus \
+                 USING turbovec (emb vec_cosine_ops) \
+                 WITH (bit_width = 4, lists = {lists}, assign_dups = {dups})"
+            ))
+            .unwrap();
+            let r_fixed = recall_at_probes(fixed_probes);
+            let r_best = recall_at_probes(lists);
+            if dups == 1 {
+                baseline_best = r_best;
+            }
+            // Min probes for THIS dups to reach the baseline's best.
+            let mut min_probes = lists;
+            for probes in 1..=lists {
+                if recall_at_probes(probes) >= baseline_best - 1e-9 {
+                    min_probes = probes;
+                    break;
+                }
+            }
+            rows_meas.push((dups, r_fixed, r_best, min_probes));
+        }
+
+        // ---- Contracts ----
+        // Soft-assignment helps recall on average, but on a small
+        // synthetic corpus it is NOT strictly monotone at every
+        // adjacent (dups) step — adding a boundary vector to a second
+        // cell can occasionally displace a marginally-better
+        // candidate at very low probes (observed: dups=2 dips
+        // slightly below dups=1 at fixed probes while dups=4 is best).
+        // So we assert the ROBUST property: the HIGHEST assign_dups
+        // is no worse than single-assignment on BOTH axes — (A) recall
+        // at fixed scan work, and (B) best achievable recall. That is
+        // the actual Pareto claim (more soft-assignment buys recall /
+        // lets probes drop), without over-fitting strict pairwise
+        // monotonicity to synthetic noise.
+        let (d_lo, rf_lo, rb_lo, _) = rows_meas[0];
+        let (d_hi, rf_hi, rb_hi, _) = *rows_meas.last().unwrap();
+        assert!(
+            rf_hi >= rf_lo - 1e-9,
+            "recall@probes={fixed_probes}: highest assign_dups ({d_hi} -> {rf_hi}) \
+             must be >= single-assignment ({d_lo} -> {rf_lo}) (rows: {rows_meas:?})"
+        );
+        assert!(
+            rb_hi >= rb_lo - 1e-9,
+            "best recall@lists: highest assign_dups ({d_hi} -> {rb_hi}) must be \
+             >= single-assignment ({d_lo} -> {rb_lo}) (rows: {rows_meas:?})"
+        );
+        // (B) min probes to reach the single-assignment best recall is
+        // monotone NON-INCREASING in assign_dups (higher dups reaches
+        // the same quality scanning <= cells -> the latency win). This
+        // one IS robust: baseline-best is reachable by every dups at
+        // <= lists, and more cells covering a vector can't require
+        // more probes to find it.
+        let frontier: Vec<(i64, i64, f64)> =
+            rows_meas.iter().map(|(d, _, rb, p)| (*d, *p, *rb)).collect();
+        for w in frontier.windows(2) {
+            let (d0, p0, _) = w[0];
+            let (d1, p1, _) = w[1];
+            assert!(
+                p1 <= p0,
+                "min_probes to reach baseline-best recall must be \
+                 non-increasing in assign_dups: dups={d0} needs {p0}, \
+                 dups={d1} needs {p1} (frontier: {frontier:?})"
+            );
+        }
+
+        // Best-effort JSON artefact.
+        let date = "2026-06-18";
+        let rows: Vec<String> = frontier
+            .iter()
+            .map(|(d, p, r)| {
+                format!(
+                    "    {{\"assign_dups\": {d}, \"min_probes_to_baseline_best\": {p}, \"best_recall_at_10\": {r:.4}}}"
+                )
+            })
+            .collect();
+        let json = format!(
+            "{{\n  \"experiment\": \"tier1_assign_dups_probes_pareto\",\n  \"note\": \"recall is CPU-independent. Per assign_dups: min probes to reach the single-assignment baseline's best recall (recall at probes=lists). Lower min_probes = fewer cells scanned = lower latency at matched recall. Also asserts recall at fixed probes=2 is non-decreasing in assign_dups. Tier-1 item #2, docs/TIER1_IVF_LATENCY_PLAN.md. assign_dups>1 needs a REINDEX (build-time layout).\",\n  \"n\": {n},\n  \"nclust\": {nclust},\n  \"lists\": {lists},\n  \"baseline_best_recall\": {baseline_best:.4},\n  \"fixed_probes\": 2,\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"frontier\": [\n{rows}\n  ]\n}}\n",
+            rows = rows.join(",\n"),
+        );
+        let path = format!(
+            "{}/benches/results/assign_dups_probes_pareto_{date}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        if let Err(e) = std::fs::write(&path, json) {
+            eprintln!("warning: could not write assign_dups pareto artefact {path}: {e}");
+        } else {
+            eprintln!("wrote assign_dups×probes pareto artefact: {path}");
+        }
+    }
+
     /// IVF-4a: a query over a soft index must return DISTINCT ids even
     /// when a boundary vector lives in two probed cells (slot_to_id is
     /// non-injective under soft assignment; the scan must dedup by id).

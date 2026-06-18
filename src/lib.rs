@@ -7517,6 +7517,179 @@ mod tests {
         }
     }
 
+    /// Tier-1 item #1 de-risking: the **recall-vs-`search_k`
+    /// frontier**. This is the contention-IMMUNE half of the
+    /// hypothesis behind an internal design note § 1: the
+    /// IVF latency floor is dominated by the reorder-recheck of all
+    /// `search_k` candidates (~`search_k` heap fetches + exact
+    /// recomputes per query, to emit LIMIT 10). The plan's bet is
+    /// that we can LOWER `search_k` — cutting that floor — while
+    /// recall@10 holds, because at LIMIT 10 a modest candidate pool
+    /// suffices when the quantized ranking is decent.
+    ///
+    /// Recall is deterministic given the index (independent of CPU
+    /// load), so this runs trustworthily on a CONTENDED box where a
+    /// latency sweep cannot. It records recall@10 across a `search_k`
+    /// sweep at a fixed `probes` that already hits the recall target,
+    /// and asserts:
+    ///   1. recall@10 is monotone non-decreasing in `search_k`
+    ///      (more candidates through the reorder queue can never
+    ///      lower the exact-rechecked top-k);
+    ///   2. there EXISTS a `search_k` well below the current default
+    ///      (100) at which recall@10 is within a small epsilon of the
+    ///      recall at `search_k = 200` — i.e. the floor-cutting lever
+    ///      is viable (we don't need 200 candidates rechecked).
+    /// Persists `benches/results/searchk_recall_frontier_<DATE>.json`
+    /// so the latency half (deferred to a quiet AVX2 host) can be
+    /// joined to it later.
+    #[pg_test]
+    fn searchk_recall_frontier() {
+        use_turbovec();
+        // Same CI-friendly clustered scale as the probes frontier so
+        // the curves are comparable; lists≈√n.
+        let n: i64 = 16_384;
+        let dim: i64 = 64;
+        let lists: i64 = 128;
+        let n_queries: i64 = 50;
+        ivf_make_random_corpus("sk_frontier", n, dim);
+
+        let q_lo = n - n_queries + 1;
+        Spi::run(&format!(
+            "CREATE TABLE sk_frontier_q AS \
+             SELECT id, emb FROM sk_frontier WHERE id >= {q_lo}"
+        ))
+        .unwrap();
+        Spi::run(&format!("DELETE FROM sk_frontier WHERE id >= {q_lo}")).unwrap();
+
+        Spi::run(
+            "CREATE INDEX sk_frontier_idx ON sk_frontier \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 128)",
+        )
+        .unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
+        // Fix probes at a value that already reaches a good recall, so
+        // the only lever under test is search_k. probes=32 (of 128)
+        // is comfortably on the recall plateau per the probes
+        // frontier.
+        Spi::run("SET turbovec.probes = 32").unwrap();
+
+        // Held-out query rows.
+        let queries: Vec<(i64, String)> = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT id, emb::text FROM sk_frontier_q ORDER BY id",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .map(|r| {
+                    (
+                        r.get::<i64>(1).unwrap().unwrap(),
+                        r.get::<String>(2).unwrap().unwrap(),
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(queries.len() as i64, n_queries);
+
+        // Brute-force exact top-10 GT per query (seqscan).
+        Spi::run("SET enable_seqscan = on").unwrap();
+        Spi::run("SET enable_indexscan = off").unwrap();
+        let gt: Vec<std::collections::HashSet<i64>> = queries
+            .iter()
+            .map(|(_, emb)| {
+                fetch_ids(&format!(
+                    "SELECT id FROM sk_frontier \
+                     ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ))
+                .into_iter()
+                .collect()
+            })
+            .collect();
+
+        // Sweep search_k. Curve rows: (search_k, recall@10).
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+        let sk_sweep: Vec<i64> = vec![10, 25, 50, 100, 200];
+        let mut curve: Vec<(i64, f64)> = Vec::new();
+        for &sk in &sk_sweep {
+            Spi::run(&format!("SET turbovec.search_k = {sk}")).unwrap();
+            let mut hit_sum = 0usize;
+            for (qi, (_, emb)) in queries.iter().enumerate() {
+                crate::cache::invalidate_all();
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM sk_frontier \
+                     ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                hit_sum += ids.iter().filter(|id| gt[qi].contains(id)).count();
+            }
+            let recall = hit_sum as f64 / (n_queries as usize * 10) as f64;
+            curve.push((sk, recall));
+        }
+
+        // ---- Contract assertions ----
+        // (1) recall@10 monotone non-decreasing in search_k.
+        for w in curve.windows(2) {
+            let (k0, r0) = w[0];
+            let (k1, r1) = w[1];
+            assert!(
+                r1 >= r0 - 1e-9,
+                "recall@10 must be monotone non-decreasing in search_k: \
+                 recall({k0})={r0} > recall({k1})={r1}"
+            );
+        }
+        // (2) the lever is viable: SOME search_k <= 50 reaches within
+        // 0.01 of the search_k=200 recall. If true, we can cut the
+        // recheck floor (search_k 200 -> ~50) almost for free.
+        let r_200 = curve.last().unwrap().1;
+        let best_low = curve
+            .iter()
+            .filter(|(k, _)| *k <= 50)
+            .map(|(_, r)| *r)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            best_low >= r_200 - 0.01,
+            "Tier-1 #1 lever viability: expected recall@10 at search_k<=50 \
+             ({best_low}) to be within 0.01 of search_k=200 ({r_200}); \
+             if this fails, lowering search_k costs recall and the \
+             floor-cutting lever is not free. Curve: {curve:?}"
+        );
+
+        searchk_write_frontier_json(n, dim, lists, 32, n_queries, &curve);
+    }
+
+    /// Best-effort JSON artefact for the search_k recall frontier
+    /// (companion to `ivf_write_frontier_json`). A write failure on a
+    /// read-only checkout is a warning, not a test failure.
+    fn searchk_write_frontier_json(
+        n: i64,
+        dim: i64,
+        lists: i64,
+        probes: i64,
+        n_queries: i64,
+        curve: &[(i64, f64)],
+    ) {
+        let date = "2026-06-18";
+        let rows: Vec<String> = curve
+            .iter()
+            .map(|(sk, r)| format!("    {{\"search_k\": {sk}, \"recall_at_10\": {r:.4}}}"))
+            .collect();
+        let json = format!(
+            "{{\n  \"experiment\": \"tier1_searchk_recall_frontier\",\n  \"note\": \"recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, an internal design note.\",\n  \"n\": {n},\n  \"dim\": {dim},\n  \"lists\": {lists},\n  \"probes\": {probes},\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"current_default_search_k\": 100,\n  \"curve\": [\n{rows}\n  ]\n}}\n",
+            rows = rows.join(",\n"),
+        );
+        let path = format!(
+            "{}/benches/results/searchk_recall_frontier_{date}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        if let Err(e) = std::fs::write(&path, json) {
+            eprintln!("warning: could not write search_k frontier artefact {path}: {e}");
+        } else {
+            eprintln!("wrote search_k recall frontier artefact: {path}");
+        }
+    }
+
     /// Helper: slurp the DATA REGION (bytes after the 24-byte PG page
     /// header) of every block of an index relation's main fork into
     /// one byte vector via the buffer manager. We skip the page

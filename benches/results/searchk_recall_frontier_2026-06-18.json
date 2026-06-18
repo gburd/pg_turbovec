@@ -1,0 +1,18 @@
+{
+  "experiment": "tier1_searchk_recall_frontier",
+  "note": "recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, an internal design note.",
+  "n": 16384,
+  "dim": 64,
+  "lists": 128,
+  "probes": 32,
+  "n_queries": 50,
+  "bit_width": 4,
+  "current_default_search_k": 100,
+  "curve": [
+    {"search_k": 10, "recall_at_10": 0.6880},
+    {"search_k": 25, "recall_at_10": 0.7220},
+    {"search_k": 50, "recall_at_10": 0.7220},
+    {"search_k": 100, "recall_at_10": 0.7220},
+    {"search_k": 200, "recall_at_10": 0.7220}
+  ]
+}

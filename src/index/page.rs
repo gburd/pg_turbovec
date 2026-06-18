@@ -15,7 +15,8 @@
 //!   24     4  magic = "TVRM"                          |   left at SizeOfPageHeaderData
 //!   28     1  version = 3                             |   / BLCKSZ; we don't use
 //!   29     1  bit_width                               |   line pointers and our
-//!   30     2  reserved (zero)                         |   data lives in the data
+//!   30     1  kind = 0 single-vec / 1 colbert (v5)    |   data lives in the data
+//!   31     1  reserved (zero)                         |
 //!   32     4  dim          (u32)                      |   region as private bytes.
 //!   36     8  n_vectors    (u64)                      |
 //!   44     4  codes_first  (BlockNumber)              |
@@ -116,7 +117,28 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       need no REINDEX. The scan path is still FLAT in IVF-1
 ///       (cells are persisted but not yet probed); cell-restricted
 ///       search is IVF-2.
-pub const VERSION: u8 = 4;
+/// `5` - Phase F-2: ADDITIVE multivector/ColBERT index kind. The
+///       new `kind` byte (page offset 30, formerly reserved) is `1`
+///       for a ColBERT token index and `0` for the single-vector
+///       index. **A single-vector index still emits version=4** —
+///       `encode` only writes 5 when `kind == KIND_COLBERT`. So a
+///       v4 single-vector relfile is BYTE-IDENTICAL under the v5
+///       binary (the kind byte was already a zeroed reserved byte),
+///       and existing v4 indexes need no REINDEX. A ColBERT index
+///       is a brand-new on-disk shape (token slots, doc-id repeated
+///       in the ids chain) that only a v5 binary produces; there is
+///       no in-place migration of a v4 index into a v5 ColBERT one.
+pub const VERSION: u8 = 5;
+
+/// Index kind discriminator (page offset 30, formerly a reserved
+/// byte). `0` = single-vector (the v1..v4 default; a `vector` column
+/// with `vec_*_ops`). `1` = ColBERT/multivector token index (a
+/// `turbovec.vector[]` column with `vec_colbert_ops`, Phase F-2). A
+/// v4 meta page has this byte zeroed, so it decodes as single-vector
+/// — the additive backward-compat path.
+pub const KIND_SINGLE: u8 = 0;
+/// ColBERT/multivector token index kind. See [`KIND_SINGLE`].
+pub const KIND_COLBERT: u8 = 1;
 
 /// The on-disk version we read **and** write today. Decode
 /// accepts strictly older versions for migration-HINT purposes
@@ -158,6 +180,10 @@ pub struct MetaPageData {
     /// indexes built before the prepared-layout work landed.
     pub version: u8,
     pub bit_width: u8,
+    /// Index kind: [`KIND_SINGLE`] (0, single-vector) or
+    /// [`KIND_COLBERT`] (1, multivector token index). A v4 meta page
+    /// has the kind byte zeroed, so it decodes as single-vector.
+    pub kind: u8,
     pub dim: u32,
     pub n_vectors: u64,
     pub codes_first: u32,
@@ -340,8 +366,15 @@ impl MetaPageData {
         let rotation_first_blkno = blocked_first_blkno + blocked_count;
 
         Self {
-            version: VERSION,
+            // A single-vector index emits wire version 4 (byte-
+            // identical to v1.16.0). mark_colbert() bumps this to
+            // VERSION (5) together with `kind`.
+            version: 4,
             bit_width,
+            // plan_with_blocked always plans a SINGLE-vector layout;
+            // the colbert build calls mark_colbert() after planning
+            // (mirroring how set_ivf_chains flips `lists`).
+            kind: KIND_SINGLE,
             dim,
             n_vectors,
             codes_first,
@@ -435,6 +468,19 @@ impl MetaPageData {
         Self::plan_with_blocked(bit_width, dim, n_vectors, am_version, 0, 0, 0)
     }
 
+    /// Mark this meta page as a ColBERT / multivector token index
+    /// (Phase F-2). Flips `kind` to [`KIND_COLBERT`] and bumps
+    /// `version` to [`VERSION`] (5) in lock-step, so `encode` emits
+    /// the v5 wire format. Call AFTER `plan_with_blocked` /
+    /// `set_ivf_chains` (which always plan a single-vector v4 layout);
+    /// the chain layout is otherwise identical to a single-vector IVF
+    /// index — only the discriminator changes. A single-vector index
+    /// never calls this, so it stays byte-identical to v1.16.0.
+    pub fn mark_colbert(&mut self) {
+        self.kind = KIND_COLBERT;
+        self.version = VERSION;
+    }
+
     /// Set the inline codebook fields. `centroids` must have
     /// length `1 << bit_width` (≤ [`MAX_CODEBOOK_LEVELS`]) and
     /// `boundaries` must have length `centroids.len() - 1`.
@@ -488,9 +534,25 @@ impl MetaPageData {
     pub fn encode(&self) -> [u8; PAYLOAD_BYTES] {
         let mut out = [0u8; PAYLOAD_BYTES];
         out[0..4].copy_from_slice(&MAGIC);
-        out[4] = VERSION;
+        // Wire-version is ADDITIVE per kind and lives in `self.version`,
+        // kept in lock-step with `self.kind` (plan_with_blocked sets
+        // version 4 + KIND_SINGLE; mark_colbert() flips both to 5 +
+        // KIND_COLBERT). A single-vector index emits version 4 so its
+        // relfile bytes are byte-identical to v1.16.0; only a ColBERT
+        // index emits 5. The `kind` byte (offset 6, a formerly-zeroed
+        // reserved byte) is the real discriminator; the version byte
+        // is the belt-and-braces signal a pre-v5 binary uses to refuse
+        // the index outright.
+        debug_assert!(
+            (self.kind == KIND_COLBERT) == (self.version >= 5),
+            "version/kind out of sync: kind={} version={}",
+            self.kind,
+            self.version,
+        );
+        out[4] = self.version;
         out[5] = self.bit_width;
-        // out[6..8] reserved
+        out[6] = self.kind;
+        // out[7] reserved
         out[8..12].copy_from_slice(&self.dim.to_le_bytes());
         out[12..20].copy_from_slice(&self.n_vectors.to_le_bytes());
         out[20..24].copy_from_slice(&self.codes_first.to_le_bytes());
@@ -562,6 +624,11 @@ impl MetaPageData {
             return Err("unsupported meta page version");
         }
         let bit_width = bytes[5];
+        // Kind byte (offset 6). On a v1..v4 meta page this is a zeroed
+        // reserved byte, so it reads as KIND_SINGLE — the additive
+        // backward-compat path. Only a v5 ColBERT index sets it to
+        // KIND_COLBERT.
+        let kind = bytes[6];
         let dim = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         let n_vectors = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
         let codes_first = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
@@ -579,6 +646,7 @@ impl MetaPageData {
         let mut me = Self {
             version,
             bit_width,
+            kind,
             dim,
             n_vectors,
             codes_first,
@@ -766,6 +834,39 @@ impl MetaPageData {
     #[allow(dead_code)]
     pub fn is_legacy_v3(&self) -> bool {
         false
+    }
+
+    /// Returns `true` when the meta page is in a wire format the
+    /// Phase F-2 (v5) binary cannot read.
+    ///
+    /// **Deliberately always `false`.** v5 is purely additive: a v4
+    /// single-vector meta page decodes under the v5 binary as
+    /// `kind = KIND_SINGLE` (the kind byte was a zeroed reserved byte
+    /// on v4), and the single-vector flat/IVF decode path is
+    /// byte-compatible with v4. So a v4 index remains fully readable
+    /// and writable under v5 with NO REINDEX. There is no pre-v5
+    /// format a v5 binary genuinely cannot read (v1/v2 are already
+    /// caught by `is_legacy_v1`/`is_legacy_v2`; v3/v4 read fine). The
+    /// predicate exists to satisfy the `AGENTS.md` migration contract
+    /// (every wire bump ships an `is_legacy_v{N}()`) and gives a
+    /// future v6 a place to flag a genuinely-unreadable v5-and-earlier
+    /// format. Today it never trips. See `docs/UPGRADING.md`.
+    #[allow(dead_code)]
+    pub fn is_legacy_v4(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` when this meta page describes a ColBERT /
+    /// multivector token index (Phase F-2, `kind = KIND_COLBERT`,
+    /// wire version 5). A single-vector index (the v1..v4 default and
+    /// the v5 `kind = KIND_SINGLE` case) returns `false`.
+    ///
+    /// `scan.rs` consults this to REJECT an `ORDER BY` scan against a
+    /// ColBERT index (it has no single-vector orderby semantics —
+    /// query it with `turbovec.colbert_search`). `colbert_search`
+    /// consults it to find the persistent token index.
+    pub fn is_colbert(&self) -> bool {
+        self.kind == KIND_COLBERT
     }
 
     /// Returns `true` when this index uses the IVF layout
@@ -1146,5 +1247,86 @@ mod tests {
         buf[4] = 99; // bogus future version
         let err = MetaPageData::decode(&buf).unwrap_err();
         assert!(err.contains("version"));
+    }
+
+    /// INVARIANT #1 guard (Phase F-2): a single-vector index must
+    /// still emit wire version 4 with a ZEROED kind byte, byte-for-
+    /// byte identical to what v1.16.0 wrote. Bumping VERSION to 5 must
+    /// NOT change a single-vector relfile.
+    #[test]
+    fn single_vector_still_emits_v4_bytes() {
+        let dim: u32 = 384;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta = MetaPageData::plan_with_blocked(
+            4, dim, 1000, 7, 12_345, 31, rotation_bytes,
+        );
+        let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+        let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
+        meta.set_codebook(&centroids, &boundaries);
+        assert_eq!(meta.kind, KIND_SINGLE);
+        let buf = meta.encode();
+        // Version byte is 4 (NOT the compiled VERSION = 5) and the
+        // kind byte (offset 6) is zero — exactly the v4 byte layout.
+        assert_eq!(buf[4], 4, "single-vector index must emit wire version 4");
+        assert_eq!(buf[6], 0, "single-vector kind byte must be zero");
+        let back = MetaPageData::decode(&buf).expect("decode");
+        assert_eq!(back.version, 4);
+        assert_eq!(back.kind, KIND_SINGLE);
+        assert!(!back.is_colbert());
+        assert_eq!(meta, back);
+    }
+
+    /// A ColBERT (multivector) index round-trips at wire version 5
+    /// with kind = KIND_COLBERT, and a v4 single-vector decode is
+    /// distinguishable from it.
+    #[test]
+    fn colbert_index_emits_v5_with_kind() {
+        let dim: u32 = 64;
+        let lists: u32 = 16;
+        let n: u64 = 4096; // token slots
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta = MetaPageData::plan_with_blocked(
+            4, dim, n, 9, 200_000, 781, rotation_bytes,
+        );
+        meta.set_codebook(
+            &(0..16).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
+            &(0..15).map(|i| i as f32 * 0.05).collect::<Vec<_>>(),
+        );
+        meta.set_ivf_chains(
+            lists,
+            u64::from(lists) * u64::from(dim) * 4,
+            u64::from(lists) * 12,
+        );
+        // A colbert build flips kind AFTER planning.
+        meta.mark_colbert();
+        let buf = meta.encode();
+        assert_eq!(buf[4], 5, "colbert index must emit wire version 5");
+        assert_eq!(buf[6], KIND_COLBERT);
+        let back = MetaPageData::decode(&buf).expect("decode");
+        assert_eq!(back.version, 5);
+        assert!(back.is_colbert());
+        assert!(back.has_ivf(), "colbert index is IVF-backed");
+        assert!(!back.is_legacy_v4());
+        assert_eq!(meta, back);
+    }
+
+    /// A forged v4 meta page (version byte 4, all v5 region zero)
+    /// decodes under the v5 binary as a single-vector index, NOT
+    /// legacy — the additive backward-compat path.
+    #[test]
+    fn decodes_v4_meta_as_single_vector_under_v5() {
+        let mut buf = MetaPageData::plan_with_blocked(
+            4, 384, 100, 3, 12_000, 5, u64::from(384u32) * 384 * 4,
+        )
+        .encode();
+        // Force the version byte to 4 (a genuine pre-F-2 index) and
+        // ensure the kind byte is zero.
+        buf[4] = 4;
+        buf[6] = 0;
+        let meta = MetaPageData::decode(&buf).expect("v4 decode under v5");
+        assert_eq!(meta.version, 4);
+        assert_eq!(meta.kind, KIND_SINGLE);
+        assert!(!meta.is_colbert());
+        assert!(!meta.is_legacy_v4());
     }
 }

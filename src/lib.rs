@@ -1016,9 +1016,13 @@ mod tests {
     /// `docs/UPGRADING.md` migration matrix.
     #[pg_test]
     fn wire_format_version_is_stable() {
-        // The version emitted by IVF-1 (v4). Bump this only as part
-        // of a deliberate minor/major release with a migration story.
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 4;
+        // The version emitted by Phase F-2 (v5; ColBERT/multivector
+        // index kind). Bump this only as part of a deliberate
+        // minor/major release with a migration story. NOTE: a
+        // single-vector index still emits wire version 4 bytes (the
+        // bump is additive per-kind); VERSION is the MAXIMUM wire
+        // version the binary writes, reached only by a ColBERT index.
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 5;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,
@@ -7905,6 +7909,296 @@ mod tests {
                'cb_badk'::regclass, 'id', 'tokens', \
                ARRAY['[1,0,0,0,0,0,0,0]']::turbovec.vector[], 0)",
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Phase F-2: PERSISTENT on-disk ColBERT token index. A
+    //   CREATE INDEX ... USING turbovec (tokens vec_colbert_ops)
+    // builds a v5 persistent token index; turbovec.colbert_search
+    // detects it and reads stage-1 from the relfile instead of
+    // rebuilding the backend cache every call. See
+    // an internal design note § F-2.
+    // ----------------------------------------------------------------
+
+    /// Build a NON-temp `(id bigint, tokens turbovec.vector[])` table
+    /// (so `index_open` by oid works across the SPI boundary) and a
+    /// persistent ColBERT index on `tokens`. Returns the index oid.
+    fn colbert_make_persistent(table: &str, docs: &[(i64, Vec<[f32; 8]>)]) -> pg_sys::Oid {
+        Spi::run(&format!("DROP TABLE IF EXISTS {table} CASCADE")).unwrap();
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint, tokens turbovec.vector[])"
+        ))
+        .unwrap();
+        for (id, toks) in docs {
+            let arr = toks
+                .iter()
+                .map(|t| {
+                    let nums =
+                        t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                    format!("'[{nums}]'::turbovec.vector")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            Spi::run(&format!(
+                "INSERT INTO {table} VALUES ({id}, ARRAY[{arr}]::turbovec.vector[])"
+            ))
+            .unwrap();
+        }
+        Spi::run(&format!(
+            "CREATE INDEX {table}_cb ON {table} USING turbovec (tokens vec_colbert_ops)"
+        ))
+        .unwrap();
+        Spi::get_one::<pg_sys::Oid>(&format!("SELECT '{table}_cb'::regclass::oid"))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn colbert_persistent_ids(table: &str, query_tokens: &[[f32; 8]], k: i32) -> Vec<i64> {
+        let q = query_tokens
+            .iter()
+            .map(|t| {
+                let nums = t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                format!("'[{nums}]'::turbovec.vector")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id FROM turbovec.colbert_search( \
+               '{table}'::regclass, 'id', 'tokens', \
+               ARRAY[{q}]::turbovec.vector[], {k}) ORDER BY score DESC, id"
+        );
+        fetch_ids(&sql)
+    }
+
+    /// CREATE INDEX builds a v5 persistent token index, and
+    /// colbert_search reads it: top-k matches the F-1 backend-cache
+    /// path (and brute-force MaxSim) on a small corpus.
+    #[pg_test]
+    fn colbert_persistent_build_and_search() {
+        use_turbovec();
+        let docs = &[
+            (1i64, vec![onehot8(0), onehot8(1)]), // matches q exactly
+            (2, vec![onehot8(2), onehot8(3)]),    // disjoint
+            (3, vec![onehot8(0), onehot8(4)]),    // partial (token 0)
+        ];
+        let _oid = colbert_make_persistent("cb_p_basic", docs);
+        let ids = colbert_persistent_ids("cb_p_basic", &[onehot8(0), onehot8(1)], 3);
+        assert!(!ids.is_empty(), "persistent colbert_search returned no rows");
+        for id in &ids {
+            assert!((1..=3).contains(id), "unexpected doc id {id}");
+        }
+        assert_distinct_ids(&ids);
+        // doc 1 (both query tokens present) must be top-1.
+        assert_eq!(ids[0], 1, "doc 1 (full match) must rank first: {ids:?}");
+        Spi::run("DROP TABLE cb_p_basic CASCADE").unwrap();
+    }
+
+    /// THE gap proof via the PERSISTENT index: a doc whose pooled mean
+    /// is far from the query but with ONE matching token is still
+    /// retrieved (stage-1 over all tokens, read from the relfile).
+    #[pg_test]
+    fn colbert_persistent_recovers_single_token_match() {
+        use_turbovec();
+        // doc 1: one token == query token 0, plus orthogonal filler so
+        // its MEAN is washed out; doc 2/3 disjoint.
+        let mut doc1 = vec![onehot8(0)];
+        for d in 2..7 {
+            doc1.push(onehot8(d));
+        }
+        let doc2 = vec![onehot8(3), onehot8(4)];
+        let doc3 = vec![onehot8(5), onehot8(6)];
+        colbert_make_persistent("cb_p_gap", &[(1, doc1), (2, doc2), (3, doc3)]);
+        let ids = colbert_persistent_ids("cb_p_gap", &[onehot8(0), onehot8(7)], 3);
+        assert!(
+            ids.contains(&1),
+            "persistent index must recover doc 1 via its single matching token: {ids:?}"
+        );
+        Spi::run("DROP TABLE cb_p_gap CASCADE").unwrap();
+    }
+
+    /// VACUUM survival: drive ambulkdelete to mark a doc's ctid dead;
+    /// ALL its token slots must be tombstoned and masked out of
+    /// colbert_search (the many-slots-one-doc shape). The persistent
+    /// index is IVF-backed (lists > 0), so the tombstone path applies.
+    #[pg_test]
+    fn colbert_persistent_survives_vacuum() {
+        use_turbovec();
+        let docs = &[
+            (1i64, vec![onehot8(0), onehot8(1), onehot8(2)]),
+            (2, vec![onehot8(0), onehot8(3), onehot8(4)]),
+            (3, vec![onehot8(5), onehot8(6), onehot8(7)]),
+        ];
+        let oid = colbert_make_persistent("cb_p_vac", docs);
+        // Before: doc 1 retrieved by token 0.
+        let before = colbert_persistent_ids("cb_p_vac", &[onehot8(0)], 3);
+        assert!(before.contains(&1), "doc 1 retrieved before vacuum: {before:?}");
+
+        // Collect doc 1's ctid as the dead set.
+        let dead_set: std::collections::HashSet<u64> = {
+            let mut set = std::collections::HashSet::new();
+            Spi::connect(|client| {
+                let t = client
+                    .select(
+                        "SELECT ctid FROM cb_p_vac WHERE id = 1",
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                for row in t {
+                    let ctid: pg_sys::ItemPointerData =
+                        row.get(1).unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(ctid));
+                }
+            });
+            set
+        };
+        assert_eq!(dead_set.len(), 1, "one ctid for id = 1");
+
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const std::collections::HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(oid, &dead_set, Some(dead_cb));
+
+        // After: doc 1's tokens are tombstoned, so token 0 no longer
+        // surfaces doc 1 from the index (doc 2 also has token 0 and
+        // remains; doc 1 must be gone).
+        let after = colbert_persistent_ids("cb_p_vac", &[onehot8(0)], 3);
+        assert!(
+            !after.contains(&1),
+            "doc 1's tokens must be masked from colbert_search after vacuum: {after:?}"
+        );
+        assert!(after.contains(&2), "doc 2 (also has token 0) survives: {after:?}");
+        Spi::run("DROP TABLE cb_p_vac CASCADE").unwrap();
+    }
+
+    /// A ColBERT index must REJECT an `ORDER BY tokens <=> q` style
+    /// scan with a clear ERROR (it has no single-vector orderby
+    /// semantics). The planner won't normally pick a colbert index
+    /// for ORDER BY (no order-by operator registered), so we force
+    /// the AM scan path via a direct ambeginscan drive on the index
+    /// relation — which is exactly what a forced scan would hit — and
+    /// assert it errors. Driving ambeginscan directly mirrors how the
+    /// other AM-path tests exercise scan internals.
+    #[pg_test]
+    #[should_panic(expected = "ColBERT (multivector)")]
+    fn colbert_index_rejects_orderby_scan() {
+        use_turbovec();
+        let oid = colbert_make_persistent(
+            "cb_p_reject",
+            &[(1, vec![onehot8(0), onehot8(1)]), (2, vec![onehot8(2)])],
+        );
+        unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            assert!(!rel.is_null());
+            // ambeginscan must ERROR (ColBERT index) before returning a
+            // scan desc. We expect the panic to unwind through here;
+            // index_close won't run, but the test process tears down.
+            let _scan = crate::index::scan::ambeginscan(rel, 0, 1);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+    }
+
+    /// Determinism: building the index twice over the same table +
+    /// reloptions yields a byte-identical relfile main fork.
+    #[pg_test]
+    fn colbert_persistent_deterministic() {
+        use_turbovec();
+        let docs: Vec<(i64, Vec<[f32; 8]>)> = (0..40i64)
+            .map(|i| {
+                let toks = (0..6)
+                    .map(|j| onehot8(((i as usize) + j) % 8))
+                    .collect::<Vec<_>>();
+                (i, toks)
+            })
+            .collect();
+        let oid1 = colbert_make_persistent("cb_p_det1", &docs);
+        let oid2 = colbert_make_persistent("cb_p_det2", &docs);
+        let bytes_of = |oid: pg_sys::Oid| -> Vec<u8> {
+            unsafe {
+                let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+                let nblocks = pg_sys::RelationGetNumberOfBlocksInFork(
+                    rel,
+                    pg_sys::ForkNumber::MAIN_FORKNUM,
+                );
+                let mut out = Vec::new();
+                for blk in 0..nblocks {
+                    let buf = pg_sys::ReadBufferExtended(
+                        rel,
+                        pg_sys::ForkNumber::MAIN_FORKNUM,
+                        blk,
+                        pg_sys::ReadBufferMode::RBM_NORMAL,
+                        std::ptr::null_mut(),
+                    );
+                    pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+                    let page = pg_sys::BufferGetPage(buf);
+                    let data = std::slice::from_raw_parts(
+                        page as *const u8,
+                        crate::index::page::BLCKSZ,
+                    );
+                    out.extend_from_slice(data);
+                    pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_UNLOCK as i32);
+                    pg_sys::ReleaseBuffer(buf);
+                }
+                pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+                out
+            }
+        };
+        let b1 = bytes_of(oid1);
+        let b2 = bytes_of(oid2);
+        assert_eq!(
+            b1.len(),
+            b2.len(),
+            "deterministic colbert builds must produce the same block count"
+        );
+        // The pd_lsn (first 8 bytes of every page header) differs per
+        // WAL insert; compare the DATA region (after the 24-byte page
+        // header) of every block, which is what our wire format owns.
+        let bs = crate::index::page::BLCKSZ;
+        let hdr = crate::index::page::PAGE_HEADER_BYTES;
+        let nblk = b1.len() / bs;
+        for blk in 0..nblk {
+            let s = blk * bs + hdr;
+            let e = (blk + 1) * bs;
+            assert_eq!(
+                &b1[s..e],
+                &b2[s..e],
+                "colbert build is non-deterministic at block {blk} data region"
+            );
+        }
+        Spi::run("DROP TABLE cb_p_det1 CASCADE").unwrap();
+        Spi::run("DROP TABLE cb_p_det2 CASCADE").unwrap();
+    }
+
+    /// INVARIANT #1 (live): a single-vector index built under the v5
+    /// binary still emits wire version 4 with kind = 0 on its meta
+    /// page. A ColBERT index emits version 5 / kind = 1. Proves the
+    /// v5 bump is additive and doesn't disturb single-vector relfiles.
+    #[pg_test]
+    fn v4_single_vector_index_byte_identical() {
+        use_turbovec();
+        Spi::run("DROP TABLE IF EXISTS cb_sv CASCADE").unwrap();
+        Spi::run("CREATE TABLE cb_sv (id bigint, emb turbovec.vector)").unwrap();
+        for i in 0..32i64 {
+            let nums = (0..8).map(|j| ((i + j) % 5).to_string()).collect::<Vec<_>>().join(",");
+            Spi::run(&format!("INSERT INTO cb_sv VALUES ({i}, '[{nums}]')")).unwrap();
+        }
+        Spi::run("CREATE INDEX cb_sv_ix ON cb_sv USING turbovec (emb vec_cosine_ops)")
+            .unwrap();
+        let oid: pg_sys::Oid =
+            Spi::get_one("SELECT 'cb_sv_ix'::regclass::oid").unwrap().unwrap();
+        let (ver, kind) = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (meta.version, meta.kind)
+        };
+        assert_eq!(ver, 4, "single-vector index must still emit wire version 4");
+        assert_eq!(kind, crate::index::page::KIND_SINGLE);
+        Spi::run("DROP TABLE cb_sv CASCADE").unwrap();
     }
 }
 

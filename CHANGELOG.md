@@ -4,6 +4,71 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.18.0] — 2026-06-18
+
+**Tier-1 IVF latency optimizations (scan-path).** No SQL-surface
+change, **no wire change** (`MetaPageData::version = 5`; single-vector
+stays v4), **no REINDEX**. Closes the Tier-1 backlog
+(`docs/TIER1_IVF_LATENCY_PLAN.md`) — narrowing the IVF-vs-HNSW latency
+gap by attacking the actual per-query floor, with evidence rather than
+speculation.
+
+### Changed
+
+- **Default `turbovec.search_k` lowered 100 → 32 (#1a).** The dominant
+  per-query cost is the executor's reorder-recheck of *every*
+  returned candidate (a heap-tuple fetch + an exact full-precision
+  distance recompute each) — not the vector scan. The new
+  `searchk_recall_frontier` test shows recall@10 **plateaus by
+  `search_k`≈25** (25/50/100/200 identical), so the old default of
+  100 over-provisioned the recheck ~3× for zero recall gain. The
+  real-corpus `recall_floor_{2,3,4}bit` tests pass at the new
+  default, confirming recall safety. Raise it for `LIMIT > ~20` or a
+  hard corpus; lower it (toward 16) for the lowest latency.
+
+### Added
+
+- **`assign_dups_probes_pareto` test + guidance (#2).** Demonstrates
+  that raising `WITH (assign_dups = M)` (soft multi-assignment) lets
+  a query reach a matched recall while probing **fewer cells** (best
+  recall@10 climbs 0.173 → 0.207 → 0.240 as `assign_dups` 1 → 2 → 4
+  on the test corpus; min-probes-to-matched-recall is non-increasing
+  in `assign_dups`). Opt-in (a build-time layout choice; `assign_dups
+  > 1` needs a REINDEX). The default (1) is unchanged.
+- Frontier artifacts:
+  `benches/results/searchk_recall_frontier_2026-06-18.json`,
+  `benches/results/assign_dups_probes_pareto_2026-06-18.json`.
+
+### Investigated and rejected / deferred (documented, not built)
+
+- **#1b (advertise a tighter ORDER BY distance) — rejected as a
+  no-op.** PostgreSQL's `IndexNextWithReorder` rechecks (heap fetch +
+  exact recompute) every candidate unconditionally under
+  `xs_recheckorderby`, before reading the advertised value; a tighter
+  bound reduces zero work (identical PG 13–18). Documented in
+  `src/index/scan.rs`.
+- **#3 (SIMD `coarse_probe`) — assessed, deferred:** it is a
+  fixed-floor term, not the dominant cost, and a SIMD horizontal-sum
+  risks cross-ISA reduction-order divergence → recall drift.
+- **#4–6 — not warranted by the data** (zero effect on the
+  OOC-gathered benchmark; build-when-profiled).
+
+### Honest caveat
+
+The **latency confirmation** of #1a/#2 (does p50 actually drop ~3×?)
+is **deferred to a quiet AVX2 host** — both `floki` and `arnold` were
+saturated by unrelated work during this release. The **recall safety**
+of every change is host-independent and verified here; only the
+latency *number* awaits a quiet window. The projected effect
+(`docs/TIER1_IVF_LATENCY_PLAN.md` § 4): ~10–13 ms at recall@10≈0.96 at
+500k–1M, matching HNSW ef40–ef100.
+
+### Migration
+
+**No REINDEX.** Scan-path / default-tuning only; wire stays v5.
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.18.0';` is sufficient (the
+new `search_k` default applies to new sessions). Tests: 239 → 241.
+
 ## [1.17.1] — 2026-06-18
 
 **ColBERT recall win confirmed cross-domain.** Docs + bench-results

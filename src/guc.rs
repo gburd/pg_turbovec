@@ -31,7 +31,7 @@ pub static CACHE_SIZE_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
-pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(100);
+pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(32);
 pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(8);
 
 /// IVF-3: iterative-scan cap on probe-set growth under a selective
@@ -339,9 +339,9 @@ pub fn register_gucs() {
 
     GucRegistry::define_int_guc(
         c_str(b"turbovec.search_k\0"),
-        c_str(b"Max candidates to fetch from the index per scan (default 100).\0"),
+        c_str(b"Max candidates to fetch from the index per scan (default 32).\0"),
         c_str(
-            b"The kernel ranks all corpus rows; this caps how many top-scoring candidates the index returns from one amgettuple sweep. The executor then drains them under LIMIT/recheck-orderby. Set higher for queries with LIMIT > 100 or when xs_recheckorderby semantics require oversampling. Set lower for lower-latency queries that accept slightly worse recall.\0",
+            b"The kernel ranks all corpus rows; this caps how many top-scoring candidates the index returns from one amgettuple sweep. The executor then drains them under LIMIT, re-ranking by exact distance (xs_recheckorderby). Latency scales with this count: every returned candidate costs a heap-tuple fetch + an exact full-precision distance recompute in the reorder queue, which is the dominant per-query cost (the IVF scan itself is a minority of the time). The recall-vs-search_k frontier (benches/results/searchk_recall_frontier_*.json) shows recall@10 PLATEAUS by ~search_k=25 -- 25/50/100/200 give identical recall -- so the pre-v1.18 default of 100 over-provisioned the recheck ~3x for no recall gain. The default is now 32 (above the recall plateau with margin, ~3x less recheck work). RAISE it when your query's LIMIT exceeds ~20 (you need at least LIMIT candidates), or to push recall on a hard corpus; LOWER it (toward 16) for the lowest latency on small-LIMIT queries that accept slightly worse recall. Composes with turbovec.oversample (which widens the candidate set) and iterative_scan (which grows search_k on refill).\0",
         ),
         &SEARCH_K,
         1,

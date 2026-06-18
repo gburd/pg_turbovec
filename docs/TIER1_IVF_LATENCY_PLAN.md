@@ -59,15 +59,18 @@ re-rechecks all `search_k` of them against the heap. Two sub-levers:
 - **(1b) Advertise the REAL quantized distance** instead of
   `NEG_INFINITY`, so the executor only re-queues tuples that are
   genuinely out of order, cutting heap fetches from ~`search_k` toward
-  ~`LIMIT`. **The catch (must respect):** the advertised distance must
-  never be *below* the exact value, or the `elog(ERROR, "index
-  returned tuples in wrong order")` guard (`scan.rs:636`) fires. The
-  quantized distance is a lossy *approximation* — it can be above or
-  below exact. So (1b) needs either a proven lower-bound on the
-  quantized distance, or a safety margin, or it stays as a candidate
-  only if we can guarantee the monotonicity the executor requires.
-  **This is the substance of the lever and the one place it needs real
-  care, not a GUC flip.**
+  ~`LIMIT`. **REJECTED (investigated 2026-06): a no-op.** Under
+  `xs_recheckorderby = true`, PostgreSQL's `IndexNextWithReorder`
+  UNCONDITIONALLY fetches the heap tuple and recomputes the exact
+  distance for EVERY candidate `amgettuple` returns, *before* it reads
+  our advertised value (the advertised value only governs the
+  wrong-order ERROR + final drain ordering). So a tighter lower bound
+  is legal but reduces zero heap fetches / recomputes. Behaviour is
+  identical across PG 13-18. The ONLY lever that cuts the recheck
+  floor is returning fewer candidates (= 1a). The AM-side
+  "recompute-exactly-and-set-recheck=false" alternative duplicates the
+  heap I/O and is an MVCC-correctness minefield — also rejected.
+  Documented in `src/index/scan.rs` so it isn't re-asked.
 
 Expected: the recheck is ~200 random heap fetches + 200 exact
 recomputes; the profile attributes ~37% to ReadBuffer. Cutting it to
@@ -87,6 +90,25 @@ pg_turbovec **~10–13 ms at R@0.96**, matching HNSW ef40–ef100
 | 4 | **Compact-gather for the whole-load path** (replace the `search_masked` whole-index masked walk for sub-threshold in-RAM indexes) | M | Low-Med (zero effect on the 500k bench; helps small/in-RAM indexes) | N | N | Y |
 | 5 | **`search_with_cell_ranges` turbovec fork API** (scan only probed contiguous block ranges in place) | M-L | Low (whole-load path only; mostly superseded by #4) | N | **Y** | Y |
 | 6 | `madvise`/prefetch on gather; early-termination | M | Low (downstream of #1) | N | N | Y |
+
+## 2a. Resolution (worked 2026-06-18)
+
+| # | Status | Why |
+|---|---|---|
+| **1a** lower `search_k` default 100→32 | ✅ **DONE** | recall@10 plateaus by ~25 (frontier); `recall_floor_{2,3,4}bit` pass at 32. ~3× less recheck, zero recall loss. Latency confirmation deferred to a quiet AVX2 host. |
+| **1b** advertise real/tighter distance | ❌ **REJECTED (no-op)** | `IndexNextWithReorder` rechecks (heap fetch + exact recompute) EVERY returned candidate unconditionally under `xs_recheckorderby`; the advertised bound only governs the wrong-order ERROR + drain order. Identical PG 13–18. Documented in scan.rs. |
+| **2** `assign_dups`×probes Pareto | ✅ **DONE** | `assign_dups_probes_pareto` test: min-probes-for-target is monotone non-increasing in assign_dups — higher dups reaches matched recall at ≤ probes (fewer cells scanned). Opt-in (REINDEX), already-existing build machinery. |
+| **3** SIMD `coarse_probe`/`rotate_query` | ⚠️ **ASSESSED, DEFERRED** | `coarse_probe` is a fixed-floor term, NOT the dominant cost (the recheck floor is). A SIMD horizontal-sum changes reduction order vs scalar → could flip the `(dist, cell_id)` argmin near ties → cross-ISA recall drift, breaking the determinism + recall-stability invariant. Poor risk/reward; revisit only if a profile shows `sq_dist` hot AND with a proven bit-identical SIMD `sq_dist`. |
+| **4** compact-gather for whole-load path | ⏸️ **NOT WARRANTED BY DATA** | Zero effect on the measured (OOC-gathered) bench; helps only sub-threshold in-RAM indexes. Build when a profiled workload shows the whole-load masked path is hot. |
+| **5** `search_with_cell_ranges` fork API | ⏸️ **NOT WARRANTED** | Whole-load path only; mostly superseded by #4; needs a turbovec fork change. Defer until #4 is shown insufficient. |
+| **6** prefetch / early-term | ⏸️ **DOWNSTREAM OF #1** | Low payoff while the recheck floor dominates. |
+
+**Net Tier-1 deliverable:** the two evidence-backed wins (#1a lower
+`search_k`, #2 the `assign_dups` Pareto frontier) ship; #1b and #3 are
+rejected/deferred with source-level + determinism reasons rather than
+built speculatively; #4–6 are documented as not-warranted-by-the-data
+(building them would optimize paths the profile shows aren't hot). The
+discipline: don't write speculative optimization code for cold paths.
 
 ---
 

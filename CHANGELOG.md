@@ -4,6 +4,74 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.17.0] — 2026-06-18
+
+**Phase F-2 — persistent index-native ColBERT late interaction.**
+New index kind; **additive wire bump 4 → 5** (single-vector indexes
+stay **byte-identical to v4**); **no REINDEX** for any existing
+index. This makes pg_turbovec one of only two PostgreSQL extensions
+(with VectorChord) to offer index-native multivector/MaxSim — and the
+only one that is also 7–15× smaller than HNSW.
+
+### Added
+
+- **Persistent ColBERT token index.** `CREATE INDEX ON docs USING
+  turbovec (tokens vec_colbert_ops)` over a `turbovec.vector[]`
+  column (per-doc token arrays) builds a v5 on-disk **token** index:
+  `ambuild` unnests each doc's `vector[]` into per-token slots (the
+  doc's heap TID repeated per token — the IVF soft-assign
+  synthetic-slot-id machinery), laid out IVF cell-contiguous and
+  spilled via the Phase B-4 BufFile (n_tokens ≫ n_docs, so the spill
+  is load-bearing). Determinism: tokens are unnested in array order.
+- **`turbovec.colbert_search` now reads the persistent index.** It
+  locates the `vec_colbert_ops` index on the token column and runs
+  stage-1 candidate generation against the on-disk relfile (warm
+  cache or cold read) instead of rebuilding a backend cache every
+  call. Stage-2 still exact-MaxSim-reranks heap tokens by ctid. **The
+  F-1 ~28 MB/call backend-RSS leak is eliminated on the persistent
+  path** (and bounded on the no-index fallback).
+- **`vec_colbert_ops`** operator class over `turbovec.vector[]` —
+  support function `max_sim`, **no order-by operator**, so the
+  planner can never select a ColBERT index for `ORDER BY` (the
+  forbidden `amrescan` scan-key path is untouched). A ColBERT index
+  ERRORs on an `ORDER BY` scan with a HINT to use
+  `turbovec.colbert_search`.
+- **VACUUM** reuses the IVF tombstone path unchanged: a deleted
+  doc's TID marks all its token slots dead (the many-slots-one-TID
+  shape is identical to IVF soft-assign dups); cells stay contiguous
+  (tombstone, never swap-remove); `colbert_search` masks tombstoned
+  slots.
+
+### Wire format (additive v5, per index kind)
+
+A new `kind` byte at page offset 30 (formerly a reserved zero)
+discriminates `KIND_SINGLE` (0, single-vector, wire v4) from
+`KIND_COLBERT` (1, multivector, wire v5). A single-vector build never
+sets it, so it emits **wire version 4 + kind 0 — byte-identical to
+v1.16.0** (guarded by `single_vector_still_emits_v4_bytes` and
+`v4_single_vector_index_byte_identical`). A v4 meta decodes as
+`kind = KIND_SINGLE`, so `is_legacy_v4()` never trips.
+`EXPECTED_WIRE_FORMAT_VERSION` is now 5.
+
+### Migration
+
+**No REINDEX.** Existing single-vector indexes are byte-identical and
+read unchanged under the v5 binary. A ColBERT index is a brand-new
+shape, built fresh (no in-place conversion from a single-vector
+index). `ALTER EXTENSION pg_turbovec UPDATE TO '1.17.0';` registers
+the new opclass and is sufficient. See `docs/UPGRADING.md`.
+
+### Tests
+
+230 → 239 (+`colbert_persistent_build_and_search`,
+`colbert_persistent_recovers_single_token_match`,
+`colbert_persistent_survives_vacuum`,
+`colbert_persistent_deterministic`,
+`colbert_index_rejects_orderby_scan`,
+`v4_single_vector_index_byte_identical`, + 3 page.rs unit tests).
+All six PG versions (13–18) compile; drift-check clean (after the
+VERSION-5 / minor-bump pairing this release provides).
+
 ## [1.16.0] — 2026-06-17
 
 **Phase F-1 — index-native late interaction (ColBERT stage-1).**

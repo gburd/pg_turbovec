@@ -85,20 +85,27 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.16.0, 2026-06-17)
+### Current (as of v1.17.0, 2026-06-18)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.16.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.16.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.16.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.16.x     | 1.16.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.17.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.17.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.17.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.17.x     | 1.17.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
 
-`MetaPageData::version` is **4** (v1.10.0+); v1.11–v1.13 changes
-(tombstones, out-of-core build, out-of-core query) are additive /
-build-internal / scan-path within v4, so v1.4.x–v1.12.x indexes need
-**no REINDEX**. IVF is opt-in via `WITH (lists = N)`; as of v1.13.0
-IVF is out-of-core end-to-end (build AND query), so a >RAM IVF index
+`MetaPageData::version` is **5** as of v1.17.0 (was **4** for
+v1.10.0–v1.16.x), but the bump is **strictly additive per index
+kind**: a single-vector index (`vec_*_ops` over a `vector` column)
+still emits wire **version 4** with a zeroed `kind` byte (page offset
+30), **byte-identical to v1.16.0**; only a ColBERT index
+(`vec_colbert_ops` over a `vector[]` column, Phase F-2) is v5
+(`kind = KIND_COLBERT`). A v4 meta decodes as `KIND_SINGLE`, so
+`is_legacy_v4()` never trips and v1.4.x–v1.16.x single-vector indexes
+need **no REINDEX**. v1.11–v1.13 changes (tombstones, out-of-core
+build, out-of-core query) remain additive within v4. IVF is opt-in
+via `WITH (lists = N)`; as of v1.13.0 IVF is out-of-core end-to-end
+(build AND query), so a >RAM IVF index
 can be built and served on a RAM-constrained host.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it

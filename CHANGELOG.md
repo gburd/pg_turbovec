@@ -4,6 +4,51 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.17.1] — 2026-06-18
+
+**ColBERT recall win confirmed cross-domain.** Docs + bench-results
+release; **no source, SQL-surface, or wire change**
+(`MetaPageData::version = 5`, single-vector still v4); **no REINDEX**.
+
+### Confirmed
+
+The Phase F-2 index-native ColBERT recall gain (shipped v1.17.0) was
+**replicated on a second, out-of-domain corpus** (BEIR/NFCorpus,
+3,633 docs, medical/nutrition, entity-heavier), exercising the
+persistent `vec_colbert_ops` index on `floki` (AVX2):
+
+- **+0.044 nDCG@10 / +0.037 Recall@10** vs the Phase-D pooled+rerank
+  baseline at the value operating point (`candidate_n=256`), rising
+  to **+0.065 nDCG at low candidate budget** (`candidate_n=128`,
+  where the pooled baseline collapses to 0.220 while
+  `colbert_search` holds at 0.285) — same sign, same mechanism, same
+  low-budget shape as the SciFact gate at *every* config.
+- Quantization signal intact (2-bit ≈ 4-bit, ≤0.0001 nDCG; 2-bit
+  index = 43 MB).
+- The **persistent index built cleanly** (561k token slots, 42 s /
+  43 MB at 2-bit, no OOM) and **served from disk — the F-1
+  ~28 MB/call backend-RSS leak is gone** (RSS plateaus flat at
+  ~360 MB; ~1.4 KB/call warm).
+
+**The qualified GO is upgraded to an established cross-domain recall
+win.** Data:
+`benches/results/colbert_f2_confirm_floki_nfcorpus_20260618.json`;
+harness: `benches/scripts/colbert/`.
+
+### Docs
+
+an internal design note
+updated to record index-native late interaction as **DONE** (was a
+future phase): pg_turbovec is one of two PostgreSQL extensions (with
+VectorChord) with index-native multivector/MaxSim, and the only one
+also 7–15× smaller than HNSW.
+
+### Migration
+
+**No REINDEX.** Docs + bench only; wire stays v5 (single-vector v4).
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.17.1';` is sufficient.
+Tests unchanged (239).
+
 ## [1.17.0] — 2026-06-18
 
 **Phase F-2 — persistent index-native ColBERT late interaction.**

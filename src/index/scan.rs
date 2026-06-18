@@ -647,6 +647,24 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     // every tuple onto the reorder queue and drains it in exact
     // order at end-of-scan. The performance cost is negligible
     // because we only return up to `k` tuples per scan anyway.
+    //
+    // Tier-1 #1b (investigated 2026-06, REJECTED as a no-op): we
+    // considered advertising a TIGHTER valid lower bound (e.g. 0.0
+    // for cosine/L2, which are non-negative) so the executor could
+    // skip rechecking some candidates. It cannot. Under
+    // `xs_recheckorderby = true`, `IndexNextWithReorder`
+    // UNCONDITIONALLY fetches the heap tuple (in
+    // `index_getnext_slot` -> `index_fetch_heap`, before it reads
+    // our advertised value) and recomputes the exact distance
+    // (`EvalOrderByExpressions`) for EVERY tuple `amgettuple`
+    // returns. The advertised value only governs the wrong-order
+    // ERROR and the final drain ordering, never whether a recheck
+    // happens. So a tighter bound is legal but buys nothing; the
+    // ONLY lever that cuts the per-query recheck floor (heap fetch +
+    // exact recompute per candidate) is returning fewer candidates,
+    // i.e. `turbovec.search_k` (Tier-1 #1a, default lowered to 32).
+    // (Behaviour is identical across PG 13-18.) Keep NEG_INFINITY:
+    // simplest, opclass-agnostic, provably safe.
     if !(*scan).xs_orderbyvals.is_null() && !(*scan).xs_orderbynulls.is_null() {
         let lb_bits = f64::NEG_INFINITY.to_bits();
         *(*scan).xs_orderbyvals.add(0) = pg_sys::Datum::from(lb_bits);

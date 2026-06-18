@@ -216,6 +216,24 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
                     "Run `REINDEX INDEX <name>;` to migrate. See docs/UPGRADING.md for details."
                 );
             }
+            // Phase F-2: a ColBERT / multivector token index (kind = 1,
+            // wire v5) has NO single-vector order-by semantics. Its
+            // opclass registers no order-by operator, so the planner
+            // should never pick it for `ORDER BY ... <=> q`; but a
+            // forced index scan (or a future planner change) could
+            // still reach the AM scan path. We REJECT it here with a
+            // clear HINT rather than crash or return garbage. The
+            // ColBERT query path is `turbovec.colbert_search(...)`,
+            // which reads the persistent index directly (cache /
+            // relfile) and never enters `ambeginscan`.
+            Some(m) if m.is_colbert() => {
+                ereport!(
+                    PgLogLevel::ERROR,
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "this is a ColBERT (multivector) turbovec index; it has no ORDER BY semantics",
+                    "Query it with turbovec.colbert_search(rel, id_col, token_col, query, k), not an ORDER BY <=> scan. See an internal design note."
+                );
+            }
             _ => {}
         }
     }

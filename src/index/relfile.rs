@@ -556,6 +556,11 @@ pub(crate) struct IvfParts<'a> {
     pub lists: u32,
     pub coarse_centroids: &'a [f32],
     pub cell_dir_bytes: &'a [u8],
+    /// Phase F-2: stamp the meta page as a ColBERT / multivector
+    /// token index (`mark_colbert()`, wire v5) when `true`. A normal
+    /// single-vector IVF build leaves this `false`, so the meta stays
+    /// byte-identical to the v4 wire format.
+    pub colbert: bool,
 }
 
 /// High-level helper: write a fully-built `IdMapIndex` plus the
@@ -977,6 +982,13 @@ unsafe fn write_full_inner(
         let coarse_bytes = std::mem::size_of_val(iv.coarse_centroids) as u64;
         let cell_dir_bytes = iv.cell_dir_bytes.len() as u64;
         meta.set_ivf_chains(iv.lists, coarse_bytes, cell_dir_bytes);
+        // Phase F-2: stamp the ColBERT / multivector kind (wire v5).
+        // Done AFTER set_ivf_chains so the chain layout is identical
+        // to a single-vector IVF index — only the discriminator byte
+        // changes. A non-colbert build leaves the meta at v4.
+        if iv.colbert {
+            meta.mark_colbert();
+        }
     }
     let new_total = meta.total_blocks().max(1);
 

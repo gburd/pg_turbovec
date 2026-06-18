@@ -45,7 +45,7 @@ pub(crate) mod mmap_static;
 mod options;
 pub(crate) mod page;
 pub(crate) mod relfile;
-mod scan;
+pub(crate) mod scan;
 pub(crate) mod vacuum;
 mod validate;
 
@@ -224,7 +224,25 @@ extension_sql!(
         FOR TYPE vector USING turbovec AS
             OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
             FUNCTION 1 l1_distance(vector, vector);
+
+    -- Phase F-2: the ColBERT / multivector token index kind. The
+    -- opclass is over the ARRAY type `turbovec.vector[]` (a column of
+    -- per-doc token arrays). It registers NO order-by operator and NO
+    -- `<=>`-style binary operator: ColBERT has no single-vector
+    -- orderby semantics, so the planner has nothing to match and will
+    -- NEVER pick this index for an `ORDER BY ... <=> q` scan (the
+    -- forbidden amrescan path). The opclass exists purely so
+    --   CREATE INDEX ... USING turbovec (tokens vec_colbert_ops)
+    -- is accepted and routes to the v5 persistent-token-index build.
+    -- Reads go through turbovec.colbert_search(), not the planner;
+    -- ambeginscan/amrescan REJECT an ORDER BY scan on a kind=colbert
+    -- index with a HINT to use colbert_search. Support function 1 is
+    -- max_sim (the Phase D MaxSim kernel) purely to satisfy the AM's
+    -- amsupport = 1; it is never invoked by the (rejected) scan path.
+    CREATE OPERATOR CLASS vec_colbert_ops
+        FOR TYPE vector[] USING turbovec AS
+            FUNCTION 1 max_sim(vector[], vector[]);
     ",
     name = "turbovec_index_am",
-    requires = ["turbovec_index_handler_decl", "vec_operators"]
+    requires = ["turbovec_index_handler_decl", "vec_operators", max_sim]
 );

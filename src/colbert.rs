@@ -476,7 +476,6 @@ unsafe fn load_persistent_colbert_inner(
         total_bytes,
         relfile_node,
         version_as_i64,
-        None,
     );
     Some((handle, tombstones))
 }

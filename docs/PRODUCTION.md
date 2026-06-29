@@ -132,14 +132,16 @@ SET turbovec.cache_size_mb = 256;
 
 -- Out-of-core IVF serving (v1.13.0+): serve an IVF index larger
 -- than RAM by caching only bounded metadata (coarse centroids,
--- cell directory, rotation, codebook, per-slot scales/ids) plus a
--- MAP_PRIVATE mmap of the relfile, then per query copying ONLY the
--- probed cells' contiguous code ranges off the mmap into a compact
--- throwaway sub-index. The per-backend resident set is then
--- O(probes * cell_size + faulted pages) instead of O(n) -- hot
--- cells stay in the OS page cache, cold cells fault from disk on
--- demand. This is THE mechanism that lets a >RAM IVF index be
--- queried at all (pairs with the v1.12.0 out-of-core BUILD).
+-- cell directory, rotation, codebook, per-slot scales/ids), then
+-- per query gathering ONLY the probed cells' contiguous code ranges
+-- through PostgreSQL's buffer manager into a compact throwaway
+-- sub-index. The per-backend resident set is then
+-- O(probes * cell_size) instead of O(n) -- only the probed cells'
+-- pages are read; the buffer manager + OS cache hold hot pages,
+-- cold pages are read on demand. This is THE mechanism that lets a
+-- >RAM IVF index be queried at all (pairs with the v1.12.0
+-- out-of-core BUILD). All index data is read through the buffer
+-- cache (no relfile mmap; see docs/BUFFER_CACHE_ONLY_DESIGN.md).
 --
 --   * auto (DEFAULT): cell-scoped only when the index codes exceed
 --     0.5 * cache_size_mb -- i.e. the index that actually needs
@@ -163,12 +165,15 @@ SET turbovec.cache_size_mb = 256;
 -- WITH (lists = N), for a >RAM corpus).
 SET turbovec.out_of_core = auto;
 
--- Use mmap-resident reads for the deterministic-after-build
--- regions of the relfile (blocked codes + rotation matrix +
--- inline codebook). Default ON in v1.5.0+; turn OFF only if you
--- hit a kernel mmap quirk. The fallback path goes through
--- shared_buffers as in v1.4.x.
-SET turbovec.mmap_static_blocked = on;
+-- NOTE: turbovec.mmap_static_blocked is DEPRECATED and ignored as
+-- of v1.19.0. pg_turbovec no longer mmaps the relfile; every byte
+-- of index data is read through PostgreSQL's shared-buffer cache
+-- (ReadBufferExtended). Size shared_buffers to hold the hot
+-- (compressed) index for best cold-fill latency -- pg_turbovec's
+-- 7-15x compression is what makes "the index fits shared_buffers"
+-- achievable where fp32 HNSW could not. The GUC is kept as a no-op
+-- for one minor so an existing SET does not error; it will be
+-- removed. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
 
 -- Normalise embeddings on insert. Useful if your embedding
 -- producer doesn't normalise; lets you use cosine distance
@@ -274,18 +279,23 @@ RESET turbovec.allowlist;
 The pgrx test cluster default is 128 MiB; production should run with
 `shared_buffers = 25–40% of RAM`. For `pg_turbovec` specifically:
 
-- v1.5.0+ mmap-resident reads of static regions (~30–60% of an index)
-  bypass `shared_buffers` entirely. They're served from the OS page
-  cache via `mmap MAP_PRIVATE`.
-- Mutated regions (codes/scales/ids; v1.5+ keeps these on the buffer
-  manager) follow the standard rule: `shared_buffers ≥ 2× sum of all
-  turbovec indexes you query in a session`.
-- For a 10M × 1536-d × 4-bit index (~15 GiB), that's `shared_buffers
-  ≥ 30 GiB` if you query the index frequently. On a 64 GiB host,
-  `shared_buffers = 24 GiB` is a sensible production setting.
-
-Lower `shared_buffers` will not corrupt anything; it'll just make
-warm-scan p50 noisier as buffer-manager evictions force refills.
+- **All index data is read through `shared_buffers`** (the buffer
+  manager). As of v1.19.0 there is no relfile mmap; size
+  `shared_buffers` to hold the hot index so cold cache-fills stay
+  fast. pg_turbovec's **7–15× compression** is what makes this
+  practical: the index that must fit `shared_buffers` is the
+  *compressed* one, not the fp32 corpus.
+- For a 10M × 1536-d × 4-bit index (~15 GiB), size `shared_buffers`
+  to hold it if you query frequently (e.g. `shared_buffers = 24 GiB`
+  on a 64 GiB host). For a >RAM index, use **IVF** (`WITH (lists =
+  N)`) + `turbovec.out_of_core` so only the probed cells' pages are
+  read — the resident set is then O(probes/lists) of the index, not
+  the whole thing.
+- Warm queries never touch the buffer manager (the prepared index is
+  cached per-backend); `shared_buffers` sizing only affects cold
+  cache-fill latency. Lower `shared_buffers` will not corrupt
+  anything; it'll just make cold-fill p50 noisier as buffer-manager
+  evictions force refills.
 
 ### `maintenance_work_mem`
 
@@ -365,8 +375,11 @@ or index-AM change). Full guide with worked CTEs:
 
 - All page mutations go through `GenericXLog` → standard PG WAL.
 - `ambuild` + `aminsert` + `ambulkdelete` are all WAL-logged.
-- The mmap path on standbys uses `File::open(path).map(MAP_PRIVATE)`,
-  which is read-only and works on hot standbys.
+- **All index data is read through PostgreSQL's buffer manager**
+  (`ReadBufferExtended`) — no direct relfile `mmap`/`pread`. This is
+  the correct posture for hot standbys, managed/sandboxed Postgres,
+  and any environment that restricts direct file access; the buffer
+  manager is the single source of truth for page reads.
 - The per-backend cache (`turbovec.cache_size_mb`) is process-local,
   so primary and standby backends maintain independent caches; no
   shared-memory invalidation hazards.
@@ -633,8 +646,8 @@ is paid once and cached. Mitigations:
 
 - Pre-warm the cache on backend startup with a dummy query.
 - Use connection pooling so warm scans dominate.
-- Future v1.8.0 may close the gap with a wire-format change to
-  enable zero-copy mmap reads of the blocked-codes chain.
+- Size `shared_buffers` to hold the hot (compressed) index so cold
+  cache-fills are served from the buffer cache rather than disk.
 
 ---
 
@@ -696,7 +709,7 @@ reports include:
 
 For performance regressions specifically, also include:
 - `shared_buffers`, `maintenance_work_mem`, `turbovec.search_k`,
-  `turbovec.cache_size_mb`, `turbovec.mmap_static_blocked` settings.
+  `turbovec.cache_size_mb` settings.
 - Approximate corpus size (`SELECT count(*), avg(array_length(emb::real[],1))
   FROM your_table;`).
 - Index storage (`SELECT pg_size_pretty(pg_relation_size('your_idx'));`).

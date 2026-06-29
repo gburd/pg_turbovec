@@ -11,7 +11,7 @@
 //! | `turbovec.warn_on_rebuild`       | bool | true    | -              |
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
-//! | `turbovec.mmap_static_blocked`   | bool | true    | -              |
+//! | `turbovec.mmap_static_blocked`   | bool | true (no-op, deprecated) | -          |
 //! | `turbovec.iterative_scan`        | enum | relaxed_order | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
@@ -62,11 +62,11 @@ pub static MAX_PROBES: GucSetting<i32> = GucSetting::<i32>::new(64);
 /// IVF index scanned cold from the relfile is served **cell-scoped**
 /// — the backend caches only bounded metadata (coarse centroids,
 /// cell directory, rotation, codebook, and the small per-slot
-/// scales/ids tables) plus a `MAP_PRIVATE` mmap of the relfile, and
-/// per query copies ONLY the probed cells' contiguous code ranges
-/// off the mmap to build a compact throwaway sub-index. The
-/// per-backend resident set is then `O(probes * cell_size + faulted
-/// pages)` instead of `O(n)`, so an IVF index larger than RAM can be
+/// scales/ids tables), and per query gathers ONLY the probed cells'
+/// contiguous code ranges through PostgreSQL's buffer manager to
+/// build a compact throwaway sub-index. The per-backend resident set
+/// is then `O(probes * cell_size)` instead of `O(n)`, so an IVF
+/// index larger than RAM can be
 /// served: the OS page cache holds hot (recently-probed) cells and
 /// cold cells fault from disk on demand.
 ///
@@ -172,24 +172,16 @@ const AUTO_OOC_FRACTION: f64 = 0.5;
 /// candidate set; iterative scan grows it from there.
 pub static OVERSAMPLE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 
-/// Phase R-3: when on (the default), `ambeginscan` mmap-loads the
-/// deterministic-after-`ambuild` regions of the relfile (blocked
-/// codes + persisted rotation matrix) instead of pulling the
-/// chains through `ReadBufferExtended` / shared_buffers. The
-/// codebook is read straight from the meta page either way.
-///
-/// Mmap is `MAP_PRIVATE`, read-only, lives for the
-/// backend-local cache entry's lifetime, and is invalidated
-/// when the cache entry's `(relfilenode, am_version)` mismatch
-/// rolls forward (REINDEX or any committed mutation). Heap
-/// visibility + `xs_recheckorderby = true` remain the MVCC
-/// backstops; see `docs/ARCHITECTURE.md` § "Index AM · mmap
-/// isolation contract" for the full argument.
-///
-/// Set off only if you observe weirdness on a custom storage
-/// substrate (e.g. tablespace on a filesystem that doesn't
-/// support shared mappings) and need to fall back to the
-/// buffer-manager-only read path.
+/// DEPRECATED no-op (v1.19.0+). pg_turbovec no longer mmaps the
+/// relfile; every byte of index data is read through PostgreSQL's
+/// shared-buffer cache (`ReadBufferExtended`). This setting is
+/// ignored and retained only so an existing `SET
+/// turbovec.mmap_static_blocked` does not error; it will be removed
+/// in a future minor. See `docs/BUFFER_CACHE_ONLY_DESIGN.md`.
+/// DEPRECATED no-op (v1.19.0+): retained only so an existing
+/// `SET turbovec.mmap_static_blocked` doesn't error. All index data
+/// is read through PG's buffer manager; nothing reads this. Removed
+/// in a future minor. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
 pub static MMAP_STATIC_BLOCKED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Iterative-scan mode, modelled on pgvector's `hnsw.iterative_scan`.
@@ -380,18 +372,24 @@ pub fn register_gucs() {
         c_str(b"turbovec.out_of_core\0"),
         c_str(b"Serve large IVF indexes cell-scoped so an index larger than RAM can be queried (off | auto | on; default auto).\0"),
         c_str(
-            b"Controls out-of-core IVF serving. auto (the default) serves an IVF index (built WITH (lists > 0)) cell-scoped ONLY when its codes are large relative to turbovec.cache_size_mb (codes > 0.5 * cache_size_mb): the backend then caches only bounded metadata (coarse centroids, cell directory, rotation, codebook, per-slot scales/ids) plus a MAP_PRIVATE mmap of the relfile, and per query copies only the probed cells' contiguous code ranges off the mmap into a compact throwaway sub-index, so the per-backend resident set is O(probes * cell_size + faulted pages) instead of O(n) and a >RAM IVF index can be served (hot cells stay in the OS page cache; cold cells fault on demand). An IVF index that fits the cache budget loads whole under auto (no per-query gather/reblock cost). on forces cell-scoped regardless of size (pays the per-query reblock tax even on small indexes); off forces the whole-index load into a per-backend Arc (lowest warm latency, O(n) resident, must fit in RAM). No effect on flat (lists = 0) or vacuum-degraded indexes (no cells to scope; always O(n)-resident \xe2\x80\x94 use IVF for >RAM), nor on the post-insert / dirty-fallback paths. Results are identical to the whole-load IVF path.\0",
+            b"Controls out-of-core IVF serving. auto (the default) serves an IVF index (built WITH (lists > 0)) cell-scoped ONLY when its codes are large relative to turbovec.cache_size_mb (codes > 0.5 * cache_size_mb): the backend then caches only bounded metadata (coarse centroids, cell directory, rotation, codebook, per-slot scales/ids) and per query gathers only the probed cells' contiguous code ranges through PostgreSQL's buffer manager into a compact throwaway sub-index, so the per-backend resident set is O(probes * cell_size) instead of O(n) and a >RAM IVF index can be served (only the probed cells' pages are read; the buffer manager + OS cache hold hot pages, cold pages are read on demand). An IVF index that fits the cache budget loads whole under auto (no per-query gather/reblock cost). on forces cell-scoped regardless of size (pays the per-query reblock tax even on small indexes); off forces the whole-index load into a per-backend Arc (lowest warm latency, O(n) resident, must fit in RAM). No effect on flat (lists = 0) or vacuum-degraded indexes (no cells to scope; always O(n)-resident \xe2\x80\x94 use IVF for >RAM), nor on the post-insert / dirty-fallback paths. Results are identical to the whole-load IVF path.\0",
         ),
         &OUT_OF_CORE,
         GucContext::Userset,
         GucFlags::default(),
     );
 
+    // DEPRECATED no-op (v1.19.0+): all index data is now read through
+    // PostgreSQL's buffer manager; there is no relfile mmap to toggle.
+    // Kept registered for one minor so an existing `SET
+    // turbovec.mmap_static_blocked = ...` in a session or config
+    // doesn't error; it is read by nothing and will be removed in a
+    // future minor. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
     GucRegistry::define_bool_guc(
         c_str(b"turbovec.mmap_static_blocked\0"),
-        c_str(b"Mmap the deterministic static regions of a turbovec relfile (default on).\0"),
+        c_str(b"DEPRECATED no-op: all index reads now go through PostgreSQL's buffer manager; this setting is ignored.\0"),
         c_str(
-            b"When on, ambeginscan mmaps the persisted SIMD-blocked codes and rotation matrix RO into the backend address space, bypassing PG's buffer manager for those bytes. Halves warm-scan latency on indexes that don't fit in shared_buffers. The cache entry holds the Mmap so it lives until the cache invalidates (REINDEX / am_version bump / backend exit). Codes / scales / ids chains keep going through the buffer manager because VACUUM swap-remove mutates them in place. Heap visibility + xs_recheckorderby remain the MVCC backstops; see docs/ARCHITECTURE.md.\0",
+            b"Deprecated and ignored as of v1.19.0. pg_turbovec no longer mmaps the relfile; every byte of index data is read through PostgreSQL's shared-buffer cache (ReadBufferExtended). This GUC is retained as a no-op for one minor release so existing `SET` statements do not error, and will be removed. See docs/BUFFER_CACHE_ONLY_DESIGN.md.\0",
         ),
         &MMAP_STATIC_BLOCKED,
         GucContext::Userset,

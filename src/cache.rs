@@ -48,7 +48,6 @@ use turbovec::{IdMapIndex, SearchResults, TurboQuantIndex};
 
 use crate::guc;
 use crate::index::ivf::{coarse_probe, rotate_query, CellDirectory};
-use crate::index::mmap_static::StaticRegionsMap;
 
 /// Read-only materialisation of a turbovec index for the index-AM
 /// scan path. Unlike [`IdMapIndex`] it stores **only** the inner
@@ -247,19 +246,20 @@ impl ReadOnlyIndex {
 /// **bounded** index metadata resident — the coarse centroids, the
 /// cell directory, the rotation matrix, the Lloyd-Max codebook, and
 /// the small per-slot tables (`scales` 4 B/vec, `slot_to_id`
-/// 8 B/vec) — plus a `MAP_PRIVATE` mmap of the relfile. The big
-/// `O(n)` codes buffer is **never** materialised whole.
+/// 8 B/vec). The big `O(n)` codes buffer is **never** materialised
+/// whole.
 ///
 /// Per query (see [`Self::search_ooc`]) it coarse-probes the cached
-/// centroids, then copies ONLY the probed cells' contiguous packed
-/// code ranges off the mmap into a compact, gapless buffer, builds a
-/// throwaway [`TurboQuantIndex`] over just those rows, and runs an
-/// unmasked top-`k` search on it. The resident set is therefore
-/// `O(probes * cell_size + faulted mmap pages)`, not `O(n)`: the OS
-/// page cache holds hot (recently-probed) cells; cold cells fault
-/// from disk on demand and evict under memory pressure. **This is
-/// the out-of-core serving path** — an IVF index can exceed RAM as
-/// long as the working set (hot cells) fits.
+/// centroids, then gathers ONLY the probed cells' contiguous packed
+/// code ranges through PostgreSQL's buffer manager
+/// (`relfile::gather_codes_ranges`) into a compact, gapless buffer,
+/// builds a throwaway [`TurboQuantIndex`] over just those rows, and
+/// runs an unmasked top-`k` search on it. The resident set is
+/// therefore `O(probes * cell_size)`, not `O(n)`: only the probed
+/// cells' pages are read (the buffer manager + OS cache hold hot
+/// pages; cold pages are read on demand and evict under memory
+/// pressure). **This is the out-of-core serving path** — an IVF
+/// index can exceed RAM as long as the working set (hot cells) fits.
 ///
 /// Only IVF indexes (`lists > 0`, live cell directory) get this
 /// path; flat indexes have no cells to scope and keep the
@@ -268,23 +268,10 @@ impl ReadOnlyIndex {
 /// (which were encoded under identity TQ+, exactly as the
 /// whole-index [`ReadOnlyIndex`] path assumes).
 pub(crate) struct OocIvfIndex {
-    /// The relfile mmap, when available (production: a committed,
-    /// flushed relfile). `gather_slot_ranges` reads the probed
-    /// cells' code bytes off it per query; cold pages fault on
-    /// demand. Dropped (unmapped) when the cache entry is.
-    ///
-    /// `None` when the relfile isn't mmappable (e.g. a freshly-built
-    /// index in the same transaction, before the dirty buffers have
-    /// been flushed to the segment file). In that case the per-query
-    /// gather falls back to reading the probed cells' code pages
-    /// through PG's buffer manager (still cell-scoped: only the
-    /// probed pages are pulled, not the whole chain). Either way the
-    /// resident codes are bounded by `probes * cell_size`.
-    map: Option<StaticRegionsMap>,
     bit_width: usize,
     dim: usize,
     n_vectors: usize,
-    /// Codes chain layout for `gather_slot_ranges`.
+    /// Codes chain layout for the per-query buffer-manager gather.
     codes_first: u32,
     codes_stride: u32,
     rows_per_codes_page: u32,
@@ -312,7 +299,6 @@ impl OocIvfIndex {
     /// this just moves them into the cache-resident container.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        map: Option<StaticRegionsMap>,
         bit_width: usize,
         dim: usize,
         n_vectors: usize,
@@ -329,7 +315,6 @@ impl OocIvfIndex {
         slot_to_id: Vec<u64>,
     ) -> Self {
         Self {
-            map,
             bit_width,
             dim,
             n_vectors,
@@ -453,32 +438,22 @@ impl OocIvfIndex {
         }
 
         // Gather the compact packed codes for the probed cells
-        // (cell-scoped: only the probed cells' pages are touched).
-        // Prefer the mmap (production: committed, flushed relfile;
-        // cold pages fault on demand). Fall back to the buffer
-        // manager when the mmap isn't available (fresh same-xact
-        // index) — still bounded, since only the probed cell pages
-        // are read, not the whole chain.
-        let compact_codes = match &self.map {
-            Some(map) => map.gather_slot_ranges(
+        // through the buffer manager: only the probed cells' pages
+        // are read (cell-scoped), so the resident codes stay bounded
+        // at O(probes * cell_size), not O(n). All index data goes
+        // through `ReadBufferExtended` — see
+        // docs/BUFFER_CACHE_ONLY_DESIGN.md.
+        //
+        // SAFETY: `rel` is a live index relation reference held by
+        // the scan for the call's duration.
+        let compact_codes = unsafe {
+            crate::index::relfile::gather_codes_ranges(
+                rel,
                 self.codes_first,
                 self.codes_stride,
                 self.rows_per_codes_page,
                 &ranges,
-            )?,
-            None => {
-                // SAFETY: `rel` is a live index relation reference
-                // held by the scan for the call's duration.
-                unsafe {
-                    crate::index::relfile::gather_codes_ranges(
-                        rel,
-                        self.codes_first,
-                        self.codes_stride,
-                        self.rows_per_codes_page,
-                        &ranges,
-                    )
-                }
-            }
+            )
         };
         debug_assert_eq!(compact_codes.len(), n_compact * self.codes_stride as usize);
 
@@ -690,21 +665,6 @@ struct Entry {
     /// given caller installs and how the AM path upgrades a
     /// read-only entry to a mutable one on first mutation.
     index: Stored,
-    /// Phase R-3: optional `Mmap` of the relfile's static regions.
-    /// `Some(_)` when the entry was installed via the mmap-load
-    /// path; `None` when it came from a pure `read_full` fall-back
-    /// (e.g. `mmap_static_blocked = off`, non-default tablespace,
-    /// or the brief mid-REINDEX rename window where opening the
-    /// relfile by path returns `ENOENT`). The index does
-    /// not literally borrow into this map today (we copy the
-    /// chains off it once at cache-fill time), but holding the
-    /// `Mmap` here pins the lifetime contract for the
-    /// `from_*_with_prepared_borrowed` constructor and lets a
-    /// future zero-copy follow-up be additive without touching
-    /// the cache machinery again. The `Mmap` is dropped (and the
-    /// kernel mapping torn down) when the cache entry is.
-    #[allow(dead_code)] // retained for Drop ordering / lifetime contract
-    mmap: Option<StaticRegionsMap>,
     /// Approximate bytes the entry occupies. Used for the LRU cap.
     bytes: usize,
     /// `pg_class.relfilenode` snapshot. Zero means we didn't track it
@@ -896,34 +856,12 @@ pub fn insert(
     relfilenode: u32,
     n_rows: i64,
 ) -> Arc<RwLock<IdMapIndex>> {
-    insert_with_mmap(key, index, bytes, relfilenode, n_rows, None)
-}
-
-/// Phase R-3 variant of [`insert`] that also takes an optional
-/// [`StaticRegionsMap`]. The `Mmap` is colocated on the cache
-/// entry so it lives for at least as long as the
-/// `Arc<RwLock<IdMapIndex>>` returned to the caller. Drop
-/// ordering on `Entry` is `Drop::drop(self)` -> drops `index`
-/// (the `Arc`; if this was the last reference, the inner
-/// `RwLock<IdMapIndex>` is freed) -> drops `mmap` (`munmap(2)`).
-///
-/// Crate-private because `StaticRegionsMap` is itself
-/// `pub(crate)`; external callers use [`insert`].
-pub(crate) fn insert_with_mmap(
-    key: CacheKey,
-    index: IdMapIndex,
-    bytes: usize,
-    relfilenode: u32,
-    n_rows: i64,
-    mmap: Option<StaticRegionsMap>,
-) -> Arc<RwLock<IdMapIndex>> {
     let arc = Arc::new(RwLock::new(index));
     let mut g = CACHE.lock();
     g.insert(
         key,
         Entry {
             index: Stored::Mutable(arc.clone()),
-            mmap,
             bytes,
             relfilenode,
             n_rows,
@@ -937,18 +875,16 @@ pub(crate) fn insert_with_mmap(
 }
 
 /// Index-AM scan install: cache a freshly-built [`ReadOnlyIndex`]
-/// (no `id_to_slot` `HashMap`) under `key`, colocating the optional
-/// relfile `Mmap` for the lifetime contract. Returns a
-/// [`ScanHandle`] the caller drains. This is the cold-scan fast
-/// path: a read-only backend that only ever scans never pays the
-/// O(n) `HashMap` build.
+/// (no `id_to_slot` `HashMap`) under `key`. Returns a [`ScanHandle`]
+/// the caller drains. This is the cold-scan fast path: a read-only
+/// backend that only ever scans never pays the O(n) `HashMap` build.
+/// All index data is read through the buffer manager.
 pub(crate) fn scan_install(
     key: CacheKey,
     index: ReadOnlyIndex,
     bytes: usize,
     relfilenode: u32,
     n_rows: i64,
-    mmap: Option<StaticRegionsMap>,
 ) -> ScanHandle {
     let arc = Arc::new(index);
     let mut g = CACHE.lock();
@@ -956,7 +892,6 @@ pub(crate) fn scan_install(
         key,
         Entry {
             index: Stored::ReadOnly(arc.clone()),
-            mmap,
             bytes,
             relfilenode,
             n_rows,
@@ -971,11 +906,11 @@ pub(crate) fn scan_install(
 
 /// Out-of-core IVF scan install (Phase B-1/B-2): cache an
 /// [`OocIvfIndex`] (bounded resident metadata; the codes buffer is
-/// faulted per probed cell off the colocated mmap that lives inside
-/// the `OocIvfIndex`). Returns a [`ScanHandle::Ooc`] the caller
-/// drains via the cell-scoped path. `bytes` is the (bounded)
-/// resident footprint estimate for the LRU cap — NOT `O(n)` codes,
-/// just the centroids/scales/ids/directory tables.
+/// gathered per probed cell through the buffer manager). Returns a
+/// [`ScanHandle::Ooc`] the caller drains via the cell-scoped path.
+/// `bytes` is the (bounded) resident footprint estimate for the LRU
+/// cap — NOT `O(n)` codes, just the centroids/scales/ids/directory
+/// tables.
 pub(crate) fn scan_install_ooc(
     key: CacheKey,
     index: OocIvfIndex,
@@ -989,10 +924,6 @@ pub(crate) fn scan_install_ooc(
         key,
         Entry {
             index: Stored::Ooc(arc.clone()),
-            // The mmap lives inside the OocIvfIndex (the Arc), not
-            // here; `Entry::mmap` is for the ReadOnly/Mutable
-            // borrowed-cache contract and stays None for OOC.
-            mmap: None,
             bytes,
             relfilenode,
             n_rows,
@@ -1023,7 +954,6 @@ pub fn am_install(
         key,
         Entry {
             index: Stored::Mutable(arc.clone()),
-            mmap: None,
             bytes,
             relfilenode,
             n_rows: freshness,

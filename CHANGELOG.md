@@ -4,6 +4,57 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.19.0] — 2026-06-18
+
+**All index reads through the PostgreSQL buffer manager.** Read-path
+architecture change; **no wire change** (`MetaPageData::version`
+unchanged), no SQL-surface change, **no REINDEX**. Required for
+managed/sandboxed Postgres and any environment that restricts direct
+file access.
+
+### Changed
+
+- **Removed the direct relfile `mmap`.** Every byte of index data is
+  now read through PostgreSQL's shared-buffer cache
+  (`ReadBufferExtended`) — there is no `mmap`/`pread` of the relfile.
+  The buffer manager is the single source of truth for page access
+  (consistent pinning/locking; clean crash + streaming-replication
+  semantics). `src/index/mmap_static.rs` is deleted and the `memmap2`
+  dependency dropped (net −700 lines). The buffer-manager readers
+  this routes through already existed (they were the mmap fallback),
+  so this is mostly a deletion. See
+  `docs/BUFFER_CACHE_ONLY_DESIGN.md`.
+- **Out-of-core (>RAM) IVF serving is preserved without mmap.** The
+  cell-scoped gather (`OocIvfIndex::search_ooc` →
+  `relfile::gather_codes_ranges`) reads **only the probed cells'
+  pages** through the buffer manager, so the per-backend resident set
+  stays `O(probes * cell_size)`, not `O(n)`. Out-of-core serving
+  needs cell-contiguous layout + range-scoped reads — **not** mmap.
+
+### Deprecated
+
+- **`turbovec.mmap_static_blocked`** is now a no-op (ignored). It is
+  retained for one minor release so an existing `SET` does not error,
+  and will be removed in a future minor.
+
+### Performance notes
+
+- **Warm queries: unchanged** (the prepared index is cached
+  per-backend; warm scans never touch the buffer manager).
+- **Cold cache-fill on a >`shared_buffers` index: slower** than the
+  old mmap path (per-page lookup/pin/lock + a buffer-manager copy).
+  Mitigation: size `shared_buffers` to hold the hot index —
+  pg_turbovec's 7–15× compression is what makes "the index fits
+  `shared_buffers`" practical where fp32 HNSW could not. For a >RAM
+  index, use IVF + `turbovec.out_of_core` so only probed cells'
+  pages are read.
+
+### Migration
+
+**No REINDEX.** Read-path only; wire format unchanged. `ALTER
+EXTENSION pg_turbovec UPDATE TO '1.19.0';` is sufficient. Tests: 241
+(unchanged) on pg16; all 6 PG versions compile; drift-check clean.
+
 ## [1.18.0] — 2026-06-18
 
 **Tier-1 IVF latency optimizations (scan-path).** No SQL-surface

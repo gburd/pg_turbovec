@@ -59,7 +59,6 @@ rand = "0.8"
 rand_chacha = "0.3"
 libc = "0.2"
 half = { version = "2.4", features = ["serde"] }
-memmap2 = "0.9"
 # Already in the tree transitively (faer/gemm stack pulls it in via
 # turbovec); declared directly so ambuild can size a bounded rayon
 # thread pool from `turbovec.build_parallelism`. v1.12.0 is the

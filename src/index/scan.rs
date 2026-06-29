@@ -3,17 +3,15 @@
 //! `amgettuple`, runs a single batch search, then drains results
 //! one TID per call.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::c_int;
 
 use pgrx::pg_sys;
 use pgrx::prelude::*;
-use turbovec::PreparedCachesBorrowed;
 
 use crate::cache::{self, CacheKey};
 use crate::guc;
-use crate::index::{mmap_static, relfile};
+use crate::index::relfile;
 use crate::kernels;
 use crate::vec::Vector;
 
@@ -453,13 +451,10 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             None => match cache::scan_lookup(key, relfile_node, version_as_i64) {
             Some(a) => a,
             None => {
-                // Phase R-3: cache miss. Try the mmap fast path
-                // for the deterministic-after-`ambuild` static
-                // regions (blocked codes + rotation matrix +
-                // inline codebook); fall back to the buffer-
-                // manager `read_full` if mmap isn't available
-                // (mmap_static_blocked GUC off, non-default
-                // tablespace, or open(2) raced a REINDEX).
+                // Cache miss: build the read-only handle from the
+                // relfile via the buffer manager (all index data is
+                // read through `ReadBufferExtended`; see
+                // docs/BUFFER_CACHE_ONLY_DESIGN.md).
                 //
                 // We materialise a read-only `ReadOnlyIndex` here,
                 // NOT a full `IdMapIndex`: the scan path only needs
@@ -471,26 +466,23 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     .expect("meta disappeared mid-scan");
 
                 // Phase B-1/B-2: out-of-core cell-scoped IVF. When
-                // `turbovec.out_of_core` is on AND this is a live
-                // IVF index (lists > 0, not vacuum-degraded) AND we
-                // can mmap the relfile, install a bounded-resident
-                // `OocIvfIndex` instead of the whole-index
-                // `ReadOnlyIndex`. The codes buffer is faulted per
-                // probed cell off the mmap, so the resident set is
-                // O(probes*cell_size) not O(n) — a >RAM index can be
-                // served. Flat / degraded indexes fall through to
-                // the whole-index load (they have no cells to scope).
-                // `auto` (default) goes cell-scoped only when the
-                // codes are large vs turbovec.cache_size_mb; `on`
-                // always, `off` never. The codes (packed quantized
-                // vectors) are the O(n) term the whole-load path
-                // would make resident.
+                // `turbovec.out_of_core` selects it AND this is a
+                // live IVF index (lists > 0, not vacuum-degraded),
+                // install a bounded-resident `OocIvfIndex` instead
+                // of the whole-index `ReadOnlyIndex`. The codes
+                // buffer is gathered per probed cell through the
+                // buffer manager (`gather_codes_ranges`), so the
+                // resident set is O(probes*cell_size) not O(n) — a
+                // >RAM index can be served. Flat / degraded indexes
+                // fall through to the whole-index load (they have no
+                // cells to scope). `auto` (default) goes cell-scoped
+                // only when the codes are large vs
+                // turbovec.cache_size_mb; `on` always, `off` never.
                 let codes_bytes = (meta.n_vectors as u64)
                     .saturating_mul(((meta.dim as u64) * (meta.bit_width as u64)) / 8);
                 if guc::out_of_core_cell_scoped(codes_bytes)
                     && meta.has_ivf()
                     && meta.has_prepared_layout()
-                    && guc::MMAP_STATIC_BLOCKED.get()
                 {
                     if let Some(handle) = try_install_ooc(
                         (*scan).indexRelation,
@@ -707,48 +699,26 @@ unsafe fn install_whole_index(
     bit_width_u8: u8,
 ) -> cache::ScanHandle {
     let (codes, scales, ids) = relfile::read_full(rel, meta);
-    let mmap_enabled = guc::MMAP_STATIC_BLOCKED.get();
-    let mmap_load = if mmap_enabled && meta.has_prepared_layout() {
-        mmap_static::load_static_regions(rel, meta)
-    } else {
-        None
-    };
 
-    let (stored_index, mmap_handle): (cache::ReadOnlyIndex, _) = if let Some((handle, parts)) =
-        mmap_load
-    {
-        // Mmap path: hand the chain bytes to turbovec via the
-        // borrowed-cache constructor as `Cow::Owned` (the chains
-        // had to be copied off the mmap because the on-disk
-        // layout has 24-byte page-header gaps every 8168 bytes).
-        // The Mmap handle still lives in the cache entry per the
-        // isolation contract.
-        let prepared = PreparedCachesBorrowed {
-            blocked_codes: Some(Cow::Owned(parts.blocked_codes)),
-            n_blocks: parts.n_blocks,
-            centroids: Some(Cow::Owned(parts.centroids)),
-            boundaries: Some(Cow::Owned(parts.boundaries)),
-            rotation: Some(Cow::Owned(parts.rotation)),
-        };
-        let idx = cache::ReadOnlyIndex::from_prepared_parts_borrowed(
-            meta.bit_width as usize,
-            meta.dim as usize,
-            meta.n_vectors as usize,
-            Cow::Owned(codes),
-            Cow::Owned(scales),
-            ids,
-            prepared,
-        );
-        (idx, Some(handle))
-    } else if meta.has_prepared_layout() {
-        // Buffer-manager fallback path with prepared layout
-        // (matches v1.4.0 behaviour).
+    // All index data is read through PostgreSQL's buffer manager
+    // (`ReadBufferExtended`) — there is no direct relfile mmap. Heap
+    // visibility + `xs_recheckorderby` remain the correctness
+    // backstops; the buffer manager is the single source of truth
+    // for page access (consistent pinning/locking, crash + streaming-
+    // replication semantics). See docs/BUFFER_CACHE_ONLY_DESIGN.md.
+    let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
+        // Prepared (SIMD-blocked) layout: read the blocked codes +
+        // rotation chains through the buffer manager. The result is
+        // cached in this per-backend `ReadOnlyIndex`, so the
+        // per-page pin/lock/copy cost is paid once per (backend,
+        // am_version) — warm queries hit the resident buffers, never
+        // the buffer manager.
         let blocked = relfile::read_blocked(rel, meta);
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(rel, meta);
         let rotation_opt = if rotation.is_empty() { None } else { Some(rotation) };
-        let idx = cache::ReadOnlyIndex::from_prepared_parts(
+        cache::ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             meta.dim as usize,
             meta.n_vectors as usize,
@@ -760,22 +730,20 @@ unsafe fn install_whole_index(
             centroids,
             boundaries,
             rotation_opt,
-        );
-        (idx, None)
+        )
     } else {
         // No prepared layout (legacy path; should be unreachable
         // post-Phase Q because ambeginscan ERRORs on legacy_v1 /
         // legacy_v2 up-front, but keep the fall-through for
         // defence in depth).
-        let idx = cache::ReadOnlyIndex::from_parts(
+        cache::ReadOnlyIndex::from_parts(
             meta.bit_width as usize,
             meta.dim as usize,
             meta.n_vectors as usize,
             codes,
             scales,
             ids,
-        );
-        (idx, None)
+        )
     };
     let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
     let total_bytes = bytes_per_vec * (n_in_index.max(1));
@@ -785,7 +753,6 @@ unsafe fn install_whole_index(
         total_bytes,
         relfile_node,
         version_as_i64,
-        mmap_handle,
     )
 }
 
@@ -823,40 +790,13 @@ unsafe fn try_install_ooc(
         return None;
     }
 
-    // Map the relfile. The codes chain is faulted off this map per
-    // Try to mmap the relfile. When it's available AND its meta
-    // page agrees with the buffer-managed one, the per-query gather
-    // reads probed cells off the mmap (production fast path, cold
-    // pages fault on demand). When the relfile isn't mmappable
-    // (freshly-built same-xact index whose dirty buffers aren't
-    // flushed to the segment file yet; non-default tablespace;
-    // mid-REINDEX rename) OR its meta disagrees (a concurrent
-    // rewrite raced our AccessShareLock), fall back to a
-    // buffer-manager gather — still cell-scoped (only probed cell
-    // pages are read), so the resident codes stay bounded.
-    let map: Option<mmap_static::StaticRegionsMap> =
-        match mmap_static::StaticRegionsMap::open_for_ooc(rel) {
-            Some(m) => {
-                let ok = m
-                    .page_data_pub(crate::index::page::META_BLKNO)
-                    .and_then(|b| crate::index::page::MetaPageData::decode(b).ok())
-                    .is_some_and(|mapped| {
-                        mapped.am_version == meta.am_version
-                            && mapped.n_vectors == meta.n_vectors
-                            && mapped.codes_first == meta.codes_first
-                            && mapped.lists == meta.lists
-                    });
-                if ok {
-                    Some(m)
-                } else {
-                    // mmap stale / unflushed — use the buffer-manager
-                    // gather instead (the buffer manager reads the
-                    // canonical, dirty-buffer-aware bytes).
-                    None
-                }
-            }
-            None => None,
-        };
+    // All index data is read through the buffer manager. The
+    // per-query gather (`OocIvfIndex::search_ooc` ->
+    // `relfile::gather_codes_ranges`) reads ONLY the probed cells'
+    // code pages via `ReadBufferExtended`, so the resident set stays
+    // bounded at O(probes * cell_size) — out-of-core serving needs
+    // cell-contiguous layout + range-scoped reads, NOT mmap. See
+    // docs/BUFFER_CACHE_ONLY_DESIGN.md.
 
     // Bounded regions: coarse centroids + rotation + cell directory.
     let coarse_centroids = relfile::read_coarse_centroids(rel, meta);
@@ -888,7 +828,6 @@ unsafe fn try_install_ooc(
     }
 
     let ooc = cache::OocIvfIndex::new(
-        map,
         meta.bit_width as usize,
         dim,
         n_vectors,

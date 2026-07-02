@@ -59,16 +59,38 @@ pub(crate) fn resolve_pool_size() -> usize {
 /// active).
 pub(crate) fn make_pool() -> Option<rayon::ThreadPool> {
     let n = resolve_pool_size();
+    // Always build a real pool of the resolved size (>=1). Returning
+    // a pool even for n==1 (instead of None -> inline) is important
+    // now that the IVF k-means path uses rayon `par_iter` internally:
+    // with `None`, `install` runs the closure inline and any nested
+    // `par_iter` escapes to rayon's GLOBAL pool (all machine cores),
+    // violating the `build_parallelism = 1` resource-control contract.
+    // A size-1 pool confines that nested parallelism to a single
+    // thread. (Determinism is independent of thread count -- the
+    // k-means reduction is fixed-order -- so this only affects
+    // resource use, not results.)
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n.max(1))
+        .thread_name(|i| format!("turbovec-build-{i}"))
+        .build()
+        .ok()
+}
+
+/// Build a rayon thread pool of exactly `n` threads for the IVF
+/// per-query fine-scan (item #2 of the IVF-scaling work), or `None`
+/// for the degenerate `n <= 1` case so the caller runs inline. Unlike
+/// [`make_pool`], the size is passed in already-resolved (by
+/// `guc::resolve_scan_parallelism`, which caps it modestly for
+/// concurrency safety) rather than derived from the build GUC — a scan
+/// and a build have different fan-out budgets. The threads do pure
+/// compute over owned code bytes; no PG state is touched inside them.
+pub(crate) fn scan_pool(n: usize) -> Option<rayon::ThreadPool> {
     if n <= 1 {
         return None;
     }
-    // thread_name aids `perf` / `pg_stat_activity`-adjacent debugging;
-    // panic_handler keeps a panicking encode from aborting the whole
-    // backend (it surfaces as a normal Err/abort through the calling
-    // frame instead).
     rayon::ThreadPoolBuilder::new()
         .num_threads(n)
-        .thread_name(|i| format!("turbovec-build-{i}"))
+        .thread_name(|i| format!("turbovec-scan-{i}"))
         .build()
         .ok()
 }

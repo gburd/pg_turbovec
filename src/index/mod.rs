@@ -37,7 +37,7 @@
 use pgrx::prelude::*;
 
 mod build;
-mod build_pool;
+pub(crate) mod build_pool;
 mod cost;
 mod insert;
 pub(crate) mod ivf;

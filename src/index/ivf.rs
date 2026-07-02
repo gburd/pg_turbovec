@@ -722,8 +722,17 @@ fn train_kmeans_iters(
     // D2 sampling for the remaining seeds. `d2[i]` is the squared
     // distance from sample i to its nearest chosen centroid so far.
     let mut d2 = vec![f32::INFINITY; n_sample];
-    for i in 0..n_sample {
-        d2[i] = sq_dist(row(i), &centroids[0..dim]);
+    // Parallel: d2[i] = sq_dist(row(i), centroid0) is per-row
+    // independent, so a par_chunks fill is bit-identical to the
+    // serial loop. This + the per-seed update loop below were an
+    // O(lists * n_sample * dim) serial term (the high-dim seeding
+    // cost the benchmark benchmark exposed).
+    {
+        use rayon::prelude::*;
+        let c0 = &centroids[0..dim];
+        d2.par_iter_mut().enumerate().for_each(|(i, d)| {
+            *d = sq_dist(&sample[i * dim..(i + 1) * dim], c0);
+        });
     }
     for c in 1..lists {
         let total: f64 = d2.iter().map(|&x| x as f64).sum();
@@ -750,13 +759,20 @@ fn train_kmeans_iters(
         };
         centroids[c * dim..(c + 1) * dim].copy_from_slice(row(chosen));
         // Update nearest-centroid distances with the new centroid.
-        let new_c = chosen;
-        let new_centroid = row(new_c).to_vec();
-        for i in 0..n_sample {
-            let d = sq_dist(row(i), &new_centroid);
-            if d < d2[i] {
-                d2[i] = d;
-            }
+        // Per-row independent -> parallel min-update, bit-identical
+        // (each d2[i] is min'd against one new sq_dist; no cross-row
+        // interaction). This is the inner loop of the O(lists *
+        // n_sample * dim) seeding cost.
+        let new_centroid = row(chosen).to_vec();
+        {
+            use rayon::prelude::*;
+            let nc = &new_centroid;
+            d2.par_iter_mut().enumerate().for_each(|(i, di)| {
+                let d = sq_dist(&sample[i * dim..(i + 1) * dim], nc);
+                if d < *di {
+                    *di = d;
+                }
+            });
         }
     }
 
@@ -795,18 +811,79 @@ fn train_kmeans_iters(
             sample, &centroids, &cnorm, n_sample, lists, dim, &mut cross, &mut assign,
         );
 
-        // Update step: mean of assigned points.
-        let mut sums = vec![0.0f64; lists * dim];
-        let mut counts = vec![0u64; lists];
-        for i in 0..n_sample {
-            let c = assign[i] as usize;
-            counts[c] += 1;
-            let r = row(i);
-            let base = c * dim;
-            for j in 0..dim {
-                sums[base + j] += r[j] as f64;
+        // Update step: mean of assigned points. The per-cell f64
+        // accumulation is parallelized with a FIXED-ORDER reduction
+        // so it stays bit-identical: rows are split into fixed
+        // contiguous chunks, each chunk sums into its own private
+        // (sums, counts) in ascending row order, then the chunk
+        // partials are combined in ascending chunk order. The f64
+        // addition order is therefore a fixed function of the input
+        // (independent of thread count / scheduling), so the centroids
+        // are byte-identical to the serial path. (f64 addition is not
+        // associative, so the fixed partition + fixed combine order
+        // is what guarantees reproducibility, NOT that f64 is "exact".)
+        let (sums, counts) = {
+            use rayon::prelude::*;
+            // Number of parallel chunks. CRITICAL on two axes:
+            //  (1) MEMORY: each chunk holds a private `sums` of
+            //      `lists*dim` f64 and all partials are materialised at
+            //      once (`collect()`), so total transient memory is
+            //      `n_chunks * lists * dim * 8`. The old code scaled
+            //      chunks with n_sample and OOM'd at large `lists`.
+            //  (2) DETERMINISM: the f64 reduction order is fixed by the
+            //      PARTITION, so n_chunks must be a fixed function of
+            //      the INPUT (n_sample, lists, dim) -- NEVER of
+            //      `current_num_threads()`, or the byte-identical
+            //      relfile would differ across machines with different
+            //      core counts. We therefore pick a fixed target chunk
+            //      row-count and derive n_chunks from n_sample, capped
+            //      by a memory budget on the partials.
+            let bytes_per_partial = (lists * dim).max(1) * 8;
+            // Cap total partials at ~512 MiB.
+            let max_chunks_by_mem = (512 * 1024 * 1024 / bytes_per_partial).max(1);
+            // Fixed target: ~16k sample rows per chunk (amortises the
+            // per-chunk alloc; input-only, thread-count-independent).
+            const TARGET_CHUNK_ROWS: usize = 16_384;
+            let by_rows = n_sample.div_ceil(TARGET_CHUNK_ROWS).max(1);
+            let n_chunks = by_rows.min(max_chunks_by_mem);
+            let chunk = n_sample.div_ceil(n_chunks).max(1);
+            let starts: Vec<usize> = (0..n_sample).step_by(chunk).collect();
+            // Each chunk sums into its own (sums, counts) in ascending
+            // row order (parallel across chunks).
+            let partials: Vec<(Vec<f64>, Vec<u64>)> = starts
+                .par_iter()
+                .map(|&start| {
+                    let end = (start + chunk).min(n_sample);
+                    let mut s = vec![0.0f64; lists * dim];
+                    let mut cnt = vec![0u64; lists];
+                    for i in start..end {
+                        let c = assign[i] as usize;
+                        cnt[c] += 1;
+                        let r = &sample[i * dim..(i + 1) * dim];
+                        let base = c * dim;
+                        for j in 0..dim {
+                            s[base + j] += r[j] as f64;
+                        }
+                    }
+                    (s, cnt)
+                })
+                .collect();
+            // Combine partials in ASCENDING chunk order (fixed) so the
+            // f64 addition order is a deterministic function of the
+            // input, not of thread scheduling -> byte-identical.
+            let mut sums = vec![0.0f64; lists * dim];
+            let mut counts = vec![0u64; lists];
+            for (s, cnt) in &partials {
+                for k in 0..lists * dim {
+                    sums[k] += s[k];
+                }
+                for k in 0..lists {
+                    counts[k] += cnt[k];
+                }
             }
-        }
+            (sums, counts)
+        };
+        let mut counts = counts;
         for c in 0..lists {
             if counts[c] == 0 {
                 continue; // handled by the empty-cell rule below

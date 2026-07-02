@@ -4,6 +4,65 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.20.0] — 2026-07-02
+
+**IVF scaling — parallel build + parallel scan + sublinear coarse
+quantizer.** Surfaced by the benchmark A/B/C benchmark (the benchmark host, AVX-512).
+Scan-path / build-path / in-memory only; **no wire change**
+(`MetaPageData::version = 5`), one new GUC, **no REINDEX** — existing
+indexes benefit with no rebuild.
+
+### Added
+
+- **Sublinear two-level coarse quantizer** (the key scaling enabler).
+  For an IVF index with `lists > 4096`, cell selection is now
+  `O(√lists)` instead of `O(lists)`. The two-level structure is
+  computed **in-memory at index-open** from the already-persisted
+  coarse centroids (a deterministic function of them) — nothing new
+  is persisted, so **existing IVF indexes get it for free on the next
+  scan, no REINDEX**. Measured **39–364× fewer centroid distance
+  computations per query at recall 1.0**, which breaks the
+  coarse-probe wall: `lists` can grow large (tiny cells) without the
+  coarse step becoming the bottleneck — the enabler for IVF at 10M+.
+- **`turbovec.scan_parallelism`** (GUC, int, default `0` = auto =
+  `min(cores, 4)`; `1` = serial). Parallelizes the per-query IVF
+  fine-scan across probed cells (out-of-core path), cutting
+  single-query latency at high dimension. Conservative default to
+  protect aggregate QPS under concurrency. **Results identical to the
+  serial scan** (same top-k; verified).
+
+### Changed
+
+- **Parallel IVF build.** k-means training + the assign-sweep now use
+  the bounded build pool (`turbovec.build_parallelism`) across cores,
+  **memory-bounded and byte-identical** (the reduction order is a
+  fixed function of the input, independent of thread count — so the
+  relfile is reproducible across machines with different core counts).
+
+### Honest notes
+
+- The parallel **build** measured only **~1.27×** on 64-core
+  GIST-960d: the single-threaded GEMM (`Parallelism::None`, for
+  bit-exactness) remains the dominant term, and row-blocking around
+  it can't parallelize the GEMM itself. This release makes the
+  parallel build **safe and correct** (no OOM, deterministic) but it
+  is **not** the full build-cliff fix — a deterministic parallel GEMM
+  (or an IVF bit-exactness policy change enabling BLAS threads) is
+  scoped follow-up work.
+- The high-dim recall ceiling was investigated and found
+  **retrieval-bound** (addressed by the sublinear coarse + more
+  probes), **not** quantization-bound (widening the reorder-rescore
+  pool recovered ~0 recall).
+- Query-latency-at-scale and 10M-build validation on a cloud VM are pending
+  (the 10M run OOM'd before the memory fix in this release; re-run
+  needed to confirm).
+
+### Migration
+
+**No REINDEX.** Wire stays v5; existing v4/v5 indexes benefit from the
+sublinear coarse + parallel scan with no rebuild. `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.20.0';` is sufficient. Tests: 241 → 249.
+
 ## [1.19.0] — 2026-06-18
 
 **All index reads through the PostgreSQL buffer manager.** Read-path

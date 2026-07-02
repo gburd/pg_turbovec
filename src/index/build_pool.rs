@@ -59,15 +59,18 @@ pub(crate) fn resolve_pool_size() -> usize {
 /// active).
 pub(crate) fn make_pool() -> Option<rayon::ThreadPool> {
     let n = resolve_pool_size();
-    if n <= 1 {
-        return None;
-    }
-    // thread_name aids `perf` / `pg_stat_activity`-adjacent debugging;
-    // panic_handler keeps a panicking encode from aborting the whole
-    // backend (it surfaces as a normal Err/abort through the calling
-    // frame instead).
+    // Always build a real pool of the resolved size (>=1). Returning
+    // a pool even for n==1 (instead of None -> inline) is important
+    // now that the IVF k-means path uses rayon `par_iter` internally:
+    // with `None`, `install` runs the closure inline and any nested
+    // `par_iter` escapes to rayon's GLOBAL pool (all machine cores),
+    // violating the `build_parallelism = 1` resource-control contract.
+    // A size-1 pool confines that nested parallelism to a single
+    // thread. (Determinism is independent of thread count -- the
+    // k-means reduction is fixed-order -- so this only affects
+    // resource use, not results.)
     rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
+        .num_threads(n.max(1))
         .thread_name(|i| format!("turbovec-build-{i}"))
         .build()
         .ok()

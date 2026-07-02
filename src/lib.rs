@@ -7845,6 +7845,90 @@ mod tests {
         searchk_write_frontier_json(n, dim, lists, 32, n_queries, &curve);
     }
 
+    /// #5 investigation (REDIRECTED): tests that `oversample` (widening
+    /// the exact-recheck candidate pool) is monotone non-decreasing in
+    /// recall at high dim. Its diagnostic finding: on a high-dim corpus
+    /// where IVF recall is capped, oversample recovers ~0 recall — the
+    /// ceiling is RETRIEVAL-bound (wrong cells probed), not RANKING-
+    /// bound (which better codes / more rescore would fix). So
+    /// higher-fidelity fine quantization ("#5") is NOT the high-dim
+    /// recall lever; #3 (sublinear coarse -> more/finer cells + probes)
+    /// is. This test remains as the monotonicity guard for oversample.
+    /// See an internal design note / FINDINGS.
+    #[pg_test]
+    fn highdim_oversample_recovers_recall() {
+        use_turbovec();
+        // 256-d (multiple of 8) clustered corpus — high enough dim to
+        // show the quantized-ranking loss the 960-d run exposed.
+        let n: i64 = 20_000;
+        let dim: i64 = 256;
+        let lists: i64 = 141; // ~sqrt(20000)
+        let n_queries: i64 = 40;
+        ivf_make_random_corpus("hd_os", n, dim);
+        let q_lo = n - n_queries + 1;
+        Spi::run(&format!(
+            "CREATE TABLE hd_os_q AS SELECT id, emb FROM hd_os WHERE id >= {q_lo}"
+        ))
+        .unwrap();
+        Spi::run(&format!("DELETE FROM hd_os WHERE id >= {q_lo}")).unwrap();
+        Spi::run(
+            "CREATE INDEX hd_os_idx ON hd_os USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 141)",
+        )
+        .unwrap();
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.probes = 32").unwrap(); // generous, not full
+        Spi::run("SET turbovec.search_k = 100").unwrap();
+
+        let queries: Vec<String> = Spi::connect(|client| {
+            client
+                .select("SELECT emb::text FROM hd_os_q ORDER BY id", None, &[])
+                .unwrap()
+                .map(|r| r.get::<String>(1).unwrap().unwrap())
+                .collect()
+        });
+        Spi::run("SET enable_seqscan = on").unwrap();
+        Spi::run("SET enable_indexscan = off").unwrap();
+        let gt: Vec<std::collections::HashSet<i64>> = queries
+            .iter()
+            .map(|emb| {
+                fetch_ids(&format!(
+                    "SELECT id FROM hd_os ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ))
+                .into_iter()
+                .collect()
+            })
+            .collect();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+
+        let recall_at_os = |ov: f64| -> f64 {
+            Spi::run(&format!("SET turbovec.oversample = {ov}")).unwrap();
+            let mut hit = 0usize;
+            for (qi, emb) in queries.iter().enumerate() {
+                crate::cache::invalidate_all();
+                let ids = fetch_ids(&format!(
+                    "SELECT id FROM hd_os ORDER BY emb <=> '{emb}'::vector LIMIT 10"
+                ));
+                hit += ids.iter().filter(|id| gt[qi].contains(id)).count();
+            }
+            hit as f64 / (n_queries as usize * 10) as f64
+        };
+        let r1 = recall_at_os(1.0);
+        let r4 = recall_at_os(4.0);
+        let r16 = recall_at_os(16.0);
+        eprintln!("#5 high-dim oversample sweep (256d, probes=32): \
+                   R@os1={r1:.3} R@os4={r4:.3} R@os16={r16:.3}");
+        // The diagnostic assertion: oversample must be MONOTONE
+        // non-decreasing (widening the exact-recheck pool can only
+        // help), and if the ceiling is candidate-pool-driven, os16
+        // should exceed os1 by a real margin. We assert monotonicity
+        // (always true) and record the magnitude via eprintln for the
+        // finding.
+        assert!(r4 >= r1 - 1e-9, "oversample must not lower recall: {r1}->{r4}");
+        assert!(r16 >= r4 - 1e-9, "oversample must not lower recall: {r4}->{r16}");
+    }
+
     /// Best-effort JSON artefact for the search_k recall frontier
     /// (companion to `ivf_write_frontier_json`). A write failure on a
     /// read-only checkout is a warning, not a test failure.

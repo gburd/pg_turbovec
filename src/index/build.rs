@@ -761,6 +761,26 @@ fn ivf_assign_block_rows(dim: usize) -> usize {
     by_mem.clamp(1, MAX_BLOCK_ROWS)
 }
 
+/// Rows per PARALLEL work-chunk inside the assign sweep. The
+/// normalise -> rotate -> assign of a block is split into row-chunks
+/// of this size, one rayon task each, so the many-core box actually
+/// gets used at high dim (the fix for the build cliff: a 960-d
+/// single-threaded rotate+assign was ~18x slower than the 128-d
+/// case). Each chunk is independent (per-row ops + per-chunk
+/// Parallelism::None GEMMs), so the result is bit-identical to the
+/// serial path regardless of chunk size or thread count.
+///
+/// Sizing: large enough to amortise per-chunk GEMM setup + scratch
+/// alloc, small enough to give the pool many tasks. ~2048 rows at
+/// low dim, scaled down as dim grows so a chunk's transient scratch
+/// (norm + rot = 2*chunk_rows*dim f32) stays modest (~a few MiB).
+fn ivf_par_chunk_rows(dim: usize) -> usize {
+    // Target ~4 MiB of transient f32 scratch per chunk
+    // (2 buffers * rows * dim * 4 bytes  <=  ~4 MiB).
+    let target = (4 * 1024 * 1024) / (2 * dim.max(1) * 4);
+    target.clamp(256, 4096)
+}
+
 /// IVF-1 build finisher (`lists > 0`). Phase B-4: an OUT-OF-CORE
 /// streaming build. Trains coarse centroids on the bounded reservoir
 /// sample, assigns every vector to its cell(s) in a streamed sweep
@@ -855,11 +875,10 @@ unsafe fn ivf_build_and_write(
     // ivf_build_permutation_soft_expands_duplicates's M=1 case).
     let assignments: Vec<Vec<u32>> = {
         let mut assignments: Vec<Vec<u32>> = Vec::with_capacity(n_vectors);
-        // Reused per-block scratch: spill-read block + normalised
-        // block + rotated block + id sink (ids discarded in pass 2).
+        // Reused per-block scratch: spill-read block + id sink (ids
+        // discarded in pass 2). The normalise/rotate scratch is now
+        // per-chunk thread-local inside the parallel map (below).
         let mut raw_block = vec![0.0f32; block_rows * dim];
-        let mut norm_block = vec![0.0f32; block_rows * dim];
-        let mut rot_block = vec![0.0f32; block_rows * dim];
         let mut id_sink = vec![0u64; block_rows];
         let mut start = 0usize;
         while start < n_vectors {
@@ -878,29 +897,57 @@ unsafe fn ivf_build_and_write(
             // inputs are plain `&[f32]` (Send), so the spill never
             // crosses into the pool.
             let raw = &raw_block[..rows * dim];
-            let norm = &mut norm_block[..rows * dim];
-            let rot = &mut rot_block[..rows * dim];
             let model_centroids = &model.centroids;
             let rotation_ref = &rotation;
-            let block_assign = super::build_pool::install(build_pool, || {
-                // Normalise each row (matching the old per-vector
-                // re-normalise of the `flat` corpus so the sample
-                // space and the assignment space agree).
-                for r in 0..rows {
-                    let src = &raw[r * dim..(r + 1) * dim];
-                    kernels::normalise_into(&mut norm[r * dim..(r + 1) * dim], src);
-                }
-                ivf::rotate_corpus_into(norm, rotation_ref, rows, dim, rot);
-                ivf::batched_assign_soft(
-                    rot,
-                    model_centroids,
-                    rows,
-                    lists,
-                    dim,
-                    assign_dups,
-                )
+            // Row-blocked PARALLEL normalise -> rotate -> assign on the
+            // build pool. Every row is independent (normalise is
+            // per-row; rotate is out[i] = norm[i] @ R^T with no
+            // cross-row reduction; batched_assign_soft's cross term is
+            // corpus @ C^T with a per-row candidate pick). Slicing the
+            // block into row-chunks, processing each chunk on its own
+            // thread, and concatenating in row order is BIT-IDENTICAL
+            // to the serial path (per-chunk GEMMs stay
+            // Parallelism::None; parallelism is ACROSS chunks, so no
+            // single output element changes). This fixes the high-dim
+            // build cliff (at 960-d the normalise/rotate/assign ran
+            // single-threaded on a many-core box). Byte-identity is
+            // guarded by ivf_streaming_build_determinism_byte_identical.
+            let par_chunk_rows = ivf_par_chunk_rows(dim);
+            // Explicit, ordered chunk starts: rayon's indexed `collect`
+            // preserves input order, so concatenating the per-chunk
+            // assignment vecs reproduces exact row order.
+            let chunk_starts: Vec<usize> = (0..rows).step_by(par_chunk_rows).collect();
+            let block_assign: Vec<Vec<Vec<u32>>> = super::build_pool::install(build_pool, || {
+                use rayon::prelude::*;
+                chunk_starts
+                    .par_iter()
+                    .map(|&chunk_start| {
+                        let chunk_rows = par_chunk_rows.min(rows - chunk_start);
+                        let chunk_raw =
+                            &raw[chunk_start * dim..(chunk_start + chunk_rows) * dim];
+                        // Per-chunk thread-local scratch (no sharing).
+                        let mut norm = vec![0.0f32; chunk_rows * dim];
+                        let mut rot = vec![0.0f32; chunk_rows * dim];
+                        for r in 0..chunk_rows {
+                            let src = &chunk_raw[r * dim..(r + 1) * dim];
+                            kernels::normalise_into(&mut norm[r * dim..(r + 1) * dim], src);
+                        }
+                        ivf::rotate_corpus_into(&norm, rotation_ref, chunk_rows, dim, &mut rot);
+                        ivf::batched_assign_soft(
+                            &rot,
+                            model_centroids,
+                            chunk_rows,
+                            lists,
+                            dim,
+                            assign_dups,
+                        )
+                    })
+                    .collect()
             });
-            assignments.extend(block_assign);
+            // Concatenate in chunk order, then per-vector order.
+            for chunk in block_assign {
+                assignments.extend(chunk);
+            }
             start += rows;
         }
         assignments

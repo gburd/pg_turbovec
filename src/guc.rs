@@ -15,6 +15,7 @@
 //! | `turbovec.iterative_scan`        | enum | relaxed_order | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
+//! | `turbovec.scan_parallelism`      | int  | 0       | 0..=128        |
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
 //! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
 //! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
@@ -239,6 +240,87 @@ pub static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(20_000);
 /// `parallel_build_matches_serial_query` `#[pg_test]`.
 pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+/// IVF fine-scan intra-query parallelism (item #2 of the IVF-scaling
+/// work). The IVF out-of-core scan gathers the probed cells into one
+/// compact contiguous code buffer on the backend thread, then fine-
+/// scans it. At high dim and high `probes` that fine-scan is the
+/// dominant per-query cost (e.g. GIST-960d, ~64k vectors at
+/// probes=64) and it runs SINGLE-THREADED in one backend on one core.
+/// The compact buffer is a plain `&[u8]` of contiguous rows, so the
+/// scan splits it into `T` disjoint row chunks, runs the SIMD LUT
+/// top-`k` per chunk in a bounded rayon pool (pure compute over owned
+/// bytes — no buffer-manager / catalog / `pg_sys` access inside the
+/// threads; the gather already ran on the backend thread), then
+/// merges the `T` local top-`k` heaps into the global top-`k`.
+///
+/// Because the merge unions per-chunk top-`k` lists (a true top-`k`
+/// row is always in its own chunk's top-`k`), the returned top-`k`
+/// SET is identical to a serial scan of the same compact rows; the
+/// executor's reorder queue (`xs_recheckorderby`) re-ranks by exact
+/// distance regardless, so tie order at the k-th boundary is immaterial.
+/// Asserted by `ivf_parallel_scan_matches_serial`.
+///
+/// **Values:** `1` = serial (no fan-out); `>1` = pin the chunk/thread
+/// count; `0` (the default) = auto = `min(probed_rows_worth_it, cores,
+/// AUTO_SCAN_PARALLELISM_CAP)`. The auto cap is deliberately MODEST
+/// (see [`AUTO_SCAN_PARALLELISM_CAP`]): intra-query parallelism cuts
+/// single-query latency (the 332ms target) but many concurrent queries
+/// each grabbing every core thrashes and hurts aggregate QPS. The
+/// conservative default helps the isolated-latency benchmark without
+/// wrecking a high-concurrency workload; raise it explicitly for a
+/// latency-bound single-query deployment, set `1` to disable.
+///
+/// **No effect** on the flat (non-IVF) path, the whole-load IVF path
+/// (small indexes that already load whole are already fast — the win
+/// is on the large / out-of-core compact path where the cell ranges
+/// are explicit), or on `ambuild` (that is `turbovec.build_parallelism`).
+/// Never touches the wire format — this is a pure scan-time compute knob.
+pub static SCAN_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Modest ceiling on `turbovec.scan_parallelism = 0` (auto) fan-out.
+/// A single query going wide cuts its own latency, but N concurrent
+/// queries each fanning to all cores oversubscribes badly. 4 is a
+/// conservative middle ground: a meaningful latency cut on the hot
+/// high-dim fine-scan without letting one query monopolise a
+/// many-core box under concurrency. Pin a higher value explicitly for
+/// a latency-bound, low-concurrency deployment.
+const AUTO_SCAN_PARALLELISM_CAP: usize = 4;
+
+/// Below this many compact rows the per-thread top-k + merge overhead
+/// swamps the parallel IVF fine-scan; keep it serial. Used by
+/// [`resolve_scan_parallelism`] to cap the chunk count so a tiny
+/// compact set is never split into thread-startup-dominated slivers.
+const MIN_ROWS_PER_SCAN_CHUNK: usize = 2048;
+
+/// Resolve the IVF fine-scan chunk/thread count for a compact scan of
+/// `n_compact` rows. `1` (or a compact set too small to bother
+/// splitting) means run inline/serial. Auto (`0`) caps at
+/// [`AUTO_SCAN_PARALLELISM_CAP`] and never exceeds the machine's core
+/// count or a floor of [`MIN_ROWS_PER_SCAN_CHUNK`] rows per chunk (so
+/// a tiny compact set isn't split into thread-startup-dominated
+/// slivers).
+pub fn resolve_scan_parallelism(n_compact: usize) -> usize {
+    let configured = SCAN_PARALLELISM.get();
+    let want = if configured > 0 {
+        configured as usize
+    } else {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        cores.min(AUTO_SCAN_PARALLELISM_CAP)
+    };
+    cap_scan_chunks(want, n_compact)
+}
+
+/// Cap the desired chunk count `want` by how many chunks the compact
+/// set can usefully sustain (at least [`MIN_ROWS_PER_SCAN_CHUNK`] rows
+/// each), never below 1. Factored out of [`resolve_scan_parallelism`]
+/// so the boundary math is unit-testable without a live GUC.
+fn cap_scan_chunks(want: usize, n_compact: usize) -> usize {
+    let by_rows = n_compact / MIN_ROWS_PER_SCAN_CHUNK;
+    want.min(by_rows).max(1)
+}
+
 /// Phase C operator-path allowlist: a pre-materialized id-set the
 /// user `SET`s before an `ORDER BY emb <=> q LIMIT k` query to
 /// restrict the scan to those rows — the operator-path analogue of
@@ -446,6 +528,19 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.scan_parallelism\0"),
+        c_str(b"OS threads used to fine-scan probed IVF cells per query (0 = auto, capped modest; 1 = serial).\0"),
+        c_str(
+            b"The out-of-core IVF scan gathers the probed cells into one compact contiguous code buffer on the backend thread, then fine-scans it for the top-k. At high dim and high probes that fine-scan dominates query latency and runs single-threaded on one core. This GUC splits the compact rows into N disjoint chunks, runs the SIMD LUT top-k per chunk in a bounded rayon pool (pure compute over owned bytes; no buffer-manager access inside threads), and merges the per-chunk top-k heaps into the global top-k. 1 = serial (no fan-out); a positive value pins the chunk/thread count; 0 (the default) = auto = min(cores, 4), a deliberately MODEST cap: intra-query parallelism cuts single-query latency but many concurrent queries each grabbing every core thrashes and hurts aggregate QPS, so the default favours the isolated-latency case without wrecking high concurrency (raise it for a latency-bound low-concurrency deployment). The returned top-k SET is identical to a serial scan (the executor re-ranks by exact distance regardless of tie order). No effect on the flat (non-IVF) path, the whole-load IVF path (small indexes already load whole and are fast), or ambuild (that is turbovec.build_parallelism). Never changes on-disk bytes.\0",
+        ),
+        &SCAN_PARALLELISM,
+        0,
+        128,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_string_guc(
         c_str(b"turbovec.allowlist\0"),
         c_str(b"Per-query allowlist of heap TIDs for ORDER BY scans (CSV of bigints; empty = unfiltered).\0"),
@@ -465,5 +560,28 @@ const fn c_str(bytes: &'static [u8]) -> &'static CStr {
     match CStr::from_bytes_with_nul(bytes) {
         Ok(s) => s,
         Err(_) => panic!("missing trailing NUL in GUC string"),
+    }
+}
+
+#[cfg(test)]
+mod scan_parallelism_tests {
+    use super::{cap_scan_chunks, MIN_ROWS_PER_SCAN_CHUNK};
+
+    /// The chunk-count cap: never split below MIN_ROWS_PER_SCAN_CHUNK
+    /// rows per chunk, never drop below 1, and honour the ceiling.
+    #[test]
+    fn cap_respects_row_floor_and_ceiling() {
+        let m = MIN_ROWS_PER_SCAN_CHUNK;
+        // Tiny compact set -> serial regardless of want.
+        assert_eq!(cap_scan_chunks(8, 0), 1);
+        assert_eq!(cap_scan_chunks(8, m - 1), 1);
+        // Exactly one chunk's worth -> still 1 (can't sustain 2).
+        assert_eq!(cap_scan_chunks(8, m), 1);
+        // Two chunks' worth -> at most 2.
+        assert_eq!(cap_scan_chunks(8, 2 * m), 2);
+        // want below the row-supported count wins (the ceiling).
+        assert_eq!(cap_scan_chunks(4, 100 * m), 4);
+        // want=1 always serial.
+        assert_eq!(cap_scan_chunks(1, 100 * m), 1);
     }
 }

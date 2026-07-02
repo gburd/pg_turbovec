@@ -463,11 +463,92 @@ impl OocIvfIndex {
             compact_scales.push(self.scales[gs as usize]);
         }
 
-        // Build a throwaway compact index over just the probed rows.
-        // Identity TQ+ (matches the relfile codes). Rotation /
-        // codebook are handed over as prepared caches so only the
-        // SIMD re-block (`pack::repack`) is recomputed — bounded by
-        // the compact row count, not `n`.
+        // Fine-scan the compact rows for the top-`k`. At high dim /
+        // high probes this is the dominant per-query cost and is
+        // embarrassingly parallel across disjoint row ranges (item #2
+        // of the IVF-scaling work). `compact_codes` is a plain owned
+        // `Vec<u8>` of contiguous rows and `compact_scales` a
+        // `Vec<f32>`; splitting them into `T` row chunks and scanning
+        // each in a bounded rayon pool is PURE COMPUTE over owned
+        // bytes — no buffer-manager / catalog / `pg_sys` access
+        // happens inside the threads (the gather above already ran on
+        // this backend thread). The T local top-`k` heaps merge into
+        // the global top-`k`; the union of per-chunk top-`k` lists
+        // contains the true global top-`k` (a top-`k` row is always in
+        // its own chunk's top-`k`), so the returned SET matches a
+        // serial scan. Tie order at the k-th boundary is immaterial:
+        // the executor re-ranks by exact distance (xs_recheckorderby).
+        //
+        // Phase C operator-path allowlist: a compact-slot mask
+        // (allow_compact[cslot] = that compact slot's id is allowed),
+        // pushed into the blocked kernel per chunk so the 32-vector
+        // block-skip applies to the OOC path too. Only built when an
+        // allowlist is active.
+        let allow_compact: Option<Vec<bool>> = allow.map(|set| {
+            global_slots
+                .iter()
+                .map(|&gs| set.contains(&self.slot_to_id[gs as usize]))
+                .collect()
+        });
+
+        let t = guc::resolve_scan_parallelism(n_compact);
+        let (cscores, cslots): (Vec<f32>, Vec<i64>) = if t <= 1 {
+            // Serial: one sub-index over all compact rows (the
+            // pre-parallel path). `cslots` are compact-slot indices.
+            let res = self.search_compact_chunk(
+                &compact_codes,
+                &compact_scales,
+                0,
+                n_compact,
+                query,
+                k,
+                allow_compact.as_deref(),
+            );
+            (res.scores, res.indices)
+        } else {
+            self.search_compact_parallel(
+                &compact_codes,
+                &compact_scales,
+                query,
+                k,
+                allow_compact.as_deref(),
+                t,
+            )
+        };
+
+        let mut ids = Vec::with_capacity(cslots.len());
+        for &cslot in &cslots {
+            let global = global_slots[cslot as usize] as usize;
+            ids.push(self.slot_to_id[global]);
+        }
+        Some((cscores, ids))
+    }
+
+    /// Fine-scan a contiguous chunk `[row_start, row_end)` of the
+    /// gathered compact codes for the local top-`k`, returning
+    /// compact-slot indices (already offset by `row_start`, so they
+    /// are global compact slots, not chunk-local). Builds a throwaway
+    /// [`TurboQuantIndex`] over the chunk's rows with identity TQ+
+    /// (matches the relfile codes) and the shared rotation / codebook
+    /// handed over as borrowed prepared caches, so only the SIMD
+    /// re-block is recomputed — bounded by the chunk row count. Pure
+    /// compute over the passed-in slices (`Send`-safe); the parallel
+    /// path calls it from rayon worker threads.
+    #[allow(clippy::too_many_arguments)]
+    fn search_compact_chunk(
+        &self,
+        compact_codes: &[u8],
+        compact_scales: &[f32],
+        row_start: usize,
+        row_end: usize,
+        query: &[f32],
+        k: usize,
+        allow_compact: Option<&[bool]>,
+    ) -> SearchResults {
+        let n_rows = row_end - row_start;
+        let stride = self.codes_stride as usize;
+        let codes = &compact_codes[row_start * stride..row_end * stride];
+        let scales = &compact_scales[row_start..row_end];
         let dim_opt = if self.dim == 0 { None } else { Some(self.dim) };
         let prepared = turbovec::PreparedCachesBorrowed {
             blocked_codes: None,
@@ -476,36 +557,107 @@ impl OocIvfIndex {
             boundaries: Some(std::borrow::Cow::Borrowed(&self.codebook_boundaries)),
             rotation: Some(std::borrow::Cow::Borrowed(&self.rotation)),
         };
-        let compact = TurboQuantIndex::from_parts_with_prepared_borrowed(
+        let sub = TurboQuantIndex::from_parts_with_prepared_borrowed(
             dim_opt,
             self.bit_width,
-            n_compact,
-            std::borrow::Cow::Owned(compact_codes),
-            std::borrow::Cow::Owned(compact_scales),
+            n_rows,
+            std::borrow::Cow::Borrowed(codes),
+            std::borrow::Cow::Borrowed(scales),
             prepared,
         );
-        // Phase C operator-path allowlist: build a compact-slot mask
-        // (allow_compact[cslot] = id of that compact slot is allowed)
-        // and push it into the blocked kernel, so the 32-vector
-        // block-skip applies to the OOC path too — not just a
-        // post-filter. Only built when an allowlist is active.
-        let res = match allow {
-            None => compact.search(query, k),
-            Some(set) => {
-                let allow_compact: Vec<bool> = global_slots
-                    .iter()
-                    .map(|&gs| set.contains(&self.slot_to_id[gs as usize]))
-                    .collect();
-                compact.search_with_mask(query, k, Some(&allow_compact))
-            }
+        let mut res = match allow_compact {
+            None => sub.search(query, k),
+            Some(all) => sub.search_with_mask(query, k, Some(&all[row_start..row_end])),
         };
-        let mut ids = Vec::with_capacity(res.indices.len());
-        for &cslot in &res.indices {
-            let global = global_slots[cslot as usize] as usize;
-            ids.push(self.slot_to_id[global]);
+        // Lift chunk-local slots to global compact slots.
+        if row_start != 0 {
+            for idx in res.indices.iter_mut() {
+                *idx += row_start as i64;
+            }
         }
-        Some((res.scores, ids))
+        res
     }
+
+    /// Parallel fine-scan: split the compact rows into `t` roughly-
+    /// equal contiguous chunks, top-`k` each in a bounded rayon pool,
+    /// and merge the `t` local top-`k` lists into the global top-`k`.
+    /// Returns `(scores, compact_slots)`, the same shape the serial
+    /// path produces. Determinism of RESULTS (the top-`k` SET) is
+    /// guaranteed by the union property of per-chunk top-`k`; tie
+    /// order is not (nor need it be — the executor re-ranks exactly).
+    fn search_compact_parallel(
+        &self,
+        compact_codes: &[u8],
+        compact_scales: &[f32],
+        query: &[f32],
+        k: usize,
+        allow_compact: Option<&[bool]>,
+        t: usize,
+    ) -> (Vec<f32>, Vec<i64>) {
+        use rayon::prelude::*;
+        let n_compact = compact_scales.len();
+        // Contiguous, roughly-equal row chunks. `chunk` rounds up so
+        // the last chunk is the short one; every chunk is non-empty
+        // because resolve_scan_parallelism keeps t <= n_compact/floor.
+        let chunk = n_compact.div_ceil(t);
+        let bounds: Vec<(usize, usize)> = (0..n_compact)
+            .step_by(chunk)
+            .map(|s| (s, (s + chunk).min(n_compact)))
+            .collect();
+
+        // Bounded pool so a scan does not grab rayon's global (all-core)
+        // pool under concurrency; sized to the resolved chunk count.
+        let work = || {
+            bounds
+                .par_iter()
+                .map(|&(s, e)| {
+                    self.search_compact_chunk(
+                        compact_codes,
+                        compact_scales,
+                        s,
+                        e,
+                        query,
+                        k,
+                        allow_compact,
+                    )
+                })
+                .collect()
+        };
+        let locals: Vec<SearchResults> = match crate::index::build_pool::scan_pool(t) {
+            Some(pool) => pool.install(work),
+            None => work(),
+        };
+
+        merge_topk(&locals, k)
+    }
+}
+
+/// K-way merge of per-chunk local top-`k` results into the global
+/// top-`k`. Each [`SearchResults`] is already sorted by score
+/// descending (the kernel's output order). We concatenate the local
+/// `(score, slot)` pairs and select the `k` highest by score,
+/// breaking ties by ascending compact-slot so the result is a stable
+/// function of the inputs (not thread scheduling). The union of the
+/// local top-`k` lists provably contains the global top-`k`, so this
+/// returns the same SET a serial scan would.
+fn merge_topk(locals: &[SearchResults], k: usize) -> (Vec<f32>, Vec<i64>) {
+    let total: usize = locals.iter().map(|r| r.indices.len()).sum();
+    let mut pairs: Vec<(f32, i64)> = Vec::with_capacity(total);
+    for r in locals {
+        for (&s, &i) in r.scores.iter().zip(r.indices.iter()) {
+            pairs.push((s, i));
+        }
+    }
+    // Score descending; deterministic slot-ascending tie-break.
+    pairs.sort_unstable_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    pairs.truncate(k);
+    let scores = pairs.iter().map(|p| p.0).collect();
+    let slots = pairs.iter().map(|p| p.1).collect();
+    (scores, slots)
 }
 
 /// A scan-facing handle over a cached index, regardless of which
@@ -1173,5 +1325,79 @@ pub unsafe fn relfilenode_from_relation(rel: pg_sys::Relation) -> u32 {
         // conversion — `as u32` doesn't work on the newtype.
         let oid: pg_sys::Oid = (*rel).rd_locator.relNumber;
         oid.to_u32()
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::merge_topk;
+    use turbovec::SearchResults;
+
+    fn sr(pairs: &[(f32, i64)]) -> SearchResults {
+        // Kernel output is score-descending; mimic that so merge sees
+        // the same shape it would in production.
+        let mut p = pairs.to_vec();
+        p.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        SearchResults {
+            scores: p.iter().map(|x| x.0).collect(),
+            indices: p.iter().map(|x| x.1).collect(),
+            nq: 1,
+            k: p.len(),
+        }
+    }
+
+    /// The load-bearing property: merging per-chunk local top-k lists
+    /// yields the SAME top-k SET a serial scan of all rows would. We
+    /// build a global row set, compute the true top-k, split the rows
+    /// into chunks, take each chunk's local top-k, merge, and assert
+    /// the merged set equals the global top-k set.
+    #[test]
+    fn merge_matches_global_topk() {
+        // 12 rows, distinct scores + a couple of ties.
+        let rows: Vec<(f32, i64)> = vec![
+            (0.90, 0), (0.10, 1), (0.55, 2), (0.55, 3), (0.80, 4),
+            (0.20, 5), (0.70, 6), (0.30, 7), (0.95, 8), (0.40, 9),
+            (0.60, 10), (0.50, 11),
+        ];
+        let k = 5;
+
+        // Global top-k SET (serial ground truth).
+        let mut g = rows.clone();
+        g.sort_unstable_by(|a, b| {
+            b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1))
+        });
+        let global: std::collections::HashSet<i64> =
+            g.iter().take(k).map(|p| p.1).collect();
+
+        // Split into 3 chunks, each takes its local top-k.
+        let chunks = [&rows[0..4], &rows[4..8], &rows[8..12]];
+        let locals: Vec<SearchResults> = chunks
+            .iter()
+            .map(|c| {
+                let mut cc = c.to_vec();
+                cc.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                cc.truncate(k);
+                sr(&cc)
+            })
+            .collect();
+
+        let (scores, slots) = merge_topk(&locals, k);
+        assert_eq!(slots.len(), k, "merge returned {} != k", slots.len());
+        // Scores descending.
+        for w in scores.windows(2) {
+            assert!(w[0] >= w[1], "merge not score-descending: {scores:?}");
+        }
+        let merged: std::collections::HashSet<i64> = slots.iter().copied().collect();
+        assert_eq!(merged, global, "merged top-k SET != global top-k SET");
+    }
+
+    /// Deterministic tie-break: equal scores resolve by ascending
+    /// slot, so the merge is a pure function of its inputs (not thread
+    /// scheduling). Two ties at 0.55 -> slots 2 then 3.
+    #[test]
+    fn merge_tie_break_is_slot_ascending() {
+        let locals = vec![sr(&[(0.55, 3), (0.55, 2), (0.90, 0)])];
+        let (_s, slots) = merge_topk(&locals, 3);
+        assert_eq!(slots, vec![0, 2, 3], "tie-break not slot-ascending");
     }
 }

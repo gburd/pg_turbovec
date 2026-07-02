@@ -824,8 +824,29 @@ fn train_kmeans_iters(
         // is what guarantees reproducibility, NOT that f64 is "exact".)
         let (sums, counts) = {
             use rayon::prelude::*;
-            // Chunk size: enough rows to amortise, bounded task count.
-            let chunk = (n_sample / (rayon::current_num_threads().max(1) * 4)).max(1024);
+            // Number of parallel chunks. CRITICAL on two axes:
+            //  (1) MEMORY: each chunk holds a private `sums` of
+            //      `lists*dim` f64 and all partials are materialised at
+            //      once (`collect()`), so total transient memory is
+            //      `n_chunks * lists * dim * 8`. The old code scaled
+            //      chunks with n_sample and OOM'd at large `lists`.
+            //  (2) DETERMINISM: the f64 reduction order is fixed by the
+            //      PARTITION, so n_chunks must be a fixed function of
+            //      the INPUT (n_sample, lists, dim) -- NEVER of
+            //      `current_num_threads()`, or the byte-identical
+            //      relfile would differ across machines with different
+            //      core counts. We therefore pick a fixed target chunk
+            //      row-count and derive n_chunks from n_sample, capped
+            //      by a memory budget on the partials.
+            let bytes_per_partial = (lists * dim).max(1) * 8;
+            // Cap total partials at ~512 MiB.
+            let max_chunks_by_mem = (512 * 1024 * 1024 / bytes_per_partial).max(1);
+            // Fixed target: ~16k sample rows per chunk (amortises the
+            // per-chunk alloc; input-only, thread-count-independent).
+            const TARGET_CHUNK_ROWS: usize = 16_384;
+            let by_rows = n_sample.div_ceil(TARGET_CHUNK_ROWS).max(1);
+            let n_chunks = by_rows.min(max_chunks_by_mem);
+            let chunk = n_sample.div_ceil(n_chunks).max(1);
             let starts: Vec<usize> = (0..n_sample).step_by(chunk).collect();
             // Each chunk sums into its own (sums, counts) in ascending
             // row order (parallel across chunks).

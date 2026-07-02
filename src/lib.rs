@@ -6091,6 +6091,257 @@ mod tests {
         assert_distinct_ids(&got);
     }
 
+    /// Build a ~16k-row IVF corpus, force the out-of-core cell-scoped
+    /// scan (`out_of_core = on`), and assert the parallel fine-scan
+    /// (`scan_parallelism = 8`) returns the SAME top-k SET as the
+    /// serial fine-scan (`scan_parallelism = 1`), for BOTH cosine and
+    /// l2. This is the result-equivalence guarantee for item #2's
+    /// parallel-cell fine-scan: the per-chunk top-k union contains the
+    /// global top-k, so the returned SET is identical; tie order at
+    /// the boundary may differ but the executor re-ranks by exact
+    /// distance regardless. Corpus is large enough (probes gather
+    /// several thousand compact rows) that scan_parallelism=8 actually
+    /// splits the compact buffer into multiple chunks.
+    #[pg_test]
+    fn ivf_parallel_scan_matches_serial() {
+        use_turbovec();
+        for ops in ["vec_cosine_ops", "vec_l2_ops"] {
+            let tbl = format!("ps_{}", if ops.contains("cosine") { "cos" } else { "l2" });
+            ivf2_make_corpus(&tbl, 16000);
+            Spi::run(&format!(
+                "CREATE INDEX {tbl}_idx ON {tbl} \
+                 USING turbovec (emb {ops}) WITH (bit_width = 4, lists = 16)"
+            ))
+            .unwrap();
+            Spi::run("SET enable_seqscan = off").unwrap();
+            Spi::run("SET turbovec.search_k = 200").unwrap();
+            Spi::run("SET turbovec.probes = 8").unwrap();
+            Spi::run("SET turbovec.out_of_core = on").unwrap(); // force compact path
+
+            let op = if ops.contains("cosine") { "<=>" } else { "<->" };
+            let q = format!("(SELECT emb FROM {tbl} WHERE id = 1234)");
+            let sql = format!(
+                "SELECT id FROM {tbl} ORDER BY emb {op} {q} LIMIT 20"
+            );
+
+            let pull = |sql: &str| -> Vec<i64> {
+                Spi::connect(|client| {
+                    client
+                        .select(sql, None, &[])
+                        .unwrap()
+                        .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                        .collect()
+                })
+            };
+
+            Spi::run("SET turbovec.scan_parallelism = 1").unwrap();
+            crate::cache::invalidate_all();
+            let serial = pull(&sql);
+
+            Spi::run("SET turbovec.scan_parallelism = 8").unwrap();
+            crate::cache::invalidate_all();
+            let parallel = pull(&sql);
+
+            Spi::run("RESET turbovec.scan_parallelism").unwrap();
+            Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+            assert_eq!(serial.len(), 20, "{ops}: serial returned {}", serial.len());
+            assert_distinct_ids(&serial);
+            assert_distinct_ids(&parallel);
+            let sset: std::collections::HashSet<i64> = serial.iter().copied().collect();
+            let pset: std::collections::HashSet<i64> = parallel.iter().copied().collect();
+            assert_eq!(
+                sset, pset,
+                "{ops}: parallel top-k SET != serial\n serial={serial:?}\n parallel={parallel:?}"
+            );
+        }
+    }
+
+    /// With `probes >= lists` the parallel fine-scan probes every cell,
+    /// so the compact buffer is the whole (live) corpus and the result
+    /// must still equal the exact serial scan (the all-cells reduces
+    /// to a full scan; parallel just splits it). Guards against the
+    /// chunk-boundary math dropping or double-counting rows.
+    #[pg_test]
+    fn ivf_parallel_scan_probes_all_exact() {
+        use_turbovec();
+        ivf2_make_corpus("ps_all", 12000);
+        Spi::run(
+            "CREATE INDEX ps_all_idx ON ps_all \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 8)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap(); // probes == lists => all cells
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+
+        let q = "(SELECT emb FROM ps_all WHERE id = 500)";
+        let sql = format!("SELECT id FROM ps_all ORDER BY emb <=> {q} LIMIT 15");
+        let pull = |sql: &str| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run("SET turbovec.scan_parallelism = 1").unwrap();
+        crate::cache::invalidate_all();
+        let serial = pull(&sql);
+        Spi::run("SET turbovec.scan_parallelism = 8").unwrap();
+        crate::cache::invalidate_all();
+        let parallel = pull(&sql);
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+        assert_eq!(serial.len(), 15);
+        let sset: std::collections::HashSet<i64> = serial.iter().copied().collect();
+        let pset: std::collections::HashSet<i64> = parallel.iter().copied().collect();
+        assert_eq!(sset, pset, "probes>=lists: parallel != serial top-k SET");
+    }
+
+    /// The parallel fine-scan must honour tombstones (deleted rows) the
+    /// same as serial: a VACUUM-tombstoned slot is expanded out of the
+    /// gather BEFORE the compact buffer is built, so no dead row can
+    /// enter any chunk. Drive `ambulkdelete` to tombstone a slice of
+    /// ids, then assert none appear in the parallel result and that
+    /// the parallel and serial SETs still match over live rows.
+    #[pg_test]
+    fn ivf_parallel_scan_tombstones() {
+        use std::collections::HashSet;
+        use_turbovec();
+        ivf2_make_corpus("ps_tomb", 12000);
+        Spi::run(
+            "CREATE INDEX ps_tomb_idx ON ps_tomb \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        let indexrelid: pg_sys::Oid =
+            Spi::get_one("SELECT 'ps_tomb_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+        // Tombstone ids 490..520 via a synthetic dead-tuple callback
+        // keyed on their heap ctids.
+        let dead_ids: Vec<i64> = (490..520).collect();
+        let dead_set: HashSet<u64> = {
+            let list = dead_ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut set = HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select(
+                        &format!("SELECT ctid FROM ps_tomb WHERE id IN ({list})"),
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData =
+                        row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+
+        let q = "(SELECT emb FROM ps_tomb WHERE id = 500)";
+        let sql = format!("SELECT id FROM ps_tomb ORDER BY emb <=> {q} LIMIT 30");
+        let pull = |sql: &str| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run("SET turbovec.scan_parallelism = 1").unwrap();
+        crate::cache::invalidate_all();
+        let serial = pull(&sql);
+        Spi::run("SET turbovec.scan_parallelism = 8").unwrap();
+        crate::cache::invalidate_all();
+        let parallel = pull(&sql);
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+        let dead: HashSet<i64> = dead_ids.iter().copied().collect();
+        for id in &parallel {
+            assert!(!dead.contains(id), "parallel scan returned tombstoned id {id}");
+        }
+        let sset: HashSet<i64> = serial.iter().copied().collect();
+        let pset: HashSet<i64> = parallel.iter().copied().collect();
+        assert_eq!(sset, pset, "tombstones: parallel != serial top-k SET");
+        assert_distinct_ids(&parallel);
+    }
+
+    /// The GUC default (`scan_parallelism = 0`, auto) must return
+    /// correct results — the auto path picks a modest thread count and
+    /// its top-k SET must match the explicit serial scan. Guards the
+    /// resolve-auto branch (cores.min(cap), row-floor cap) against a
+    /// mis-sized or degenerate split.
+    #[pg_test]
+    fn ivf_parallel_scan_default_guc_correct() {
+        use_turbovec();
+        ivf2_make_corpus("ps_def", 16000);
+        Spi::run(
+            "CREATE INDEX ps_def_idx ON ps_def \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+
+        let q = "(SELECT emb FROM ps_def WHERE id = 1234)";
+        let sql = format!("SELECT id FROM ps_def ORDER BY emb <=> {q} LIMIT 20");
+        let pull = |sql: &str| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run("SET turbovec.scan_parallelism = 1").unwrap();
+        crate::cache::invalidate_all();
+        let serial = pull(&sql);
+        // Default (auto): do NOT set the GUC (leave it at 0).
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+        crate::cache::invalidate_all();
+        let auto = pull(&sql);
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+        assert_eq!(serial.len(), 20);
+        assert_distinct_ids(&auto);
+        let sset: std::collections::HashSet<i64> = serial.iter().copied().collect();
+        let aset: std::collections::HashSet<i64> = auto.iter().copied().collect();
+        assert_eq!(sset, aset, "auto scan_parallelism != serial top-k SET");
+    }
+
     /// Build WITH (lists = N), query, and assert recall@10 vs a
     /// brute-force ground truth is high at a reasonable nprobe, with
     /// distinct ids. The IVF correctness/recall property.

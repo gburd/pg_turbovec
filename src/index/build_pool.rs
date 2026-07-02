@@ -73,6 +73,25 @@ pub(crate) fn make_pool() -> Option<rayon::ThreadPool> {
         .ok()
 }
 
+/// Build a rayon thread pool of exactly `n` threads for the IVF
+/// per-query fine-scan (item #2 of the IVF-scaling work), or `None`
+/// for the degenerate `n <= 1` case so the caller runs inline. Unlike
+/// [`make_pool`], the size is passed in already-resolved (by
+/// `guc::resolve_scan_parallelism`, which caps it modestly for
+/// concurrency safety) rather than derived from the build GUC — a scan
+/// and a build have different fan-out budgets. The threads do pure
+/// compute over owned code bytes; no PG state is touched inside them.
+pub(crate) fn scan_pool(n: usize) -> Option<rayon::ThreadPool> {
+    if n <= 1 {
+        return None;
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .thread_name(|i| format!("turbovec-scan-{i}"))
+        .build()
+        .ok()
+}
+
 /// Run `f` on `pool` if present, else inline. The closure is where the
 /// turbovec calls that fan out via rayon (`add_with_ids` → `encode`,
 /// `prepare_eager` → `repack`) execute, so they pick up `pool` as the

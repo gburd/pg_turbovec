@@ -4,12 +4,24 @@
 
 | Version | Tested patch | Status | Tests | Notes |
 |---|---|---|---|---|
-| 13.23 | ✅ | Supported | 224/224 | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.22 | ✅ | Supported | 224/224 | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.17 | ✅ | Supported | 224/224 | Same shape as 14. |
-| 16.14 | ✅ | Supported | 224/224 | Reference platform during development. |
-| 17.9  | ✅ | Supported | 224/224 | Benchmark platform (`arnold`). |
-| 18.3  | ✅ | Supported | 224/224 | `relopt_parse_elt` gained `isset_offset`. |
+| 13.23 | ✅ | Supported | 250/251 (1 ignored) | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.23 | ✅ | Supported | 250/251 (1 ignored) | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.18 | ✅ | Supported | 250/251 (1 ignored) | Same shape as 14. |
+| 16.14 | ✅ | Supported | 250/251 (1 ignored) | Reference platform during development. |
+| 17.10 | ✅ | Supported | 250/251 (1 ignored) | Benchmark platform (`arnold`). |
+| 18.4  | ✅ | Supported | 250/251 (1 ignored) | `relopt_parse_elt` gained `isset_offset`. |
+
+> Test counts and patch versions above are the exact numbers CI
+> installs and reports as of the most recent green run
+> (`gh run view` on `.github/workflows/test.yml`'s `test` job, one
+> leg per `pg<N>` matrix entry). `cargo pgrx init --pgN download`
+> always fetches the latest point release for major `N` at run
+> time, so these patch versions drift upward on their own — re-run
+> `bash scripts/drift-check.sh` and check the latest CI log rather
+> than trusting this table blindly. The one ignored test
+> (`src/index/ivf.rs`, `ivf_batch_speedup`) is a perf-only timing
+> comparison, not a correctness gate; it's `#[ignore]`d deliberately
+> on every PG version, not a skip specific to any one of them.
 
 > The out-of-core IVF build (v1.12.0+) uses PG's `BufFile` temp-file
 > API, whose signatures differ across majors (`BufFileReadExact` is
@@ -128,3 +140,11 @@ new callback you split follows the same convention.
 4. Re-run the full matrix to make sure no previous version was
    broken.
 5. Update this file's table and the `CHANGELOG.md` entry.
+
+## PostgreSQL 19
+
+Not supported yet — PG19 is still in upstream beta (`REL_19_BETA1`)
+and the pinned `pgrx = "=0.17.0"` dependency has no `pg19` feature.
+See an internal design note for the blocker detail, the C-API delta
+found so far, and the recommended timeline (wait for PG19 RC1+, then
+treat the pgrx upgrade + port as its own dedicated piece of work).

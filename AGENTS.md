@@ -85,14 +85,27 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.20.1, 2026-07-03)
+### Current (as of v1.21.0, 2026-07-03)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.20.1   | `REINDEX INDEX` once |
-| 1.2.x              | 1.20.1   | `REINDEX INDEX` once |
-| 1.3.x              | 1.20.1   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.20.x     | 1.20.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.21.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.21.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.21.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.21.x     | 1.21.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.21.0 (Phase G-1) adds an in-memory centroid graph** for
+sublinear IVF coarse-cell selection (`lists >= 4096`, gated by the
+new `turbovec.coarse_graph` GUC, default `auto`). Computed in-memory
+at index-open from the already-persisted coarse centroids — no wire
+change, no REINDEX. **Correction to the v1.20.0 CHANGELOG entry**:
+that release's "sublinear two-level coarse quantizer" claim was
+aspirational and was never actually implemented; v1.20.0 shipped
+only parallel k-means seeding/build and `turbovec.scan_parallelism`.
+`coarse_probe` stayed the plain O(lists·dim) linear scan through
+v1.20.1. v1.21.0 is the first release to ship real sublinear
+coarse-cell selection. See an internal design note and
+`CHANGELOG.md`.
 
 **v1.20.1 is a critical perf fix, not a wire/feature change** —
 `turbovec.iterative_scan` default flipped `relaxed_order` → `off`

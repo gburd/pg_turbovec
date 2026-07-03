@@ -19,6 +19,7 @@
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
 //! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
 //! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
+//! | `turbovec.coarse_graph`          | enum | auto    | off, auto, on  |
 //! | `turbovec.allowlist`             | str  | `""`    | CSV of bigint ids |
 
 use core::ffi::CStr;
@@ -110,6 +111,55 @@ pub enum OutOfCoreMode {
 
 pub static OUT_OF_CORE: GucSetting<OutOfCoreMode> =
     GucSetting::<OutOfCoreMode>::new(OutOfCoreMode::Auto);
+
+/// Phase G-1 (an internal design note): whether IVF coarse-cell
+/// selection (`coarse_probe`) navigates an in-memory
+/// [`crate::index::ivf::CentroidGraph`] instead of scanning every
+/// centroid. The graph is built once per backend, in-memory, from
+/// the already-persisted coarse centroids (never written to the
+/// relfile) — purely additive, no wire-format change, no REINDEX.
+///
+/// `auto` (the default) builds/uses the graph only when
+/// `lists >= `[`crate::index::ivf::GRAPH_MIN_LISTS`]` (below that the
+/// plain linear scan is already cheap and a graph's build + per-query
+/// heap overhead isn't worth it — see [`crate::index::ivf::GRAPH_MIN_LISTS`]'s
+/// doc for the reasoning). `on` forces the graph regardless of
+/// `lists` (mostly useful for testing); `off` always uses the exact
+/// linear scan.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
+pub enum CoarseGraphMode {
+    /// Always use the exact O(lists*dim) linear scan.
+    #[name = c"off"]
+    Off,
+    /// Use the graph only when `lists` is large enough to be worth
+    /// it (the default).
+    #[name = c"auto"]
+    Auto,
+    /// Always build/use the graph, regardless of `lists`.
+    #[name = c"on"]
+    On,
+}
+
+pub static COARSE_GRAPH: GucSetting<CoarseGraphMode> =
+    GucSetting::<CoarseGraphMode>::new(CoarseGraphMode::Auto);
+
+/// Decide whether coarse-cell selection should build/use the
+/// [`crate::index::ivf::CentroidGraph`] for an index with `lists`
+/// cells. Factored out of the live GUC read so the threshold logic is
+/// unit-testable.
+pub fn coarse_graph_enabled(lists: usize) -> bool {
+    coarse_graph_decide(COARSE_GRAPH.get(), lists)
+}
+
+/// Pure decision used by [`coarse_graph_enabled`] (factored out so it
+/// can be unit-tested without touching the live GUC).
+fn coarse_graph_decide(mode: CoarseGraphMode, lists: usize) -> bool {
+    match mode {
+        CoarseGraphMode::Off => false,
+        CoarseGraphMode::On => true,
+        CoarseGraphMode::Auto => lists >= crate::index::ivf::GRAPH_MIN_LISTS,
+    }
+}
 
 /// Decide whether an IVF scan should be served cell-scoped given the
 /// mode and the index's codes size. `auto` goes cell-scoped when the
@@ -488,6 +538,17 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_enum_guc(
+        c_str(b"turbovec.coarse_graph\0"),
+        c_str(b"Navigate an in-memory centroid graph for IVF coarse-cell selection instead of a linear scan (off | auto | on; default auto).\0"),
+        c_str(
+            b"Phase G-1: IVF coarse-cell selection (coarse_probe) can navigate a small fixed-out-degree graph over the coarse centroids (a Vamana/HNSW-lite greedy beam search) instead of scoring every centroid. The graph is built ONCE PER BACKEND, IN-MEMORY, from the already-persisted coarse centroids -- it is never written to the relfile, so this is purely additive (no wire-format change, no REINDEX). auto (the default) builds/uses the graph only when lists is large enough that the linear scan's O(lists*dim) cost is worth avoiding; below that threshold the plain scan is already cheap and a graph's build + per-query overhead isn't worth paying. on forces the graph regardless of lists (mostly for testing); off always uses the exact linear scan. The graph search returns the same (nprobe nearest cells, ascending distance, deterministic tie-break) contract as the linear scan and is verified to match or exceed its recall at matched probes.\0",
+        ),
+        &COARSE_GRAPH,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     // DEPRECATED no-op (v1.19.0+): all index data is now read through
     // PostgreSQL's buffer manager; there is no relfile mmap to toggle.
     // Kept registered for one minor so an existing `SET
@@ -610,5 +671,23 @@ mod scan_parallelism_tests {
         assert_eq!(cap_scan_chunks(4, 100 * m), 4);
         // want=1 always serial.
         assert_eq!(cap_scan_chunks(1, 100 * m), 1);
+    }
+}
+
+#[cfg(test)]
+mod coarse_graph_tests {
+    use super::{coarse_graph_decide, CoarseGraphMode};
+    use crate::index::ivf::GRAPH_MIN_LISTS;
+
+    /// `off` never builds the graph, `on` always does, `auto` gates
+    /// on the `GRAPH_MIN_LISTS` threshold — the small-`lists`
+    /// fallback contract (G-1 requirement #4).
+    #[test]
+    fn decide_matches_mode_and_threshold() {
+        assert!(!coarse_graph_decide(CoarseGraphMode::Off, GRAPH_MIN_LISTS * 10));
+        assert!(coarse_graph_decide(CoarseGraphMode::On, 1));
+        assert!(!coarse_graph_decide(CoarseGraphMode::Auto, GRAPH_MIN_LISTS - 1));
+        assert!(coarse_graph_decide(CoarseGraphMode::Auto, GRAPH_MIN_LISTS));
+        assert!(coarse_graph_decide(CoarseGraphMode::Auto, GRAPH_MIN_LISTS + 1));
     }
 }

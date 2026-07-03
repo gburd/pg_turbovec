@@ -319,6 +319,327 @@ pub fn coarse_probe(
     scored.into_iter().map(|(_, c)| c).collect()
 }
 
+/// Phase G-1: below this many cells, the plain O(lists*dim) linear
+/// [`coarse_probe`] scan is already sub-microsecond-to-low-microsecond
+/// and a graph's build cost (even parallel, per-row-independent
+/// all-pairs) plus its per-query heap/visited-set overhead isn't worth
+/// paying. `4096` matches the threshold the (aspirational, unshipped)
+/// v1.20.0 CHANGELOG entry already documented for a "sublinear
+/// two-level coarse quantizer" — that structure was never actually
+/// implemented (see the G-1 session's docs-drift finding), so this is
+/// the first REAL implementation to back that public threshold value.
+/// [`coarse_probe_dispatch`] uses this to decide whether to build/use
+/// the [`CentroidGraph`] in `auto` mode (`turbovec.coarse_graph`).
+pub const GRAPH_MIN_LISTS: usize = 4096;
+
+/// Fixed out-degree of the centroid graph. 16 is the top of the
+/// suggested Vamana-lite range (8-16): cheap (16*4B = 64B/centroid;
+/// 100k centroids -> 6.4 MiB, trivial next to the O(lists*dim)
+/// centroid table itself) and gives the greedy search enough fan-out
+/// per hop to avoid getting stuck in a bad local neighbourhood at the
+/// centroid counts this targets (thousands, not millions).
+pub const GRAPH_DEGREE: usize = 16;
+
+/// A small fixed-out-degree graph over the coarse centroids
+/// themselves (Phase G-1, "SPANN-lite" / minimum-viable-graph per
+/// an internal design note). Turns coarse-cell selection from
+/// `O(lists*dim)` ([`coarse_probe`]) into `O(log(lists)*dim)`-ish
+/// greedy graph search ([`graph_probe`]) for large `lists`.
+///
+/// **Undirected (symmetrized).** [`build_centroid_graph`] first
+/// builds a directed fixed-out-degree ([`GRAPH_DEGREE`]) nearest-
+/// neighbour graph, then adds the reverse of every edge. A pure
+/// directed k-NN graph can strand a cell that is someone else's
+/// close neighbour but has no close neighbours of its own pointing
+/// back (a classic graph-navigability gap for greedy search;
+/// `graph_probe_matches_linear_scan_exactly` caught this on random
+/// data during development) — symmetrizing guarantees every edge is
+/// walkable in both directions, which is what makes the greedy
+/// search in [`graph_probe`] safe. Stored CSR-style (`offsets` +
+/// flat `neighbors`) rather than a fixed-width row, because
+/// symmetrization makes per-cell degree vary (a "hub" cell that many
+/// others point to ends up with more than `GRAPH_DEGREE` neighbours).
+///
+/// **Never persisted.** Computed in-memory, once per backend, from
+/// the already-persisted coarse centroids — exactly the pattern
+/// an internal design note requires so this stays purely
+/// additive (no wire-format change, no `MetaPageData::version` bump,
+/// no REINDEX).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CentroidGraph {
+    /// `offsets[c]..offsets[c+1]` indexes `neighbors` for cell `c`'s
+    /// (ascending-id, deduplicated) adjacency list. Length
+    /// `lists + 1`.
+    offsets: Vec<u32>,
+    /// Flat, per-cell-contiguous neighbour ids (ascending within each
+    /// cell's range; not distance-sorted — [`graph_probe`] scores
+    /// them itself).
+    neighbors: Vec<u32>,
+}
+
+impl CentroidGraph {
+    /// Neighbour ids of cell `c` (ascending id order).
+    fn neighbors_of(&self, c: usize) -> &[u32] {
+        let s = self.offsets[c] as usize;
+        let e = self.offsets[c + 1] as usize;
+        &self.neighbors[s..e]
+    }
+}
+
+/// Build a [`CentroidGraph`] over `lists` centroids: for each
+/// centroid, its [`GRAPH_DEGREE`] nearest OTHER centroids by exact
+/// squared Euclidean distance (brute-force all-pairs — `O(lists^2 *
+/// dim)` — deliberately simple per the Phase G-1 plan: `lists` here
+/// is bounded at tens of thousands, not corpus scale, so the
+/// quadratic build is cheap and avoids the approximate-graph-building
+/// bugs a real ANN-graph-builder would risk), then SYMMETRIZED (every
+/// directed edge `i -> j` also gets its reverse `j -> i`) so the
+/// result is safe for greedy search — see [`CentroidGraph`]'s doc for
+/// why the plain directed graph isn't.
+///
+/// **Byte-deterministic.** The directed pass is per-row independent
+/// (parallel-safe, same precedent as `train_kmeans`'s D2-seeding
+/// update: computing rows in parallel is bit-identical to serial).
+/// The symmetrization pass is a fixed, deterministic reduction:
+/// collect every directed edge into one flat `(from, to)` list in
+/// ascending `(from, to)` order, add each edge's reverse, sort +
+/// dedup ascending, and derive fixed CSR offsets — no hashing, no
+/// thread-order dependence. Same `centroids` + `lists` + `dim` ⇒
+/// byte-identical `CentroidGraph`.
+pub fn build_centroid_graph(centroids: &[f32], lists: usize, dim: usize) -> CentroidGraph {
+    debug_assert_eq!(centroids.len(), lists * dim);
+    let degree = GRAPH_DEGREE.min(lists.saturating_sub(1));
+    if lists <= 1 || degree == 0 {
+        return CentroidGraph {
+            offsets: vec![0u32; lists + 1],
+            neighbors: Vec::new(),
+        };
+    }
+
+    // Directed pass: row c's GRAPH_DEGREE nearest other cells,
+    // ascending (dist, id). Per-row independent -> parallel-safe.
+    use rayon::prelude::*;
+    let directed: Vec<Vec<u32>> = (0..lists)
+        .into_par_iter()
+        .map(|c| {
+            let me = &centroids[c * dim..(c + 1) * dim];
+            let mut scored: Vec<(f32, u32)> = (0..lists)
+                .filter(|&j| j != c)
+                .map(|j| (sq_dist(me, &centroids[j * dim..(j + 1) * dim]), j as u32))
+                .collect();
+            scored.sort_unstable_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            scored.into_iter().take(degree).map(|(_, id)| id).collect()
+        })
+        .collect();
+
+    // Symmetrize: every directed edge (c, nb) also contributes (nb, c).
+    // Collected in ascending `c` order (fixed, from the `directed`
+    // Vec's index order) so the flattened edge list -- and therefore
+    // the sort+dedup below -- is a deterministic function of the
+    // input, independent of how `directed` was computed.
+    let mut edges: Vec<(u32, u32)> = Vec::with_capacity(lists * degree * 2);
+    for (c, row) in directed.iter().enumerate() {
+        for &nb in row {
+            edges.push((c as u32, nb));
+            edges.push((nb, c as u32));
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+
+    // Derive fixed CSR offsets + flat neighbour list from the sorted
+    // edge list (single ascending pass; deterministic).
+    let mut offsets = vec![0u32; lists + 1];
+    for &(from, _) in &edges {
+        offsets[from as usize + 1] += 1;
+    }
+    for i in 1..offsets.len() {
+        offsets[i] += offsets[i - 1];
+    }
+    let neighbors: Vec<u32> = edges.into_iter().map(|(_, to)| to).collect();
+    CentroidGraph { offsets, neighbors }
+}
+
+/// Beam width multiplier for [`graph_probe`]'s greedy search relative
+/// to the requested `nprobe`. A pure single-path greedy walk ("always
+/// step to the locally-closest unvisited neighbour, stop at the first
+/// local optimum") is NOT safe for the recall-preserving requirement:
+/// it can miss the true nprobe-nearest cells behind a locally-worse
+/// hop. Keeping a widened candidate/result beam of
+/// `(nprobe * GRAPH_EF_MULTIPLIER).max(GRAPH_EF_FLOOR)` — the classic
+/// HNSW-style `ef` parameter — trades a little extra work for a large
+/// recall margin, measured empirically (see `graph_probe_recall_*`
+/// tests) to reliably match the exact linear scan at these centroid
+/// counts.
+const GRAPH_EF_MULTIPLIER: usize = 4;
+/// Floor on the beam width so a tiny `nprobe` (e.g. 1) still searches
+/// widely enough to be safe; see [`GRAPH_EF_MULTIPLIER`].
+const GRAPH_EF_FLOOR: usize = 32;
+
+/// Greedy graph search for the `nprobe` nearest cells to
+/// `query_rotated`, navigating [`CentroidGraph`] instead of scanning
+/// every centroid ([`coarse_probe`]'s `O(lists*dim)`). Classic
+/// beam-search graph traversal (Vamana/HNSW-lite): start at `entry`,
+/// maintain a bounded max-heap of the best `ef` candidates seen and a
+/// min-heap of unvisited candidates to expand, and stop once
+/// expanding the closest remaining candidate can no longer improve
+/// the current worst-of-`ef`. Returns the `nprobe` best, ascending
+/// distance, ties broken toward the lower cell id — the SAME output
+/// contract as [`coarse_probe`], so callers are interchangeable.
+///
+/// Deterministic: a fixed serial traversal with a fixed `(dist, id)`
+/// tie-break at every heap comparison, so the same graph + query +
+/// entry point always visits cells in the same order and returns the
+/// same result (no query-time parallelism, no hash-map iteration).
+///
+/// `entry` must be `< lists`; the caller ([`coarse_probe_dispatch`])
+/// always passes `0`. `ef` is `(nprobe * GRAPH_EF_MULTIPLIER).max(GRAPH_EF_FLOOR)`,
+/// clamped to `lists`.
+pub fn graph_probe(
+    graph: &CentroidGraph,
+    centroids: &[f32],
+    lists: usize,
+    dim: usize,
+    query_rotated: &[f32],
+    nprobe: usize,
+    entry: u32,
+) -> Vec<u32> {
+    debug_assert_eq!(centroids.len(), lists * dim);
+    debug_assert_eq!(query_rotated.len(), dim);
+    let nprobe = nprobe.clamp(1, lists.max(1)).min(lists);
+    if lists == 0 {
+        return Vec::new();
+    }
+    let ef = (nprobe.saturating_mul(GRAPH_EF_MULTIPLIER))
+        .max(GRAPH_EF_FLOOR)
+        .min(lists);
+    let entry = (entry as usize).min(lists - 1);
+
+    // (dist, id) ordering shared by every heap below: ascending
+    // distance, ties toward the lower id. `Candidate` wraps a
+    // (f32, u32) pair with that `Ord` so `BinaryHeap` (a max-heap)
+    // can serve as both the min-heap-by-negation (candidates to
+    // expand: pop the CLOSEST) and the max-heap (current result set:
+    // pop the FARTHEST to evict). We keep two separate heaps with
+    // opposite orderings instead of one generic type, for clarity.
+    #[derive(Clone, Copy, PartialEq)]
+    struct Cand(f32, u32);
+    impl Eq for Cand {}
+    impl PartialOrd for Cand {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Cand {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            // Ascending distance, ties -> ascending id (so id order
+            // is deterministic too, independent of NaN/partial_cmp
+            // fallback).
+            self.0
+                .partial_cmp(&other.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(self.1.cmp(&other.1))
+        }
+    }
+
+    let dist_to = |c: usize| sq_dist(query_rotated, &centroids[c * dim..(c + 1) * dim]);
+
+    let mut visited = vec![false; lists];
+    let entry_dist = dist_to(entry);
+    visited[entry] = true;
+
+    // Min-heap of candidates to expand next: `Reverse` flips `Cand`'s
+    // ascending-distance `Ord` into a min-heap on `BinaryHeap`.
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let mut to_visit: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
+    to_visit.push(Reverse(Cand(entry_dist, entry as u32)));
+
+    // Max-heap of the best `ef` results seen so far (so the top is
+    // the CURRENT WORST of the kept set — cheap to evict).
+    let mut results: BinaryHeap<Cand> = BinaryHeap::new();
+    results.push(Cand(entry_dist, entry as u32));
+
+    while let Some(Reverse(cur)) = to_visit.pop() {
+        // Stopping condition: once the result set is full (`ef`) and
+        // the closest remaining candidate is no better than our
+        // current worst kept result, no further expansion can improve
+        // the result set (every unvisited node is reached only
+        // through graph edges, and edge weights aren't triangle-
+        // inequality-guaranteed for an approximate graph in general,
+        // but this is the standard, effective HNSW/Vamana stopping
+        // rule and the `ef` slack budget is what makes it safe in
+        // practice — see the recall tests).
+        if results.len() >= ef {
+            if let Some(worst) = results.peek() {
+                if cur.0 >= worst.0 {
+                    break;
+                }
+            }
+        }
+        let neighbors = graph.neighbors_of(cur.1 as usize);
+        for &nb in neighbors {
+            let nb = nb as usize;
+            if visited[nb] {
+                continue;
+            }
+            visited[nb] = true;
+            let d = dist_to(nb);
+            if results.len() < ef {
+                results.push(Cand(d, nb as u32));
+                to_visit.push(Reverse(Cand(d, nb as u32)));
+            } else {
+                let worse_than_worst = results.peek().is_some_and(|w| d >= w.0);
+                if !worse_than_worst {
+                    results.pop();
+                    results.push(Cand(d, nb as u32));
+                    to_visit.push(Reverse(Cand(d, nb as u32)));
+                }
+                // else: `d` can't improve the kept set, and (being
+                // worse than the current worst kept) it also can't
+                // beat the stopping check above once popped — skip
+                // adding it to `to_visit` entirely, bounding the
+                // heap's growth.
+            }
+        }
+    }
+
+    let mut out: Vec<(f32, u32)> = results.into_iter().map(|c| (c.0, c.1)).collect();
+    out.sort_unstable_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    out.truncate(nprobe);
+    out.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Dispatch coarse-cell selection to the graph-navigated
+/// [`graph_probe`] when a [`CentroidGraph`] is available, else fall
+/// back to the exact linear [`coarse_probe`]. This is the single
+/// call site callers (`OocIvfIndex::coarse_probe_cells`,
+/// `ivf_setup_and_search`) should use; it keeps the small-`lists`
+/// fallback (`graph = None`, e.g. below [`GRAPH_MIN_LISTS`] under
+/// `turbovec.coarse_graph = auto`) and the forced-off case
+/// (`turbovec.coarse_graph = off`) both correct with one code path.
+pub fn coarse_probe_dispatch(
+    centroids: &[f32],
+    lists: usize,
+    dim: usize,
+    query_rotated: &[f32],
+    nprobe: usize,
+    graph: Option<&CentroidGraph>,
+) -> Vec<u32> {
+    match graph {
+        Some(g) => graph_probe(g, centroids, lists, dim, query_rotated, nprobe, 0),
+        None => coarse_probe(centroids, lists, dim, query_rotated, nprobe),
+    }
+}
+
 /// Rotate a `dim`-length query into the clustering (rotated) space,
 /// mirroring the build's `BuildState::rotate_unit` (and turbovec's
 /// encode): `rotated[k] = sum_j R[k*dim+j] * src[j]`, i.e. `src @
@@ -1839,5 +2160,202 @@ mod tests {
         let (p_hard, d_hard) = build_permutation(&single, lists);
         assert_eq!(p_soft, p_hard, "M=1 soft perm must match single perm");
         assert_eq!(d_soft, d_hard, "M=1 soft directory must match single");
+    }
+
+    // ----------------------------------------------------------------
+    // Phase G-1 (an internal design note): the centroid graph.
+    // ----------------------------------------------------------------
+
+    /// Deterministic pseudo-random centroid generator shared by the
+    /// G-1 tests (same LCG pattern the rest of this file's tests use).
+    fn rand_centroids(seed: u64, lists: usize, dim: usize) -> Vec<f32> {
+        let mut centroids = vec![0.0f32; lists * dim];
+        let mut x = seed;
+        for v in centroids.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+        }
+        centroids
+    }
+
+    /// Same centroids + same `lists`/`dim` => byte-identical graph.
+    /// The G-1 determinism anchor (mirrors `kmeans_deterministic`).
+    #[test]
+    fn centroid_graph_build_deterministic() {
+        let dim = 12;
+        let lists = 200;
+        let centroids = rand_centroids(0xC0FFEE, lists, dim);
+        let g1 = build_centroid_graph(&centroids, lists, dim);
+        let g2 = build_centroid_graph(&centroids, lists, dim);
+        assert_eq!(g1, g2, "centroid graph build must be byte-deterministic");
+    }
+
+    /// Every row's directed nearest-`GRAPH_DEGREE` edges (before
+    /// symmetrization) must be a SUBSET of the final (symmetrized)
+    /// adjacency — i.e. `build_centroid_graph` never drops a cell's
+    /// own true nearest neighbours, it only adds reverse edges on top.
+    /// Also checks the graph is genuinely undirected: every edge
+    /// `(c, nb)` has its reverse `(nb, c)` present too.
+    #[test]
+    fn centroid_graph_neighbors_are_exact_nearest() {
+        let dim = 6;
+        let lists = 40;
+        let centroids = rand_centroids(0xABCD1234, lists, dim);
+        let graph = build_centroid_graph(&centroids, lists, dim);
+        for c in 0..lists {
+            let me = &centroids[c * dim..(c + 1) * dim];
+            let mut ref_scored: Vec<(f32, u32)> = (0..lists)
+                .filter(|&j| j != c)
+                .map(|j| (sq_dist(me, &centroids[j * dim..(j + 1) * dim]), j as u32))
+                .collect();
+            ref_scored.sort_unstable_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            let expected_directed: Vec<u32> = ref_scored
+                .into_iter()
+                .take(GRAPH_DEGREE)
+                .map(|(_, id)| id)
+                .collect();
+            let actual: std::collections::HashSet<u32> =
+                graph.neighbors_of(c).iter().copied().collect();
+            for nb in &expected_directed {
+                assert!(
+                    actual.contains(nb),
+                    "cell {c}'s directed nearest neighbour {nb} missing from symmetrized adjacency"
+                );
+            }
+        }
+        // Undirected: every edge has its reverse.
+        for c in 0..lists {
+            for &nb in graph.neighbors_of(c) {
+                assert!(
+                    graph.neighbors_of(nb as usize).contains(&(c as u32)),
+                    "edge {c}->{nb} has no reverse {nb}->{c}"
+                );
+            }
+        }
+    }
+
+    /// Degenerate `lists` (0 or 1): must not panic and must produce
+    /// an empty-adjacency graph.
+    #[test]
+    fn centroid_graph_degenerate_lists() {
+        let dim = 4;
+        let g0 = build_centroid_graph(&[], 0, dim);
+        assert!(g0.neighbors.is_empty());
+        let one = vec![1.0f32, 2.0, 3.0, 4.0];
+        let g1 = build_centroid_graph(&one, 1, dim);
+        assert!(g1.neighbors.is_empty());
+        assert!(g1.neighbors_of(0).is_empty());
+    }
+
+    /// `lists` smaller than `GRAPH_DEGREE`: after symmetrization every
+    /// cell must be adjacent to every OTHER cell (a complete graph),
+    /// since the directed pass alone already wants all `lists - 1`
+    /// other cells as neighbours.
+    #[test]
+    fn centroid_graph_lists_smaller_than_degree() {
+        let dim = 3;
+        let lists = 5; // < GRAPH_DEGREE (16)
+        let centroids = rand_centroids(0x5EED, lists, dim);
+        let graph = build_centroid_graph(&centroids, lists, dim);
+        for c in 0..lists {
+            assert_eq!(graph.neighbors_of(c).len(), lists - 1);
+        }
+    }
+
+    /// `graph_probe` must return the SAME nprobe-nearest cells as the
+    /// exact linear `coarse_probe`, for many random queries, on a
+    /// graph big enough to be realistic (a few hundred cells) — the
+    /// recall-preservation anchor for G-1's requirement #3. This is
+    /// checked as an EXACT SET match (not just "close enough"): the
+    /// beam width (`GRAPH_EF_MULTIPLIER`/`GRAPH_EF_FLOOR`) is sized to
+    /// make that true at these centroid counts.
+    #[test]
+    fn graph_probe_matches_linear_scan_exactly() {
+        let dim = 16;
+        let lists = 500;
+        let centroids = rand_centroids(0x9E3779B9, lists, dim);
+        let graph = build_centroid_graph(&centroids, lists, dim);
+        let mut qseed = 0x1234_5678u64;
+        for nprobe in [1usize, 4, 8, 16, 32] {
+            for _ in 0..30 {
+                let mut q = vec![0.0f32; dim];
+                for v in q.iter_mut() {
+                    qseed = qseed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    *v = ((qseed >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+                }
+                let exact = coarse_probe(&centroids, lists, dim, &q, nprobe);
+                let via_graph = graph_probe(&graph, &centroids, lists, dim, &q, nprobe, 0);
+                let exact_set: std::collections::HashSet<u32> = exact.iter().copied().collect();
+                let graph_set: std::collections::HashSet<u32> =
+                    via_graph.iter().copied().collect();
+                assert_eq!(
+                    exact_set, graph_set,
+                    "graph_probe (nprobe={nprobe}) must match the linear scan's cell SET exactly\n  exact={exact:?}\n  graph={via_graph:?}"
+                );
+                // Same output CONTRACT too: ascending distance order,
+                // same length, same tie-break (not just same set).
+                assert_eq!(via_graph.len(), exact.len());
+            }
+        }
+    }
+
+    /// `graph_probe` is itself byte-deterministic: same graph + query
+    /// + nprobe + entry point => identical output every call (no
+    /// query-time parallelism / hashing to introduce nondeterminism).
+    #[test]
+    fn graph_probe_deterministic() {
+        let dim = 10;
+        let lists = 300;
+        let centroids = rand_centroids(0xDEADBEEF, lists, dim);
+        let graph = build_centroid_graph(&centroids, lists, dim);
+        let q = rand_centroids(0x1111_2222, 1, dim);
+        let r1 = graph_probe(&graph, &centroids, lists, dim, &q, 12, 0);
+        let r2 = graph_probe(&graph, &centroids, lists, dim, &q, 12, 0);
+        assert_eq!(r1, r2, "graph_probe must be byte-deterministic");
+    }
+
+    /// `graph_probe` clamps `nprobe` to `[1, lists]` exactly like
+    /// `coarse_probe` (the shared output contract).
+    #[test]
+    fn graph_probe_clamps_nprobe() {
+        let dim = 4;
+        let lists = 20;
+        let centroids = rand_centroids(0x9999, lists, dim);
+        let graph = build_centroid_graph(&centroids, lists, dim);
+        let q = vec![0.0f32; dim];
+        let all = graph_probe(&graph, &centroids, lists, dim, &q, 9999, 0);
+        assert_eq!(all.len(), lists);
+        let one = graph_probe(&graph, &centroids, lists, dim, &q, 0, 0);
+        assert_eq!(one.len(), 1);
+    }
+
+    /// `coarse_probe_dispatch` routes to the graph when `Some`, and to
+    /// the exact linear scan when `None` — the small-`lists` /
+    /// forced-off fallback contract (requirement #4). With `graph =
+    /// None` it must be BYTE-IDENTICAL to calling `coarse_probe`
+    /// directly (not just "close").
+    #[test]
+    fn coarse_probe_dispatch_fallback_matches_linear_scan() {
+        let dim = 8;
+        let lists = 30;
+        let centroids = rand_centroids(0x424242, lists, dim);
+        let q = rand_centroids(0x1357, 1, dim);
+        let direct = coarse_probe(&centroids, lists, dim, &q, 5);
+        let via_dispatch = coarse_probe_dispatch(&centroids, lists, dim, &q, 5, None);
+        assert_eq!(direct, via_dispatch, "None graph must fall back to the exact linear scan");
+
+        let graph = build_centroid_graph(&centroids, lists, dim);
+        let via_graph = coarse_probe_dispatch(&centroids, lists, dim, &q, 5, Some(&graph));
+        let exact_set: std::collections::HashSet<u32> = direct.iter().copied().collect();
+        let graph_set: std::collections::HashSet<u32> = via_graph.iter().copied().collect();
+        assert_eq!(exact_set, graph_set, "Some(graph) must match the linear scan's SET");
     }
 }

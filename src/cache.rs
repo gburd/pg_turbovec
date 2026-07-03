@@ -47,7 +47,7 @@ use pgrx::prelude::*;
 use turbovec::{IdMapIndex, SearchResults, TurboQuantIndex};
 
 use crate::guc;
-use crate::index::ivf::{coarse_probe, rotate_query, CellDirectory};
+use crate::index::ivf::{coarse_probe_dispatch, rotate_query, CellDirectory};
 
 /// Read-only materialisation of a turbovec index for the index-AM
 /// scan path. Unlike [`IdMapIndex`] it stores **only** the inner
@@ -278,6 +278,13 @@ pub(crate) struct OocIvfIndex {
     /// Coarse centroids (row-major `lists * dim`, rotated space).
     coarse_centroids: Vec<f32>,
     lists: usize,
+    /// Phase G-1: an in-memory (never persisted) navigable graph over
+    /// `coarse_centroids`, built once here at cache-install time from
+    /// the already-persisted centroids. `None` when
+    /// `turbovec.coarse_graph` gates it off (small `lists` under
+    /// `auto`, or `off`) — [`Self::coarse_probe_cells`] then falls
+    /// back to the exact linear scan via `coarse_probe_dispatch`.
+    graph: Option<crate::index::ivf::CentroidGraph>,
     /// Rotation matrix (row-major `dim * dim`) for the coarse probe.
     rotation: Vec<f32>,
     /// Cell directory: each cell's `[code_offset, +n_vectors)` range.
@@ -314,6 +321,20 @@ impl OocIvfIndex {
         scales: Vec<f32>,
         slot_to_id: Vec<u64>,
     ) -> Self {
+        // Phase G-1: build the centroid graph once here, in-memory,
+        // from the already-persisted centroids (never written back
+        // to the relfile — purely additive). Gated by
+        // `turbovec.coarse_graph` (auto/on/off); see
+        // `guc::coarse_graph_enabled` and `ivf::GRAPH_MIN_LISTS`.
+        let graph = if crate::guc::coarse_graph_enabled(lists) {
+            Some(crate::index::ivf::build_centroid_graph(
+                &coarse_centroids,
+                lists,
+                dim,
+            ))
+        } else {
+            None
+        };
         Self {
             bit_width,
             dim,
@@ -323,6 +344,7 @@ impl OocIvfIndex {
             rows_per_codes_page,
             coarse_centroids,
             lists,
+            graph,
             rotation,
             directory,
             codebook_centroids,
@@ -348,7 +370,14 @@ impl OocIvfIndex {
     pub(crate) fn coarse_probe_cells(&self, query_unit: &[f32], probes: usize) -> Vec<u32> {
         let q_rot = rotate_query(&self.rotation, query_unit, self.dim);
         let probes = probes.clamp(1, self.lists.max(1));
-        coarse_probe(&self.coarse_centroids, self.lists, self.dim, &q_rot, probes)
+        coarse_probe_dispatch(
+            &self.coarse_centroids,
+            self.lists,
+            self.dim,
+            &q_rot,
+            probes,
+            self.graph.as_ref(),
+        )
     }
 
     /// Cell-scoped top-`k` search over the `probed` cells. Copies

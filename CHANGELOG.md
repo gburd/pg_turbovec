@@ -4,6 +4,99 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.21.0] — 2026-07-03
+
+**Phase G-1: centroid graph for sublinear IVF coarse-cell
+selection.** (an internal design note, gated in by
+an internal design note's finding that the IVF-vs-HNSW latency
+gap at SIFT-1M didn't clear the bar for a full corpus graph, so this
+release attacks the coarse-probe cost instead.) In-memory / scan-path
+only; **no wire change** (`MetaPageData::version = 5`), one new GUC,
+**no REINDEX**.
+
+### Added
+
+- **Centroid graph coarse-cell selection.** For an out-of-core IVF
+  index (`turbovec.out_of_core` cell-scoped path) with `lists >=
+  4096`, `coarse_probe` can now navigate a small fixed-out-degree
+  (16) undirected graph over the coarse centroids — a Vamana/
+  HNSW-lite greedy beam search — instead of scoring every centroid.
+  The graph is built **once per backend, in-memory**, from the
+  already-persisted coarse centroids (`ivf::build_centroid_graph`);
+  nothing new is persisted, so **existing IVF indexes get it for
+  free on the next scan, no REINDEX**.
+  - **Undirected by construction.** A pure directed k-NN graph (each
+    centroid's own nearest-16 others) can strand a cell that's
+    someone else's close neighbour but has no close neighbours of
+    its own pointing back — a real navigability gap for greedy
+    search that a randomized-corpus test caught during development.
+    `build_centroid_graph` symmetrizes every edge (adds the reverse
+    of each directed edge) before search ever runs, which is what
+    makes the recall-preservation guarantee below actually hold.
+  - **Byte-deterministic.** The directed pass is per-row independent
+    (parallel-safe); the symmetrization pass is a fixed sort+dedup
+    over the full edge list. Same centroids ⇒ byte-identical graph.
+    Verified by `centroid_graph_build_deterministic` (unit) and
+    `ivf_coarse_graph_build_is_deterministic_across_cache_rebuilds`
+    (`#[pg_test]`, end-to-end through the relfile + cache).
+  - **Recall-preserving.** `graph_probe`'s beam width
+    (`ef = max(nprobe*4, 32)`, the classic HNSW-style slack budget)
+    is sized so the graph-navigated result SET matches the exact
+    linear scan's `nprobe`-nearest cells exactly at the tested scales
+    (verified by `graph_probe_matches_linear_scan_exactly`, 150
+    random queries across 5 `nprobe` values, and the end-to-end
+    `ivf_coarse_graph_matches_linear_scan` `#[pg_test]`). Existing
+    recall-floor tests (`index_am_recall_floor_{2,3,4}bit`) still
+    pass unmodified.
+- **`turbovec.coarse_graph`** (GUC, enum, default `auto`): `auto`
+  builds/uses the graph only when `lists >= 4096` (below that the
+  plain linear scan is already cheap and a graph's build + per-query
+  overhead isn't worth paying — see `ivf::GRAPH_MIN_LISTS`'s doc);
+  `on` forces it regardless of `lists`; `off` always uses the exact
+  linear scan. `ivf_coarse_graph_auto_falls_back_below_threshold`
+  proves the small-`lists` fallback is correctness-neutral (matches
+  `off` exactly) and that forcing `on` below the threshold still
+  matches too.
+
+### Honest notes
+
+- **G-1 is scoped to the out-of-core (`OocIvfIndex`) scan path
+  only.** The whole-load path (`ivf_setup_and_search` in
+  `src/index/scan.rs`) re-reads centroids fresh from the relfile on
+  every scan-open (there is no per-backend cache of that struct
+  today), so building an `O(lists²)` graph there per scan would be
+  pure overhead, not the "build once per backend" amortised cost the
+  plan requires. That path is also gated to comfortably-RAM-resident
+  indexes, i.e. the small-`lists` regime where the linear scan is
+  already cheap — the OOC path is also where `lists >= 4096` (the
+  scale G-1 targets) actually shows up in practice.
+- **Correcting a docs-drift bug found while implementing this
+  release**: the v1.20.0 CHANGELOG entry below claims a "sublinear
+  two-level coarse quantizer" (`O(lists)→O(√lists)`) shipped in that
+  release. **That was never implemented.** v1.20.0's actual diff
+  (verified against `git show`) only parallelized k-means++ seeding
+  and the build-time assign-sweep, and added `turbovec.scan_parallelism`
+  for the fine-scan. `coarse_probe` remained the plain
+  `O(lists·dim)` linear scan through v1.20.1. There is no
+  `TwoLevelCoarse` type or equivalent anywhere in the v1.20.0–v1.20.1
+  source tree. v1.21.0 (this release) is the first to actually ship
+  sublinear coarse-cell selection. The v1.20.0 CHANGELOG entry and
+  `docs/UPGRADING.md`'s corresponding row are left as historical
+  record (not rewritten) but this release's `docs/UPGRADING.md` row
+  calls out the correction explicitly.
+- Measured effect is a rough local sanity check (small-corpus pgrx
+  test host, not a benchmark AVX-512/AVX2 latency benchmark): correctness
+  and recall-preservation are verified by the tests above; a
+  proper before/after p50 comparison at `lists` in the low-to-high
+  thousands (where `auto` actually engages) on an AVX2+ host is
+  follow-up bench work, not part of this patch.
+
+### Migration
+
+**No REINDEX.** Wire stays v5; existing v4/v5 IVF indexes benefit
+from the centroid graph (when `lists >= 4096`) with no rebuild.
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.21.0';` is sufficient.
+
 ## [1.20.1] — 2026-07-03
 
 **CRITICAL PERF FIX: `turbovec.iterative_scan` default flipped

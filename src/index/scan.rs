@@ -937,6 +937,20 @@ unsafe fn ivf_setup_and_search(
     // The build always normalises before assigning to a cell (see
     // ivf_build_and_write), so the coarse search must normalise too,
     // regardless of turbovec.normalize_on_insert.
+    //
+    // Phase G-1 scoping note: the whole-load path re-reads
+    // `centroids` fresh from the relfile on every scan-open (there is
+    // no per-backend cache of THIS struct today), so building an
+    // O(lists^2) `CentroidGraph` here per scan would not be the
+    // "build once per backend" amortised cost the plan requires --
+    // it would be pure overhead on every query. The whole-load path
+    // is also gated to comfortably-RAM-resident indexes
+    // (`turbovec.out_of_core`), i.e. the SMALL-`lists` regime where
+    // the linear scan is already cheap. G-1's graph therefore only
+    // backs the OOC path (`OocIvfIndex::coarse_probe_cells`, cached
+    // once per backend by the existing scan-install machinery), which
+    // is also the >RAM / large-`lists` regime the plan targets. This
+    // path keeps the exact linear `coarse_probe`.
     let unit = kernels::normalise_to_vec(query);
     let q_rot = crate::index::ivf::rotate_query(&rotation, &unit, dim);
     let probes = (crate::guc::PROBES.get() as usize).clamp(1, lists);

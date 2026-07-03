@@ -4,6 +4,76 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.20.1] — 2026-07-03
+
+**CRITICAL PERF FIX: `turbovec.iterative_scan` default flipped
+`relaxed_order` → `off`.** Wire format unchanged
+(`MetaPageData::version = 5`); no SQL surface change; **no REINDEX
+needed** — `ALTER EXTENSION pg_turbovec UPDATE` is sufficient and
+the new default takes effect on the next backend.
+
+### The bug
+
+PostgreSQL's reorder queue (`IndexNextWithReorder` in
+`nodeIndexscan.c`) can only return a candidate tuple early when the
+index AM's advertised `ORDER BY` value for that tuple is *exact*.
+pg_turbovec always advertises `f64::NEG_INFINITY` for every tuple
+(deliberately opclass-agnostic — correct across L2/cosine/inner-
+product without per-opclass bounds logic), so that exactness
+condition can never be satisfied. Under the old default
+(`relaxed_order`), this forced the executor to drive the AM's own
+iterative-refill schedule (probe-widening, `search_k` doubling, up
+to `turbovec.max_scan_tuples` = 20,000 and `turbovec.max_probes` =
+64) all the way to completion on **every** `ORDER BY dist LIMIT n`
+query — no matter how small `n` was — before the executor's reorder
+queue could signal it was safe to return even the first row.
+
+Measured on an AVX-512 a cloud VM host (SIFT-1M/128d IVF, `probes=8`,
+otherwise-default GUCs): **~2 ms with `turbovec.iterative_scan =
+off` vs ~900 ms with the old default `relaxed_order`** — a **450x**
+latency tax paid by every default-configuration KNN query since
+`relaxed_order` first shipped as the default in v1.8.0. Every
+benchmark and load-test in this repository explicitly set
+`turbovec.iterative_scan = off`, which is why this went undetected
+for eleven releases: the bug only manifests when a caller does NOT
+override the GUC, and no internal benchmark left it at its default.
+It was caught while measuring the Phase G-0 IVF-vs-HNSW frontier,
+which (deliberately) exercised the untouched defaults for the first
+time.
+
+### Changed
+
+- `turbovec.iterative_scan` now defaults to `off` (was
+  `relaxed_order`). `off` matches pgvector's own `hnsw.iterative_scan`
+  default and only under-returns on a *selective* `WHERE` filter
+  combined with `ORDER BY ... LIMIT` — a much rarer shape than the
+  plain unfiltered KNN query this bug taxed. Opt back into
+  `relaxed_order` (`SET turbovec.iterative_scan = relaxed_order;`)
+  if your workload relies on the under-return-avoidance guarantee for
+  selective filters; see `docs/FILTERING.md` and `docs/PRODUCTION.md`.
+- Added `index_am_iterative_scan_defaults_to_off` regression test
+  (`src/lib.rs`) that asserts the compiled-in default — without an
+  explicit `SET` — caps at `search_k` rather than draining to
+  `max_scan_tuples`, so this can't silently regress back.
+- Fixed one pre-existing test (`ivf_lists_scan_matches_flat`) that
+  was implicitly relying on the old `relaxed_order` default to
+  guarantee finding an exact self-match under quantization noise;
+  it now opts into `relaxed_order` explicitly, since that's a
+  correctness anchor for k-widening behaviour, not a test of the
+  compiled-in default.
+- Corrected the documented default in `src/guc.rs`'s module-level
+  GUC table, `docs/PRODUCTION.md`, `docs/FILTERING.md`,
+  `docs/MIGRATING_FROM_PGVECTOR.md`, and `docs/PARITY_GAPS.md`.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.20.1';` (empty migration
+file, `migrations/032_pg_turbovec_v1.20.1.sql`). No REINDEX. The new
+GUC default applies to new backends/sessions; a long-lived backend
+that already read the old compiled-in default at connection start
+keeps using it until it reconnects (ordinary PostgreSQL GUC
+semantics — not specific to this fix).
+
 ## [1.20.0] — 2026-07-02
 
 **IVF scaling — parallel build + parallel scan + sublinear coarse

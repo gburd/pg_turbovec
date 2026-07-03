@@ -85,14 +85,24 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.20.0, 2026-07-02)
+### Current (as of v1.20.1, 2026-07-03)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.20.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.20.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.20.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.20.x     | 1.20.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.20.1   | `REINDEX INDEX` once |
+| 1.2.x              | 1.20.1   | `REINDEX INDEX` once |
+| 1.3.x              | 1.20.1   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.20.x     | 1.20.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.20.1 is a critical perf fix, not a wire/feature change** —
+`turbovec.iterative_scan` default flipped `relaxed_order` → `off`
+(PostgreSQL's reorder queue can never pop a tuple early when we
+advertise `NEG_INFINITY`, so the old default drove the AM's full
+iterative-refill schedule to completion on every `ORDER BY ...
+LIMIT` query regardless of `LIMIT` size — measured ~450x tax,
+SIFT-1M/128d ~2ms vs ~900ms). Upgrade via `ALTER EXTENSION
+pg_turbovec UPDATE`, no REINDEX. See `CHANGELOG.md` and
+`docs/UPGRADING.md`.
 
 `MetaPageData::version` is **5** as of v1.17.0 (was **4** for
 v1.10.0–v1.16.x), but the bump is **strictly additive per index

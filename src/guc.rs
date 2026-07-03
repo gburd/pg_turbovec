@@ -12,7 +12,7 @@
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
 //! | `turbovec.mmap_static_blocked`   | bool | true (no-op, deprecated) | -          |
-//! | `turbovec.iterative_scan`        | enum | relaxed_order | off, relaxed_order |
+//! | `turbovec.iterative_scan`        | enum | off     | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 //! | `turbovec.scan_parallelism`      | int  | 0       | 0..=128        |
@@ -187,21 +187,48 @@ pub static MMAP_STATIC_BLOCKED: GucSetting<bool> = GucSetting::<bool>::new(true)
 
 /// Iterative-scan mode, modelled on pgvector's `hnsw.iterative_scan`.
 ///
-/// * `Off` — single fixed-`search_k` batch (pre-v1.8.0 behaviour).
+/// * `Off` (**default since v1.20.1** — see the perf note below) —
+///   single fixed-`search_k` batch (pre-v1.8.0 behaviour).
 ///   `amgettuple` returns false as soon as that batch drains, which
 ///   under-returns under a selective `WHERE` filter + `ORDER BY dist
 ///   LIMIT k`.
-/// * `RelaxedOrder` (default) — when the batch drains and the
-///   executor asks for more, re-run the turbovec search with a
-///   doubled `k` and feed the new candidates, capped by
-///   [`MAX_SCAN_TUPLES`]. Results across refill batches are only
-///   approximately distance-ordered; the executor's reorder queue
-///   (`xs_recheckorderby = true`) restores exact per-tuple ordering.
+/// * `RelaxedOrder` — when the batch drains and the executor asks
+///   for more, re-run the turbovec search with a doubled `k` and
+///   feed the new candidates, capped by [`MAX_SCAN_TUPLES`]. Results
+///   across refill batches are only approximately distance-ordered;
+///   the executor's reorder queue (`xs_recheckorderby = true`)
+///   restores exact per-tuple ordering. Opt in for selective
+///   `WHERE` filters where `off` under-returns.
 ///
-/// pgvector also exposes `strict_order` for HNSW; we defer it as
-/// future work because our reorder-queue model already delivers exact
-/// ordering on top of `relaxed_order`. The `#[name = ...]` attrs give
-/// the lowercase pgvector-familiar spelling at the SQL surface.
+/// # Why the default flipped in v1.20.1 (critical perf fix, no wire
+/// change)
+///
+/// Because we advertise `f64::NEG_INFINITY` as every tuple's
+/// order-by value (opclass-agnostic safety; see the comment at the
+/// `xs_orderbyvals` write site in `index/scan.rs`), PostgreSQL's
+/// `IndexNextWithReorder` (`nodeIndexscan.c`) can *never* prove a
+/// tuple is `was_exact`, so it can never pop its reorder queue
+/// early — it keeps calling `amgettuple` until the AM itself
+/// signals end-of-scan. Under the old default (`RelaxedOrder`),
+/// that meant the AM's OWN iterative-widening schedule
+/// (`max_probes`, doubling `k` up to [`MAX_SCAN_TUPLES`] = 20,000)
+/// ran to completion on **every** `ORDER BY dist LIMIT n` query,
+/// no matter how small `n` was — the executor's `LIMIT` node never
+/// gets a chance to short-circuit the AM because index AMs aren't
+/// LIMIT-aware in the `amgettuple` API (a general PG constraint, not
+/// specific to us). Measured on SIFT-1M/128d IVF: **~2 ms with `off`
+/// vs ~900 ms with the old default `relaxed_order`** — a 450×
+/// regression paid by every default-configuration KNN query since
+/// `relaxed_order` first shipped (v1.8.0). Every prior pg_turbovec
+/// benchmark in this repo explicitly set `turbovec.iterative_scan =
+/// off`, which is why this went undetected until a benchmark frontier
+/// run used the untouched default. `off` is safe as the default
+/// because it matches pgvector's own `hnsw.iterative_scan` default
+/// and only under-returns on a *selective* `WHERE` filter (rare, and
+/// the fully-tested opt-in `relaxed_order` path handles it). This is
+/// a scan-side behaviour fix — the wire format and SQL surface are
+/// untouched, so it ships as a patch release per the versioning
+/// policy.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
 pub enum IterativeScanMode {
     #[name = c"off"]
@@ -211,7 +238,7 @@ pub enum IterativeScanMode {
 }
 
 pub static ITERATIVE_SCAN: GucSetting<IterativeScanMode> =
-    GucSetting::<IterativeScanMode>::new(IterativeScanMode::RelaxedOrder);
+    GucSetting::<IterativeScanMode>::new(IterativeScanMode::Off);
 
 /// Hard ceiling on the total number of candidates a single scan may
 /// examine when iterative refill is enabled. Matches pgvector's

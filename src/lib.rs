@@ -2003,6 +2003,65 @@ mod tests {
         );
     }
 
+    /// v1.20.1 perf fix, locked in: `turbovec.iterative_scan` defaults
+    /// to `off` WITHOUT an explicit `SET`. Under the old default
+    /// (`relaxed_order`), PostgreSQL's reorder queue
+    /// (`IndexNextWithReorder`) can never pop a tuple early because we
+    /// advertise `f64::NEG_INFINITY` as every tuple's order-by value
+    /// (opclass-agnostic safety), so it drives the AM's own iterative
+    /// refill schedule (probe-widening / k-doubling up to
+    /// `max_scan_tuples`) to completion on EVERY `ORDER BY ... LIMIT`
+    /// query, no matter how small the LIMIT — measured a 450x latency
+    /// tax on SIFT-1M (~2ms vs ~900ms). This test asserts the
+    /// no-`SET` default caps at `search_k` exactly like the explicit
+    /// `off` test above, so a future change can't silently regress
+    /// the default back to a query-time refill.
+    #[pg_test]
+    fn index_am_iterative_scan_defaults_to_off() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_iter_default (id bigint PRIMARY KEY, emb vector)")
+            .unwrap();
+        Spi::run(
+            "INSERT INTO t_iter_default \
+             SELECT i, \
+                 ('[' || string_agg( \
+                     ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+                 ',') || ']')::vector \
+             FROM generate_series(1, 500) AS gs(i), \
+                  generate_series(1, 8) AS sub(k) \
+             GROUP BY i",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_iter_default_idx \
+             ON t_iter_default USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_iter_default").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 12").unwrap();
+        // Deliberately NOT setting turbovec.iterative_scan: this test
+        // is exercising the GucSetting's compiled-in default.
+
+        let mode: Option<String> = Spi::get_one("SHOW turbovec.iterative_scan").unwrap();
+        assert_eq!(
+            mode,
+            Some("off".to_string()),
+            "turbovec.iterative_scan must default to off (v1.20.1 perf fix)"
+        );
+
+        let ids = fetch_ids(
+            "SELECT id FROM t_iter_default \
+             ORDER BY emb <=> '[0,0,0,0,0,0,0,0]'::vector LIMIT 100",
+        );
+        assert_distinct_ids(&ids);
+        assert_eq!(
+            ids.len(),
+            12,
+            "default iterative_scan (off) must cap at search_k regardless of LIMIT"
+        );
+    }
+
     // ---- Oversampling (differentiator #5): tunable recall ----
     //
     // These tests share a corpus builder: `n` rows of `dim`-dim
@@ -4806,7 +4865,7 @@ mod tests {
             "0.1.0", "0.2.0", "0.4.0", "0.5.0",
             "1.3.0", "1.5.0", "1.6.0", "1.6.1",
             "1.7.0", "1.7.1", "1.7.2", "1.7.3",
-            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0", "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0",
+            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0", "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1",
         ];
         let expected_owned: Vec<String> =
             expected.iter().map(|s| s.to_string()).collect();
@@ -5459,6 +5518,15 @@ mod tests {
         )
         .unwrap();
         Spi::run("SET enable_seqscan = off").unwrap();
+        // This is a correctness anchor: the query IS row 777's own
+        // vector, so its true distance is 0 and it must be found
+        // regardless of quantization noise. That guarantee depends on
+        // k-widening (relaxed_order) rather than the fixed search_k=32
+        // default batch (off, default since v1.20.1) — quantization
+        // calibration can shift the self-match just outside the
+        // initial batch; explicitly opt in here rather than relying on
+        // whatever turbovec.iterative_scan defaults to.
+        Spi::run("SET turbovec.iterative_scan = relaxed_order").unwrap();
 
         // Query = a specific row's vector (id 777), so the true top-1
         // is unambiguous and the surrounding neighbours are stable.

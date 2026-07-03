@@ -121,8 +121,9 @@ you **three patterns** ([full guide: `docs/FILTERING.md`](FILTERING.md)):
 a **partial index** (`CREATE INDEX ... WHERE tenant_id = X`) for
 known filter values, the **in-kernel allowlist** `turbovec.knn(...,
 allowed)` for selective per-query id sets, and **iterative scan**
-(`turbovec.iterative_scan = relaxed_order`) for the normal `ORDER
-BY ... LIMIT` ergonomics. The allowlist is the one shown here — it
+(`turbovec.iterative_scan = relaxed_order`, opt-in; default `off`)
+for the normal `ORDER BY ... LIMIT` ergonomics. The allowlist is the
+one shown here — it
 pushes the id set into the SIMD kernel:
 
 ```sql

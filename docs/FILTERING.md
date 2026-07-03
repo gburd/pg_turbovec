@@ -290,7 +290,7 @@ the `WHERE` recheck; the AM's job is to keep feeding candidates until
 the post-filter yields `k`.
 
 ```sql
-SET turbovec.iterative_scan = relaxed_order;   -- default
+SET turbovec.iterative_scan = relaxed_order;   -- opt-in; default is off (see PRODUCTION.md)
 SET turbovec.max_scan_tuples = 20000;          -- safety ceiling (default)
 
 SELECT id FROM items

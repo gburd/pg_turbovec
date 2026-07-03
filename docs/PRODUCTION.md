@@ -183,14 +183,22 @@ SET turbovec.normalize_on_insert = off;
 -- Iterative index scan (v1.8.0+). With a selective WHERE filter +
 -- ORDER BY emb <=> q LIMIT k, the executor post-filters the
 -- index's candidates and can under-return if a single search_k
--- batch doesn't contain k matching rows. relaxed_order (the
--- default) re-runs the search with a doubled k and feeds the new
--- candidates until the LIMIT is satisfied or the cap below is hit;
--- the reorder queue keeps results exactly distance-ordered. off
--- restores the pre-v1.8.0 single-batch behaviour (faster, but may
--- under-return under selective filters). pgvector parity:
--- mirrors hnsw.iterative_scan (strict_order is future work).
-SET turbovec.iterative_scan = relaxed_order;  -- off | relaxed_order
+-- batch doesn't contain k matching rows. relaxed_order re-runs the
+-- search with a doubled k and feeds the new candidates until the
+-- LIMIT is satisfied or the cap below is hit; the reorder queue
+-- keeps results exactly distance-ordered. off (the **default since
+-- v1.20.1**) restores the pre-v1.8.0 single-batch behaviour: faster
+-- by ~450x on an UNFILTERED ORDER BY (measured SIFT-1M/128d IVF:
+-- ~2ms vs ~900ms), because PostgreSQL's reorder queue can only
+-- return a tuple early when the AM's advertised distance is exact;
+-- since we advertise NEG_INFINITY (opclass-agnostic safety) it
+-- never is, so under relaxed_order the executor drove the AM's OWN
+-- refill schedule to its cap (max_probes/max_scan_tuples) on EVERY
+-- query regardless of LIMIT. off may under-return under a
+-- SELECTIVE WHERE filter -- opt into relaxed_order for that case.
+-- pgvector parity: mirrors hnsw.iterative_scan (which also defaults
+-- off; strict_order is future work).
+SET turbovec.iterative_scan = off;  -- off (default) | relaxed_order
 
 -- Hard ceiling on candidates examined per iterative scan. Matches
 -- pgvector's hnsw.max_scan_tuples (default 20000). Only consulted

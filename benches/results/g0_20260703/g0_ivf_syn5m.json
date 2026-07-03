@@ -1,0 +1,30 @@
+[
+  {
+    "engine": "ivf",
+    "bw": 4,
+    "lists": 2236,
+    "sublinear": false,
+    "build_FAILED": "connection to server on socket \"/mnt/nvme/pg/.s.PGSQL.5432\" failed: FATAL:  the database system is shutting down\n"
+  },
+  {
+    "engine": "ivf",
+    "bw": 4,
+    "lists": 8944,
+    "sublinear": true,
+    "build_FAILED": "connection to server on socket \"/mnt/nvme/pg/.s.PGSQL.5432\" failed: FATAL:  the database system is shutting down\n"
+  },
+  {
+    "engine": "ivf",
+    "bw": 2,
+    "lists": 2236,
+    "sublinear": false,
+    "build_FAILED": "connection to server on socket \"/mnt/nvme/pg/.s.PGSQL.5432\" failed: FATAL:  the database system is shutting down\n"
+  },
+  {
+    "engine": "ivf",
+    "bw": 2,
+    "lists": 8944,
+    "sublinear": true,
+    "build_FAILED": "connection to server on socket \"/mnt/nvme/pg/.s.PGSQL.5432\" failed: FATAL:  the database system is shutting down\n"
+  }
+]

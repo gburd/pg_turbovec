@@ -4865,7 +4865,7 @@ mod tests {
             "0.1.0", "0.2.0", "0.4.0", "0.5.0",
             "1.3.0", "1.5.0", "1.6.0", "1.6.1",
             "1.7.0", "1.7.1", "1.7.2", "1.7.3",
-            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0", "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1",
+            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0", "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0",
         ];
         let expected_owned: Vec<String> =
             expected.iter().map(|s| s.to_string()).collect();
@@ -6361,6 +6361,186 @@ mod tests {
         let pset: HashSet<i64> = parallel.iter().copied().collect();
         assert_eq!(sset, pset, "tombstones: parallel != serial top-k SET");
         assert_distinct_ids(&parallel);
+    }
+
+    // ----------------------------------------------------------------
+    // Phase G-1 (an internal design note): centroid graph for
+    // sublinear IVF coarse-cell selection. The graph is computed
+    // IN-MEMORY at index-open from the already-persisted coarse
+    // centroids (no wire change, no REINDEX); `turbovec.coarse_graph`
+    // (off/auto/on) gates it. These tests exercise the OOC path
+    // (`OocIvfIndex`), which is where G-1 is wired in (see
+    // `src/index/ivf.rs`'s `build_centroid_graph`/`graph_probe` doc
+    // comments for the scoping rationale).
+    // ----------------------------------------------------------------
+
+    /// `turbovec.coarse_graph = on` must return the SAME top-k SET as
+    /// `= off` for the SAME query — the recall-preservation anchor
+    /// (requirement #3): forcing the graph on never loses a true
+    /// neighbour a linear scan would have found, at matched `probes`.
+    #[pg_test]
+    fn ivf_coarse_graph_matches_linear_scan() {
+        use_turbovec();
+        ivf2_make_corpus("cg_match", 20000);
+        Spi::run(
+            "CREATE INDEX cg_match_idx ON cg_match \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 64)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap(); // force OOC (where the graph is wired)
+
+        let pull = |sql: &str| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // Several distinct queries, not just one (a single lucky query
+        // could match by coincidence).
+        for probe_id in [500, 5000, 12000, 19000] {
+            let q = format!("(SELECT emb FROM cg_match WHERE id = {probe_id})");
+            let sql = format!("SELECT id FROM cg_match ORDER BY emb <=> {q} LIMIT 20");
+
+            Spi::run("SET turbovec.coarse_graph = off").unwrap();
+            crate::cache::invalidate_all();
+            let linear = pull(&sql);
+
+            Spi::run("SET turbovec.coarse_graph = on").unwrap();
+            crate::cache::invalidate_all();
+            let graph = pull(&sql);
+
+            assert_eq!(linear.len(), 20, "probe_id={probe_id}: linear returned {}", linear.len());
+            let lset: std::collections::HashSet<i64> = linear.iter().copied().collect();
+            let gset: std::collections::HashSet<i64> = graph.iter().copied().collect();
+            assert_eq!(
+                lset, gset,
+                "probe_id={probe_id}: coarse_graph=on top-k SET != coarse_graph=off\n  linear={linear:?}\n  graph={graph:?}"
+            );
+        }
+        Spi::run("RESET turbovec.coarse_graph").unwrap();
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+    }
+
+    /// `turbovec.coarse_graph = auto` (the default) with `lists` BELOW
+    /// `ivf::GRAPH_MIN_LISTS` must fall back to the plain linear scan
+    /// — requirement #4 (small-`lists` fallback). We can't directly
+    /// inspect the private `OocIvfIndex::graph` field from an SQL
+    /// test, so this proves the OBSERVABLE contract instead: `auto`
+    /// on a small index returns the exact same result as `off`
+    /// (nothing else could differ if no graph were built), while `on`
+    /// (forcing the graph even below the threshold) ALSO still matches
+    /// — i.e. auto's fallback doesn't change correctness either way.
+    #[pg_test]
+    fn ivf_coarse_graph_auto_falls_back_below_threshold() {
+        use_turbovec();
+        ivf2_make_corpus("cg_small", 6000);
+        // lists=8 is far below GRAPH_MIN_LISTS (4096): auto must not
+        // build a graph here.
+        Spi::run(
+            "CREATE INDEX cg_small_idx ON cg_small \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 8)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 4").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+
+        let q = "(SELECT emb FROM cg_small WHERE id = 3000)";
+        let sql = format!("SELECT id FROM cg_small ORDER BY emb <=> {q} LIMIT 10");
+        let pull = |sql: &str| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        Spi::run("SET turbovec.coarse_graph = off").unwrap();
+        crate::cache::invalidate_all();
+        let off = pull(&sql);
+
+        Spi::run("SET turbovec.coarse_graph = auto").unwrap();
+        crate::cache::invalidate_all();
+        let auto = pull(&sql);
+
+        Spi::run("SET turbovec.coarse_graph = on").unwrap();
+        crate::cache::invalidate_all();
+        let on = pull(&sql);
+
+        Spi::run("RESET turbovec.coarse_graph").unwrap();
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+        assert_eq!(off.len(), 10);
+        let off_set: std::collections::HashSet<i64> = off.iter().copied().collect();
+        let auto_set: std::collections::HashSet<i64> = auto.iter().copied().collect();
+        let on_set: std::collections::HashSet<i64> = on.iter().copied().collect();
+        assert_eq!(off_set, auto_set, "auto (below GRAPH_MIN_LISTS) must match off");
+        assert_eq!(off_set, on_set, "on (forced graph, tiny lists) must still match off");
+    }
+
+    /// The `CentroidGraph` built at OOC cache-install time is a
+    /// deterministic function of the persisted centroids: installing
+    /// the SAME index twice (forcing a cache rebuild between) must
+    /// produce identical query results under `coarse_graph = on`.
+    /// This is the end-to-end (relfile-backed) byte-determinism
+    /// anchor for G-1's requirement #2, complementing the pure-Rust
+    /// `centroid_graph_build_deterministic` unit test in
+    /// `index::ivf::tests` (which checks the `CentroidGraph` value
+    /// directly, not through SQL).
+    #[pg_test]
+    fn ivf_coarse_graph_build_is_deterministic_across_cache_rebuilds() {
+        use_turbovec();
+        ivf2_make_corpus("cg_det", 20000);
+        Spi::run(
+            "CREATE INDEX cg_det_idx ON cg_det \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 64)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        Spi::run("SET turbovec.out_of_core = on").unwrap();
+        Spi::run("SET turbovec.coarse_graph = on").unwrap();
+
+        let q = "(SELECT emb FROM cg_det WHERE id = 10000)";
+        let sql = format!("SELECT id FROM cg_det ORDER BY emb <=> {q} LIMIT 15");
+        let pull = |sql: &str| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // Force the cache to evict and rebuild the OocIvfIndex (and
+        // therefore rebuild the CentroidGraph from scratch) between
+        // two runs of the identical query.
+        crate::cache::invalidate_all();
+        let r1 = pull(&sql);
+        crate::cache::invalidate_all();
+        let r2 = pull(&sql);
+
+        Spi::run("RESET turbovec.coarse_graph").unwrap();
+        Spi::run("SET turbovec.out_of_core = auto").unwrap();
+
+        assert_eq!(r1.len(), 15);
+        assert_eq!(
+            r1, r2,
+            "rebuilding the CentroidGraph from the same persisted centroids \
+             must reproduce the identical scan result (same order, not just same set)"
+        );
     }
 
     /// The GUC default (`scan_parallelism = 0`, auto) must return

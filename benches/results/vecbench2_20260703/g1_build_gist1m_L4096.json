@@ -1,0 +1,8 @@
+{
+  "corpus": "gist1m",
+  "lists": 4096,
+  "idx": "gist_corpus_ivf_bw4_L4096_g1",
+  "build_s": 3664.61,
+  "idx_bytes": 994885632,
+  "idx_total_bytes": 994885632
+}

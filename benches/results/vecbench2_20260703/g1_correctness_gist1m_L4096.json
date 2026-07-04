@@ -1,0 +1,13 @@
+{
+  "corpus": "gist1m",
+  "lists": 4096,
+  "probes_tested": [
+    8,
+    32,
+    64
+  ],
+  "n_queries": 25,
+  "ok": true,
+  "mismatches": [],
+  "n_mismatches": 0
+}

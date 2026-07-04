@@ -1,0 +1,74 @@
+[
+  {
+    "corpus": "sift1m",
+    "lists": 4096,
+    "coarse_graph": "off",
+    "probes": 8,
+    "p50": 3.031,
+    "p95": 4.265,
+    "mean": 3.165,
+    "qps_1conn": 315.92,
+    "recall": 0.6944,
+    "load": "1.17"
+  },
+  {
+    "corpus": "sift1m",
+    "lists": 4096,
+    "coarse_graph": "off",
+    "probes": 32,
+    "p50": 3.662,
+    "p95": 4.999,
+    "mean": 3.798,
+    "qps_1conn": 263.302,
+    "recall": 0.8692,
+    "load": "1.39"
+  },
+  {
+    "corpus": "sift1m",
+    "lists": 4096,
+    "coarse_graph": "off",
+    "probes": 64,
+    "p50": 5.305,
+    "p95": 7.773,
+    "mean": 5.598,
+    "qps_1conn": 178.634,
+    "recall": 0.9054,
+    "load": "2.44"
+  },
+  {
+    "corpus": "sift1m",
+    "lists": 4096,
+    "coarse_graph": "on",
+    "probes": 8,
+    "p50": 2.278,
+    "p95": 3.397,
+    "mean": 2.389,
+    "qps_1conn": 418.561,
+    "recall": 0.6597,
+    "load": "2.19"
+  },
+  {
+    "corpus": "sift1m",
+    "lists": 4096,
+    "coarse_graph": "on",
+    "probes": 32,
+    "p50": 3.053,
+    "p95": 4.345,
+    "mean": 3.19,
+    "qps_1conn": 313.435,
+    "recall": 0.8692,
+    "load": "2.43"
+  },
+  {
+    "corpus": "sift1m",
+    "lists": 4096,
+    "coarse_graph": "on",
+    "probes": 64,
+    "p50": 4.748,
+    "p95": 7.071,
+    "mean": 5.042,
+    "qps_1conn": 198.315,
+    "recall": 0.9054,
+    "load": "2.41"
+  }
+]

@@ -1,0 +1,8 @@
+{
+  "corpus": "sift1m",
+  "lists": 16000,
+  "idx": "sift_corpus_ivf_bw4_L16000_g1",
+  "build_s": 1983.0,
+  "idx_bytes": 149241856,
+  "idx_total_bytes": 149241856
+}

@@ -1,0 +1,74 @@
+[
+  {
+    "corpus": "gist1m",
+    "lists": 4096,
+    "coarse_graph": "off",
+    "probes": 8,
+    "p50": 22.476,
+    "p95": 29.995,
+    "mean": 22.662,
+    "qps_1conn": 44.127,
+    "recall": 0.4076,
+    "load": "1.16"
+  },
+  {
+    "corpus": "gist1m",
+    "lists": 4096,
+    "coarse_graph": "off",
+    "probes": 32,
+    "p50": 25.102,
+    "p95": 34.57,
+    "mean": 26.26,
+    "qps_1conn": 38.081,
+    "recall": 0.5846,
+    "load": "2.87"
+  },
+  {
+    "corpus": "gist1m",
+    "lists": 4096,
+    "coarse_graph": "off",
+    "probes": 64,
+    "p50": 43.014,
+    "p95": 61.031,
+    "mean": 43.664,
+    "qps_1conn": 22.902,
+    "recall": 0.6395,
+    "load": "3.41"
+  },
+  {
+    "corpus": "gist1m",
+    "lists": 4096,
+    "coarse_graph": "on",
+    "probes": 8,
+    "p50": 18.376,
+    "p95": 26.043,
+    "mean": 18.559,
+    "qps_1conn": 53.881,
+    "recall": 0.4072,
+    "load": "1.35"
+  },
+  {
+    "corpus": "gist1m",
+    "lists": 4096,
+    "coarse_graph": "on",
+    "probes": 32,
+    "p50": 21.858,
+    "p95": 33.177,
+    "mean": 23.253,
+    "qps_1conn": 43.004,
+    "recall": 0.5845,
+    "load": "3.00"
+  },
+  {
+    "corpus": "gist1m",
+    "lists": 4096,
+    "coarse_graph": "on",
+    "probes": 64,
+    "p50": 40.824,
+    "p95": 61.013,
+    "mean": 41.932,
+    "qps_1conn": 23.848,
+    "recall": 0.6395,
+    "load": "3.54"
+  }
+]

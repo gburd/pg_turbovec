@@ -1,0 +1,17 @@
+[
+  {
+    "engine": "turbovec_default",
+    "lists": 1000,
+    "probes": 8,
+    "search_k": 32,
+    "build_s": 54.92,
+    "idx_bytes": 141361152,
+    "idx_total_bytes": 141361152,
+    "p50": 1.634,
+    "p95": 1.827,
+    "mean": 1.649,
+    "qps_1conn": 606.48,
+    "recall": 0.7962,
+    "load": "2.13"
+  }
+]

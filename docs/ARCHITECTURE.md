@@ -543,11 +543,26 @@ ambulkdelete `ShareUpdateExclusiveLock` — unchanged.
 | GUC                              | Type | Default | Range          | Notes |
 |----------------------------------|------|---------|----------------|-------|
 | `turbovec.bit_width_default`     | int  | 4       | 2..=4          | applied when `WITH (bit_width)` is omitted |
-| `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      | 0 disables cache (forces rebuild on every scan) |
+| `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      | 0 disables caching (forces rebuild every scan); also the size threshold `turbovec.out_of_core=auto` compares codes-bytes against |
 | `turbovec.warn_on_rebuild`       | bool | true    | -              | emit `NOTICE` when a per-backend `IdMapIndex` is reconstructed from the relfile pages |
 | `turbovec.search_concurrency`    | int  | 1       | 1..=128        | caps rayon fan-out inside a single batched search |
-| `turbovec.mmap_static_blocked`   | bool | true (deprecated no-op) | - | Deprecated/ignored as of v1.19.0; all reads go through the buffer manager. See § 8.1. |
 | `turbovec.normalize_on_insert`   | bool | true    | -              | unit-normalise vectors before passing to `add_with_ids` |
+| `turbovec.search_k`              | int  | 32      | 1..=100000     | candidate count per scan batch; the reorder-recheck floor lever (Tier-1 #1a) |
+| `turbovec.probes`                | int  | 8       | 1..=65536      | IVF: number of coarse cells scanned per query |
+| `turbovec.iterative_scan`        | enum | off     | off, relaxed_order | off is the default since v1.20.1 (the old `relaxed_order` default drove a 450× latency regression — see CHANGELOG) |
+| `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10000000   | cap on total candidates examined under iterative refill |
+| `turbovec.build_parallelism`     | int  | 0       | 0..=128        | 0 = auto; bounds the rayon pool used by IVF build (k-means + assign-sweep) |
+| `turbovec.scan_parallelism`      | int  | 0       | 0..=128        | 0 = auto = `min(cores,4)`; parallelizes the out-of-core per-query fine-scan across probed cells |
+| `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    | widens the initial candidate set to `ceil(search_k * oversample)` |
+| `turbovec.max_probes`            | int  | 64      | 1..=65536      | cap on IVF probe-set widening under iterative refill |
+| `turbovec.out_of_core`           | enum | auto    | off, auto, on  | auto goes cell-scoped only when an IVF index's codes exceed half of `turbovec.cache_size_mb` |
+| `turbovec.coarse_graph`          | enum | auto    | off, auto, on  | Phase G-1: navigate an in-memory centroid graph for IVF coarse-cell selection instead of a linear scan, once `lists` is large enough to be worth it; only engages on the out-of-core scan path (needs `turbovec.out_of_core` to have selected cell-scoped serving) |
+| `turbovec.allowlist`             | str  | `""`    | CSV of bigint ids | Phase C: per-session heap-TID allowlist ANDed into the scan mask |
+
+`turbovec.mmap_static_blocked` was removed in v1.22.0 (it had been a
+deprecated no-op since v1.19.0, when the relfile mmap fast path it
+controlled was deleted). `SET turbovec.mmap_static_blocked = ...` now
+errors like any other unknown GUC. See CHANGELOG.md.
 
 All five are `USERSET` — settable per-session.
 

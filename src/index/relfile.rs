@@ -64,8 +64,7 @@ const GENERIC_XLOG_BATCH: usize = pg_sys::MAX_GENERIC_XLOG_PAGES as usize;
 #[allow(dead_code)]
 unsafe fn rel_needs_wal(rel: pg_sys::Relation) -> bool {
     let rd_rel = (*rel).rd_rel;
-    !rd_rel.is_null()
-        && (*rd_rel).relpersistence as u8 == pg_sys::RELPERSISTENCE_PERMANENT
+    !rd_rel.is_null() && (*rd_rel).relpersistence as u8 == pg_sys::RELPERSISTENCE_PERMANENT
 }
 
 /// Convenience wrapper around `ReadBufferExtended` that
@@ -280,11 +279,8 @@ pub(crate) unsafe fn write_meta_in_fork(
     };
 
     let state = pg_sys::GenericXLogStart(rel);
-    let page = pg_sys::GenericXLogRegisterBuffer(
-        state,
-        buf,
-        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-    );
+    let page =
+        pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
     // Re-init on the GenericXLog workspace page so partial old
     // contents (e.g. a previous larger meta layout) don't leak.
     // page_init_no_hole flags the data region as "used" so
@@ -431,11 +427,8 @@ pub(crate) unsafe fn extend_to(rel: pg_sys::Relation, target: u32) {
         // with un-WAL'd zero pages on disk.
         let buf = extend_block(rel);
         let state = pg_sys::GenericXLogStart(rel);
-        let page = pg_sys::GenericXLogRegisterBuffer(
-            state,
-            buf,
-            pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-        );
+        let page =
+            pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
         page_init_no_hole(page);
         pg_sys::GenericXLogFinish(state);
         pg_sys::UnlockReleaseBuffer(buf);
@@ -729,9 +722,7 @@ pub(crate) unsafe fn write_packed_phase(
     // `MetaPageData::plan_with_blocked` lays out blocked/rotation
     // AFTER ids — the row-major chain offsets are stable across
     // re-planning.
-    let plan = MetaPageData::plan_with_blocked(
-        bit_width, dim, n_vectors, am_version, 0, 0, 0,
-    );
+    let plan = MetaPageData::plan_with_blocked(bit_width, dim, n_vectors, am_version, 0, 0, 0);
     let layout = PackedPhaseLayout {
         bit_width,
         dim,
@@ -755,8 +746,7 @@ pub(crate) unsafe fn write_packed_phase(
     // Pre-extend so the chain offsets we just planned are valid
     // pages on disk before any reader could see them. Phase 2 may
     // extend further (for blocked + rotation) but never shrinks.
-    let row_chain_total =
-        1 + layout.codes_n_pages + layout.scales_n_pages + layout.ids_n_pages;
+    let row_chain_total = 1 + layout.codes_n_pages + layout.scales_n_pages + layout.ids_n_pages;
     let existing_before = nblocks(rel);
     if existing_before < row_chain_total {
         extend_to(rel, row_chain_total);
@@ -772,10 +762,8 @@ pub(crate) unsafe fn write_packed_phase(
     );
 
     // Scales chain. Reinterpret f32 slice as raw bytes.
-    let scales_bytes: &[u8] = std::slice::from_raw_parts(
-        scales.as_ptr().cast::<u8>(),
-        std::mem::size_of_val(scales),
-    );
+    let scales_bytes: &[u8] =
+        std::slice::from_raw_parts(scales.as_ptr().cast::<u8>(), std::mem::size_of_val(scales));
     write_chain_at(
         rel,
         layout.scales_first_blkno,
@@ -1182,11 +1170,8 @@ pub(crate) unsafe fn copy_slot_in_chain(
         // finish. Cheaper than a separate read.
         let buf = read_block(rel, src_blkno, /*exclusive=*/ true);
         let state = pg_sys::GenericXLogStart(rel);
-        let page = pg_sys::GenericXLogRegisterBuffer(
-            state,
-            buf,
-            pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-        );
+        let page =
+            pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
         let data = page.cast::<u8>().add(PAGE_HEADER_BYTES);
         std::ptr::copy(data.add(src_off), data.add(dst_off), stride_us);
         pg_sys::GenericXLogFinish(state);
@@ -1209,11 +1194,8 @@ pub(crate) unsafe fn copy_slot_in_chain(
 
     let dst_buf = read_block(rel, dst_blkno, /*exclusive=*/ true);
     let state = pg_sys::GenericXLogStart(rel);
-    let page = pg_sys::GenericXLogRegisterBuffer(
-        state,
-        dst_buf,
-        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-    );
+    let page =
+        pg_sys::GenericXLogRegisterBuffer(state, dst_buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
     // NOTE: do NOT call page_init_no_hole here. The destination
     // page was previously written via write_chain_at, which set
     // pd_lower = pd_upper. PageInit would reset that and zero
@@ -1525,10 +1507,7 @@ pub(crate) unsafe fn read_blocked(rel: pg_sys::Relation, meta: &MetaPageData) ->
 /// # Safety
 ///
 /// Caller must hold a relation reference.
-pub(crate) unsafe fn read_rotation(
-    rel: pg_sys::Relation,
-    meta: &MetaPageData,
-) -> Vec<f32> {
+pub(crate) unsafe fn read_rotation(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<f32> {
     if meta.rotation_count == 0 || meta.rotation_first == 0 || meta.rotation_dim == 0 {
         return Vec::new();
     }
@@ -1555,10 +1534,7 @@ pub(crate) unsafe fn read_rotation(
 /// # Safety
 ///
 /// Caller must hold a relation reference.
-pub(crate) unsafe fn read_coarse_centroids(
-    rel: pg_sys::Relation,
-    meta: &MetaPageData,
-) -> Vec<f32> {
+pub(crate) unsafe fn read_coarse_centroids(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<f32> {
     if meta.lists == 0 || meta.coarse_first == 0 || meta.coarse_count == 0 {
         return Vec::new();
     }
@@ -1732,11 +1708,8 @@ pub(crate) unsafe fn force_meta_version(rel: pg_sys::Relation, version: u8) {
     );
     let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
     let state = pg_sys::GenericXLogStart(rel);
-    let page = pg_sys::GenericXLogRegisterBuffer(
-        state,
-        buf,
-        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-    );
+    let page =
+        pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
     // Byte layout: PG_HEADER (24) + magic (4) + version (1).
     // Patch only the version byte; the surrounding chain offsets
     // and codebook stay valid so the decoder accepts the page.
@@ -1772,11 +1745,8 @@ pub(crate) unsafe fn force_meta_blank_ivf(rel: pg_sys::Relation) {
     );
     let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
     let state = pg_sys::GenericXLogStart(rel);
-    let page = pg_sys::GenericXLogRegisterBuffer(
-        state,
-        buf,
-        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-    );
+    let page =
+        pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
     // v4 IVF fields: payload offset 224, 5 contiguous u32s = 20 bytes.
     const V4_BASE: usize = 224;
     let ivf_fields = page.cast::<u8>().add(PAGE_HEADER_BYTES + V4_BASE);
@@ -1807,11 +1777,8 @@ pub(crate) unsafe fn force_meta_set_degraded(rel: pg_sys::Relation) {
     );
     let buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
     let state = pg_sys::GenericXLogStart(rel);
-    let page = pg_sys::GenericXLogRegisterBuffer(
-        state,
-        buf,
-        pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
-    );
+    let page =
+        pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
     // E-2 fields begin at payload offset 244 (ivf_degraded is the
     // first byte).
     const E2_BASE: usize = 244;

@@ -1,15 +1,15 @@
 //! Phase 5 extras: pgvector-parity helpers that don't fit cleanly
 //! into the type / distance / aggregate modules.
 //!
-//! - `subvector(vector, start, length) -> vector` \u2014 1-indexed
+//! - `subvector(vector, start, length) -> vector` — 1-indexed
 //!   slice, mirrors pgvector's `subvector`.
-//! - `vec_to_jsonb(vector)` \u2014 explicit JSON output (handy for
+//! - `vec_to_jsonb(vector)` — explicit JSON output (handy for
 //!   logging, replication via JSONB columns).
-//! - `jsonb_to_vec(jsonb)` \u2014 inverse.
-//! - `vec_check_dim(vector, integer)` \u2014 runtime dim assertion;
+//! - `jsonb_to_vec(jsonb)` — inverse.
+//! - `vec_check_dim(vector, integer)` — runtime dim assertion;
 //!   raises ERROR if mismatch. Cheaper than typmod plumbing.
-//! - `vec_zeros(integer)` \u2014 zero-filled vector helper.
-//! - `vec_to_text(vector)` \u2014 explicit text representation
+//! - `vec_zeros(integer)` — zero-filled vector helper.
+//! - `vec_to_text(vector)` — explicit text representation
 //!   (the IO function's output, callable as a regular function).
 
 use pgrx::prelude::*;
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::vec::{Vector, MAX_DIM};
 
-/// `subvector(v, start, length)` \u2014 1-indexed slice (matches pgvector).
+/// `subvector(v, start, length)` — 1-indexed slice (matches pgvector).
 /// `start` and `length` must be positive and the resulting range must
 /// lie within `v`.
 ///

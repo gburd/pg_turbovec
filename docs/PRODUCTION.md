@@ -165,15 +165,14 @@ SET turbovec.cache_size_mb = 256;
 -- WITH (lists = N), for a >RAM corpus).
 SET turbovec.out_of_core = auto;
 
--- NOTE: turbovec.mmap_static_blocked is DEPRECATED and ignored as
--- of v1.19.0. pg_turbovec no longer mmaps the relfile; every byte
--- of index data is read through PostgreSQL's shared-buffer cache
--- (ReadBufferExtended). Size shared_buffers to hold the hot
--- (compressed) index for best cold-fill latency -- pg_turbovec's
--- 7-15x compression is what makes "the index fits shared_buffers"
--- achievable where fp32 HNSW could not. The GUC is kept as a no-op
--- for one minor so an existing SET does not error; it will be
--- removed. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
+-- turbovec.mmap_static_blocked was REMOVED in v1.22.0 (it had been
+-- a deprecated no-op since v1.19.0, when pg_turbovec's relfile mmap
+-- was deleted). All index data is read through PostgreSQL's
+-- shared-buffer cache (ReadBufferExtended); there is no GUC to
+-- toggle. Size shared_buffers to hold the hot (compressed) index for
+-- best cold-fill latency -- pg_turbovec's 7-15x compression is what
+-- makes "the index fits shared_buffers" achievable where fp32 HNSW
+-- could not. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
 
 -- Normalise embeddings on insert. Useful if your embedding
 -- producer doesn't normalise; lets you use cosine distance

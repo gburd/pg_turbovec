@@ -444,7 +444,11 @@ unsafe fn load_persistent_colbert_inner(
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(index_rel, &meta);
-        let rotation_opt = if rotation.is_empty() { None } else { Some(rotation) };
+        let rotation_opt = if rotation.is_empty() {
+            None
+        } else {
+            Some(rotation)
+        };
         cache::ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             meta.dim as usize,
@@ -470,13 +474,7 @@ unsafe fn load_persistent_colbert_inner(
     };
     let bytes_per_vec = (meta.dim as usize * meta.bit_width as usize) / 8 + 4 + 64;
     let total_bytes = bytes_per_vec * (meta.n_vectors as usize).max(1);
-    let handle = cache::scan_install(
-        key,
-        stored,
-        total_bytes,
-        relfile_node,
-        version_as_i64,
-    );
+    let handle = cache::scan_install(key, stored, total_bytes, relfile_node, version_as_i64);
     Some((handle, tombstones))
 }
 

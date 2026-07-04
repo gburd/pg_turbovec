@@ -4,12 +4,12 @@
 
 | Version | Tested patch | Status | Tests | Notes |
 |---|---|---|---|---|
-| 13.23 | ✅ | Supported | 250/251 (1 ignored) | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.23 | ✅ | Supported | 250/251 (1 ignored) | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.18 | ✅ | Supported | 250/251 (1 ignored) | Same shape as 14. |
-| 16.14 | ✅ | Supported | 250/251 (1 ignored) | Reference platform during development. |
-| 17.10 | ✅ | Supported | 250/251 (1 ignored) | Benchmark platform (`arnold`). |
-| 18.4  | ✅ | Supported | 250/251 (1 ignored) | `relopt_parse_elt` gained `isset_offset`. |
+| 13.23 | ✅ | Supported | 261/262 (1 ignored) | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.23 | ✅ | Supported | 261/262 (1 ignored) | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.18 | ✅ | Supported | 261/262 (1 ignored) | Same shape as 14. |
+| 16.14 | ✅ | Supported | 261/262 (1 ignored) | Reference platform during development. |
+| 17.10 | ✅ | Supported | 261/262 (1 ignored) | Benchmark platform (`arnold`). |
+| 18.4  | ✅ | Supported | 261/262 (1 ignored) | `relopt_parse_elt` gained `isset_offset`. |
 
 > Test counts and patch versions above are the exact numbers CI
 > installs and reports as of the most recent green run

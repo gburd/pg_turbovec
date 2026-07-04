@@ -388,14 +388,22 @@ impl MetaPageData {
             rows_per_ids_page,
             stride_bytes,
             am_version,
-            blocked_first: if blocked_bytes > 0 { blocked_first_blkno } else { 0 },
+            blocked_first: if blocked_bytes > 0 {
+                blocked_first_blkno
+            } else {
+                0
+            },
             blocked_count,
             blocked_bytes,
             n_blocks_blocked,
             codebook_n_levels: 0,
             centroids: [0.0; MAX_CODEBOOK_LEVELS],
             boundaries: [0.0; MAX_CODEBOOK_LEVELS - 1],
-            rotation_first: if rotation_bytes > 0 { rotation_first_blkno } else { 0 },
+            rotation_first: if rotation_bytes > 0 {
+                rotation_first_blkno
+            } else {
+                0
+            },
             rotation_count,
             rotation_dim: if rotation_bytes > 0 { dim } else { 0 },
             // v4 IVF fields default to flat; set_ivf_chains() fills
@@ -423,12 +431,7 @@ impl MetaPageData {
     /// the packed cell-directory (`lists * CellEntry::ENCODED_BYTES`).
     /// Pass `lists = 0` (the default after `plan_with_blocked`) to
     /// leave the index flat — in that case this is a no-op.
-    pub fn set_ivf_chains(
-        &mut self,
-        lists: u32,
-        coarse_bytes: u64,
-        cell_dir_bytes: u64,
-    ) {
+    pub fn set_ivf_chains(&mut self, lists: u32, coarse_bytes: u64, cell_dir_bytes: u64) {
         self.lists = lists;
         if lists == 0 {
             self.coarse_first = 0;
@@ -696,14 +699,12 @@ impl MetaPageData {
             }
             for i in 0..MAX_CODEBOOK_LEVELS {
                 let off = 88 + i * 4;
-                me.centroids[i] =
-                    f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+                me.centroids[i] = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
             }
             let bound_base = 88 + MAX_CODEBOOK_LEVELS * 4;
             for i in 0..MAX_CODEBOOK_LEVELS - 1 {
                 let off = bound_base + i * 4;
-                me.boundaries[i] =
-                    f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+                me.boundaries[i] = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
             }
         }
 
@@ -714,8 +715,7 @@ impl MetaPageData {
                 return Err("v3 meta page data region too short");
             }
             let v3_base = 212;
-            me.rotation_first =
-                u32::from_le_bytes(bytes[v3_base..v3_base + 4].try_into().unwrap());
+            me.rotation_first = u32::from_le_bytes(bytes[v3_base..v3_base + 4].try_into().unwrap());
             me.rotation_count =
                 u32::from_le_bytes(bytes[v3_base + 4..v3_base + 8].try_into().unwrap());
             me.rotation_dim =
@@ -911,8 +911,15 @@ mod tests {
     fn round_trip_meta_v4_flat() {
         let dim: u32 = 384;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta =
-            MetaPageData::plan_with_blocked(4, dim, 1_000_000, 7, 12_345_678, 31_250, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(
+            4,
+            dim,
+            1_000_000,
+            7,
+            12_345_678,
+            31_250,
+            rotation_bytes,
+        );
         let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
         meta.set_codebook(&centroids, &boundaries);
@@ -942,8 +949,7 @@ mod tests {
         let lists: u32 = 16;
         let n: u64 = 4096;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta =
-            MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
         let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
         meta.set_codebook(&centroids, &boundaries);
@@ -984,8 +990,7 @@ mod tests {
         let lists: u32 = 16;
         let n: u64 = 4096;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta =
-            MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
         let coarse_bytes = u64::from(lists) * u64::from(dim) * 4;
         let cell_dir_bytes = u64::from(lists) * 12;
         meta.set_ivf_chains(lists, coarse_bytes, cell_dir_bytes);
@@ -1172,7 +1177,7 @@ mod tests {
         buf[72..80].copy_from_slice(&12_000u64.to_le_bytes()); // blocked_bytes
         buf[80..84].copy_from_slice(&5u32.to_le_bytes()); // n_blocks_blocked
         buf[84..88].copy_from_slice(&16u32.to_le_bytes()); // codebook_n_levels
-        // Centroid/boundary tables stay zero — fine for the decoder.
+                                                           // Centroid/boundary tables stay zero — fine for the decoder.
 
         let meta = MetaPageData::decode(&buf).expect("v2 decode");
         assert_eq!(meta.version, 2);
@@ -1257,9 +1262,7 @@ mod tests {
     fn single_vector_still_emits_v4_bytes() {
         let dim: u32 = 384;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(
-            4, dim, 1000, 7, 12_345, 31, rotation_bytes,
-        );
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, 1000, 7, 12_345, 31, rotation_bytes);
         let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
         meta.set_codebook(&centroids, &boundaries);
@@ -1285,9 +1288,7 @@ mod tests {
         let lists: u32 = 16;
         let n: u64 = 4096; // token slots
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(
-            4, dim, n, 9, 200_000, 781, rotation_bytes,
-        );
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
         meta.set_codebook(
             &(0..16).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
             &(0..15).map(|i| i as f32 * 0.05).collect::<Vec<_>>(),
@@ -1315,10 +1316,9 @@ mod tests {
     /// legacy — the additive backward-compat path.
     #[test]
     fn decodes_v4_meta_as_single_vector_under_v5() {
-        let mut buf = MetaPageData::plan_with_blocked(
-            4, 384, 100, 3, 12_000, 5, u64::from(384u32) * 384 * 4,
-        )
-        .encode();
+        let mut buf =
+            MetaPageData::plan_with_blocked(4, 384, 100, 3, 12_000, 5, u64::from(384u32) * 384 * 4)
+                .encode();
         // Force the version byte to 4 (a genuine pre-F-2 index) and
         // ensure the kind byte is zero.
         buf[4] = 4;

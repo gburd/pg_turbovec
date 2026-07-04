@@ -338,8 +338,7 @@ fn hostname() -> String {
 }
 
 fn num_cpus_best_effort() -> usize {
-    thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
+    thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 /// `YYYYMMDDTHHMMSSZ` UTC timestamp using only stdlib.  Avoids

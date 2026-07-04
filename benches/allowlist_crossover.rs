@@ -28,14 +28,20 @@ use std::time::Instant;
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use turbovec::IdMapIndex;
 use turbovec::search::{blocks_skipped_by_mask, reset_blocks_skipped_by_mask};
+use turbovec::IdMapIndex;
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn random_unit(dim: usize, rng: &mut impl Rng) -> Vec<f32> {
@@ -138,7 +144,11 @@ fn main() {
         for q in &queries {
             let t0 = Instant::now();
             let (_s, hits) = idx.search(q, fetch);
-            let kept: Vec<u64> = hits.into_iter().filter(|id| allow_set.contains(id)).take(k).collect();
+            let kept: Vec<u64> = hits
+                .into_iter()
+                .filter(|id| allow_set.contains(id))
+                .take(k)
+                .collect();
             base_lat.push(t0.elapsed().as_secs_f64() * 1e6);
             std::hint::black_box(kept);
         }

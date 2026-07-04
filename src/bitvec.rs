@@ -118,8 +118,7 @@ impl InOutFuncs for Bitvec {
         }
     }
 
-    const NULL_ERROR_MESSAGE: Option<&'static str> =
-        Some("NULL is not a valid bitvec value");
+    const NULL_ERROR_MESSAGE: Option<&'static str> = Some("NULL is not a valid bitvec value");
 }
 
 // ---------------------------------------------------------------------

@@ -449,49 +449,61 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let arc: cache::ScanHandle = match dirty_fallback {
             Some((_, a, _)) => cache::ScanHandle::Mutable(a),
             None => match cache::scan_lookup(key, relfile_node, version_as_i64) {
-            Some(a) => a,
-            None => {
-                // Cache miss: build the read-only handle from the
-                // relfile via the buffer manager (all index data is
-                // read through `ReadBufferExtended`; see
-                // docs/BUFFER_CACHE_ONLY_DESIGN.md).
-                //
-                // We materialise a read-only `ReadOnlyIndex` here,
-                // NOT a full `IdMapIndex`: the scan path only needs
-                // slot->id translation (a `Vec` index), so we skip
-                // the O(n) `id_to_slot` `HashMap` build. The first
-                // `aminsert` in this backend rebuilds a full
-                // `IdMapIndex` via `am_install` (deferred HashMap).
-                let meta = relfile::read_meta((*scan).indexRelation)
-                    .expect("meta disappeared mid-scan");
+                Some(a) => a,
+                None => {
+                    // Cache miss: build the read-only handle from the
+                    // relfile via the buffer manager (all index data is
+                    // read through `ReadBufferExtended`; see
+                    // docs/BUFFER_CACHE_ONLY_DESIGN.md).
+                    //
+                    // We materialise a read-only `ReadOnlyIndex` here,
+                    // NOT a full `IdMapIndex`: the scan path only needs
+                    // slot->id translation (a `Vec` index), so we skip
+                    // the O(n) `id_to_slot` `HashMap` build. The first
+                    // `aminsert` in this backend rebuilds a full
+                    // `IdMapIndex` via `am_install` (deferred HashMap).
+                    let meta = relfile::read_meta((*scan).indexRelation)
+                        .expect("meta disappeared mid-scan");
 
-                // Phase B-1/B-2: out-of-core cell-scoped IVF. When
-                // `turbovec.out_of_core` selects it AND this is a
-                // live IVF index (lists > 0, not vacuum-degraded),
-                // install a bounded-resident `OocIvfIndex` instead
-                // of the whole-index `ReadOnlyIndex`. The codes
-                // buffer is gathered per probed cell through the
-                // buffer manager (`gather_codes_ranges`), so the
-                // resident set is O(probes*cell_size) not O(n) — a
-                // >RAM index can be served. Flat / degraded indexes
-                // fall through to the whole-index load (they have no
-                // cells to scope). `auto` (default) goes cell-scoped
-                // only when the codes are large vs
-                // turbovec.cache_size_mb; `on` always, `off` never.
-                let codes_bytes = (meta.n_vectors as u64)
-                    .saturating_mul(((meta.dim as u64) * (meta.bit_width as u64)) / 8);
-                if guc::out_of_core_cell_scoped(codes_bytes)
-                    && meta.has_ivf()
-                    && meta.has_prepared_layout()
-                {
-                    if let Some(handle) = try_install_ooc(
-                        (*scan).indexRelation,
-                        &meta,
-                        key,
-                        relfile_node,
-                        version_as_i64,
-                    ) {
-                        handle
+                    // Phase B-1/B-2: out-of-core cell-scoped IVF. When
+                    // `turbovec.out_of_core` selects it AND this is a
+                    // live IVF index (lists > 0, not vacuum-degraded),
+                    // install a bounded-resident `OocIvfIndex` instead
+                    // of the whole-index `ReadOnlyIndex`. The codes
+                    // buffer is gathered per probed cell through the
+                    // buffer manager (`gather_codes_ranges`), so the
+                    // resident set is O(probes*cell_size) not O(n) — a
+                    // >RAM index can be served. Flat / degraded indexes
+                    // fall through to the whole-index load (they have no
+                    // cells to scope). `auto` (default) goes cell-scoped
+                    // only when the codes are large vs
+                    // turbovec.cache_size_mb; `on` always, `off` never.
+                    let codes_bytes = (meta.n_vectors as u64)
+                        .saturating_mul(((meta.dim as u64) * (meta.bit_width as u64)) / 8);
+                    if guc::out_of_core_cell_scoped(codes_bytes)
+                        && meta.has_ivf()
+                        && meta.has_prepared_layout()
+                    {
+                        if let Some(handle) = try_install_ooc(
+                            (*scan).indexRelation,
+                            &meta,
+                            key,
+                            relfile_node,
+                            version_as_i64,
+                        ) {
+                            handle
+                        } else {
+                            install_whole_index(
+                                (*scan).indexRelation,
+                                &meta,
+                                key,
+                                relfile_node,
+                                version_as_i64,
+                                n_in_index,
+                                dim_u32,
+                                bit_width_u8,
+                            )
+                        }
                     } else {
                         install_whole_index(
                             (*scan).indexRelation,
@@ -504,20 +516,9 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                             bit_width_u8,
                         )
                     }
-                } else {
-                    install_whole_index(
-                        (*scan).indexRelation,
-                        &meta,
-                        key,
-                        relfile_node,
-                        version_as_i64,
-                        n_in_index,
-                        dim_u32,
-                        bit_width_u8,
-                    )
                 }
-            }
-        }};
+            },
+        };
         let n_live = arc.len();
         if n_live == 0 {
             (*opaque).fetched = true;
@@ -717,7 +718,11 @@ unsafe fn install_whole_index(
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(rel, meta);
-        let rotation_opt = if rotation.is_empty() { None } else { Some(rotation) };
+        let rotation_opt = if rotation.is_empty() {
+            None
+        } else {
+            Some(rotation)
+        };
         cache::ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             meta.dim as usize,
@@ -747,13 +752,7 @@ unsafe fn install_whole_index(
     };
     let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
     let total_bytes = bytes_per_vec * (n_in_index.max(1));
-    cache::scan_install(
-        key,
-        stored_index,
-        total_bytes,
-        relfile_node,
-        version_as_i64,
-    )
+    cache::scan_install(key, stored_index, total_bytes, relfile_node, version_as_i64)
 }
 
 /// Phase B-1/B-2: build and install an out-of-core cell-scoped
@@ -846,12 +845,7 @@ unsafe fn try_install_ooc(
 
     // Bounded resident-byte estimate for the LRU cap: centroids +
     // rotation + directory + scales + ids (NOT O(n) codes).
-    let bytes = lists * dim * 4
-        + dim * dim * 4
-        + lists * 12
-        + n_vectors * 4
-        + n_vectors * 8
-        + 4096;
+    let bytes = lists * dim * 4 + dim * dim * 4 + lists * 12 + n_vectors * 4 + n_vectors * 8 + 4096;
     Some(cache::scan_install_ooc(
         key,
         ooc,
@@ -1028,7 +1022,9 @@ unsafe fn ivf_setup_and_search_ooc(
         // Unused on the OOC path (the OOC index holds its own copies);
         // kept empty to avoid duplicating the O(lists*dim) centroids.
         centroids: Vec::new(),
-        directory: crate::index::ivf::CellDirectory { entries: Vec::new() },
+        directory: crate::index::ivf::CellDirectory {
+            entries: Vec::new(),
+        },
         q_rot: Vec::new(),
         lists,
         probes,
@@ -1297,7 +1293,14 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
             let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
             let before = (*opaque).results.len();
             let (scores, ids) = ooc
-                .search_ooc((*scan).indexRelation, &(*opaque).query, new_k, &ctx.probed_cells, &ctx.tombstones, (*opaque).allow.as_ref())
+                .search_ooc(
+                    (*scan).indexRelation,
+                    &(*opaque).query,
+                    new_k,
+                    &ctx.probed_cells,
+                    &ctx.tombstones,
+                    (*opaque).allow.as_ref(),
+                )
                 .unwrap_or_else(|| (Vec::new(), Vec::new()));
             (*opaque).current_k = new_k;
             let probes_now = ctx.probes;
@@ -1339,7 +1342,9 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
             // Defensive: the ReadOnly arm this ctx came from always
             // returns Some; fall back to flat only if that ever
             // changes (e.g. handle swapped mid-scan).
-            .unwrap_or_else(|| flat_search(&arc, &(*opaque).query, new_k, (*opaque).allow.as_ref()));
+            .unwrap_or_else(|| {
+                flat_search(&arc, &(*opaque).query, new_k, (*opaque).allow.as_ref())
+            });
         (*opaque).current_k = new_k;
         (*opaque).ivf = Some(ctx);
         populate_batch(opaque, &scores, &ids);

@@ -171,9 +171,7 @@ fn array_to_halfvec(arr: ::std::vec::Vec<Option<f32>>) -> Halfvec {
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            v.unwrap_or_else(|| {
-                error!("halfvec cannot contain NULL element at index {}", i)
-            })
+            v.unwrap_or_else(|| error!("halfvec cannot contain NULL element at index {}", i))
         })
         .collect();
     Halfvec::from_f32_vec(data)
@@ -228,10 +226,7 @@ fn halfvec_accum(state: Option<HalfvecAccum>, value: Halfvec) -> HalfvecAccum {
 }
 
 #[pg_extern(immutable, parallel_safe)]
-fn halfvec_combine(
-    s1: Option<HalfvecAccum>,
-    s2: Option<HalfvecAccum>,
-) -> Option<HalfvecAccum> {
+fn halfvec_combine(s1: Option<HalfvecAccum>, s2: Option<HalfvecAccum>) -> Option<HalfvecAccum> {
     match (s1, s2) {
         (None, None) => None,
         (Some(s), None) | (None, Some(s)) => Some(s),
@@ -278,11 +273,7 @@ fn halfvec_sum_finalfn(state: HalfvecAccum) -> Option<Halfvec> {
     if state.count == 0 {
         return None;
     }
-    let data: ::std::vec::Vec<f16> = state
-        .sum
-        .iter()
-        .map(|s| f16::from_f32(*s as f32))
-        .collect();
+    let data: ::std::vec::Vec<f16> = state.sum.iter().map(|s| f16::from_f32(*s as f32)).collect();
     Some(Halfvec::from_f16_vec(data))
 }
 

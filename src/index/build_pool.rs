@@ -173,10 +173,7 @@ mod tests {
 
         assert_eq!(serial.0, parallel.0, "packed_codes differ by pool size");
         assert_eq!(serial.1, parallel.1, "scales differ by pool size");
-        assert_eq!(
-            serial.2, parallel.2,
-            "blocked_codes differ by pool size"
-        );
+        assert_eq!(serial.2, parallel.2, "blocked_codes differ by pool size");
         assert_eq!(serial.3, parallel.3, "slot_to_id differs by pool size");
     }
 }

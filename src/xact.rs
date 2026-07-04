@@ -113,7 +113,9 @@ pub(crate) fn ensure_xact_callbacks_registered() {
             }
             for d in &dirty {
                 let guard = d.index.read();
-                unsafe { flush_to_relfile(d.key.rel_oid, &*guard, &d.persist); }
+                unsafe {
+                    flush_to_relfile(d.key.rel_oid, &*guard, &d.persist);
+                }
                 drop(guard);
                 cache::clear_dirty(d.key);
             }

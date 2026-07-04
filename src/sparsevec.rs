@@ -34,11 +34,7 @@ pub struct Sparsevec {
 }
 
 impl Sparsevec {
-    pub fn new(
-        dim: i32,
-        indices: ::std::vec::Vec<i32>,
-        values: ::std::vec::Vec<f32>,
-    ) -> Self {
+    pub fn new(dim: i32, indices: ::std::vec::Vec<i32>, values: ::std::vec::Vec<f32>) -> Self {
         if dim < 1 || dim as usize > MAX_DIM {
             error!("sparsevec dim {} out of range 1..={}", dim, MAX_DIM);
         }
@@ -136,15 +132,12 @@ impl InOutFuncs for Sparsevec {
         buffer.push_str(&self.dim.to_string());
     }
 
-    const NULL_ERROR_MESSAGE: Option<&'static str> =
-        Some("NULL is not a valid sparsevec value");
+    const NULL_ERROR_MESSAGE: Option<&'static str> = Some("NULL is not a valid sparsevec value");
 }
 
 /// Parse the pgvector-format `'{i1:v1, i2:v2}/dim'` literal. Returns
 /// (dim, 0-based indices, values).
-fn parse_sparsevec(
-    s: &str,
-) -> Result<(i32, ::std::vec::Vec<i32>, ::std::vec::Vec<f32>), String> {
+fn parse_sparsevec(s: &str) -> Result<(i32, ::std::vec::Vec<i32>, ::std::vec::Vec<f32>), String> {
     let trimmed = s.trim();
     let (body, dim_str) = trimmed
         .rsplit_once('/')
@@ -187,10 +180,7 @@ fn parse_sparsevec(
             .parse()
             .map_err(|e| format!("position {}: invalid value '{}': {}", i, val_str, e))?;
         if !val.is_finite() {
-            return Err(format!(
-                "position {}: non-finite value '{}'",
-                i, val
-            ));
+            return Err(format!("position {}: non-finite value '{}'", i, val));
         }
         indices.push(idx_1based - 1);
         values.push(val);

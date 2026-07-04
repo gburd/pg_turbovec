@@ -166,7 +166,9 @@ mod tests {
     // variant, rrf_score) is covered by `#[pg_test]`s in src/lib.rs,
     // which run inside the postmaster.
     fn v(data: &[f32]) -> Vector {
-        Vector { data: data.to_vec() }
+        Vector {
+            data: data.to_vec(),
+        }
     }
 
     #[test]

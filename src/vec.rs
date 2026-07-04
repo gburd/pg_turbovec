@@ -155,10 +155,7 @@ mod tests {
     #[test]
     fn parse_basic() {
         assert_eq!(parse_vec("[1, 2, 3]").unwrap(), vec![1.0, 2.0, 3.0]);
-        assert_eq!(
-            parse_vec("[ 1.5,-2.0 , 3 ]").unwrap(),
-            vec![1.5, -2.0, 3.0]
-        );
+        assert_eq!(parse_vec("[ 1.5,-2.0 , 3 ]").unwrap(), vec![1.5, -2.0, 3.0]);
     }
 
     #[test]

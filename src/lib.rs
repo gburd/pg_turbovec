@@ -20,17 +20,17 @@
 use pgrx::prelude::*;
 
 pub mod aggregate;
+pub mod bitvec;
 pub mod cache;
 pub mod cast;
 pub mod distance;
 pub mod extras;
 pub mod guc;
 pub mod halfvec;
-pub mod hybrid;
 pub mod halfvec_ops;
+pub mod hybrid;
 pub mod sparsevec;
 pub mod sparsevec_ops;
-pub mod bitvec;
 
 pub mod colbert;
 pub mod index;
@@ -106,10 +106,7 @@ mod tests {
 
     #[pg_test]
     fn bitvec_basic_round_trip() {
-        let txt: Option<String> = Spi::get_one(
-            "SELECT '101010'::turbovec.bitvec::text",
-        )
-        .unwrap();
+        let txt: Option<String> = Spi::get_one("SELECT '101010'::turbovec.bitvec::text").unwrap();
         assert_eq!(txt.as_deref(), Some("101010"));
     }
 
@@ -117,16 +114,10 @@ mod tests {
     fn bitvec_hamming_distance() {
         Spi::run("SET search_path = turbovec, public").unwrap();
         // 1010 vs 1100: differ at positions 1 and 2 = 2 bits.
-        let h: Option<f64> = Spi::get_one(
-            "SELECT '1010'::bitvec <~> '1100'::bitvec",
-        )
-        .unwrap();
+        let h: Option<f64> = Spi::get_one("SELECT '1010'::bitvec <~> '1100'::bitvec").unwrap();
         assert_eq!(h, Some(2.0));
         // Same -> 0.
-        let z: Option<f64> = Spi::get_one(
-            "SELECT '1111'::bitvec <~> '1111'::bitvec",
-        )
-        .unwrap();
+        let z: Option<f64> = Spi::get_one("SELECT '1111'::bitvec <~> '1111'::bitvec").unwrap();
         assert_eq!(z, Some(0.0));
     }
 
@@ -136,10 +127,7 @@ mod tests {
         // 1110 ∩ 1011 = 1010 (popcount 2)
         // 1110 ∪ 1011 = 1111 (popcount 4)
         // Jaccard = 1 - 2/4 = 0.5
-        let j: Option<f64> = Spi::get_one(
-            "SELECT '1110'::bitvec <%> '1011'::bitvec",
-        )
-        .unwrap();
+        let j: Option<f64> = Spi::get_one("SELECT '1110'::bitvec <%> '1011'::bitvec").unwrap();
         assert!((j.unwrap() - 0.5).abs() < 1e-9);
     }
 
@@ -156,10 +144,8 @@ mod tests {
 
     #[pg_test]
     fn bitvec_popcount_function() {
-        let p: Option<i64> = Spi::get_one(
-            "SELECT turbovec.bitvec_popcount('11010110'::turbovec.bitvec)",
-        )
-        .unwrap();
+        let p: Option<i64> =
+            Spi::get_one("SELECT turbovec.bitvec_popcount('11010110'::turbovec.bitvec)").unwrap();
         assert_eq!(p, Some(5));
     }
 
@@ -183,8 +169,7 @@ mod tests {
         )
         .unwrap();
         // Sum: idx 1 → 2.0, idx 3 → 2.0, idx 5 → 3.0.
-        let s: Option<String> =
-            Spi::get_one("SELECT sum(v)::text FROM sv").unwrap();
+        let s: Option<String> = Spi::get_one("SELECT sum(v)::text FROM sv").unwrap();
         let txt = s.unwrap();
         assert!(txt.contains("1:2"), "expected 1:2 in {}", txt);
         assert!(txt.contains("3:2"), "expected 3:2 in {}", txt);
@@ -194,10 +179,8 @@ mod tests {
 
     #[pg_test]
     fn sparsevec_basic_round_trip() {
-        let txt: Option<String> = Spi::get_one(
-            "SELECT '{1:1.5, 5:2.25}/10'::turbovec.sparsevec::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT '{1:1.5, 5:2.25}/10'::turbovec.sparsevec::text").unwrap();
         let s = txt.unwrap();
         assert!(s.contains("1:1.5"));
         assert!(s.contains("5:2.25"));
@@ -207,10 +190,8 @@ mod tests {
     #[pg_test]
     fn sparsevec_distance_ops() {
         Spi::run("SET search_path = turbovec, public").unwrap();
-        let l2: Option<f64> = Spi::get_one(
-            "SELECT '{1:1, 2:2}/3'::sparsevec <-> '{2:2, 3:1}/3'::sparsevec",
-        )
-        .unwrap();
+        let l2: Option<f64> =
+            Spi::get_one("SELECT '{1:1, 2:2}/3'::sparsevec <-> '{2:2, 3:1}/3'::sparsevec").unwrap();
         let v = l2.unwrap();
         assert!((v - 2.0_f64.sqrt()).abs() < 1e-6, "got {}", v);
 
@@ -226,9 +207,7 @@ mod tests {
     fn sparsevec_dim_mismatch_errors() {
         Spi::run("SET search_path = turbovec, public").unwrap();
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<f64>(
-                "SELECT '{1:1}/3'::sparsevec <-> '{1:1}/4'::sparsevec",
-            )
+            Spi::get_one::<f64>("SELECT '{1:1}/3'::sparsevec <-> '{1:1}/4'::sparsevec")
         });
         assert!(bad.is_err(), "sparsevec dim mismatch should ERROR");
     }
@@ -236,10 +215,9 @@ mod tests {
     #[pg_test]
     fn sparsevec_vector_round_trip() {
         Spi::run("SET search_path = turbovec, public").unwrap();
-        let txt: Option<String> = Spi::get_one(
-            "SELECT (('[0, 1.5, 0, 0, 2.25]'::vector::sparsevec)::vector)::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT (('[0, 1.5, 0, 0, 2.25]'::vector::sparsevec)::vector)::text")
+                .unwrap();
         let s = txt.unwrap();
         assert!(s.contains("1.5"));
         assert!(s.contains("2.25"));
@@ -248,24 +226,18 @@ mod tests {
     #[pg_test]
     fn sparsevec_nnz_function() {
         Spi::run("SET search_path = turbovec, public").unwrap();
-        let n: Option<i32> = Spi::get_one(
-            "SELECT turbovec.sparsevec_nnz('{1:1, 5:2, 9:3}/10'::sparsevec)",
-        )
-        .unwrap();
+        let n: Option<i32> =
+            Spi::get_one("SELECT turbovec.sparsevec_nnz('{1:1, 5:2, 9:3}/10'::sparsevec)").unwrap();
         assert_eq!(n, Some(3));
-        let d: Option<i32> = Spi::get_one(
-            "SELECT turbovec.sparsevec_dims('{1:1}/100'::sparsevec)",
-        )
-        .unwrap();
+        let d: Option<i32> =
+            Spi::get_one("SELECT turbovec.sparsevec_dims('{1:1}/100'::sparsevec)").unwrap();
         assert_eq!(d, Some(100));
     }
 
     #[pg_test]
     fn halfvec_basic_round_trip() {
-        let txt: Option<String> = Spi::get_one(
-            "SELECT '[1.0, 2.0, 3.0]'::turbovec.halfvec::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT '[1.0, 2.0, 3.0]'::turbovec.halfvec::text").unwrap();
         let s = txt.unwrap();
         assert!(s.contains('1') && s.contains('2') && s.contains('3'));
     }
@@ -273,22 +245,16 @@ mod tests {
     #[pg_test]
     fn halfvec_distance_ops() {
         Spi::run("SET search_path = turbovec, public").unwrap();
-        let l2: Option<f64> = Spi::get_one(
-            "SELECT '[1, 2, 3]'::halfvec <-> '[4, 6, 3]'::halfvec",
-        )
-        .unwrap();
+        let l2: Option<f64> =
+            Spi::get_one("SELECT '[1, 2, 3]'::halfvec <-> '[4, 6, 3]'::halfvec").unwrap();
         assert!((l2.unwrap() - 5.0).abs() < 1e-3);
 
-        let cos: Option<f64> = Spi::get_one(
-            "SELECT '[1, 0]'::halfvec <=> '[0, 1]'::halfvec",
-        )
-        .unwrap();
+        let cos: Option<f64> =
+            Spi::get_one("SELECT '[1, 0]'::halfvec <=> '[0, 1]'::halfvec").unwrap();
         assert!((cos.unwrap() - 1.0).abs() < 1e-3);
 
-        let neg_ip: Option<f64> = Spi::get_one(
-            "SELECT '[1, 0, 0]'::halfvec <#> '[1, 0, 0]'::halfvec",
-        )
-        .unwrap();
+        let neg_ip: Option<f64> =
+            Spi::get_one("SELECT '[1, 0, 0]'::halfvec <#> '[1, 0, 0]'::halfvec").unwrap();
         assert!((neg_ip.unwrap() + 1.0).abs() < 1e-3);
     }
 
@@ -308,10 +274,8 @@ mod tests {
     fn halfvec_aggregate_avg() {
         Spi::run("SET search_path = turbovec, public").unwrap();
         Spi::run("CREATE TEMP TABLE hv (v halfvec)").unwrap();
-        Spi::run("INSERT INTO hv VALUES ('[1,2,3]'),('[3,4,5]'),('[5,6,7]')")
-            .unwrap();
-        let avg: Option<String> =
-            Spi::get_one("SELECT avg(v)::text FROM hv").unwrap();
+        Spi::run("INSERT INTO hv VALUES ('[1,2,3]'),('[3,4,5]'),('[5,6,7]')").unwrap();
+        let avg: Option<String> = Spi::get_one("SELECT avg(v)::text FROM hv").unwrap();
         let s = avg.unwrap();
         assert!(s.contains('3'));
         assert!(s.contains('4'));
@@ -321,14 +285,9 @@ mod tests {
     #[pg_test]
     fn halfvec_overflow_rejected() {
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT '[1, 100000, 3]'::turbovec.halfvec::text",
-            )
+            Spi::get_one::<String>("SELECT '[1, 100000, 3]'::turbovec.halfvec::text")
         });
-        assert!(
-            bad.is_err(),
-            "halfvec should reject f16-overflowing values"
-        );
+        assert!(bad.is_err(), "halfvec should reject f16-overflowing values");
     }
 
     #[pg_test]
@@ -376,8 +335,7 @@ mod tests {
         // <#> = -dot = -1
         assert!((neg_ip.unwrap() + 1.0).abs() < 1e-6);
 
-        let cos: Option<f64> =
-            Spi::get_one("SELECT '[1,0]'::vector <=> '[0,1]'::vector").unwrap();
+        let cos: Option<f64> = Spi::get_one("SELECT '[1,0]'::vector <=> '[0,1]'::vector").unwrap();
         // perpendicular -> cosine distance = 1.0
         assert!((cos.unwrap() - 1.0).abs() < 1e-6);
     }
@@ -418,24 +376,20 @@ mod tests {
     #[pg_test]
     fn to_vec_text_form() {
         // Single-arg: parse text → vec. Equivalent to ::vec.
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3]'))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3]'))").unwrap();
         assert_eq!(dim, Some(3));
 
         // Three-arg: with explicit dim check that passes.
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3]', 3, false))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3]', 3, false))")
+                .unwrap();
         assert_eq!(dim, Some(3));
 
         // dim = 0 means "no check".
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3, 4]', 0, false))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3, 4]', 0, false))")
+                .unwrap();
         assert_eq!(dim, Some(4));
     }
 
@@ -446,10 +400,7 @@ mod tests {
                 "SELECT turbovec.vector_dims(turbovec.to_vec('[1, 2, 3]', 5, false))",
             )
         });
-        assert!(
-            bad.is_err(),
-            "to_vec should reject dim mismatch"
-        );
+        assert!(bad.is_err(), "to_vec should reject dim mismatch");
     }
 
     #[pg_test]
@@ -467,10 +418,7 @@ mod tests {
                      turbovec.array_to_vec(ARRAY[1, 2, 3]::real[], 5, false))",
             )
         });
-        assert!(
-            bad.is_err(),
-            "array_to_vec should reject dim mismatch"
-        );
+        assert!(bad.is_err(), "array_to_vec should reject dim mismatch");
     }
 
     #[pg_test]
@@ -524,8 +472,7 @@ mod tests {
         .unwrap();
 
         // Confirm the heap row count matches what we inserted.
-        let n_rows: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM t_ann").unwrap();
+        let n_rows: Option<i64> = Spi::get_one("SELECT count(*) FROM t_ann").unwrap();
         assert_eq!(n_rows, Some(4));
 
         // ORDER BY <=> with the index in place. Even if the planner
@@ -557,8 +504,7 @@ mod tests {
     #[pg_test]
     fn parallel_build_matches_serial_query() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_pb (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_pb (id bigint PRIMARY KEY, emb vector)").unwrap();
         // Deterministic 16-dim corpus: each row is e_(id%16) scaled,
         // so nearest-neighbour answers are predictable and stable.
         Spi::run(
@@ -629,8 +575,7 @@ mod tests {
     #[pg_test]
     fn parallel_build_relfile_size_matches_serial() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_pbsz (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_pbsz (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_pbsz \
              SELECT g, \
@@ -647,17 +592,13 @@ mod tests {
              WITH (bit_width = 4)",
         )
         .unwrap();
-        let serial_sz: Option<i64> = Spi::get_one(
-            "SELECT pg_relation_size('t_pbsz_idx'::regclass)::int8",
-        )
-        .unwrap();
+        let serial_sz: Option<i64> =
+            Spi::get_one("SELECT pg_relation_size('t_pbsz_idx'::regclass)::int8").unwrap();
 
         Spi::run("SET turbovec.build_parallelism = 4").unwrap();
         Spi::run("REINDEX INDEX t_pbsz_idx").unwrap();
-        let parallel_sz: Option<i64> = Spi::get_one(
-            "SELECT pg_relation_size('t_pbsz_idx'::regclass)::int8",
-        )
-        .unwrap();
+        let parallel_sz: Option<i64> =
+            Spi::get_one("SELECT pg_relation_size('t_pbsz_idx'::regclass)::int8").unwrap();
 
         assert_eq!(
             serial_sz, parallel_sz,
@@ -679,12 +620,14 @@ mod tests {
         use_turbovec();
         // Default is 0 (auto).
         let dflt: Option<i32> =
-            Spi::get_one("SELECT current_setting('turbovec.build_parallelism')::int")
-                .unwrap();
-        assert_eq!(dflt, Some(0), "build_parallelism default should be 0 (auto)");
+            Spi::get_one("SELECT current_setting('turbovec.build_parallelism')::int").unwrap();
+        assert_eq!(
+            dflt,
+            Some(0),
+            "build_parallelism default should be 0 (auto)"
+        );
 
-        Spi::run("CREATE TABLE t_pbg (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_pbg (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_pbg \
              SELECT g, ('[' || g || ',0,0,0,0,0,0,0]')::vector \
@@ -694,10 +637,8 @@ mod tests {
 
         for p in [0i32, 1, 4] {
             Spi::run(&format!("SET turbovec.build_parallelism = {p}")).unwrap();
-            Spi::run(
-                "CREATE INDEX t_pbg_idx ON t_pbg USING turbovec (emb vec_cosine_ops)",
-            )
-            .unwrap();
+            Spi::run("CREATE INDEX t_pbg_idx ON t_pbg USING turbovec (emb vec_cosine_ops)")
+                .unwrap();
             let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_pbg").unwrap();
             assert_eq!(n, Some(64), "build at parallelism={p} lost rows");
             Spi::run("DROP INDEX t_pbg_idx").unwrap();
@@ -719,38 +660,29 @@ mod tests {
     fn pgvector_aliases() {
         Spi::run("SET search_path = turbovec, public").unwrap();
         // l2_normalize is the pgvector spelling of vec_normalize.
-        let n: Option<f64> = Spi::get_one(
-            "SELECT vector_norm(l2_normalize('[3, 4]'::vector))",
-        )
-        .unwrap();
+        let n: Option<f64> =
+            Spi::get_one("SELECT vector_norm(l2_normalize('[3, 4]'::vector))").unwrap();
         assert!((n.unwrap() - 1.0).abs() < 1e-6);
 
         // to_vector(text) is the pgvector spelling of to_vec(text).
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT vector_dims(to_vector('[1, 2, 3]'))",
-        )
-        .unwrap();
+        let dim: Option<i32> = Spi::get_one("SELECT vector_dims(to_vector('[1, 2, 3]'))").unwrap();
         assert_eq!(dim, Some(3));
 
         // to_vector(text, integer, boolean) with dim check.
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT vector_dims(to_vector('[1, 2, 3]', 3, false))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT vector_dims(to_vector('[1, 2, 3]', 3, false))").unwrap();
         assert_eq!(dim, Some(3));
 
         // array_to_vector(real[], integer, boolean) with dim check.
-        let dim: Option<i32> = Spi::get_one(
-            "SELECT vector_dims(array_to_vector(ARRAY[1,2,3,4]::real[], 4, false))",
-        )
-        .unwrap();
+        let dim: Option<i32> =
+            Spi::get_one("SELECT vector_dims(array_to_vector(ARRAY[1,2,3,4]::real[], 4, false))")
+                .unwrap();
         assert_eq!(dim, Some(4));
 
         // vector_to_float4 narrows back to real[].
-        let txt: Option<String> = Spi::get_one(
-            "SELECT vector_to_float4('[1.5, 2.5, 3.5]'::vector, 3, false)::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT vector_to_float4('[1.5, 2.5, 3.5]'::vector, 3, false)::text")
+                .unwrap();
         let s = txt.unwrap();
         assert!(s.contains("1.5") && s.contains("2.5") && s.contains("3.5"));
     }
@@ -760,41 +692,30 @@ mod tests {
         Spi::run("SET search_path = turbovec, public").unwrap();
         // Same SQL function name dispatches by argument type, the
         // pgvector convention.
-        let dv: Option<i32> = Spi::get_one(
-            "SELECT vector_dims('[1,2,3,4]'::vector)",
-        )
-        .unwrap();
+        let dv: Option<i32> = Spi::get_one("SELECT vector_dims('[1,2,3,4]'::vector)").unwrap();
         assert_eq!(dv, Some(4));
 
-        let dh: Option<i32> = Spi::get_one(
-            "SELECT vector_dims('[1,2,3,4,5]'::halfvec)",
-        )
-        .unwrap();
+        let dh: Option<i32> = Spi::get_one("SELECT vector_dims('[1,2,3,4,5]'::halfvec)").unwrap();
         assert_eq!(dh, Some(5));
 
-        let ds: Option<i32> = Spi::get_one(
-            "SELECT vector_dims('{1:1, 5:2}/100'::sparsevec)",
-        )
-        .unwrap();
+        let ds: Option<i32> =
+            Spi::get_one("SELECT vector_dims('{1:1, 5:2}/100'::sparsevec)").unwrap();
         assert_eq!(ds, Some(100));
     }
 
     #[pg_test]
     fn vector_norm_overloads() {
         Spi::run("SET search_path = turbovec, public").unwrap();
-        let nv: Option<f64> =
-            Spi::get_one("SELECT vector_norm('[3, 4]'::vector)").unwrap();
+        let nv: Option<f64> = Spi::get_one("SELECT vector_norm('[3, 4]'::vector)").unwrap();
         assert!((nv.unwrap() - 5.0).abs() < 1e-6);
 
-        let nh: Option<f64> =
-            Spi::get_one("SELECT vector_norm('[3, 4]'::halfvec)").unwrap();
+        let nh: Option<f64> = Spi::get_one("SELECT vector_norm('[3, 4]'::halfvec)").unwrap();
         assert!((nh.unwrap() - 5.0).abs() < 1e-3);
 
         // sparsevec norm: only the non-zero coordinates contribute.
         // {1:3, 2:4}/5 has the same magnitude as the dense [3,4,0,0,0].
         let ns: Option<f64> =
-            Spi::get_one("SELECT vector_norm('{1:3, 2:4}/5'::sparsevec)")
-                .unwrap();
+            Spi::get_one("SELECT vector_norm('{1:3, 2:4}/5'::sparsevec)").unwrap();
         assert!((ns.unwrap() - 5.0).abs() < 1e-6);
     }
 
@@ -806,8 +727,7 @@ mod tests {
     fn relfile_aminsert_deferred_commit_bulk() {
         use_turbovec();
         Spi::run("CREATE TABLE t_rfb (id bigint PRIMARY KEY, emb vector)").unwrap();
-        Spi::run("CREATE INDEX t_rfb_idx ON t_rfb USING turbovec (emb vec_cosine_ops)")
-            .unwrap();
+        Spi::run("CREATE INDEX t_rfb_idx ON t_rfb USING turbovec (emb vec_cosine_ops)").unwrap();
         let t0 = std::time::Instant::now();
         Spi::run(
             "INSERT INTO t_rfb SELECT g, \
@@ -820,7 +740,11 @@ mod tests {
         // Pre-Phase-N-C, this took several minutes on the relfile
         // path. Post-fix it should match the side-table path's
         // ~136 ms; loose 5 s upper bound.
-        assert!(elapsed < 5_000, "relfile bulk insert too slow: {} ms", elapsed);
+        assert!(
+            elapsed < 5_000,
+            "relfile bulk insert too slow: {} ms",
+            elapsed
+        );
 
         let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_rfb").unwrap();
         assert_eq!(n, Some(1000));
@@ -852,8 +776,7 @@ mod tests {
     fn ambuild_streams_heap_scan_under_maintenance_work_mem() {
         use_turbovec();
         Spi::run("SET maintenance_work_mem = '4MB'").unwrap();
-        Spi::run("CREATE TABLE t_streamed (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_streamed (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_streamed SELECT g, \
                 ('[' || g || ',0,0,0,0,0,0,0]')::vector \
@@ -866,8 +789,7 @@ mod tests {
         )
         .unwrap();
         // Sanity: every row indexed.
-        let n: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM t_streamed").unwrap();
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_streamed").unwrap();
         assert_eq!(n, Some(1000));
         // Nearest neighbour to [7,0,...] under L2 is row 7
         // (distance 0). Operator `<->` is L2.
@@ -907,10 +829,7 @@ mod tests {
                 FROM generate_series(1, 100) g",
         )
         .unwrap();
-        Spi::run(
-            "CREATE INDEX t_w2_idx ON t_w2 USING turbovec (emb vec_l2_ops)",
-        )
-        .unwrap();
+        Spi::run("CREATE INDEX t_w2_idx ON t_w2 USING turbovec (emb vec_l2_ops)").unwrap();
 
         // (1)+(2): index is queryable end-to-end. Self-distance
         // (L2) under the embedding `[42,0,...]` is uniquely
@@ -928,16 +847,13 @@ mod tests {
         // rotation chain populated. We re-open the index by oid
         // — mirrors the pattern in
         // ambuild_persists_prepared_blocked_layout.
-        let indexrelid: pg_sys::Oid = Spi::get_one(
-            "SELECT 't_w2_idx'::regclass::oid",
-        )
-        .unwrap()
-        .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_w2_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         use crate::index::relfile;
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
-            let m = relfile::read_meta(rel)
-                .expect("meta must exist after build");
+            let m = relfile::read_meta(rel).expect("meta must exist after build");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             assert_eq!(m.n_vectors, 100);
             assert!(
@@ -966,12 +882,9 @@ mod tests {
     fn aminsert_rollback_invalidates_cache() {
         use_turbovec();
         Spi::run("CREATE TABLE t_rb (id bigint PRIMARY KEY, emb vector)").unwrap();
-        Spi::run(
-            "INSERT INTO t_rb VALUES (1, '[1,0,0,0,0,0,0,0]'), (2, '[0,1,0,0,0,0,0,0]')",
-        )
-        .unwrap();
-        Spi::run("CREATE INDEX t_rb_idx ON t_rb USING turbovec (emb vec_cosine_ops)")
+        Spi::run("INSERT INTO t_rb VALUES (1, '[1,0,0,0,0,0,0,0]'), (2, '[0,1,0,0,0,0,0,0]')")
             .unwrap();
+        Spi::run("CREATE INDEX t_rb_idx ON t_rb USING turbovec (emb vec_cosine_ops)").unwrap();
 
         // Insert a row — marks the cache entry dirty but doesn't
         // hit the relfile yet (deferred to commit).
@@ -1074,18 +987,14 @@ mod tests {
     #[pg_test]
     fn index_am_count_star_does_not_error() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_cnt (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_cnt (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_cnt VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
                  (2, '[0,1,0,0,0,0,0,0]')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE INDEX t_cnt_idx ON t_cnt USING turbovec (emb vec_cosine_ops)",
-        )
-        .unwrap();
+        Spi::run("CREATE INDEX t_cnt_idx ON t_cnt USING turbovec (emb vec_cosine_ops)").unwrap();
         let n: Option<i64> = Spi::get_one("SELECT count(*) FROM t_cnt").unwrap();
         assert_eq!(n, Some(2));
     }
@@ -1093,8 +1002,7 @@ mod tests {
     #[pg_test]
     fn index_am_l2_opclass() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_l2 (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_l2 (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_l2 VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -1108,10 +1016,7 @@ mod tests {
              WITH (bit_width = 4)",
         )
         .unwrap();
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_l2",
-        )
-        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM t_l2").unwrap();
         assert_eq!(n_vec, Some(3));
     }
 
@@ -1119,22 +1024,15 @@ mod tests {
     #[pg_test]
     fn index_am_l1_opclass() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_l1 (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_l1 (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_l1 VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
                  (2, '[0,1,0,0,0,0,0,0]')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE INDEX t_l1_idx ON t_l1 USING turbovec (emb vec_l1_ops)",
-        )
-        .unwrap();
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_l1",
-        )
-        .unwrap();
+        Spi::run("CREATE INDEX t_l1_idx ON t_l1 USING turbovec (emb vec_l1_ops)").unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM t_l1").unwrap();
         assert_eq!(n_vec, Some(2));
     }
 
@@ -1146,8 +1044,7 @@ mod tests {
     #[pg_test]
     fn index_am_halfvec_expression_index() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_hv (id bigint PRIMARY KEY, emb halfvec)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_hv (id bigint PRIMARY KEY, emb halfvec)").unwrap();
         Spi::run(
             "INSERT INTO t_hv VALUES \
                  (1, '[1,0,0,0,0,0,0,0]'), \
@@ -1161,10 +1058,7 @@ mod tests {
              USING turbovec ((emb::vector) vec_cosine_ops)",
         )
         .unwrap();
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_hv",
-        )
-        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM t_hv").unwrap();
         assert_eq!(n_vec, Some(3));
     }
 
@@ -1199,10 +1093,7 @@ mod tests {
              WITH (bit_width = 4)",
         )
         .unwrap();
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_cic",
-        )
-        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM t_cic").unwrap();
         assert_eq!(n_vec, Some(3));
     }
 
@@ -1227,10 +1118,7 @@ mod tests {
              WITH (bit_width = 4)",
         )
         .unwrap();
-        let initial: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_vac",
-        )
-        .unwrap();
+        let initial: Option<i64> = Spi::get_one("SELECT count(*) FROM t_vac").unwrap();
         assert_eq!(initial, Some(4));
 
         // Delete two rows. Note: pgrx tests run inside a tx, so
@@ -1242,10 +1130,7 @@ mod tests {
         // script in tests/02_index_am.sql.)
         Spi::run("DELETE FROM t_vac WHERE id IN (2, 4)").unwrap();
         Spi::run("REINDEX INDEX t_vac_idx").unwrap();
-        let after: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_vac",
-        )
-        .unwrap();
+        let after: Option<i64> = Spi::get_one("SELECT count(*) FROM t_vac").unwrap();
         assert_eq!(
             after,
             Some(2),
@@ -1291,8 +1176,7 @@ mod tests {
         // would still read 2. We assert observable behaviour
         // through the index instead: a same-transaction scan must
         // see the new rows via the in-memory cache.
-        let n_table: Option<i64> = Spi::get_one("SELECT count(*) FROM t_ins")
-            .unwrap();
+        let n_table: Option<i64> = Spi::get_one("SELECT count(*) FROM t_ins").unwrap();
         assert_eq!(
             n_table,
             Some(4),
@@ -1494,8 +1378,7 @@ mod tests {
             "a surviving row must be returned, got {:?}",
             after
         );
-        let n_remaining: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM t_del").unwrap();
+        let n_remaining: Option<i64> = Spi::get_one("SELECT count(*) FROM t_del").unwrap();
         assert_eq!(n_remaining, Some(2));
     }
 
@@ -1526,10 +1409,7 @@ mod tests {
         .unwrap();
 
         // Index built; verify via heap count.
-        let n_indexed: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_64",
-        )
-        .unwrap();
+        let n_indexed: Option<i64> = Spi::get_one("SELECT count(*) FROM t_64").unwrap();
         assert_eq!(n_indexed, Some(64));
 
         // Self-query: the row's own embedding queried back. With
@@ -1611,10 +1491,7 @@ mod tests {
         )
         .unwrap();
         Spi::run("REINDEX INDEX t_re_emb_idx").unwrap();
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_re",
-        )
-        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM t_re").unwrap();
         assert_eq!(n_vec, Some(2));
     }
 
@@ -1876,8 +1753,7 @@ mod tests {
     #[pg_test]
     fn index_am_iterative_scan_no_duplicate_tids() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_iter_dup (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_iter_dup (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_iter_dup \
              SELECT i, \
@@ -1967,8 +1843,7 @@ mod tests {
     #[pg_test]
     fn index_am_iterative_scan_off_preserves_single_batch() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_iter_off (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_iter_off (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_iter_off \
              SELECT i, \
@@ -2019,8 +1894,7 @@ mod tests {
     #[pg_test]
     fn index_am_iterative_scan_defaults_to_off() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_iter_default (id bigint PRIMARY KEY, emb vector)")
-            .unwrap();
+        Spi::run("CREATE TABLE t_iter_default (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "INSERT INTO t_iter_default \
              SELECT i, \
@@ -2335,10 +2209,8 @@ mod tests {
     #[pg_test]
     fn oversample_composes_with_iterative_scan() {
         use_turbovec();
-        Spi::run(
-            "CREATE TABLE t_os_iter (id bigint PRIMARY KEY, category int, emb vector)",
-        )
-        .unwrap();
+        Spi::run("CREATE TABLE t_os_iter (id bigint PRIMARY KEY, category int, emb vector)")
+            .unwrap();
         Spi::run(
             "INSERT INTO t_os_iter \
              SELECT i, i % 100, ('[' || string_agg( \
@@ -2468,10 +2340,7 @@ mod tests {
         .unwrap();
 
         // The AM persisted all 200 rows.
-        let n_indexed: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_384",
-        )
-        .unwrap();
+        let n_indexed: Option<i64> = Spi::get_one("SELECT count(*) FROM t_384").unwrap();
         assert_eq!(n_indexed, Some(200));
 
         // Self-query: row 73's emb. At d=384 / 4-bit, self-score
@@ -2528,8 +2397,7 @@ mod tests {
         // the relfile meta page rather than a queryable side
         // table, so we just confirm the index built without
         // ERROR and serves queries below.
-        let n_rows: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM t_2bit").unwrap();
+        let n_rows: Option<i64> = Spi::get_one("SELECT count(*) FROM t_2bit").unwrap();
         assert_eq!(n_rows, Some(100));
 
         // Self-recall in top-20 at 2-bit, d=128. Tighter quantisation
@@ -2721,10 +2589,9 @@ mod tests {
 
     #[pg_test]
     fn subvector_basic() {
-        let s: Option<String> = Spi::get_one(
-            "SELECT turbovec.subvector('[10,20,30,40]'::turbovec.vector, 2, 2)::text",
-        )
-        .unwrap();
+        let s: Option<String> =
+            Spi::get_one("SELECT turbovec.subvector('[10,20,30,40]'::turbovec.vector, 2, 2)::text")
+                .unwrap();
         let txt = s.unwrap();
         assert!(txt.contains("20") && txt.contains("30"));
         assert!(!txt.contains("10") && !txt.contains("40"));
@@ -2793,8 +2660,7 @@ mod tests {
     #[pg_test]
     fn vec_to_text_function() {
         let s: Option<String> =
-            Spi::get_one("SELECT turbovec.vec_to_text('[1, 2.5, 3]'::turbovec.vector)")
-                .unwrap();
+            Spi::get_one("SELECT turbovec.vec_to_text('[1, 2.5, 3]'::turbovec.vector)").unwrap();
         let txt = s.unwrap();
         assert!(txt.starts_with('['));
         assert!(txt.ends_with(']'));
@@ -2952,9 +2818,7 @@ mod tests {
     #[pg_test]
     fn jsonb_to_vec_rejects_non_numeric() {
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT turbovec.jsonb_to_vec('[1, \"oops\", 3]'::jsonb)::text",
-            )
+            Spi::get_one::<String>("SELECT turbovec.jsonb_to_vec('[1, \"oops\", 3]'::jsonb)::text")
         });
         assert!(bad.is_err(), "expected ERROR for string element");
 
@@ -3093,10 +2957,7 @@ mod tests {
 
         // Heap row count must reflect the rebuild; the AM
         // cache must serve fresh data on the next scan.
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM reidx_t",
-        )
-        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM reidx_t").unwrap();
         assert_eq!(n_vec, Some(2));
 
         let nearest: Option<i64> = Spi::get_one(
@@ -3314,10 +3175,7 @@ mod tests {
         // Heap row count smoke check: the relfile-resident
         // index has no side-table; observable state is the
         // count(*) on the heap.
-        let n_vec: Option<i64> = Spi::get_one(
-            "SELECT count(*) FROM t_rf",
-        )
-        .unwrap();
+        let n_vec: Option<i64> = Spi::get_one("SELECT count(*) FROM t_rf").unwrap();
         assert_eq!(n_vec, Some(200));
 
         // The relfile relation should have at least 4 blocks
@@ -3489,10 +3347,8 @@ mod tests {
             lsn_after_build,
         );
 
-        let nblocks_after_build: Option<i64> = Spi::get_one(
-            "SELECT (pg_relation_size('t_wal_idx'::regclass) / 8192)::int8",
-        )
-        .unwrap();
+        let nblocks_after_build: Option<i64> =
+            Spi::get_one("SELECT (pg_relation_size('t_wal_idx'::regclass) / 8192)::int8").unwrap();
         let nblocks_after_build = nblocks_after_build.unwrap();
         assert!(
             nblocks_after_build >= 4,
@@ -3536,7 +3392,10 @@ mod tests {
              LIMIT 1",
         )
         .unwrap();
-        assert!(any_id.is_some(), "index must remain queryable after build + insert");
+        assert!(
+            any_id.is_some(),
+            "index must remain queryable after build + insert"
+        );
     }
 
     /// Phase L hardening (item 3): `relfile::write_full` calls
@@ -3579,10 +3438,7 @@ mod tests {
     #[pg_test]
     fn relfile_unlogged_has_init_fork() {
         use_turbovec();
-        Spi::run(
-            "CREATE UNLOGGED TABLE t_ul (id bigint PRIMARY KEY, emb vector)",
-        )
-        .unwrap();
+        Spi::run("CREATE UNLOGGED TABLE t_ul (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
             "CREATE INDEX t_ul_idx ON t_ul USING turbovec (emb vec_cosine_ops) \
              WITH (bit_width = 4, dim = 16)",
@@ -3592,10 +3448,8 @@ mod tests {
         // Init fork must contain at least our 1-page meta header.
         // pg_relation_size with the 'init' fork argument is the
         // user-facing way to inspect it.
-        let init_bytes: Option<i64> = Spi::get_one(
-            "SELECT pg_relation_size('t_ul_idx'::regclass, 'init')::int8",
-        )
-        .unwrap();
+        let init_bytes: Option<i64> =
+            Spi::get_one("SELECT pg_relation_size('t_ul_idx'::regclass, 'init')::int8").unwrap();
         assert!(
             init_bytes.unwrap_or(0) >= 8192,
             "unlogged turbovec index must have a populated init fork; got {:?} bytes",
@@ -3679,12 +3533,15 @@ mod tests {
         .unwrap();
 
         // File-size and meta-version snapshots before the walk.
-        let pages_before: i64 = Spi::get_one(
-            "SELECT (pg_relation_size('t_amwalk_idx'::regclass) / 8192)::int8",
-        )
-        .unwrap()
-        .unwrap();
-        assert!(pages_before >= 4, "relfile must be populated; got {} pages", pages_before);
+        let pages_before: i64 =
+            Spi::get_one("SELECT (pg_relation_size('t_amwalk_idx'::regclass) / 8192)::int8")
+                .unwrap()
+                .unwrap();
+        assert!(
+            pages_before >= 4,
+            "relfile must be populated; got {} pages",
+            pages_before
+        );
 
         // Pick 5 ctids to mark dead. We choose ids that are NOT
         // at the very tail of the slot order so the swap-remove
@@ -3702,8 +3559,7 @@ mod tests {
                     )
                     .unwrap();
                 for row in tup {
-                    let tid: pg_sys::ItemPointerData =
-                        row.get_by_name("ctid").unwrap().unwrap();
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
                 }
             });
@@ -3712,12 +3568,9 @@ mod tests {
         assert_eq!(dead_set.len(), 5, "expected 5 distinct ctids");
 
         // Look up the index OID and meta page before the walk.
-        let indexrelid_u32: Option<i64> = Spi::get_one(
-            "SELECT 't_amwalk_idx'::regclass::oid::int8",
-        )
-        .unwrap();
-        let indexrelid =
-            pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
+        let indexrelid_u32: Option<i64> =
+            Spi::get_one("SELECT 't_amwalk_idx'::regclass::oid::int8").unwrap();
+        let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
         let (n_before, version_before): (u64, u32) = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
@@ -3742,10 +3595,7 @@ mod tests {
         // autovacuum launcher uses. We only need (*info).index;
         // the rest is zeroed.
         let elapsed = unsafe {
-            let rel = pg_sys::index_open(
-                indexrelid,
-                pg_sys::ShareUpdateExclusiveLock as i32,
-            );
+            let rel = pg_sys::index_open(indexrelid, pg_sys::ShareUpdateExclusiveLock as i32);
             assert!(!rel.is_null());
             let mut info: pg_sys::IndexVacuumInfo = std::mem::zeroed();
             info.index = rel;
@@ -3755,9 +3605,8 @@ mod tests {
             info.num_heap_tuples = 1000.0;
             info.strategy = std::ptr::null_mut();
 
-            let stats = pg_sys::palloc0(
-                std::mem::size_of::<pg_sys::IndexBulkDeleteResult>(),
-            ) as *mut pg_sys::IndexBulkDeleteResult;
+            let stats = pg_sys::palloc0(std::mem::size_of::<pg_sys::IndexBulkDeleteResult>())
+                as *mut pg_sys::IndexBulkDeleteResult;
 
             let t0 = Instant::now();
             let res = ambulkdelete(
@@ -3818,11 +3667,10 @@ mod tests {
         // Page count must not grow (it may shrink via
         // RelationTruncate). The whole point of the in-place walk
         // is that we don't rewrite every page.
-        let pages_after: i64 = Spi::get_one(
-            "SELECT (pg_relation_size('t_amwalk_idx'::regclass) / 8192)::int8",
-        )
-        .unwrap()
-        .unwrap();
+        let pages_after: i64 =
+            Spi::get_one("SELECT (pg_relation_size('t_amwalk_idx'::regclass) / 8192)::int8")
+                .unwrap()
+                .unwrap();
         assert!(
             pages_after <= pages_before,
             "page count must not grow: before={} after={}",
@@ -3928,7 +3776,10 @@ mod tests {
             assert!(w[0] < w[1], "boundaries must be sorted: {:?}", bs);
         }
         // The blocked chain is a real chain: count > 0, first > meta.
-        assert!(meta.blocked_first > meta.ids_first, "blocked chain must follow ids");
+        assert!(
+            meta.blocked_first > meta.ids_first,
+            "blocked chain must follow ids"
+        );
         assert!(meta.blocked_count >= 1);
         assert!(meta.blocked_bytes > 0);
 
@@ -4378,17 +4229,19 @@ mod tests {
     }
 
     // -------------------------------------------------------
-    // Phase R-3 (v1.5.0): mmap-based reads of the static
-    // regions (blocked codes + rotation + inline codebook). The
-    // pg_test harness runs each test inside a single backend
-    // transaction; we exercise the mmap path by:
-    //   1. Building a small index with the prepared layout
-    //      (already the default for v1.5.x).
-    //   2. Running an ORDER BY query with `mmap_static_blocked`
-    //      on (default).
-    //   3. Invalidating the cache, toggling the GUC off, and
-    //      running the same query.
-    //   4. Asserting both paths return the same top-1 id.
+    // Phase R-3 (v1.5.0) shipped an opt-out relfile-mmap fast path
+    // for the static regions (blocked codes + rotation + inline
+    // codebook); it was removed in v1.19.0 (buffer-cache-only reads,
+    // see docs/BUFFER_CACHE_ONLY_DESIGN.md) and the `turbovec.
+    // mmap_static_blocked` fallback GUC that toggled it was removed
+    // in v1.22.0. The tests below originally compared the mmap path
+    // against the buffer-manager fallback; that comparison no longer
+    // applies (there is only one read path now) so the round-trip
+    // test was deleted. The two invalidation/cache tests below still
+    // exercise real, current behaviour (cache invalidation on a
+    // concurrent committed insert, and drop-order safety across
+    // invalidation) and are kept, renamed to drop the stale "mmap"
+    // framing.
     //
     // The brief's worked example is "concurrent aminsert commits
     // between scan-begin and the next amgettuple". pgrx tests
@@ -4398,124 +4251,21 @@ mod tests {
     // primitive directly: the same primitive an `am_version`
     // bump from a concurrent committed insert would trigger
     // (`cache::invalidate(rel_oid)`). After invalidation the
-    // next scan re-mmaps from the (post-write) relfile state;
-    // recheck-orderby corrects any ranking error from the
-    // intervening write.
+    // next scan re-reads from the (post-write) relfile state via
+    // the buffer manager; recheck-orderby corrects any ranking
+    // error from the intervening write.
     // -------------------------------------------------------
-
-    /// Round-trip: scans through the mmap path produce the same
-    /// top-1 result as scans through the buffer-manager fall
-    /// back. If they differed, a real workload toggling the GUC
-    /// would silently regress recall.
-    ///
-    /// Also captures debug-build warm-scan timings for both
-    /// paths as a coarse smoke. Asserts only that both modes
-    /// finish in well under a second; the production timing
-    /// harness is `benches/scripts/warm_phase_r3*.sh` on arnold.
-    #[pg_test]
-    fn relfile_mmap_static_round_trip_matches_buffer_manager() {
-        use_turbovec();
-        Spi::run("CREATE TABLE t_mmap (id bigint PRIMARY KEY, emb vector)").unwrap();
-        // 8 anchors at the basis vectors plus 8 noisy rows; small
-        // enough that the prepared layout stays under one page
-        // per chain but big enough that the search has work to do.
-        Spi::run(
-            "INSERT INTO t_mmap VALUES \
-             (1, '[1,0,0,0,0,0,0,0]'), \
-             (2, '[0,1,0,0,0,0,0,0]'), \
-             (3, '[0,0,1,0,0,0,0,0]'), \
-             (4, '[0,0,0,1,0,0,0,0]'), \
-             (5, '[0,0,0,0,1,0,0,0]'), \
-             (6, '[0,0,0,0,0,1,0,0]'), \
-             (7, '[0,0,0,0,0,0,1,0]'), \
-             (8, '[0,0,0,0,0,0,0,1]'), \
-             (9, '[0.9,0.1,0,0,0,0,0,0]'), \
-             (10, '[0.5,0.5,0,0,0,0,0,0]')",
-        )
-        .unwrap();
-        Spi::run(
-            "CREATE INDEX t_mmap_idx ON t_mmap USING turbovec (emb vec_cosine_ops)",
-        )
-        .unwrap();
-        Spi::run("SET enable_seqscan = off").unwrap();
-
-        // Path A: mmap path (default).
-        Spi::run("SET turbovec.mmap_static_blocked = on").unwrap();
-        crate::cache::invalidate_all();
-        // Warmup: pays cache-fill (mmap-load + IdMapIndex construct).
-        let _: Option<i64> = Spi::get_one(
-            "SELECT id FROM t_mmap \
-             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
-        )
-        .unwrap();
-        let t0 = std::time::Instant::now();
-        let mmap_top: Option<i64> = Spi::get_one(
-            "SELECT id FROM t_mmap \
-             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
-        )
-        .unwrap();
-        let mmap_warm_us = t0.elapsed().as_micros();
-
-        // Path B: buffer-manager fallback.
-        Spi::run("SET turbovec.mmap_static_blocked = off").unwrap();
-        crate::cache::invalidate_all();
-        let _: Option<i64> = Spi::get_one(
-            "SELECT id FROM t_mmap \
-             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
-        )
-        .unwrap();
-        let t0 = std::time::Instant::now();
-        let bm_top: Option<i64> = Spi::get_one(
-            "SELECT id FROM t_mmap \
-             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
-        )
-        .unwrap();
-        let bm_warm_us = t0.elapsed().as_micros();
-
-        eprintln!(
-            "phase-r3 debug-build warm-scan smoke (10 rows x 8-d, bit_width=4): \
-             mmap={} us, buffer-manager={} us",
-            mmap_warm_us, bm_warm_us,
-        );
-        // Also persist to a file so the harness driver can
-        // read the smoke number out-of-band; pgrx-tests captures
-        // PG stderr into the cluster's logfile rather than the
-        // cargo-test stdout, so eprintln is invisible to the
-        // CI runner.
-        let _ = std::fs::write(
-            "/tmp/pg_turbovec_phase_r3_smoke.txt",
-            format!("mmap_us={}\nbuffer_manager_us={}\n", mmap_warm_us, bm_warm_us),
-        );
-
-        assert_eq!(
-            mmap_top, bm_top,
-            "mmap path and buffer-manager path returned different top-1 ids: {:?} vs {:?}",
-            mmap_top, bm_top
-        );
-        // Sanity: should be id 1, the exact anchor.
-        assert_eq!(mmap_top, Some(1));
-        // Loose upper bound (debug build, no LTO): both paths
-        // must finish well under 1 s on this trivial corpus.
-        assert!(
-            mmap_warm_us < 1_000_000,
-            "mmap warm scan too slow: {} us", mmap_warm_us,
-        );
-        assert!(
-            bm_warm_us < 1_000_000,
-            "buffer-manager warm scan too slow: {} us", bm_warm_us,
-        );
-    }
 
     /// Isolation: after a committed insert (which bumps
     /// `am_version`), the next scan in this backend invalidates
-    /// its mmap'd cache entry and re-mmaps from the post-insert
-    /// relfile state. We exercise the same primitive an
-    /// `am_version` mismatch in `cache::lookup` would trigger.
-    /// `xs_recheckorderby = true` (asserted unconditionally in
-    /// `amgettuple`) is the backstop for any ranking error
+    /// its cache entry and re-reads from the post-insert relfile
+    /// state via the buffer manager. We exercise the same
+    /// primitive an `am_version` mismatch in `cache::lookup` would
+    /// trigger. `xs_recheckorderby = true` (asserted unconditionally
+    /// in `amgettuple`) is the backstop for any ranking error
     /// during the brief window before the cache notices.
     #[pg_test]
-    fn relfile_mmap_static_concurrent_aminsert_recheck_corrects() {
+    fn relfile_concurrent_aminsert_recheck_corrects() {
         use_turbovec();
         Spi::run("CREATE TABLE t_iso (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
@@ -4525,10 +4275,7 @@ mod tests {
              (3, '[0,0,1,0,0,0,0,0]')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE INDEX t_iso_idx ON t_iso USING turbovec (emb vec_cosine_ops)",
-        )
-        .unwrap();
+        Spi::run("CREATE INDEX t_iso_idx ON t_iso USING turbovec (emb vec_cosine_ops)").unwrap();
         Spi::run("SET enable_seqscan = off").unwrap();
 
         // First scan: warms the cache (mmap path).
@@ -4569,19 +4316,21 @@ mod tests {
         );
     }
 
-    /// Cache-entry drop ordering: when a cache entry installed via
-    /// the mmap path is evicted (LRU cap exceeded or explicit
-    /// invalidation), the `IdMapIndex` must be dropped before the
-    /// `Mmap` so the borrowed-cache pointers (in the
-    /// `pg_turbovec_integration` future zero-copy path) don't
-    /// dangle. We can't directly observe drop order from a
-    /// pg_test, but we *can* assert the entry is gone after
-    /// invalidation and a follow-up scan rebuilds cleanly — if
-    /// the drop-order invariant were violated, the next scan's
-    /// re-mmap path would hit a use-after-free at minimum and
-    /// likely segfault.
+    /// Cache-entry drop ordering: when a cache entry is evicted (LRU
+    /// cap exceeded or explicit invalidation), the entry must be
+    /// dropped cleanly with no dangling state, so a follow-up scan
+    /// can safely rebuild it from the relfile via the buffer manager.
+    /// We can't directly observe drop order from a pg_test, but we
+    /// *can* assert the entry is gone after invalidation and a
+    /// follow-up scan rebuilds cleanly. (Historical note: this test
+    /// predates v1.19.0's removal of the relfile mmap fast path,
+    /// when the invariant being guarded was borrowed-cache pointers
+    /// into an `Mmap` outliving the `IdMapIndex` that referenced
+    /// them; today's cache holds owned `Vec`s, so the invariant is
+    /// trivially satisfied, but the eviction/rebuild round-trip is
+    /// still worth guarding for any future zero-copy work.)
     #[pg_test]
-    fn relfile_mmap_static_cache_invalidation_drop_order() {
+    fn relfile_cache_invalidation_drop_order() {
         use_turbovec();
         Spi::run("CREATE TABLE t_drop (id bigint PRIMARY KEY, emb vector)").unwrap();
         Spi::run(
@@ -4590,26 +4339,18 @@ mod tests {
              (2, '[0,1,0,0,0,0,0,0]')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE INDEX t_drop_idx ON t_drop USING turbovec (emb vec_cosine_ops)",
-        )
-        .unwrap();
+        Spi::run("CREATE INDEX t_drop_idx ON t_drop USING turbovec (emb vec_cosine_ops)").unwrap();
         Spi::run("SET enable_seqscan = off").unwrap();
 
-        // Warm the mmap cache.
+        // Warm the cache.
         let _: Option<i64> = Spi::get_one(
             "SELECT id FROM t_drop \
              ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
         )
         .unwrap();
 
-        // Force drop of every cache entry. The Mmap held by the
-        // entry should munmap cleanly; if drop order were wrong
-        // (Mmap dropped before IdMapIndex while a borrowed-path
-        // reader were still live), this would crash. Today we
-        // hold owned Vecs in IdMapIndex so the contract is
-        // trivially satisfied; the test guards the invariant for
-        // future zero-copy work.
+        // Force drop of every cache entry; today's cache holds owned
+        // Vecs, so a clean drop + rebuild is the whole contract.
         crate::cache::invalidate_all();
 
         // Re-warm and re-query. Must succeed and match.
@@ -4670,12 +4411,11 @@ mod tests {
             let path = std::path::Path::new(manifest_dir)
                 .join("migrations")
                 .join(name);
-            let sql = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {:?}: {}", path, e));
+            let sql =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {:?}: {}", path, e));
             // PostgreSQL's parser is fine with a script that's
             // entirely SQL line comments; Spi::run no-ops cleanly.
-            Spi::run(&sql)
-                .unwrap_or_else(|e| panic!("replay {} failed: {:?}", name, e));
+            Spi::run(&sql).unwrap_or_else(|e| panic!("replay {} failed: {:?}", name, e));
         }
     }
 
@@ -4690,7 +4430,9 @@ mod tests {
     /// does an `==` compare). If you intentionally change the
     /// wording in `scan.rs`, update both the v1 and v2 strings
     /// here.
-    #[pg_test(error = "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)")]
+    #[pg_test(
+        error = "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)"
+    )]
     fn ambeginscan_errors_on_legacy_v1_meta() {
         use_turbovec();
         Spi::run("CREATE TABLE legacy_v1 (id bigint, emb vector)").unwrap();
@@ -4709,16 +4451,11 @@ mod tests {
         // Patch the on-disk meta page so it looks like a v1
         // index. The byte mutation is wrapped in a GenericXLog
         // record so it sticks within the test transaction.
-        let indexrelid: pg_sys::Oid = Spi::get_one(
-            "SELECT 'legacy_v1_idx'::regclass::oid",
-        )
-        .unwrap()
-        .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'legacy_v1_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         unsafe {
-            let rel = pg_sys::index_open(
-                indexrelid,
-                pg_sys::AccessExclusiveLock as i32,
-            );
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
             crate::index::relfile::force_meta_version(rel, 1);
             pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
         }
@@ -4745,7 +4482,9 @@ mod tests {
     /// Phase Y: same as `ambeginscan_errors_on_legacy_v1_meta`
     /// but for the v2 (Phase P, v1.3.x) wire format that lacks
     /// the persisted rotation chain v1.4.0+ requires.
-    #[pg_test(error = "turbovec index built under pg_turbovec ≤ 1.3 cannot be scanned by pg_turbovec 1.4+")]
+    #[pg_test(
+        error = "turbovec index built under pg_turbovec ≤ 1.3 cannot be scanned by pg_turbovec 1.4+"
+    )]
     fn ambeginscan_errors_on_legacy_v2_meta() {
         use_turbovec();
         Spi::run("CREATE TABLE legacy_v2 (id bigint, emb vector)").unwrap();
@@ -4761,16 +4500,11 @@ mod tests {
         )
         .unwrap();
 
-        let indexrelid: pg_sys::Oid = Spi::get_one(
-            "SELECT 'legacy_v2_idx'::regclass::oid",
-        )
-        .unwrap()
-        .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'legacy_v2_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         unsafe {
-            let rel = pg_sys::index_open(
-                indexrelid,
-                pg_sys::AccessExclusiveLock as i32,
-            );
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
             crate::index::relfile::force_meta_version(rel, 2);
             pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
         }
@@ -4828,8 +4562,7 @@ mod tests {
     /// when adding a release.
     #[pg_test]
     fn migration_files_cover_documented_versions() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("migrations");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let mut sigils: Vec<String> = std::fs::read_dir(&path)
             .unwrap_or_else(|e| panic!("read_dir {:?}: {}", path, e))
             .filter_map(|e| {
@@ -4862,13 +4595,12 @@ mod tests {
         // the matrix in `docs/UPGRADING.md`) whenever you tag a
         // new release that ships a migration file.
         let expected: Vec<&str> = vec![
-            "0.1.0", "0.2.0", "0.4.0", "0.5.0",
-            "1.3.0", "1.5.0", "1.6.0", "1.6.1",
-            "1.7.0", "1.7.1", "1.7.2", "1.7.3",
-            "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0", "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0",
+            "0.1.0", "0.2.0", "0.4.0", "0.5.0", "1.3.0", "1.5.0", "1.6.0", "1.6.1", "1.7.0",
+            "1.7.1", "1.7.2", "1.7.3", "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0",
+            "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
+            "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
         ];
-        let expected_owned: Vec<String> =
-            expected.iter().map(|s| s.to_string()).collect();
+        let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(
             sigils, expected_owned,
             "migrations/*.sql sigils don't match the documented release \
@@ -4884,10 +4616,8 @@ mod tests {
     #[pg_test]
     fn vector_concat_basic() {
         use_turbovec();
-        let txt: Option<String> = Spi::get_one(
-            "SELECT ('[1,2]'::vector || '[3,4]'::vector)::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT ('[1,2]'::vector || '[3,4]'::vector)::text").unwrap();
         assert_eq!(txt.as_deref(), Some("[1, 2, 3, 4]"));
     }
 
@@ -4905,10 +4635,8 @@ mod tests {
     #[pg_test]
     fn halfvec_concat_basic() {
         use_turbovec();
-        let txt: Option<String> = Spi::get_one(
-            "SELECT ('[1,2]'::halfvec || '[3,4]'::halfvec)::text",
-        )
-        .unwrap();
+        let txt: Option<String> =
+            Spi::get_one("SELECT ('[1,2]'::halfvec || '[3,4]'::halfvec)::text").unwrap();
         assert_eq!(txt.as_deref(), Some("[1, 2, 3, 4]"));
     }
 
@@ -4926,22 +4654,16 @@ mod tests {
     fn halfvec_arithmetic_elementwise() {
         use_turbovec();
         // +  : [1,2,3] + [4,5,6] = [5,7,9]
-        let add: Option<String> = Spi::get_one(
-            "SELECT ('[1,2,3]'::halfvec + '[4,5,6]'::halfvec)::text",
-        )
-        .unwrap();
+        let add: Option<String> =
+            Spi::get_one("SELECT ('[1,2,3]'::halfvec + '[4,5,6]'::halfvec)::text").unwrap();
         assert_eq!(add.as_deref(), Some("[5, 7, 9]"));
         // -  : [4,5,6] - [1,2,3] = [3,3,3]
-        let sub: Option<String> = Spi::get_one(
-            "SELECT ('[4,5,6]'::halfvec - '[1,2,3]'::halfvec)::text",
-        )
-        .unwrap();
+        let sub: Option<String> =
+            Spi::get_one("SELECT ('[4,5,6]'::halfvec - '[1,2,3]'::halfvec)::text").unwrap();
         assert_eq!(sub.as_deref(), Some("[3, 3, 3]"));
         // *  : Hadamard product [1,2,3] * [4,5,6] = [4,10,18]
-        let mul: Option<String> = Spi::get_one(
-            "SELECT ('[1,2,3]'::halfvec * '[4,5,6]'::halfvec)::text",
-        )
-        .unwrap();
+        let mul: Option<String> =
+            Spi::get_one("SELECT ('[1,2,3]'::halfvec * '[4,5,6]'::halfvec)::text").unwrap();
         assert_eq!(mul.as_deref(), Some("[4, 10, 18]"));
     }
 
@@ -4949,9 +4671,7 @@ mod tests {
     fn halfvec_add_dim_mismatch_errors() {
         use_turbovec();
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT ('[1,2]'::halfvec + '[1,2,3]'::halfvec)::text",
-            )
+            Spi::get_one::<String>("SELECT ('[1,2]'::halfvec + '[1,2,3]'::halfvec)::text")
         });
         assert!(bad.is_err(), "halfvec + dim mismatch should ERROR");
     }
@@ -4962,9 +4682,7 @@ mod tests {
         // 300 * 300 = 90000 > f16 max (65504) -> non-finite -> ERROR,
         // matching pgvector's "value out of range: overflow".
         let bad = std::panic::catch_unwind(|| {
-            Spi::get_one::<String>(
-                "SELECT ('[300]'::halfvec * '[300]'::halfvec)::text",
-            )
+            Spi::get_one::<String>("SELECT ('[300]'::halfvec * '[300]'::halfvec)::text")
         });
         assert!(bad.is_err(), "halfvec * f16 overflow should ERROR");
     }
@@ -5124,10 +4842,9 @@ mod tests {
         // fields are already zero (lists=0), so a v3-stamped page is
         // a legitimate flat v3 index as far as the decoder is
         // concerned.
-        let indexrelid: pg_sys::Oid =
-            Spi::get_one("SELECT 'ivf_v3_idx'::regclass::oid")
-                .unwrap()
-                .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_v3_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
             crate::index::relfile::force_meta_version(rel, 3);
@@ -5170,23 +4887,20 @@ mod tests {
         )
         .unwrap();
 
-        let indexrelid: pg_sys::Oid =
-            Spi::get_one("SELECT 'ivf_rt_idx'::regclass::oid")
-                .unwrap()
-                .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_rt_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
 
         // Read back the meta, coarse centroids, and cell directory.
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
-            let meta = crate::index::relfile::read_meta(rel)
-                .expect("ivf index has a meta page");
+            let meta = crate::index::relfile::read_meta(rel).expect("ivf index has a meta page");
             assert_eq!(meta.version, 4, "IVF index must be wire v4");
             assert!(meta.has_ivf(), "meta.has_ivf() must be true for lists=16");
             assert_eq!(meta.lists, 16);
             assert_eq!(meta.n_vectors, 3000);
 
-            let coarse =
-                crate::index::relfile::read_coarse_centroids(rel, &meta);
+            let coarse = crate::index::relfile::read_coarse_centroids(rel, &meta);
             assert_eq!(
                 coarse.len(),
                 16 * 16,
@@ -5349,12 +5063,14 @@ mod tests {
         )
         .unwrap();
         let (a_oid, b_oid): (pg_sys::Oid, pg_sys::Oid) = (
-            Spi::get_one("SELECT 'ivf_sb_a'::regclass::oid").unwrap().unwrap(),
-            Spi::get_one("SELECT 'ivf_sb_b'::regclass::oid").unwrap().unwrap(),
+            Spi::get_one("SELECT 'ivf_sb_a'::regclass::oid")
+                .unwrap()
+                .unwrap(),
+            Spi::get_one("SELECT 'ivf_sb_b'::regclass::oid")
+                .unwrap()
+                .unwrap(),
         );
-        let (a, b) = unsafe {
-            (read_relfile_blocks(a_oid), read_relfile_blocks(b_oid))
-        };
+        let (a, b) = unsafe { (read_relfile_blocks(a_oid), read_relfile_blocks(b_oid)) };
         assert_eq!(
             a, b,
             "streaming IVF build must produce byte-identical relfiles run-to-run"
@@ -5402,12 +5118,14 @@ mod tests {
         )
         .unwrap();
         let (s_oid, b_oid): (pg_sys::Oid, pg_sys::Oid) = (
-            Spi::get_one("SELECT 'ivf_ci_small'::regclass::oid").unwrap().unwrap(),
-            Spi::get_one("SELECT 'ivf_ci_big'::regclass::oid").unwrap().unwrap(),
+            Spi::get_one("SELECT 'ivf_ci_small'::regclass::oid")
+                .unwrap()
+                .unwrap(),
+            Spi::get_one("SELECT 'ivf_ci_big'::regclass::oid")
+                .unwrap()
+                .unwrap(),
         );
-        let (small, big) = unsafe {
-            (read_relfile_blocks(s_oid), read_relfile_blocks(b_oid))
-        };
+        let (small, big) = unsafe { (read_relfile_blocks(s_oid), read_relfile_blocks(b_oid)) };
         assert_eq!(
             small, big,
             "streamed IVF relfile must be byte-identical regardless of \
@@ -5448,15 +5166,13 @@ mod tests {
         )
         .unwrap();
 
-        let indexrelid: pg_sys::Oid = Spi::get_one(
-            "SELECT 'ivf_bm_idx'::regclass::oid",
-        )
-        .unwrap()
-        .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_bm_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
-            let meta = crate::index::relfile::read_meta(rel)
-                .expect("streamed ivf index has a meta page");
+            let meta =
+                crate::index::relfile::read_meta(rel).expect("streamed ivf index has a meta page");
             assert_eq!(meta.version, 4);
             assert!(meta.has_ivf());
             assert_eq!(meta.lists, 32);
@@ -5534,9 +5250,7 @@ mod tests {
 
         let pull = |idx_sql: &str| -> Vec<i64> {
             Spi::run(idx_sql).unwrap();
-            let q = format!(
-                "SELECT id FROM ivf_eq ORDER BY emb <=> {query} LIMIT 10"
-            );
+            let q = format!("SELECT id FROM ivf_eq ORDER BY emb <=> {query} LIMIT 10");
             let r: Vec<i64> = Spi::connect(|client| {
                 client
                     .select(&q, None, &[])
@@ -5611,8 +5325,7 @@ mod tests {
     ) {
         use crate::index::vacuum::ambulkdelete;
         unsafe {
-            let rel =
-                pg_sys::index_open(indexrelid, pg_sys::ShareUpdateExclusiveLock as i32);
+            let rel = pg_sys::index_open(indexrelid, pg_sys::ShareUpdateExclusiveLock as i32);
             assert!(!rel.is_null());
             let mut info: pg_sys::IndexVacuumInfo = std::mem::zeroed();
             info.index = rel;
@@ -5621,9 +5334,8 @@ mod tests {
             info.message_level = pg_sys::DEBUG2 as i32;
             info.num_heap_tuples = 0.0;
             info.strategy = std::ptr::null_mut();
-            let stats = pg_sys::palloc0(
-                std::mem::size_of::<pg_sys::IndexBulkDeleteResult>(),
-            ) as *mut pg_sys::IndexBulkDeleteResult;
+            let stats = pg_sys::palloc0(std::mem::size_of::<pg_sys::IndexBulkDeleteResult>())
+                as *mut pg_sys::IndexBulkDeleteResult;
             let res = ambulkdelete(
                 &mut info as *mut _,
                 stats,
@@ -5697,7 +5409,10 @@ mod tests {
              the identical index exactly: ivf_all={ivf_all:?} flat={flat_same:?}"
         );
         assert_eq!(ivf_all.len(), 10);
-        assert!(ivf_all.contains(&777), "all-cells scan must find the query row");
+        assert!(
+            ivf_all.contains(&777),
+            "all-cells scan must find the query row"
+        );
         assert_distinct_ids(&ivf_all);
     }
 
@@ -5722,7 +5437,11 @@ mod tests {
     /// id-column value). This mirrors what a real caller does:
     /// materialize the TIDs of the rows they want, then SET the GUC.
     fn allowlist_tids_csv(table: &str, ids: &[i64]) -> String {
-        let in_list = ids.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+        let in_list = ids
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         // ctid -> (block << 32) | offset via the text representation
         // '(block,offset)'. (ctid::text::point) gives a point whose
         // [0]=block, [1]=offset; simpler to parse the text.
@@ -5848,7 +5567,10 @@ mod tests {
 
         assert!(!got.is_empty(), "allowlisted IVF scan returned nothing");
         for id in &got {
-            assert!(allow_set.contains(id), "id {id} not in allowlist (got {got:?})");
+            assert!(
+                allow_set.contains(id),
+                "id {id} not in allowlist (got {got:?})"
+            );
         }
         assert_distinct_ids(&got);
     }
@@ -5891,7 +5613,11 @@ mod tests {
         let allow_tids = allowlist_tids_csv("al_eq", &allowed);
         let allow_arr = format!(
             "ARRAY[{}]::bigint[]",
-            allowed.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+            allowed
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         );
         let qlit: String = Spi::get_one("SELECT (emb)::text FROM al_eq WHERE id = 22")
             .unwrap()
@@ -5918,7 +5644,10 @@ mod tests {
             "operator-path allowlist must return the same top-k id SET as \
              turbovec.knn for the same id-set: knn={knn_ids:?} op={op_ids:?}"
         );
-        assert!(op_ids.contains(&22), "the exact-match allowed id 22 must win");
+        assert!(
+            op_ids.contains(&22),
+            "the exact-match allowed id 22 must win"
+        );
     }
 
     /// Unset/empty GUC returns the full unfiltered top-k (no behaviour
@@ -5937,9 +5666,11 @@ mod tests {
         Spi::run("SET turbovec.probes = 16").unwrap();
 
         let q = "(SELECT emb FROM al_empty WHERE id = 333)";
-        let pull = || allowlist_pull(&format!(
-            "SELECT id FROM al_empty ORDER BY emb <=> {q} LIMIT 10"
-        ));
+        let pull = || {
+            allowlist_pull(&format!(
+                "SELECT id FROM al_empty ORDER BY emb <=> {q} LIMIT 10"
+            ))
+        };
 
         // Baseline: never-set GUC.
         crate::cache::invalidate_all();
@@ -5988,8 +5719,7 @@ mod tests {
                     .select("SELECT ctid FROM al_tomb WHERE id = 100", None, &[])
                     .unwrap();
                 for row in tup {
-                    let tid: pg_sys::ItemPointerData =
-                        row.get_by_name("ctid").unwrap().unwrap();
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
                 }
             });
@@ -6025,7 +5755,10 @@ mod tests {
         );
         let allow_set: HashSet<i64> = [101, 102, 103, 104, 105].into_iter().collect();
         for id in &got {
-            assert!(allow_set.contains(id), "id {id} not in (allowlist - tombstone)");
+            assert!(
+                allow_set.contains(id),
+                "id {id} not in (allowlist - tombstone)"
+            );
         }
     }
 
@@ -6072,7 +5805,11 @@ mod tests {
         ));
         Spi::run("RESET turbovec.allowlist").unwrap();
 
-        assert_eq!(got.len(), 5, "allowlist scan must return a full LIMIT 5 (got {got:?})");
+        assert_eq!(
+            got.len(),
+            5,
+            "allowlist scan must return a full LIMIT 5 (got {got:?})"
+        );
         got.sort_unstable();
         expected.sort_unstable();
         assert_eq!(
@@ -6188,9 +5925,7 @@ mod tests {
 
             let op = if ops.contains("cosine") { "<=>" } else { "<->" };
             let q = format!("(SELECT emb FROM {tbl} WHERE id = 1234)");
-            let sql = format!(
-                "SELECT id FROM {tbl} ORDER BY emb {op} {q} LIMIT 20"
-            );
+            let sql = format!("SELECT id FROM {tbl} ORDER BY emb {op} {q} LIMIT 20");
 
             let pull = |sql: &str| -> Vec<i64> {
                 Spi::connect(|client| {
@@ -6287,10 +6022,9 @@ mod tests {
              USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
         )
         .unwrap();
-        let indexrelid: pg_sys::Oid =
-            Spi::get_one("SELECT 'ps_tomb_idx'::regclass::oid")
-                .unwrap()
-                .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ps_tomb_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         // Tombstone ids 490..520 via a synthetic dead-tuple callback
         // keyed on their heap ctids.
         let dead_ids: Vec<i64> = (490..520).collect();
@@ -6310,8 +6044,7 @@ mod tests {
                     )
                     .unwrap();
                 for row in tup {
-                    let tid: pg_sys::ItemPointerData =
-                        row.get_by_name("ctid").unwrap().unwrap();
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
                 }
             });
@@ -6355,7 +6088,10 @@ mod tests {
 
         let dead: HashSet<i64> = dead_ids.iter().copied().collect();
         for id in &parallel {
-            assert!(!dead.contains(id), "parallel scan returned tombstoned id {id}");
+            assert!(
+                !dead.contains(id),
+                "parallel scan returned tombstoned id {id}"
+            );
         }
         let sset: HashSet<i64> = serial.iter().copied().collect();
         let pset: HashSet<i64> = parallel.iter().copied().collect();
@@ -6416,7 +6152,12 @@ mod tests {
             crate::cache::invalidate_all();
             let graph = pull(&sql);
 
-            assert_eq!(linear.len(), 20, "probe_id={probe_id}: linear returned {}", linear.len());
+            assert_eq!(
+                linear.len(),
+                20,
+                "probe_id={probe_id}: linear returned {}",
+                linear.len()
+            );
             let lset: std::collections::HashSet<i64> = linear.iter().copied().collect();
             let gset: std::collections::HashSet<i64> = graph.iter().copied().collect();
             assert_eq!(
@@ -6484,8 +6225,14 @@ mod tests {
         let off_set: std::collections::HashSet<i64> = off.iter().copied().collect();
         let auto_set: std::collections::HashSet<i64> = auto.iter().copied().collect();
         let on_set: std::collections::HashSet<i64> = on.iter().copied().collect();
-        assert_eq!(off_set, auto_set, "auto (below GRAPH_MIN_LISTS) must match off");
-        assert_eq!(off_set, on_set, "on (forced graph, tiny lists) must still match off");
+        assert_eq!(
+            off_set, auto_set,
+            "auto (below GRAPH_MIN_LISTS) must match off"
+        );
+        assert_eq!(
+            off_set, on_set,
+            "on (forced graph, tiny lists) must still match off"
+        );
     }
 
     /// The `CentroidGraph` built at OOC cache-install time is a
@@ -6608,9 +6355,7 @@ mod tests {
         let gt: Vec<i64> = Spi::connect(|client| {
             client
                 .select(
-                    &format!(
-                        "SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"
-                    ),
+                    &format!("SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"),
                     None,
                     &[],
                 )
@@ -6631,9 +6376,7 @@ mod tests {
         let ivf: Vec<i64> = Spi::connect(|client| {
             client
                 .select(
-                    &format!(
-                        "SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"
-                    ),
+                    &format!("SELECT id FROM ivf_tk ORDER BY emb <=> {query} LIMIT 10"),
                     None,
                     &[],
                 )
@@ -6692,9 +6435,7 @@ mod tests {
             let ids: Vec<i64> = Spi::connect(|client| {
                 client
                     .select(
-                        &format!(
-                            "SELECT id FROM ivf_lp ORDER BY emb <=> {query} LIMIT 10"
-                        ),
+                        &format!("SELECT id FROM ivf_lp ORDER BY emb <=> {query} LIMIT 10"),
                         None,
                         &[],
                     )
@@ -6754,9 +6495,7 @@ mod tests {
             Spi::connect(|client| {
                 client
                     .select(
-                        &format!(
-                            "SELECT id FROM ivf_cl ORDER BY emb <=> {query} LIMIT 10"
-                        ),
+                        &format!("SELECT id FROM ivf_cl ORDER BY emb <=> {query} LIMIT 10"),
                         None,
                         &[],
                     )
@@ -6801,9 +6540,7 @@ mod tests {
             Spi::connect(|client| {
                 client
                     .select(
-                        &format!(
-                            "SELECT id FROM ivf_vd ORDER BY emb <=> {query} LIMIT 10"
-                        ),
+                        &format!("SELECT id FROM ivf_vd ORDER BY emb <=> {query} LIMIT 10"),
                         None,
                         &[],
                     )
@@ -6904,8 +6641,7 @@ mod tests {
                     .select("SELECT ctid FROM ivf_sv WHERE id % 4 = 0", None, &[])
                     .unwrap();
                 for row in tup {
-                    let tid: pg_sys::ItemPointerData =
-                        row.get_by_name("ctid").unwrap().unwrap();
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
                 }
             });
@@ -7033,8 +6769,7 @@ mod tests {
                     .select("SELECT ctid FROM ivf_tomb WHERE id = 1500", None, &[])
                     .unwrap();
                 for row in tup {
-                    let tid: pg_sys::ItemPointerData =
-                        row.get_by_name("ctid").unwrap().unwrap();
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
                 }
             });
@@ -7093,7 +6828,10 @@ mod tests {
                 .unwrap()
                 .expect("index_is_degraded")
         };
-        assert!(!degraded_sql(), "healthy IVF index must not report degraded");
+        assert!(
+            !degraded_sql(),
+            "healthy IVF index must not report degraded"
+        );
 
         // Force the safety-net degradation: set ivf_degraded = 1 in
         // place, KEEPING lists (so index_was_ivf() stays true). This
@@ -7591,8 +7329,10 @@ mod tests {
         // one IS robust: baseline-best is reachable by every dups at
         // <= lists, and more cells covering a vector can't require
         // more probes to find it.
-        let frontier: Vec<(i64, i64, f64)> =
-            rows_meas.iter().map(|(d, _, rb, p)| (*d, *p, *rb)).collect();
+        let frontier: Vec<(i64, i64, f64)> = rows_meas
+            .iter()
+            .map(|(d, _, rb, p)| (*d, *p, *rb))
+            .collect();
         for w in frontier.windows(2) {
             let (d0, p0, _) = w[0];
             let (d1, p1, _) = w[1];
@@ -7788,10 +7528,9 @@ mod tests {
             "row 1500 should be its own nearest neighbour before delete: {healthy:?}"
         );
 
-        let indexrelid: pg_sys::Oid =
-            Spi::get_one("SELECT 'ivf_ooc_tomb_idx'::regclass::oid")
-                .unwrap()
-                .expect("index oid");
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_ooc_tomb_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
         let dead_set: HashSet<u64> = {
             let mut set = HashSet::new();
             Spi::connect(|client| {
@@ -7799,8 +7538,7 @@ mod tests {
                     .select("SELECT ctid FROM ivf_ooc_tomb WHERE id = 1500", None, &[])
                     .unwrap();
                 for row in tup {
-                    let tid: pg_sys::ItemPointerData =
-                        row.get_by_name("ctid").unwrap().unwrap();
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
                 }
             });
@@ -7855,7 +7593,10 @@ mod tests {
             "SELECT id FROM ivf_ooc_soft \
              ORDER BY emb <=> (SELECT emb FROM ivf_ooc_soft WHERE id = 11) LIMIT 25",
         );
-        assert!(!ids.is_empty(), "out-of-core soft-index scan returned no rows");
+        assert!(
+            !ids.is_empty(),
+            "out-of-core soft-index scan returned no rows"
+        );
         assert_distinct_ids(&ids);
     }
 
@@ -7882,12 +7623,10 @@ mod tests {
         Spi::run("SET enable_seqscan = off").unwrap();
         Spi::run("SET turbovec.search_k = 50").unwrap();
         Spi::run("SET turbovec.probes = 6").unwrap();
-        let indexrelid: pg_sys::Oid =
-            Spi::get_one("SELECT 'ivf_ooc_h_idx'::regclass::oid")
-                .unwrap()
-                .expect("index oid");
-        let query =
-            "SELECT id FROM ivf_ooc_h ORDER BY emb <=> \
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_ooc_h_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        let query = "SELECT id FROM ivf_ooc_h ORDER BY emb <=> \
              (SELECT emb FROM ivf_ooc_h WHERE id = 1234) LIMIT 5";
 
         // out_of_core = on -> cell-scoped Ooc entry (no whole codes).
@@ -7942,7 +7681,11 @@ mod tests {
         );
         // Exactly at the threshold is NOT over it (strict >).
         assert!(!out_of_core_decide(OutOfCoreMode::Auto, 128 * mb, budget));
-        assert!(out_of_core_decide(OutOfCoreMode::Auto, 128 * mb + 1, budget));
+        assert!(out_of_core_decide(
+            OutOfCoreMode::Auto,
+            128 * mb + 1,
+            budget
+        ));
     }
 
     // ----------------------------------------------------------------
@@ -8361,7 +8104,6 @@ mod tests {
         // show the quantized-ranking loss the 960-d run exposed.
         let n: i64 = 20_000;
         let dim: i64 = 256;
-        let lists: i64 = 141; // ~sqrt(20000)
         let n_queries: i64 = 40;
         ivf_make_random_corpus("hd_os", n, dim);
         let q_lo = n - n_queries + 1;
@@ -8416,16 +8158,24 @@ mod tests {
         let r1 = recall_at_os(1.0);
         let r4 = recall_at_os(4.0);
         let r16 = recall_at_os(16.0);
-        eprintln!("#5 high-dim oversample sweep (256d, probes=32): \
-                   R@os1={r1:.3} R@os4={r4:.3} R@os16={r16:.3}");
+        eprintln!(
+            "#5 high-dim oversample sweep (256d, probes=32): \
+                   R@os1={r1:.3} R@os4={r4:.3} R@os16={r16:.3}"
+        );
         // The diagnostic assertion: oversample must be MONOTONE
         // non-decreasing (widening the exact-recheck pool can only
         // help), and if the ceiling is candidate-pool-driven, os16
         // should exceed os1 by a real margin. We assert monotonicity
         // (always true) and record the magnitude via eprintln for the
         // finding.
-        assert!(r4 >= r1 - 1e-9, "oversample must not lower recall: {r1}->{r4}");
-        assert!(r16 >= r4 - 1e-9, "oversample must not lower recall: {r4}->{r16}");
+        assert!(
+            r4 >= r1 - 1e-9,
+            "oversample must not lower recall: {r1}->{r4}"
+        );
+        assert!(
+            r16 >= r4 - 1e-9,
+            "oversample must not lower recall: {r4}->{r16}"
+        );
     }
 
     /// Best-effort JSON artefact for the search_k recall frontier
@@ -8471,10 +8221,8 @@ mod tests {
     /// Caller passes a valid index relation oid.
     unsafe fn read_relfile_blocks(indexrelid: pg_sys::Oid) -> Vec<u8> {
         let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
-        let nblocks = pg_sys::RelationGetNumberOfBlocksInFork(
-            rel,
-            pg_sys::ForkNumber::MAIN_FORKNUM,
-        );
+        let nblocks =
+            pg_sys::RelationGetNumberOfBlocksInFork(rel, pg_sys::ForkNumber::MAIN_FORKNUM);
         let mut out = Vec::new();
         for blk in 0..nblocks {
             let buf = pg_sys::ReadBufferExtended(
@@ -8488,9 +8236,7 @@ mod tests {
             let page = pg_sys::BufferGetPage(buf);
             // Skip the 24-byte page header; compare only the data
             // region (LSN/checksum-free).
-            let data = page
-                .cast::<u8>()
-                .add(crate::index::page::PAGE_HEADER_BYTES);
+            let data = page.cast::<u8>().add(crate::index::page::PAGE_HEADER_BYTES);
             let slice = std::slice::from_raw_parts(
                 data,
                 crate::index::page::BLCKSZ - crate::index::page::PAGE_HEADER_BYTES,
@@ -8617,9 +8363,8 @@ mod tests {
             .unwrap();
         assert!((r1 - 1.0 / 11.0).abs() < 1e-12, "rrf_score(1,10) {r1}");
         // Monotone decreasing in rank.
-        let seq: Vec<f64> = fetch_f64(
-            "SELECT turbovec.rrf_score(g) FROM generate_series(0, 5) g ORDER BY g",
-        );
+        let seq: Vec<f64> =
+            fetch_f64("SELECT turbovec.rrf_score(g) FROM generate_series(0, 5) g ORDER BY g");
         for w in seq.windows(2) {
             assert!(w[0] > w[1], "rrf_score not decreasing: {:?}", seq);
         }
@@ -8646,7 +8391,11 @@ mod tests {
                ) u GROUP BY id)
              SELECT id::bigint FROM fused ORDER BY score DESC, id LIMIT 4",
         );
-        assert_eq!(top.first().copied(), Some(2), "RRF winner must be doc 2: {top:?}");
+        assert_eq!(
+            top.first().copied(),
+            Some(2),
+            "RRF winner must be doc 2: {top:?}"
+        );
     }
 
     // ----------------------------------------------------------------
@@ -8670,8 +8419,11 @@ mod tests {
             let arr = toks
                 .iter()
                 .map(|t| {
-                    let nums =
-                        t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                    let nums = t
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
                     format!("'[{nums}]'::turbovec.vector")
                 })
                 .collect::<Vec<_>>()
@@ -8694,7 +8446,11 @@ mod tests {
         let q = query_tokens
             .iter()
             .map(|t| {
-                let nums = t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                let nums = t
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 format!("'[{nums}]'::turbovec.vector")
             })
             .collect::<Vec<_>>()
@@ -8715,9 +8471,9 @@ mod tests {
         colbert_make_table(
             "cb_basic",
             &[
-                (1, vec![onehot8(0), onehot8(1)]),       // matches q exactly
-                (2, vec![onehot8(2), onehot8(3)]),       // disjoint
-                (3, vec![onehot8(0), onehot8(4)]),       // partial (token 0)
+                (1, vec![onehot8(0), onehot8(1)]), // matches q exactly
+                (2, vec![onehot8(2), onehot8(3)]), // disjoint
+                (3, vec![onehot8(0), onehot8(4)]), // partial (token 0)
             ],
         );
         let ids = colbert_search_ids("cb_basic", &[onehot8(0), onehot8(1)], 3);
@@ -8732,7 +8488,10 @@ mod tests {
         let p2 = ids.iter().position(|&x| x == 2);
         assert!(p1.is_some(), "doc 1 must be retrieved: {ids:?}");
         if let (Some(p1), Some(p2)) = (p1, p2) {
-            assert!(p1 < p2, "doc 1 (full match) must outrank doc 2 (no match): {ids:?}");
+            assert!(
+                p1 < p2,
+                "doc 1 (full match) must outrank doc 2 (no match): {ids:?}"
+            );
         }
     }
 
@@ -8875,8 +8634,11 @@ mod tests {
             let arr = toks
                 .iter()
                 .map(|t| {
-                    let nums =
-                        t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                    let nums = t
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
                     format!("'[{nums}]'::turbovec.vector")
                 })
                 .collect::<Vec<_>>()
@@ -8899,7 +8661,11 @@ mod tests {
         let q = query_tokens
             .iter()
             .map(|t| {
-                let nums = t.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+                let nums = t
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 format!("'[{nums}]'::turbovec.vector")
             })
             .collect::<Vec<_>>()
@@ -8925,7 +8691,10 @@ mod tests {
         ];
         let _oid = colbert_make_persistent("cb_p_basic", docs);
         let ids = colbert_persistent_ids("cb_p_basic", &[onehot8(0), onehot8(1)], 3);
-        assert!(!ids.is_empty(), "persistent colbert_search returned no rows");
+        assert!(
+            !ids.is_empty(),
+            "persistent colbert_search returned no rows"
+        );
         for id in &ids {
             assert!((1..=3).contains(id), "unexpected doc id {id}");
         }
@@ -8973,22 +8742,20 @@ mod tests {
         let oid = colbert_make_persistent("cb_p_vac", docs);
         // Before: doc 1 retrieved by token 0.
         let before = colbert_persistent_ids("cb_p_vac", &[onehot8(0)], 3);
-        assert!(before.contains(&1), "doc 1 retrieved before vacuum: {before:?}");
+        assert!(
+            before.contains(&1),
+            "doc 1 retrieved before vacuum: {before:?}"
+        );
 
         // Collect doc 1's ctid as the dead set.
         let dead_set: std::collections::HashSet<u64> = {
             let mut set = std::collections::HashSet::new();
             Spi::connect(|client| {
                 let t = client
-                    .select(
-                        "SELECT ctid FROM cb_p_vac WHERE id = 1",
-                        None,
-                        &[],
-                    )
+                    .select("SELECT ctid FROM cb_p_vac WHERE id = 1", None, &[])
                     .unwrap();
                 for row in t {
-                    let ctid: pg_sys::ItemPointerData =
-                        row.get(1).unwrap().unwrap();
+                    let ctid: pg_sys::ItemPointerData = row.get(1).unwrap().unwrap();
                     set.insert(pgrx::itemptr::item_pointer_to_u64(ctid));
                 }
             });
@@ -9013,7 +8780,10 @@ mod tests {
             !after.contains(&1),
             "doc 1's tokens must be masked from colbert_search after vacuum: {after:?}"
         );
-        assert!(after.contains(&2), "doc 2 (also has token 0) survives: {after:?}");
+        assert!(
+            after.contains(&2),
+            "doc 2 (also has token 0) survives: {after:?}"
+        );
         Spi::run("DROP TABLE cb_p_vac CASCADE").unwrap();
     }
 
@@ -9062,10 +8832,8 @@ mod tests {
         let bytes_of = |oid: pg_sys::Oid| -> Vec<u8> {
             unsafe {
                 let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
-                let nblocks = pg_sys::RelationGetNumberOfBlocksInFork(
-                    rel,
-                    pg_sys::ForkNumber::MAIN_FORKNUM,
-                );
+                let nblocks =
+                    pg_sys::RelationGetNumberOfBlocksInFork(rel, pg_sys::ForkNumber::MAIN_FORKNUM);
                 let mut out = Vec::new();
                 for blk in 0..nblocks {
                     let buf = pg_sys::ReadBufferExtended(
@@ -9077,10 +8845,8 @@ mod tests {
                     );
                     pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
                     let page = pg_sys::BufferGetPage(buf);
-                    let data = std::slice::from_raw_parts(
-                        page as *const u8,
-                        crate::index::page::BLCKSZ,
-                    );
+                    let data =
+                        std::slice::from_raw_parts(page as *const u8, crate::index::page::BLCKSZ);
                     out.extend_from_slice(data);
                     pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_UNLOCK as i32);
                     pg_sys::ReleaseBuffer(buf);
@@ -9125,13 +8891,16 @@ mod tests {
         Spi::run("DROP TABLE IF EXISTS cb_sv CASCADE").unwrap();
         Spi::run("CREATE TABLE cb_sv (id bigint, emb turbovec.vector)").unwrap();
         for i in 0..32i64 {
-            let nums = (0..8).map(|j| ((i + j) % 5).to_string()).collect::<Vec<_>>().join(",");
+            let nums = (0..8)
+                .map(|j| ((i + j) % 5).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             Spi::run(&format!("INSERT INTO cb_sv VALUES ({i}, '[{nums}]')")).unwrap();
         }
-        Spi::run("CREATE INDEX cb_sv_ix ON cb_sv USING turbovec (emb vec_cosine_ops)")
+        Spi::run("CREATE INDEX cb_sv_ix ON cb_sv USING turbovec (emb vec_cosine_ops)").unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 'cb_sv_ix'::regclass::oid")
+            .unwrap()
             .unwrap();
-        let oid: pg_sys::Oid =
-            Spi::get_one("SELECT 'cb_sv_ix'::regclass::oid").unwrap().unwrap();
         let (ver, kind) = unsafe {
             let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
             let meta = crate::index::relfile::read_meta(rel).expect("meta");

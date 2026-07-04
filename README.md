@@ -394,33 +394,29 @@ lets you pass an allowlist for hybrid retrieval).
 
 ## Performance
 
-> **Operations note: `shared_buffers`.** As of v1.5.1 (Phase
-> R-3), the bulk of a pg_turbovec index — the persisted
-> SIMD-blocked codes, the rotation matrix, and the inline
-> codebook — is read from disk via per-backend
-> `mmap(MAP_PRIVATE)` of the relfile, **bypassing PG's buffer
-> manager entirely** for those bytes. The OS page cache is the
-> authoritative cache, and `shared_buffers` size no longer
-> bounds warm-scan latency on the dominant chains.
+> **Operations note: `shared_buffers`.** As of v1.19.0, every byte of
+> a pg_turbovec index is read through PostgreSQL's buffer manager
+> (`ReadBufferExtended`) — there is no relfile mmap. `shared_buffers`
+> sizing matters: size it to hold the hot (compressed) index for best
+> cold-fill latency. pg_turbovec's 7–15× compression vs fp32 HNSW is
+> what makes "the index fits `shared_buffers`" achievable at corpus
+> sizes where an uncompressed index could not. A cold-fill on an
+> index larger than `shared_buffers` pays the buffer-manager's
+> per-page pin/lock/copy cost the first time each backend touches it;
+> warm (already-cached) scans are unaffected by index size.
 >
-> You still want `shared_buffers` big enough to hold the meta
-> page, the codes/scales/ids chains (which stay on the buffer
-> manager because VACUUM mutates them in place), and your other
-> relations. A few hundred MiB is fine; 1.5× the index size is
-> no longer required.
+> Out-of-core (>RAM) serving for IVF indexes doesn't need
+> `shared_buffers` to hold the whole index either — `turbovec.
+> out_of_core` (default `auto`) keeps the per-backend resident set at
+> O(probes·cell_size) by gathering only the probed cells' pages
+> through the buffer manager.
 >
-> The fall-back GUC `turbovec.mmap_static_blocked = off` reverts
-> to the v1.4.x buffer-manager-only read path on a per-session
-> basis. With it off, the v1.4.x advice applies:
-> `shared_buffers ≥ 2 × (sum of all turbovec indexes you query
-> hot)` to keep the warm-scan profile clean.
->
-> Full diagnosis: [`docs/RECALL.md § 2.5`](docs/RECALL.md) (the
-> v1.4.0 buffer-manager-bound profile) and
-> [`docs/RECALL.md § 2.6`](docs/RECALL.md) (the v1.5.1 mmap
-> fix); architecture +
-> isolation contract:
-> [`docs/ARCHITECTURE.md § 8.1`](docs/ARCHITECTURE.md#81-index-am--mmap-isolation-contract).
+> Architecture: [`docs/ARCHITECTURE.md` § 8.1 "Index AM ·
+> buffer-cache-only reads"](docs/ARCHITECTURE.md#81-index-am--buffer-cache-only-reads).
+> Design rationale for the (now-shipped) buffer-cache-only read path:
+> [`docs/BUFFER_CACHE_ONLY_DESIGN.md`](docs/BUFFER_CACHE_ONLY_DESIGN.md).
+> Historical mmap-era benchmarks (v1.5.0–v1.18.x, since removed):
+> [`docs/RECALL.md § 2.5–2.6`](docs/RECALL.md).
 
 > **Performance methodology.** The headline numbers in the
 > table at the top of this README come from a real

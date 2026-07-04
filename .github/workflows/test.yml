@@ -18,6 +18,17 @@ jobs:
           fetch-depth: 0
       - run: bash scripts/drift-check.sh
 
+  fmt-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+          rustflags: ""
+      - run: cargo fmt --all -- --check
+
   test:
     runs-on: ubuntu-latest
     strategy:

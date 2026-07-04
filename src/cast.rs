@@ -92,11 +92,7 @@ fn to_vector_text(s: &str) -> Vector {
 fn to_vec_text_dim(s: &str, dim: i32, _transpose: bool) -> Vector {
     let v = to_vec_text(s);
     if dim != 0 && v.dim() != dim as usize {
-        error!(
-            "to_vec: expected dim {}, got {}",
-            dim,
-            v.dim()
-        );
+        error!("to_vec: expected dim {}, got {}", dim, v.dim());
     }
     v
 }
@@ -113,11 +109,7 @@ fn to_vector_text_dim(s: &str, dim: i32, transpose: bool) -> Vector {
 #[pg_extern(immutable, parallel_safe)]
 fn vector_to_float4(v: Vector, dim: i32, _transpose: bool) -> Vec<f32> {
     if dim != 0 && v.dim() != dim as usize {
-        error!(
-            "vector_to_float4: expected dim {}, got {}",
-            dim,
-            v.dim()
-        );
+        error!("vector_to_float4: expected dim {}, got {}", dim, v.dim());
     }
     v.data
 }
@@ -130,11 +122,7 @@ fn vector_to_float4(v: Vector, dim: i32, _transpose: bool) -> Vec<f32> {
 fn array_to_vec_dim(arr: Vec<Option<f32>>, dim: i32, _transpose: bool) -> Vector {
     let v = array_to_vec(arr);
     if dim != 0 && v.dim() != dim as usize {
-        error!(
-            "array_to_vec: expected dim {}, got {}",
-            dim,
-            v.dim()
-        );
+        error!("array_to_vec: expected dim {}, got {}", dim, v.dim());
     }
     v
 }

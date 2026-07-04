@@ -174,7 +174,9 @@ impl CellDirectory {
         let mut entries = Vec::with_capacity(lists);
         for i in 0..lists {
             let off = i * CellEntry::ENCODED_BYTES;
-            entries.push(CellEntry::decode(&bytes[off..off + CellEntry::ENCODED_BYTES]));
+            entries.push(CellEntry::decode(
+                &bytes[off..off + CellEntry::ENCODED_BYTES],
+            ));
         }
         Self { entries }
     }
@@ -1129,7 +1131,14 @@ fn train_kmeans_iters(
                 .sum::<f32>();
         }
         gemm_lloyd_assign(
-            sample, &centroids, &cnorm, n_sample, lists, dim, &mut cross, &mut assign,
+            sample,
+            &centroids,
+            &cnorm,
+            n_sample,
+            lists,
+            dim,
+            &mut cross,
+            &mut assign,
         );
 
         // Update step: mean of assigned points. The per-cell f64
@@ -1521,10 +1530,7 @@ pub fn batched_assign_soft(
 /// probed cells (a boundary vector in two probed cells must not be
 /// returned twice) — the scan's emitted-id set + an intra-batch
 /// guard handle this.
-pub fn build_permutation_soft(
-    assignments: &[Vec<u32>],
-    lists: usize,
-) -> (Vec<u32>, CellDirectory) {
+pub fn build_permutation_soft(assignments: &[Vec<u32>], lists: usize) -> (Vec<u32>, CellDirectory) {
     // Count slots per cell (a vector contributes one slot per cell
     // it is assigned to).
     let mut counts = vec![0u64; lists];
@@ -1779,8 +1785,14 @@ mod tests {
             "centroids didn't converge to the two blobs: {c0:?} {c1:?}"
         );
         // Assignment splits cleanly.
-        assert_eq!(model.assign_one(&[0.0, 0.0]), model.assign_one(&[0.05, -0.05]));
-        assert_ne!(model.assign_one(&[0.0, 0.0]), model.assign_one(&[10.0, 10.0]));
+        assert_eq!(
+            model.assign_one(&[0.0, 0.0]),
+            model.assign_one(&[0.05, -0.05])
+        );
+        assert_ne!(
+            model.assign_one(&[0.0, 0.0]),
+            model.assign_one(&[10.0, 10.0])
+        );
     }
 
     /// Same sample + same lists ⇒ byte-identical centroids. The
@@ -1793,7 +1805,9 @@ mod tests {
         // Pseudo-random but fixed content.
         let mut x = 12345u64;
         for v in sample.iter_mut() {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
         }
         let m1 = train_kmeans(&sample, n, 16, dim);
@@ -1964,9 +1978,18 @@ mod tests {
     fn cell_directory_round_trip() {
         let dir = CellDirectory {
             entries: vec![
-                CellEntry { code_offset: 0, n_vectors: 5 },
-                CellEntry { code_offset: 5, n_vectors: 0 },
-                CellEntry { code_offset: 5, n_vectors: 7 },
+                CellEntry {
+                    code_offset: 0,
+                    n_vectors: 5,
+                },
+                CellEntry {
+                    code_offset: 5,
+                    n_vectors: 0,
+                },
+                CellEntry {
+                    code_offset: 5,
+                    n_vectors: 7,
+                },
             ],
         };
         let bytes = dir.encode();
@@ -1981,8 +2004,14 @@ mod tests {
     fn validate_partition_rejects_gaps() {
         let dir = CellDirectory {
             entries: vec![
-                CellEntry { code_offset: 0, n_vectors: 5 },
-                CellEntry { code_offset: 6, n_vectors: 4 }, // gap!
+                CellEntry {
+                    code_offset: 0,
+                    n_vectors: 5,
+                },
+                CellEntry {
+                    code_offset: 6,
+                    n_vectors: 4,
+                }, // gap!
             ],
         };
         assert!(dir.validate_partition(9).is_err());
@@ -2024,18 +2053,33 @@ mod tests {
     fn probe_mask_marks_cell_ranges() {
         let dir = CellDirectory {
             entries: vec![
-                CellEntry { code_offset: 0, n_vectors: 3 },  // slots 0,1,2
-                CellEntry { code_offset: 3, n_vectors: 2 },  // slots 3,4
-                CellEntry { code_offset: 5, n_vectors: 4 },  // slots 5,6,7,8
+                CellEntry {
+                    code_offset: 0,
+                    n_vectors: 3,
+                }, // slots 0,1,2
+                CellEntry {
+                    code_offset: 3,
+                    n_vectors: 2,
+                }, // slots 3,4
+                CellEntry {
+                    code_offset: 5,
+                    n_vectors: 4,
+                }, // slots 5,6,7,8
             ],
         };
         let n = 9;
         // Probe cell 1 only.
         let m = dir.probe_mask(&[1], n);
-        assert_eq!(m, vec![false, false, false, true, true, false, false, false, false]);
+        assert_eq!(
+            m,
+            vec![false, false, false, true, true, false, false, false, false]
+        );
         // Probe cells 0 and 2.
         let m = dir.probe_mask(&[0, 2], n);
-        assert_eq!(m, vec![true, true, true, false, false, true, true, true, true]);
+        assert_eq!(
+            m,
+            vec![true, true, true, false, false, true, true, true, true]
+        );
         assert_eq!(m.iter().filter(|&&b| b).count(), 7);
         // Probe all cells ⇒ all true (the exact-flat anchor at the
         // mask level).
@@ -2294,8 +2338,7 @@ mod tests {
                 let exact = coarse_probe(&centroids, lists, dim, &q, nprobe);
                 let via_graph = graph_probe(&graph, &centroids, lists, dim, &q, nprobe, 0);
                 let exact_set: std::collections::HashSet<u32> = exact.iter().copied().collect();
-                let graph_set: std::collections::HashSet<u32> =
-                    via_graph.iter().copied().collect();
+                let graph_set: std::collections::HashSet<u32> = via_graph.iter().copied().collect();
                 assert_eq!(
                     exact_set, graph_set,
                     "graph_probe (nprobe={nprobe}) must match the linear scan's cell SET exactly\n  exact={exact:?}\n  graph={via_graph:?}"
@@ -2350,12 +2393,18 @@ mod tests {
         let q = rand_centroids(0x1357, 1, dim);
         let direct = coarse_probe(&centroids, lists, dim, &q, 5);
         let via_dispatch = coarse_probe_dispatch(&centroids, lists, dim, &q, 5, None);
-        assert_eq!(direct, via_dispatch, "None graph must fall back to the exact linear scan");
+        assert_eq!(
+            direct, via_dispatch,
+            "None graph must fall back to the exact linear scan"
+        );
 
         let graph = build_centroid_graph(&centroids, lists, dim);
         let via_graph = coarse_probe_dispatch(&centroids, lists, dim, &q, 5, Some(&graph));
         let exact_set: std::collections::HashSet<u32> = direct.iter().copied().collect();
         let graph_set: std::collections::HashSet<u32> = via_graph.iter().copied().collect();
-        assert_eq!(exact_set, graph_set, "Some(graph) must match the linear scan's SET");
+        assert_eq!(
+            exact_set, graph_set,
+            "Some(graph) must match the linear scan's SET"
+        );
     }
 }

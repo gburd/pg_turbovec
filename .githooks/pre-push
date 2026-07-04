@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# .githooks/pre-push — drift-check + cross-version compile gate
+# .githooks/pre-push — fmt + drift-check + cross-version compile gate
 # before any push.
 #
 # Installed via `bash scripts/install-hooks.sh`. Skips on
@@ -9,5 +9,6 @@
 
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
+cargo fmt --all -- --check
 bash "$root/scripts/drift-check.sh"
 bash "$root/scripts/compile-matrix.sh"

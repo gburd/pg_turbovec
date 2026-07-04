@@ -4,6 +4,95 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.22.0] — 2026-07-04
+
+**Repo cleanup, no functional change.** Prompted by an audit for
+"silent GUC" traps, unfinished/debugging artifacts, and general
+repo hygiene before a release. No wire-format change
+(`MetaPageData::version` stays 5), no REINDEX.
+
+### Removed
+
+- **`turbovec.mmap_static_blocked`** — a deprecated no-op GUC since
+  v1.19.0 (it toggled a relfile-mmap fast path that v1.19.0 deleted).
+  Removed after a three-minor deprecation window (v1.19.0 warn →
+  v1.20.0/v1.21.0 still-warning → v1.22.0 remove), per AGENTS.md's
+  SQL-surface-removal policy (two-release minimum). `SET
+  turbovec.mmap_static_blocked = ...` now errors like any other
+  unknown GUC instead of silently no-op'ing.
+- `.woodpecker/ci.yaml` — an orphaned CI config from before the
+  project moved to Forgejo Actions (last touched at v0.3.0, never
+  referenced by any current doc or actually run). It was also the
+  only place `cargo fmt --all -- --check` was ever wired up, which
+  is how 244 formatting violations accumulated across the tree
+  without CI ever catching them (see below).
+- `relfile_mmap_static_round_trip_matches_buffer_manager` (test) —
+  compared the mmap read path against the buffer-manager fallback;
+  meaningless now that there is only one read path. Also incidentally
+  wrote a stray debug file (`/tmp/pg_turbovec_phase_r3_smoke.txt`) on
+  every run.
+
+### Fixed
+
+- **`cargo fmt`'d the whole tree** (244 pre-existing violations,
+  purely mechanical/cosmetic — no behavior change). `fmt-check` is
+  now wired into `.github/workflows/test.yml` and
+  `.githooks/pre-push` so this can't silently reaccumulate.
+- **Literal `\uXXXX` escape-sequence artifacts** (e.g. `\u2014`
+  instead of an actual em dash) in an internal design note,
+  an internal design note,
+  `src/extras.rs`, `src/index/cost.rs`, and the now-removed
+  `.woodpecker/ci.yaml` — cosmetic (doc comments, not code
+  behavior), but a real artifact of a write-tool double-escaping
+  bug worth stamping out repo-wide rather than file-by-file.
+- A stale dead-code compiler warning: `highdim_oversample_recovers_
+  recall`'s unused `lists: i64 = 141` local (the `CREATE INDEX`
+  right below it hardcoded the literal `141` instead of
+  interpolating the variable).
+- `src/guc.rs`'s own module-doc GUC table was missing
+  `turbovec.search_k` and `turbovec.probes` — two of the most-used
+  GUCs in the extension — and had the wrong range for
+  `turbovec.cache_size_mb` (documented as `1..=65536`; the actual
+  registered range is `0..=65536`, and 0 has real, documented meaning:
+  it disables caching). Fixed in `src/guc.rs` and propagated to
+  `docs/ARCHITECTURE.md` §9's GUC table, which had drifted to only
+  6 of the 17 real GUCs.
+- `README.md`'s "Operations note: shared_buffers" section still
+  described the v1.5.0–v1.18.x mmap-era guidance ("1.5× the index
+  size is no longer required", "shared_buffers size no longer
+  bounds warm-scan latency") as current fact. It's the opposite of
+  current reality since v1.19.0 removed mmap: `shared_buffers`
+  sizing matters again, and pg_turbovec's 7–15× compression is what
+  makes fitting the hot index in `shared_buffers` achievable.
+  Rewritten to describe the actual current (buffer-cache-only) read
+  path.
+- `docs/BUFFER_CACHE_ONLY_DESIGN.md` was never actually committed to
+  git despite describing a change that shipped in v1.19.0 (it sat
+  untracked in the working tree for multiple sessions). Committed
+  now with its status header corrected from "DESIGN" (proposal) to
+  "IMPLEMENTED" (it already is, and has been since v1.19.0).
+
+### Documentation-only, for context
+
+- Added an explicit warning to `turbovec.bit_width_default`'s GUC
+  description: the name is `turbovec.bit_width_default`, not
+  `turbovec.bit_width` — PostgreSQL silently accepts
+  `SET turbovec.<anything>` as a no-op placeholder custom GUC when
+  the name doesn't match one this extension actually registered (a
+  generic PostgreSQL behavior, not a pg_turbovec bug), so a typo'd
+  `SET turbovec.bit_width = N` neither errors nor does anything. A
+  benchmark driver script hit exactly this during the v1.21.0 Phase
+  G-1 validation (see that release's CHANGELOG entry) — every
+  "bw=2" row in the original Phase G-0 results was silently built at
+  bw=4. Use the `bit_width` **index reloption**
+  (`WITH (bit_width = N)`) to set it at `CREATE INDEX` time.
+
+### Migration
+
+**No REINDEX.** Wire stays v5; no SQL surface change besides the
+removed deprecated GUC. `ALTER EXTENSION pg_turbovec UPDATE TO
+'1.22.0';` is sufficient.
+
 ## [1.21.0] — 2026-07-03
 
 **Phase G-1: centroid graph for sublinear IVF coarse-cell

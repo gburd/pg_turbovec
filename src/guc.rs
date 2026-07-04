@@ -7,11 +7,12 @@
 //! | GUC                              | Type | Default | Range          |
 //! |----------------------------------|------|---------|----------------|
 //! | `turbovec.bit_width_default`     | int  | 4       | 2..=4          |
-//! | `turbovec.cache_size_mb`         | int  | 256     | 1..=65536      |
+//! | `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      |
 //! | `turbovec.warn_on_rebuild`       | bool | true    | -              |
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
-//! | `turbovec.mmap_static_blocked`   | bool | true (no-op, deprecated) | -          |
+//! | `turbovec.search_k`              | int  | 32      | 1..=100000     |
+//! | `turbovec.probes`                | int  | 8       | 1..=65536      |
 //! | `turbovec.iterative_scan`        | enum | off     | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
@@ -223,17 +224,10 @@ const AUTO_OOC_FRACTION: f64 = 0.5;
 /// candidate set; iterative scan grows it from there.
 pub static OVERSAMPLE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 
-/// DEPRECATED no-op (v1.19.0+). pg_turbovec no longer mmaps the
-/// relfile; every byte of index data is read through PostgreSQL's
-/// shared-buffer cache (`ReadBufferExtended`). This setting is
-/// ignored and retained only so an existing `SET
-/// turbovec.mmap_static_blocked` does not error; it will be removed
-/// in a future minor. See `docs/BUFFER_CACHE_ONLY_DESIGN.md`.
-/// DEPRECATED no-op (v1.19.0+): retained only so an existing
-/// `SET turbovec.mmap_static_blocked` doesn't error. All index data
-/// is read through PG's buffer manager; nothing reads this. Removed
-/// in a future minor. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
-pub static MMAP_STATIC_BLOCKED: GucSetting<bool> = GucSetting::<bool>::new(true);
+// REMOVED (v1.22.0): `MMAP_STATIC_BLOCKED` / `turbovec.mmap_static_blocked`
+// was a deprecated no-op since v1.19.0 (pg_turbovec's relfile mmap was
+// deleted that release) and has been removed per the documented
+// one-minor deprecation window. See CHANGELOG.md.
 
 /// Iterative-scan mode, modelled on pgvector's `hnsw.iterative_scan`.
 ///
@@ -420,8 +414,7 @@ fn cap_scan_chunks(want: usize, n_compact: usize) -> usize {
 /// scan clearly. Modelled as a string GUC (pgrx 0.17
 /// `define_string_guc`), `GucContext::Userset` so it's a per-session
 /// knob `SET`/`RESET` around the query.
-pub static ALLOWLIST: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+pub static ALLOWLIST: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 
 /// Register all `turbovec.*` GUCs with PostgreSQL.
 ///
@@ -431,7 +424,7 @@ pub fn register_gucs() {
         c_str(b"turbovec.bit_width_default\0"),
         c_str(b"Default bit width for turbovec indexes (2, 3, or 4).\0"),
         c_str(
-            b"Number of bits per coordinate used by the TurboQuant scalar quantizer when an index is created without an explicit `bit_width` reloption. Lower values save memory at the cost of recall.\0",
+            b"Number of bits per coordinate used by the TurboQuant scalar quantizer when an index is created without an explicit `bit_width` reloption. Lower values save memory at the cost of recall. NOTE: the name is `turbovec.bit_width_default`, not `turbovec.bit_width` -- PostgreSQL silently accepts `SET turbovec.<anything>` as a no-op placeholder custom GUC if it doesn't match a name this extension actually registered, so a typo'd `SET turbovec.bit_width = N` does not error and does not change anything (a benchmark driver hit exactly this once; see CHANGELOG.md's v1.21.0 Phase G-1 entry). To override bit width at index-creation time use the `bit_width` INDEX RELOPTION instead: `CREATE INDEX ... WITH (bit_width = N)`.\0",
         ),
         &BIT_WIDTH_DEFAULT,
         2,
@@ -549,22 +542,12 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
-    // DEPRECATED no-op (v1.19.0+): all index data is now read through
-    // PostgreSQL's buffer manager; there is no relfile mmap to toggle.
-    // Kept registered for one minor so an existing `SET
-    // turbovec.mmap_static_blocked = ...` in a session or config
-    // doesn't error; it is read by nothing and will be removed in a
-    // future minor. See docs/BUFFER_CACHE_ONLY_DESIGN.md.
-    GucRegistry::define_bool_guc(
-        c_str(b"turbovec.mmap_static_blocked\0"),
-        c_str(b"DEPRECATED no-op: all index reads now go through PostgreSQL's buffer manager; this setting is ignored.\0"),
-        c_str(
-            b"Deprecated and ignored as of v1.19.0. pg_turbovec no longer mmaps the relfile; every byte of index data is read through PostgreSQL's shared-buffer cache (ReadBufferExtended). This GUC is retained as a no-op for one minor release so existing `SET` statements do not error, and will be removed. See docs/BUFFER_CACHE_ONLY_DESIGN.md.\0",
-        ),
-        &MMAP_STATIC_BLOCKED,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
+    // REMOVED (v1.22.0): `turbovec.mmap_static_blocked` was a
+    // deprecated no-op since v1.19.0 (pg_turbovec stopped mmapping
+    // the relfile that release) and has now been removed per the
+    // documented one-minor deprecation window. `SET
+    // turbovec.mmap_static_blocked = ...` now errors like any other
+    // unknown GUC. See CHANGELOG.md and docs/BUFFER_CACHE_ONLY_DESIGN.md.
 
     GucRegistry::define_enum_guc(
         c_str(b"turbovec.iterative_scan\0"),
@@ -684,10 +667,19 @@ mod coarse_graph_tests {
     /// fallback contract (G-1 requirement #4).
     #[test]
     fn decide_matches_mode_and_threshold() {
-        assert!(!coarse_graph_decide(CoarseGraphMode::Off, GRAPH_MIN_LISTS * 10));
+        assert!(!coarse_graph_decide(
+            CoarseGraphMode::Off,
+            GRAPH_MIN_LISTS * 10
+        ));
         assert!(coarse_graph_decide(CoarseGraphMode::On, 1));
-        assert!(!coarse_graph_decide(CoarseGraphMode::Auto, GRAPH_MIN_LISTS - 1));
+        assert!(!coarse_graph_decide(
+            CoarseGraphMode::Auto,
+            GRAPH_MIN_LISTS - 1
+        ));
         assert!(coarse_graph_decide(CoarseGraphMode::Auto, GRAPH_MIN_LISTS));
-        assert!(coarse_graph_decide(CoarseGraphMode::Auto, GRAPH_MIN_LISTS + 1));
+        assert!(coarse_graph_decide(
+            CoarseGraphMode::Auto,
+            GRAPH_MIN_LISTS + 1
+        ));
     }
 }

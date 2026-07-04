@@ -85,14 +85,27 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.21.0, 2026-07-03)
+### Current (as of v1.22.0, 2026-07-04)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.21.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.21.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.21.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.21.x     | 1.21.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.22.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.22.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.22.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.22.x     | 1.22.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.22.0 is a repo-cleanup release, no functional change.**
+`turbovec.mmap_static_blocked` (deprecated no-op since v1.19.0) is
+removed after a three-minor deprecation window — `SET
+turbovec.mmap_static_blocked = ...` now errors like any unknown GUC.
+Also: `cargo fmt`'d the whole tree (244 pre-existing violations;
+`fmt-check` was never wired into the real CI, only into an
+already-dead `.woodpecker/ci.yaml`, now also removed and replaced
+with a `fmt-check` job in `.github/workflows/test.yml` +
+`.githooks/pre-push`), fixed literal `\uXXXX` escape-sequence
+artifacts in several doc files, deleted a test made meaningless by
+the mmap removal, fixed a stale dead-code warning. No wire change,
+no REINDEX.
 
 **v1.21.0 (Phase G-1) adds an in-memory centroid graph** for
 sublinear IVF coarse-cell selection (`lists >= 4096`, gated by the

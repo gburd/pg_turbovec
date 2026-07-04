@@ -209,12 +209,7 @@ impl ReadOnlyIndex {
     /// into a few contiguous cell ranges (as the IVF build lays them
     /// out) the masked-out blocks skip their LUT scoring work entirely
     /// — this is the IVF latency win, not just a result filter.
-    pub fn search_masked(
-        &self,
-        queries: &[f32],
-        k: usize,
-        mask: &[bool],
-    ) -> (Vec<f32>, Vec<u64>) {
+    pub fn search_masked(&self, queries: &[f32], k: usize, mask: &[bool]) -> (Vec<f32>, Vec<u64>) {
         let res: SearchResults = self.inner.search_with_mask(queries, k, Some(mask));
         let mut ids = Vec::with_capacity(res.indices.len());
         for &slot in &res.indices {
@@ -1384,19 +1379,25 @@ mod merge_tests {
     fn merge_matches_global_topk() {
         // 12 rows, distinct scores + a couple of ties.
         let rows: Vec<(f32, i64)> = vec![
-            (0.90, 0), (0.10, 1), (0.55, 2), (0.55, 3), (0.80, 4),
-            (0.20, 5), (0.70, 6), (0.30, 7), (0.95, 8), (0.40, 9),
-            (0.60, 10), (0.50, 11),
+            (0.90, 0),
+            (0.10, 1),
+            (0.55, 2),
+            (0.55, 3),
+            (0.80, 4),
+            (0.20, 5),
+            (0.70, 6),
+            (0.30, 7),
+            (0.95, 8),
+            (0.40, 9),
+            (0.60, 10),
+            (0.50, 11),
         ];
         let k = 5;
 
         // Global top-k SET (serial ground truth).
         let mut g = rows.clone();
-        g.sort_unstable_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1))
-        });
-        let global: std::collections::HashSet<i64> =
-            g.iter().take(k).map(|p| p.1).collect();
+        g.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
+        let global: std::collections::HashSet<i64> = g.iter().take(k).map(|p| p.1).collect();
 
         // Split into 3 chunks, each takes its local top-k.
         let chunks = [&rows[0..4], &rows[4..8], &rows[8..12]];

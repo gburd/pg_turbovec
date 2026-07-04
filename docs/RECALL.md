@@ -967,6 +967,18 @@ result level; sub-ms latency on the small fixture is the
 expected debug-build speed and not the right place to measure
 the arnold-scale win.
 
+> **Update (v1.19.0, then v1.22.0):** the relfile mmap fast path
+> this section describes was removed in v1.19.0 (buffer-cache-only
+> reads are now the only read path; see
+> `docs/BUFFER_CACHE_ONLY_DESIGN.md`), and the fallback GUC
+> (`turbovec.mmap_static_blocked`) named throughout this section was
+> itself removed in v1.22.0 after its documented one-minor
+> deprecation window. The `relfile_mmap_static_round_trip_matches_
+> buffer_manager` test named above no longer exists (there is only
+> one read path to round-trip against now). This section is
+> preserved as the historical record of the Phase S/R-3 mmap-era
+> measurements; it does not describe current behaviour.
+
 **Index growth and build cost** — unchanged from v1.4.0:
 
 | metric | v1.4.0 (Phase R-3 — wait, that's the *measurement*) | v1.5.0 (Phase R-3 — the *fix*) | delta |

@@ -76,9 +76,7 @@ fn sparsevec_l2_distance(a: Sparsevec, b: Sparsevec) -> f64 {
 fn sparsevec_l1_distance(a: Sparsevec, b: Sparsevec) -> f64 {
     a.check_same_dim(&b, "l1_distance");
     let mut acc: f64 = 0.0;
-    sparse_walk(&a, &b, |x, y| {
-        acc += (f64::from(x) - f64::from(y)).abs()
-    });
+    sparse_walk(&a, &b, |x, y| acc += (f64::from(x) - f64::from(y)).abs());
     acc
 }
 
@@ -179,10 +177,7 @@ impl SparsevecAccum {
 }
 
 #[pg_extern(immutable, parallel_safe)]
-fn sparsevec_accum(
-    state: Option<SparsevecAccum>,
-    value: Sparsevec,
-) -> SparsevecAccum {
+fn sparsevec_accum(state: Option<SparsevecAccum>, value: Sparsevec) -> SparsevecAccum {
     let mut state = state.unwrap_or_default();
     state.ensure_dim(value.dim());
     for (i, idx) in value.indices.iter().enumerate() {
@@ -209,10 +204,7 @@ fn sparsevec_combine(
             }
             let mut out = a;
             if out.dim != b.dim {
-                error!(
-                    "sparsevec_combine: dim mismatch ({} vs {})",
-                    out.dim, b.dim
-                );
+                error!("sparsevec_combine: dim mismatch ({} vs {})", out.dim, b.dim);
             }
             for (x, y) in out.sum.iter_mut().zip(b.sum.iter()) {
                 *x += *y;

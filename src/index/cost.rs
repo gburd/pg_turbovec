@@ -8,7 +8,7 @@
 //! the kernel will do for one batched search. The previous
 //! versions read these out of the SPI side-table; that's gone in
 //! v1.3.0. The relfile read is cheap — one buffer-pool hit on a
-//! pinned shared-buffer page \u2014 and avoids the SPI round-trip
+//! pinned shared-buffer page — and avoids the SPI round-trip
 //! that would otherwise re-enter the executor mid-plan.
 
 use pgrx::pg_sys;

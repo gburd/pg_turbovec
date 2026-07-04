@@ -126,10 +126,7 @@ impl CorpusSpill {
         unsafe {
             self.seek(start);
             for r in 0..rows {
-                self.read_one_at_cursor(
-                    &mut ids[r],
-                    &mut out[r * self.dim..(r + 1) * self.dim],
-                );
+                self.read_one_at_cursor(&mut ids[r], &mut out[r * self.dim..(r + 1) * self.dim]);
             }
         }
     }
@@ -378,10 +375,7 @@ impl BuildState {
         let mwm_kb = unsafe { pg_sys::maintenance_work_mem }.max(0) as usize;
         // Saturating math because mwm_kb * 1024 could overflow on a
         // hypothetical 32-bit build; on 64-bit it can't, but be safe.
-        let bytes = mwm_kb
-            .saturating_mul(1024)
-            .saturating_mul(3)
-            / 4;
+        let bytes = mwm_kb.saturating_mul(1024).saturating_mul(3) / 4;
         let chunk_bytes = bytes.min(MAX_STAGING_BYTES);
         let row_bytes = dim.saturating_mul(std::mem::size_of::<f32>()).max(1);
         (chunk_bytes / row_bytes).max(1)
@@ -459,13 +453,10 @@ impl BuildState {
         // SAFETY: `pool` either is null or points at a `ThreadPool`
         // that lives on `ambuild`'s stack for the entire scan, which
         // strictly outlives this callback-driven flush.
-        let pool: Option<&rayon::ThreadPool> =
-            unsafe { self.pool.as_ref() };
+        let pool: Option<&rayon::ThreadPool> = unsafe { self.pool.as_ref() };
         let pending_flat = &self.pending_flat;
         let pending_ids = &self.pending_ids;
-        let res = super::build_pool::install(pool, || {
-            idx.add_with_ids(pending_flat, pending_ids)
-        });
+        let res = super::build_pool::install(pool, || idx.add_with_ids(pending_flat, pending_ids));
         if let Err(e) = res {
             error!("turbovec ambuild: add_with_ids failed: {:?}", e);
         }
@@ -823,16 +814,7 @@ unsafe fn ivf_build_and_write(
     // index over zero rows has no cells; readers treat it as empty.
     // (The spill drops here, unlinking the temp file.)
     if n_vectors == 0 {
-        relfile::write_full(
-            index_relation,
-            bit_width,
-            dim as u32,
-            0,
-            &[],
-            &[],
-            &[],
-            1,
-        );
+        relfile::write_full(index_relation, bit_width, dim as u32, 0, &[], &[], &[], 1);
         return 0;
     }
 
@@ -923,8 +905,7 @@ unsafe fn ivf_build_and_write(
                     .par_iter()
                     .map(|&chunk_start| {
                         let chunk_rows = par_chunk_rows.min(rows - chunk_start);
-                        let chunk_raw =
-                            &raw[chunk_start * dim..(chunk_start + chunk_rows) * dim];
+                        let chunk_raw = &raw[chunk_start * dim..(chunk_start + chunk_rows) * dim];
                         // Per-chunk thread-local scratch (no sharing).
                         let mut norm = vec![0.0f32; chunk_rows * dim];
                         let mut rot = vec![0.0f32; chunk_rows * dim];
@@ -1020,18 +1001,18 @@ unsafe fn ivf_build_and_write(
         while new_slot < n_slots {
             // First batch is the fixed calibration prefix; subsequent
             // batches are mwm-bounded stream chunks.
-            let want = if new_slot == 0 { calib_rows } else { chunk_rows };
+            let want = if new_slot == 0 {
+                calib_rows
+            } else {
+                chunk_rows
+            };
             let rows = (n_slots - new_slot).min(want);
             // Random-access reads of this chunk's cell-ordered
             // vectors + real ids from the spill, on THIS thread.
             for r in 0..rows {
                 let old_idx = permutation[new_slot + r] as usize;
                 let mut id = 0u64;
-                spill.read_one(
-                    old_idx,
-                    &mut id,
-                    &mut chunk_flat[r * dim..(r + 1) * dim],
-                );
+                spill.read_one(old_idx, &mut id, &mut chunk_flat[r * dim..(r + 1) * dim]);
                 perm_ids[new_slot + r] = id;
                 // Synthetic contiguous slot id for the IdMapIndex.
                 chunk_ids[r] = (new_slot + r) as u64;
@@ -1153,8 +1134,7 @@ unsafe fn colbert_build_callback(
                 // the rotation matrix + disk spill on the first token,
                 // exactly as the single-vector IVF path does.
                 if state.ivf_rotation.is_none() {
-                    state.ivf_rotation =
-                        Some(turbovec::rotation::make_rotation_matrix(row_dim));
+                    state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(row_dim));
                     state.ivf_spill = Some(CorpusSpill::new(row_dim));
                 }
             }
@@ -1248,8 +1228,7 @@ unsafe extern "C-unwind" fn build_callback(
             // IVF: build the rotation matrix now that dim is pinned,
             // so reservoir samples land in the clustering space.
             if state.lists > 0 && state.ivf_rotation.is_none() {
-                state.ivf_rotation =
-                    Some(turbovec::rotation::make_rotation_matrix(row_dim));
+                state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(row_dim));
                 // Phase B-4: open the disk spill (stride needs dim).
                 state.ivf_spill = Some(CorpusSpill::new(row_dim));
             }
@@ -1325,11 +1304,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Rela
         let meta = crate::index::page::MetaPageData::plan(
             bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
         );
-        relfile::write_meta_in_fork(
-            index_relation,
-            pg_sys::ForkNumber::INIT_FORKNUM,
-            &meta,
-        );
+        relfile::write_meta_in_fork(index_relation, pg_sys::ForkNumber::INIT_FORKNUM, &meta);
     }
     // If dim was supplied as a non-multiple-of-8 we silently
     // skip the init-fork write; the next ambuild will error

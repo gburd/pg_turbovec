@@ -59,10 +59,7 @@ impl Halfvec {
         let mut out = ::std::vec::Vec::with_capacity(data.len());
         for (i, v) in data.iter().enumerate() {
             if !v.is_finite() {
-                error!(
-                    "halfvec value at index {} is not finite ({})",
-                    i, v
-                );
+                error!("halfvec value at index {} is not finite ({})", i, v);
             }
             let h = f16::from_f32(*v);
             if !h.is_finite() {
@@ -134,6 +131,5 @@ impl InOutFuncs for Halfvec {
         buffer.push(']');
     }
 
-    const NULL_ERROR_MESSAGE: Option<&'static str> =
-        Some("NULL is not a valid halfvec value");
+    const NULL_ERROR_MESSAGE: Option<&'static str> = Some("NULL is not a valid halfvec value");
 }

@@ -917,6 +917,41 @@ fn gemm_lloyd_assign(
     }
     // Cross term: cross (n_rows x lists) = sample @ centroids^T.
     // Identical GEMM shape/strides to batched_assign.
+    //
+    // Parallelism::Rayon(0) (== rayon::current_num_threads() of the
+    // AMBIENT pool -- see below) rather than Parallelism::None. This
+    // is the dominant term in an IVF build at high `lists` (the
+    // Lloyd loop runs this GEMM over the WHOLE sample once per
+    // iteration, up to KMEANS_ITERS times, vs. the row-blocked
+    // per-vector work elsewhere which is already split across chunks
+    // -- see an internal design note §12 / the v1.22.1 CHANGELOG entry for
+    // the FLOPs accounting that identified this as the real build
+    // cliff, not the row-blocked stages parallelized in v1.21.0).
+    //
+    // Determinism is preserved WITHOUT any row-blocking or reduction-
+    // order bookkeeping: empirically verified (see the v1.22.1
+    // release notes) that gemm 0.18.2's OWN internal Parallelism::
+    // Rayon(n) tiling produces BIT-IDENTICAL output to Parallelism::
+    // None for every thread count and shape tested, because each
+    // output tile of a GEMM is an independent dot-product reduction
+    // over the shared `k` dimension -- unlike the k-means centroid-
+    // SUM step (which DOES need the fixed-chunk-order dance in
+    // train_kmeans_iters below), a GEMM's tiling never reduces
+    // ACROSS threads, so thread count can never perturb which f32
+    // adds happen in which order for a given output element. This is
+    // exactly the guarantee the exact top-2 scalar recompute below
+    // ALSO independently provides (it re-derives the real winner from
+    // scratch), so parallelizing this GEMM is safe on two
+    // independent grounds, not just one.
+    //
+    // `rayon::current_num_threads()` (what Rayon(0) resolves to)
+    // reads the AMBIENT pool -- i.e. when this function runs inside
+    // `build_pool::install(pool, ...)` (as train_kmeans/train_kmeans_
+    // iters always is, from build.rs), it reports that bounded
+    // pool's size, NOT rayon's unbounded global default pool. So
+    // Rayon(0) here automatically and correctly respects `turbovec.
+    // build_parallelism` with no extra plumbing.
+    //
     // SAFETY: buffers sized m*k / (read transposed) k*n / m*n; strides
     // are in-bounds row-major (sample, cross) and transposed-row-major
     // (centroids^T). read_dst=false overwrites `cross`.
@@ -940,7 +975,7 @@ fn gemm_lloyd_assign(
             false,
             false,
             false,
-            Parallelism::None,
+            Parallelism::Rayon(0),
         );
     }
     for i in 0..n_rows {
@@ -1813,6 +1848,60 @@ mod tests {
         let m1 = train_kmeans(&sample, n, 16, dim);
         let m2 = train_kmeans(&sample, n, 16, dim);
         assert_eq!(m1.centroids, m2.centroids, "k-means must be deterministic");
+    }
+
+    /// `gemm_lloyd_assign`'s cross-term GEMM runs `Parallelism::
+    /// Rayon(0)` (ambient-pool-sized), not `Parallelism::None` --
+    /// v1.22.1 (see CHANGELOG.md "closing the IVF build-cliff gap").
+    /// This is the load-bearing determinism guarantee for that
+    /// change: the SAME sample + lists must produce byte-identical
+    /// centroids regardless of how many threads the ambient rayon
+    /// pool has, because a REAL deployment's `turbovec.
+    /// build_parallelism` (and thus the pool `train_kmeans` runs
+    /// inside, via `build_pool::install`) varies across machines with
+    /// different core counts -- the on-disk IVF relfile bytes (coarse
+    /// centroids, cell assignment, and everything downstream of it)
+    /// must not.
+    ///
+    /// Shape chosen so `n_rows * lists * dim` clears gemm 0.18's
+    /// internal `DEFAULT_THREADING_THRESHOLD` (48*48*256 = 589,824;
+    /// see `gemm-common::gemm::get_threading_threshold`) -- below that
+    /// product gemm always runs single-threaded regardless of the
+    /// `Parallelism::Rayon` thread count, which would make this test
+    /// pass trivially without actually exercising the multi-threaded
+    /// path. `2000 * 64 * 64 = 8,192,000`, well above it, while still
+    /// running in well under a second in a debug test binary.
+    #[test]
+    fn kmeans_deterministic_across_pool_sizes() {
+        let dim = 64;
+        let n = 2000;
+        let lists = 64;
+        let mut sample = vec![0.0f32; n * dim];
+        let mut x = 0xC0FF_EEu64;
+        for v in sample.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+        }
+        let train_in_pool = |n_threads: usize| -> Vec<f32> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .unwrap();
+            pool.install(|| train_kmeans(&sample, n, lists, dim).centroids)
+        };
+        let serial = train_in_pool(1);
+        for n_threads in [2, 3, 4, 8] {
+            let parallel = train_in_pool(n_threads);
+            assert_eq!(
+                serial, parallel,
+                "train_kmeans centroids differ between a 1-thread and \
+                 a {n_threads}-thread pool -- the Lloyd-assign GEMM's \
+                 Parallelism::Rayon(0) is not actually thread-count-\
+                 invariant for this shape"
+            );
+        }
     }
 
     /// GEMM-Lloyd k-means + convergence early-exit must still produce

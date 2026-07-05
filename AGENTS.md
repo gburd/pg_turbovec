@@ -85,16 +85,32 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.22.0, 2026-07-04)
+### Current (as of v1.22.1, 2026-07-05)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.22.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.22.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.22.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.22.x     | 1.22.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.22.1   | `REINDEX INDEX` once |
+| 1.2.x              | 1.22.1   | `REINDEX INDEX` once |
+| 1.3.x              | 1.22.1   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.22.x     | 1.22.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.22.1 closes a real fraction of the IVF build-cliff gap** —
+`gemm_lloyd_assign`'s Lloyd-loop cross-term GEMM (the dominant
+k-means training cost at high `lists`, ~26-112× the FLOPs of the
+row-blocked stages v1.20.0/v1.21.0 already parallelized) now runs
+`Parallelism::Rayon(0)` instead of `Parallelism::None`. Bit-identical
+output confirmed empirically (`gemm`'s own tiling never reduces
+across threads for a given output element). **Measured on real
+GIST-1M-scale k-means training (16-core AVX-512 a cloud VM): 2686.6s →
+768.4s, a 3.50× speedup.** Scan/build-path only, no wire change, no
+SQL surface change, no REINDEX. See CHANGELOG.md for the full
+investigation writeup, including two dead-end findings (a test-
+harness stride bug that looked like a `gemm` crate bug; a test-
+harness thread-pool-scoping bug that overstated the problem) caught
+and retracted before being reported.
 
 **v1.22.0 is a repo-cleanup release, no functional change.**
+
 `turbovec.mmap_static_blocked` (deprecated no-op since v1.19.0) is
 removed after a three-minor deprecation window — `SET
 turbovec.mmap_static_blocked = ...` now errors like any unknown GUC.

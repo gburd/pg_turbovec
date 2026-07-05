@@ -4,6 +4,78 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.22.1] — 2026-07-05
+
+**Closes a real fraction of the IVF build-cliff gap — scan/build-path
+only, no wire change, no SQL surface change, no REINDEX.**
+
+v1.20.0/v1.21.0's parallel-build work row-blocked the
+normalize/rotate/assign-sweep stages of `ambuild`, measuring only a
+modest ~1.27× speedup on a 64-core box. A FLOPs analysis (triggered
+by the v1.22.0 GUC audit) found the real dominant cost was never
+row-blocked: `gemm_lloyd_assign`'s cross-term GEMM runs over the
+*whole* k-means training sample (`n_sample = lists × 256`, which
+equals the full corpus size at high `lists`) once per Lloyd
+iteration, up to 25 times, single-threaded (`Parallelism::None`, kept
+that way for on-disk determinism). At GIST-1M/960d/`lists=4096`
+scale this GEMM is ~26-112× more FLOPs than the already-parallelized
+stages — explaining why the earlier fix barely moved the needle.
+
+**The fix**: `gemm` 0.18's own internal `Parallelism::Rayon(n)`
+tiling produces bit-identical output to `Parallelism::None` for
+every shape/seed/thread-count tested — a GEMM's output tiles are
+independent dot-product reductions over the shared contraction
+dimension, so (unlike a cross-thread SUM, which does need the
+fixed-partition-order bookkeeping k-means' centroid-update step
+already has) thread count can never perturb a GEMM's per-element
+result. One line changed: `Parallelism::None` → `Parallelism::
+Rayon(0)`. Via `rayon::current_num_threads()`, this automatically
+and correctly respects `turbovec.build_parallelism`'s bounded pool
+with zero extra plumbing (`train_kmeans` already runs inside
+`build_pool::install(pool, ..)`).
+
+**Measured on real hardware, real scale** (16-core AVX-512 a cloud VM
+instance, GIST-1M corpus shape: `n_sample=1,048,576, dim=960,
+lists=4096`, full 25-iteration k-means training):
+
+| Variant | Wall clock | vs today |
+|---|---:|---:|
+| `Parallelism::None` (v1.22.0, shipped) | 2686.6s (~44.8 min) | baseline |
+| `Parallelism::Rayon(0)` (this release) | 768.4s (~12.8 min) | **3.50×** |
+
+Centroids confirmed bit-identical between the two runs.
+
+**The investigation took two wrong turns before this number, both
+worth recording rather than hiding**: (1) an early microbenchmark of
+`gemm` at specific shapes segfaulted with a real gdb backtrace into
+`gemm-common` internals, looking exactly like a crate memory-safety
+bug — root cause was the *test harness's own* transposed-read stride
+bug (a genuine ~16M-element out-of-bounds read), not a `gemm` bug;
+replicating the real call site's exact strides showed no issue. (2)
+A later a cloud VM timing harness's naive "serial baseline" — an explicit
+1-thread `rayon::ThreadPoolBuilder` wrapped around the whole training
+call, meant to isolate the GEMM's own parallelism — also accidentally
+forced the *unrelated, already-parallel* k-means++ seeding phase down
+to 1 thread, making the "today" baseline look far slower than
+v1.22.0 actually behaves in production (where seeding always runs on
+the real `build_parallelism` pool regardless of the GEMM's
+parallelism setting). Both were caught and retracted before being
+reported as findings; the final harness varies only pool size as an
+independent axis and compares GEMM modes strictly within each pool
+size, matching what the real code actually does.
+
+New regression test `kmeans_deterministic_across_pool_sizes` (sized
+to exceed `gemm`'s `DEFAULT_THREADING_THRESHOLD` so it genuinely
+exercises multi-threading, not a no-op) asserts byte-identical
+`CoarseModel.centroids` across pool sizes `{1,2,3,4,8}`. 263/263
+tests (1 ignored), drift-check clean, compile-matrix clean all 6 PG
+versions.
+
+**Migration**: `ALTER EXTENSION pg_turbovec UPDATE TO '1.22.1';` is
+sufficient. No REINDEX — this changes build wall clock only, not the
+on-disk bytes (centroids/assignment/everything downstream of
+`train_kmeans` is byte-identical to v1.22.0 for the same input).
+
 ## [1.22.0] — 2026-07-04
 
 **Repo cleanup, no functional change.** Prompted by an audit for

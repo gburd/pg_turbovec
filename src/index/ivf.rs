@@ -1073,6 +1073,8 @@ fn train_kmeans_iters(
     let row = |i: usize| -> &[f32] { &sample[i * dim..(i + 1) * dim] };
 
     // ---- k-means++ seeding ----
+    let __trace = std::env::var_os("TURBOVEC_BUILD_TRACE").is_some();
+    let __t_seed = std::time::Instant::now();
     // First centroid: a deterministic uniform pick.
     let first = rng.gen_range(0..n_sample);
     centroids[0..dim].copy_from_slice(row(first));
@@ -1133,6 +1135,13 @@ fn train_kmeans_iters(
             });
         }
     }
+    if __trace {
+        eprintln!(
+            "[turbovec build trace]   1a_kmeanspp_seeding   {:.3}s",
+            __t_seed.elapsed().as_secs_f64()
+        );
+    }
+    let __t_lloyd = std::time::Instant::now();
 
     // ---- Lloyd's iterations ----
     // GEMM-batched assignment (one (n_sample x lists) cross-term GEMM
@@ -1151,6 +1160,7 @@ fn train_kmeans_iters(
     let mut prev_centroids = vec![0.0f32; lists * dim];
     let mut iters_run = 0usize;
     for _iter in 0..KMEANS_ITERS {
+        let __t_iter = std::time::Instant::now();
         iters_run += 1;
         // Snapshot centroids to measure end-of-iteration movement.
         prev_centroids.copy_from_slice(&centroids);
@@ -1267,6 +1277,18 @@ fn train_kmeans_iters(
         // cell's centroid. This is the standard "re-seed largest
         // cell" rule and prevents dead centroids from collapsing
         // recall.
+        //
+        // Traced under TURBOVEC_BUILD_TRACE: each empty cell costs an
+        // O(n_sample) serial scan below, so a build that regularly
+        // hits many empty cells (e.g. lists close to or exceeding the
+        // number of distinct clusters actually present in the data)
+        // pays a real, otherwise-invisible cost here.
+        if __trace {
+            let n_empty = counts.iter().filter(|&&c| c == 0).count();
+            if n_empty > 0 {
+                eprintln!("[turbovec build trace]   iter {_iter}: {n_empty}/{lists} cells empty");
+            }
+        }
         for c in 0..lists {
             if counts[c] != 0 {
                 continue;
@@ -1329,9 +1351,22 @@ fn train_kmeans_iters(
             let d = (centroids[j] - prev_centroids[j]) as f64;
             movement += d * d;
         }
+        if __trace {
+            eprintln!(
+                "[turbovec build trace]     iter {_iter}: {:.3}s",
+                __t_iter.elapsed().as_secs_f64()
+            );
+        }
         if movement < KMEANS_TOL {
             break;
         }
+    }
+    if __trace {
+        eprintln!(
+            "[turbovec build trace]   1b_lloyd_loop          {:.3}s ({} iters)",
+            __t_lloyd.elapsed().as_secs_f64(),
+            iters_run
+        );
     }
 
     (

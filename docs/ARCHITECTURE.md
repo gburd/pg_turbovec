@@ -78,6 +78,38 @@ locally vendored under `vendor/turbovec/` with a small patch (see
 - **Replication of TurboQuant internals.** We treat `turbovec` as a
   black box — no reaching into private modules, no forks.
 
+### 1.2.1 Known upstream limitation: TQ+ calibration on tiny tables
+
+`turbovec`'s TQ+ per-coordinate calibration (a lightweight data-
+dependent refinement layered on the data-oblivious base algorithm)
+fits once, on the FIRST `add_with_ids` batch, and freezes for the
+life of the index (upstream issue
+[RyanCodrai/turbovec#107](https://github.com/RyanCodrai/turbovec/issues/107),
+open as of 2026-07-06). If that first batch has fewer than 1000 rows,
+the fit silently falls back to an identity transform — frozen forever,
+no error, no warning — and the index never gets TQ+'s accuracy
+improvement. pg_turbovec's IVF build path (`WITH (lists = N)`) is
+already safe: it primes calibration with a fixed 16,384-row
+cell-ordered prefix (`IVF_CALIB_ROWS` in `src/index/build.rs`),
+comfortably above the 1000-row threshold regardless of corpus size.
+**The flat (non-IVF, default) build path is NOT protected**: its
+streaming flush batches at `turbovec.build_parallelism`-independent,
+`maintenance_work_mem`-derived `chunk_rows` (typically 8k-100k rows
+at realistic dimensions with the default 64MB `maintenance_work_mem`
+— see `BuildState::compute_chunk_rows`), so a table with FEWER rows
+than that single first-flush batch size builds its whole flat index
+in one under-1000-row `add_with_ids` call, silently freezing TQ+ to
+identity. This is a real, if narrow, gap — small tables (dev/test
+fixtures, small tenant partitions, cold-start corpora) are exposed;
+large tables are not (the streaming flush's first chunk is almost
+always ≥ 1000 rows once the corpus itself is that big). Tracked as a
+follow-up, not fixed here — the fix belongs upstream (see
+an internal design note §1) or as a pg_turbovec-side
+workaround (e.g. padding tiny first batches to the threshold with
+harmless synthetic dummy rows before calibration and correcting the
+slot count afterward) once a maintainer decides which side should own
+the mitigation.
+
 ### 1.3 Why coexist instead of drop-in?
 
 Pgvector users have years of `vector(1536)` columns and tooling.

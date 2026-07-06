@@ -206,6 +206,7 @@ impl Drop for CorpusSpill {
 }
 
 use crate::guc;
+use crate::index::graph;
 use crate::index::ivf;
 use crate::index::{options, relfile};
 use crate::kernels;
@@ -353,6 +354,16 @@ struct BuildState {
     /// space the fine quantizer + query use), so we rotate the
     /// L2-normalised vector exactly as turbovec's encode does.
     ivf_rotation: Option<Vec<f32>>,
+
+    // ---- Phase G-2a graph build state (only used when `graph`) ----
+    /// `WITH (graph = true)`: build a Vamana graph index (`KIND_GRAPH`)
+    /// instead of the flat/IVF layout. Mutually exclusive with
+    /// `lists > 0` (validated in `amoptions`) and with `colbert`
+    /// (validated in `ambuild`). Because of that exclusivity, the
+    /// graph build reuses `ivf_spill` (opened below whenever
+    /// `lists > 0 || graph`) rather than a second spill field —
+    /// there is never a build that needs both at once.
+    graph: bool,
 }
 
 impl BuildState {
@@ -501,6 +512,11 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // token search work), so when the user didn't pin `lists` we
     // default it to a sane nlist. `assign_dups` is honoured as-is.
     let colbert = is_colbert_index(index_relation);
+    if cfg_graph && colbert {
+        error!(
+            "turbovec ambuild: graph = true is not supported for a ColBERT/multivector index (vec_colbert_ops); a graph index is single-vector only"
+        );
+    }
     let lists = if colbert && lists == 0 {
         // Default nlist for a colbert build that didn't specify
         // `WITH (lists = N)`. A token index has many more slots than
@@ -545,6 +561,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         lists,
         colbert,
         assign_dups,
+        graph: cfg_graph,
     };
     // Parity gap #2: a bounded rayon pool sized from
     // `turbovec.build_parallelism` (auto = max_parallel_maintenance_workers
@@ -567,11 +584,19 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         state.chunk_rows = BuildState::compute_chunk_rows(d);
         // IVF: build the rotation matrix up front so sampled vectors
         // can be rotated into the clustering space during the scan.
+        // Phase G-2a: a graph build also opens the disk spill (it
+        // needs the same streamed-heap-scan pattern to avoid a
+        // resident f32 copy during the scan), but does NOT need the
+        // rotation matrix -- the graph is built in the raw
+        // L2-normalised vector space, not the IVF clustering space
+        // (see the module doc on `graph.rs`).
         if state.lists > 0 {
             state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(d));
             // Phase B-4: open the disk spill now that the record
             // stride (8 + d*4) is known. The heap scan streams every
             // accepted vector into it instead of `ivf_flat`.
+            state.ivf_spill = Some(CorpusSpill::new(d));
+        } else if state.graph {
             state.ivf_spill = Some(CorpusSpill::new(d));
         }
     }
@@ -634,6 +659,26 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // change round-trips (cell-restricted search is IVF-2).
     if state.lists > 0 {
         let n_built = ivf_build_and_write(
+            index_relation,
+            &mut state,
+            dim,
+            cfg_bit_width as u8,
+            build_pool.as_ref(),
+        );
+        let _ = indexrelid;
+        (*result).heap_tuples = state.heap_seen as f64;
+        (*result).index_tuples = n_built as f64;
+        return result;
+    }
+
+    // Phase G-2a graph build path (`WITH (graph = true)`): stream the
+    // spilled corpus back into one resident row-major f32 buffer
+    // (Phase G-2's RAM-resident design), quantize it exactly like a
+    // flat build, run `graph::build_vamana` over the same resident
+    // buffer, and persist codes/scales/ids + the adjacency chain via
+    // the v6 relfile path.
+    if state.graph {
+        let n_built = graph_build_and_write(
             index_relation,
             &mut state,
             dim,
@@ -1117,6 +1162,120 @@ unsafe fn ivf_build_and_write(
     built
 }
 
+/// Phase G-2a graph build finisher (`WITH (graph = true)`). Streams
+/// the spilled corpus back into ONE resident row-major f32 buffer
+/// (Phase G-2's RAM-resident design — the graph kind explicitly
+/// trades pure out-of-core for HNSW-matching latency, per
+/// an internal design note), quantizes it via the EXISTING
+/// `IdMapIndex::add_with_ids` path (a graph node's vector storage is
+/// IDENTICAL to a flat index's row — no new encode path), builds the
+/// Vamana adjacency over the SAME resident buffer
+/// (`graph::build_vamana`), and persists codes/scales/ids + the
+/// adjacency chain via [`relfile::write_full_with_prepared_graph`].
+///
+/// Unlike the IVF build, this does NOT stream the quantize step in
+/// small chunks: `build_vamana` itself needs the whole corpus
+/// resident (per-node greedy search touches arbitrary rows), so
+/// there is no memory-bound win to chasing a chunked quantize once
+/// that buffer already has to exist. `ambuild`'s existing streamed
+/// HEAP SCAN (into the spill) is what Phase W-style memory bounding
+/// still buys us: the spill, not a second RAM copy, is what's built
+/// up during the scan.
+///
+/// Returns the number of vectors written. Consumes `state.ivf_spill`.
+///
+/// # Safety
+///
+/// `index_relation` is a valid, exclusively-held index relation
+/// (ambuild holds it for the whole build).
+unsafe fn graph_build_and_write(
+    index_relation: pg_sys::Relation,
+    state: &mut BuildState,
+    dim: usize,
+    bit_width: u8,
+    build_pool: Option<&rayon::ThreadPool>,
+) -> usize {
+    let spill = state
+        .ivf_spill
+        .take()
+        .expect("graph_build_and_write: spill not opened");
+    let n_vectors = spill.rows;
+
+    // Empty corpus: write an empty (flat-shaped, kind = KIND_SINGLE)
+    // meta page. There is no graph to navigate over zero rows, and a
+    // reader never dereferences `has_graph()` for an empty index
+    // regardless of `kind` -- but writing plain `write_full` keeps
+    // this path identical to every other kind's empty-build case
+    // (simplest correct behaviour, not a special graph-empty format).
+    if n_vectors == 0 {
+        relfile::write_full(index_relation, bit_width, dim as u32, 0, &[], &[], &[], 1);
+        return 0;
+    }
+
+    // Read the WHOLE spill back into one resident row-major f32
+    // buffer (Phase G-2's RAM-resident design) and the parallel real
+    // external ids. Bounded by `n_vectors * dim * 4` bytes -- exactly
+    // the corpus size the Vamana build needs resident regardless.
+    let mut flat = vec![0.0f32; n_vectors * dim];
+    let mut ids = vec![0u64; n_vectors];
+    spill.read_block(0, n_vectors, &mut ids, &mut flat);
+    drop(spill);
+
+    // Quantize via the EXISTING IdMapIndex path, fed with SYNTHETIC
+    // contiguous slot ids (0..n_vectors) so `add_with_ids` accepts
+    // the batch (a graph build never has duplicate slot ids the way
+    // IVF soft-assignment does), then persist the REAL external ids
+    // separately -- same split `ivf_build_and_write` uses for
+    // soft-assign duplicates, kept here for symmetry even though a
+    // graph build's slot ids and external ids happen to already be
+    // in the same order (no permutation).
+    let mut idx = IdMapIndex::new(dim, bit_width as usize)
+        .expect("turbovec ambuild (graph): invalid (dim, bit_width)");
+    let synthetic_ids: Vec<u64> = (0..n_vectors as u64).collect();
+    super::build_pool::install(build_pool, || {
+        idx.add_with_ids(&flat, &synthetic_ids)
+            .expect("turbovec ambuild (graph): add_with_ids failed");
+    });
+
+    // Build the Vamana adjacency over the SAME resident buffer, in
+    // the raw L2-normalised vector space (see the module doc on
+    // `graph.rs` for why no rotation is needed here, unlike IVF).
+    let (adjacency, entry_point) =
+        super::build_pool::install(build_pool, || graph::build_vamana(&flat, n_vectors, dim));
+    drop(flat);
+
+    super::build_pool::install(build_pool, || idx.prepare_eager());
+    let idx_rotation = idx.rotation();
+    let prepared = relfile::PreparedParts {
+        blocked_codes: idx.blocked_codes(),
+        n_blocks: idx.n_blocks() as u32,
+        centroids: idx.centroids(),
+        boundaries: idx.boundaries(),
+        rotation: idx_rotation,
+    };
+    let offsets_bytes = adjacency.encode_offsets();
+    let neighbors_bytes = adjacency.encode_neighbors();
+    let graph_parts = relfile::GraphParts {
+        offsets_bytes: &offsets_bytes,
+        neighbors_bytes: &neighbors_bytes,
+        entry_point,
+    };
+    relfile::write_full_with_prepared_graph(
+        index_relation,
+        bit_width,
+        dim as u32,
+        n_vectors as u64,
+        idx.packed_codes(),
+        idx.scales(),
+        &ids,
+        1,
+        prepared,
+        graph_parts,
+    );
+
+    n_vectors
+}
+
 /// Phase F-2: ColBERT token-index unnest, called from
 /// `build_callback` when `state.colbert`. Decodes the heap tuple's
 /// `turbovec.vector[]` (the doc's per-token vectors), pins the dim
@@ -1269,6 +1428,11 @@ unsafe extern "C-unwind" fn build_callback(
                 state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(row_dim));
                 // Phase B-4: open the disk spill (stride needs dim).
                 state.ivf_spill = Some(CorpusSpill::new(row_dim));
+            } else if state.graph && state.ivf_spill.is_none() {
+                // Phase G-2a: same streamed-spill pattern, no
+                // rotation matrix needed (see the module doc on
+                // `graph.rs`).
+                state.ivf_spill = Some(CorpusSpill::new(row_dim));
             }
         }
         _ => {}
@@ -1299,6 +1463,25 @@ unsafe extern "C-unwind" fn build_callback(
         // (cells live in the rotated unit-sphere space, matching
         // turbovec's encode), regardless of the `normalise` GUC.
         state.ivf_reservoir_push(value.as_slice(), row_dim);
+        return;
+    }
+
+    // Phase G-2a graph build path (`WITH (graph = true)`): same
+    // streamed disk spill as IVF, no coarse sample / rotation. The
+    // Vamana build + quantize-and-persist happens at end-of-scan in
+    // `ambuild` -> `graph_build_and_write`.
+    if state.graph {
+        let spill = state
+            .ivf_spill
+            .as_mut()
+            .expect("turbovec ambuild (graph): spill not opened before first row");
+        if state.normalise {
+            let mut buf = vec![0.0_f32; row_dim];
+            kernels::normalise_into(&mut buf, value.as_slice());
+            spill.push(id, &buf);
+        } else {
+            spill.push(id, value.as_slice());
+        }
         return;
     }
 

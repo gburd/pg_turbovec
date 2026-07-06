@@ -119,8 +119,10 @@ SET turbovec.search_k = 100;
 -- Clamped to [1, lists] at scan time. No effect on flat (lists = 0)
 -- indexes, or on an IVF index degraded to flat by VACUUM swap-remove
 -- (those always scan the whole corpus). Start near sqrt(lists) and
--- sweep against your recall SLO. Default 8.
-SET turbovec.probes = 8;
+-- sweep against your recall SLO. Default 16 (since v1.22.2; was 8 --
+-- the old default capped recall at ~0.40-0.80 depending on corpus,
+-- well below a reasonable SLO -- see CHANGELOG.md).
+SET turbovec.probes = 16;
 
 -- Per-backend cache size for the prepared turbovec index data.
 -- Each entry is the size of the index on disk (codes + scales +

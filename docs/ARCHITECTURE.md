@@ -40,8 +40,13 @@ locally vendored under `vendor/turbovec/` with a small patch (see
      own operators on `vector` are unaffected when both extensions
      are installed in the same database.
 3. **Memory wins** matching the upstream paper: a 1536-dim corpus at
-   4-bit-per-coordinate occupies ≈ 388 B/vector — a ~16× reduction over
-   pgvector's float32 storage.
+   2-bit-per-coordinate occupies ≈ 388 B/vector (4-bit is ≈ 772 B/vector)
+   — a ~16× (2-bit) or ~8× (4-bit) reduction over pgvector's float32
+   storage. (Corrected 2026-07-06: this previously said "4-bit... ≈388
+   B/vector", which was the 2-bit figure mislabeled — 1536 × 4 bits / 8
+   + 4B scale = 772B, not 388B. Caught during a PQ-subvector-
+   quantization feasibility review; see an internal design note-
+   adjacent research notes.)
 4. **SIMD-accelerated ANN** for inner-product and cosine queries via
    the upstream `turbovec` kernels (NEON, AVX2, optional AVX-512BW).
 5. **Filtered search** that pushes the predicate into the SIMD

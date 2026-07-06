@@ -8,6 +8,10 @@
 //!   (`amoptions` callback).
 //! - `ivf.rs` — IVF coarse-quantizer k-means + cell-directory types
 //!   (Postgres-free, IVF-1).
+//! - `graph.rs` — Vamana graph construction (build) + CSR adjacency
+//!   type (Postgres-free, Phase G-2a). Scan-time greedy beam search
+//!   lives in `scan.rs` / `cache.rs` alongside the analogous IVF
+//!   coarse-probe scan-time code.
 //! - `page.rs` — meta-page byte layout for the relfile main fork.
 //! - `relfile.rs` — buffer-manager I/O for the relfile pages (the
 //!   single path for all index reads; see
@@ -39,6 +43,7 @@ use pgrx::prelude::*;
 mod build;
 pub(crate) mod build_pool;
 mod cost;
+pub(crate) mod graph;
 mod insert;
 pub(crate) mod ivf;
 mod options;

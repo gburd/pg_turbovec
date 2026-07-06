@@ -2594,6 +2594,177 @@ mod tests {
         run_recall_floor(2, 128, 20_000, 0.80);
     }
 
+    /// Phase G-2a: `WITH (graph = true)` build + `ORDER BY <=> LIMIT k`
+    /// scan on a small synthetic corpus, recall checked against an
+    /// exact brute-force scan -- the same recall-floor testing
+    /// pattern `run_recall_floor` already uses for the flat/IVF
+    /// kinds, sized down to a pgrx-test-appropriate corpus (a real
+    /// Vamana build is meaningfully more per-node work than a flat
+    /// quantize; a few hundred rows keeps this test fast).
+    #[pg_test]
+    fn graph_index_recall_floor() {
+        use_turbovec();
+        let n_rows = 800;
+        let dim = 32;
+
+        Spi::run("CREATE TABLE t_graph (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("SELECT setseed(0.17)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_graph \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(1, {dim})), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
+        .unwrap();
+
+        Spi::run("CREATE TEMP TABLE q_graph (qid int PRIMARY KEY, q vector)").unwrap();
+        Spi::run("SELECT setseed(0.71)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO q_graph \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(1, {dim})), ',') || ']')::vector \
+             FROM generate_series(1, 15) AS g"
+        ))
+        .unwrap();
+
+        Spi::run(
+            "CREATE INDEX t_graph_idx ON t_graph USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_graph").unwrap();
+
+        // Confirm this really is a v6 KIND_GRAPH index, not a silent
+        // fallback to flat -- a meta-page-level assertion, not just a
+        // query-result-level one. Same re-open-by-oid + read_meta
+        // pattern the existing relfile #[pg_test]s use (e.g. see the
+        // Phase W-2 test above).
+        {
+            let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_graph_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+            use crate::index::relfile;
+            unsafe {
+                let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+                let m = relfile::read_meta(rel).expect("meta must exist after build");
+                pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+                assert_eq!(m.version, 6, "graph index must be wire version 6");
+                assert!(m.is_graph(), "graph index must have kind = KIND_GRAPH");
+                assert!(
+                    m.has_graph(),
+                    "graph index must have a persisted adjacency chain"
+                );
+                assert!(!m.has_ivf(), "a graph index must never be IVF-backed");
+                assert_eq!(m.n_vectors, n_rows as u64);
+            }
+        }
+
+        let qids: Vec<i64> = fetch_ids("SELECT qid FROM q_graph ORDER BY qid");
+        assert_eq!(qids.len(), 15);
+
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for qid in &qids {
+            Spi::run("SET enable_indexscan = off").unwrap();
+            Spi::run("SET enable_indexonlyscan = off").unwrap();
+            Spi::run("SET enable_seqscan = on").unwrap();
+            let gt = fetch_ids(&format!(
+                "SELECT t.id FROM t_graph t, (SELECT q FROM q_graph WHERE qid = {qid}) qq \
+                 ORDER BY t.emb <=> qq.q LIMIT 10"
+            ));
+            assert_eq!(gt.len(), 10, "GT top-10 must return 10 rows");
+            assert_distinct_ids(&gt);
+
+            Spi::run("SET enable_seqscan = off").unwrap();
+            Spi::run("SET enable_indexscan = on").unwrap();
+            Spi::run("SET enable_indexonlyscan = on").unwrap();
+            // Generous search_k: this is a correctness-first test
+            // (recall parity at a generous ef/search_k), not a
+            // latency benchmark -- G-2c tunes the defaults.
+            Spi::run("SET turbovec.search_k = 40").unwrap();
+            let idx = fetch_ids(&format!(
+                "SELECT t.id FROM t_graph t, (SELECT q FROM q_graph WHERE qid = {qid}) qq \
+                 ORDER BY t.emb <=> qq.q LIMIT 10"
+            ));
+            assert_eq!(idx.len(), 10, "index top-10 must return 10 rows");
+            assert_distinct_ids(&idx);
+
+            use std::collections::HashSet;
+            let gt_set: HashSet<i64> = gt.iter().copied().collect();
+            hits += idx.iter().filter(|id| gt_set.contains(id)).count();
+            total += 10;
+        }
+
+        let recall = hits as f64 / total as f64;
+        eprintln!("graph index recall-floor: {n_rows}x{dim} recall@10 = {recall:.3}");
+        assert!(
+            recall >= 0.7,
+            "graph index recall@10 = {recall:.3} fell below the 0.7 floor"
+        );
+    }
+
+    /// A 0-row `WITH (graph = true)` build must not panic and must
+    /// leave a scannable (empty-result) index behind.
+    #[pg_test]
+    fn graph_index_empty_build_does_not_panic() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_graph_empty (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "CREATE INDEX t_graph_empty_idx ON t_graph_empty USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true, dim = 8)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let n: Option<i64> = Spi::get_one(
+            "WITH q AS ( \
+                 SELECT id FROM t_graph_empty \
+                  ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector \
+                  LIMIT 5 \
+             ) SELECT count(*)::int8 FROM q",
+        )
+        .unwrap();
+        assert_eq!(n, Some(0));
+    }
+
+    /// `graph = true` and `lists > 0` together must be rejected at
+    /// `CREATE INDEX` time (validated in `amoptions`), not silently
+    /// resolved one way or the other.
+    #[pg_test]
+    fn graph_and_ivf_reloptions_are_mutually_exclusive() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_graph_ivf (id bigint PRIMARY KEY, emb vector)").unwrap();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::run(
+                "CREATE INDEX t_graph_ivf_idx ON t_graph_ivf USING turbovec (emb vec_cosine_ops) \
+                 WITH (graph = true, lists = 16)",
+            )
+        });
+        assert!(bad.is_err(), "expected ERROR for graph=true with lists>0");
+    }
+
+    /// `aminsert` against a graph index must error clearly (G-2b
+    /// scope, not this session's) rather than silently corrupt the
+    /// adjacency chain.
+    #[pg_test]
+    fn graph_index_insert_is_rejected() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_graph_ins (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("INSERT INTO t_graph_ins VALUES (1, '[1,0,0,0,0,0,0,0]')").unwrap();
+        Spi::run(
+            "CREATE INDEX t_graph_ins_idx ON t_graph_ins USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true)",
+        )
+        .unwrap();
+        let bad = std::panic::catch_unwind(|| {
+            Spi::run("INSERT INTO t_graph_ins VALUES (2, '[0,1,0,0,0,0,0,0]')")
+        });
+        assert!(bad.is_err(), "expected ERROR inserting into a graph index");
+    }
+
     #[pg_test]
     fn knn_rejects_bad_k() {
         Spi::run("CREATE TEMP TABLE pgtv_empty (id bigint, emb turbovec.vector)").unwrap();

@@ -4,6 +4,37 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.22.2] — 2026-07-06
+
+**Raises `turbovec.probes`'s default from 8 to 16 — the out-of-the-
+box recall floor was unreasonably low.** Scan-side default change
+only, no wire change, no SQL surface change, no REINDEX.
+
+The v1.22.1 a cloud VM competitive re-benchmark measured pg_turbovec's
+shipped defaults (`probes=8, search_k=32`) capping at **R@10=0.796 on
+SIFT-1M and R@10=0.407 on GIST-1M** — both far below any reasonable
+recall SLO, and a real footgun for anyone who runs `CREATE INDEX ...
+USING turbovec` without reading the tuning docs. `probes=16` (same
+`search_k=32`) measured:
+
+| Corpus | `probes=8` (old default) | `probes=16` (new default) |
+|---|---|---|
+| SIFT-1M | R@10=0.796, p50=3.0ms | R@10=0.918, p50=4.8ms |
+| GIST-1M | R@10=0.407, p50=18.5ms | R@10=0.557, p50=20.4ms |
+
+Roughly 1.5-1.6× the latency for +12-15 recall points on both
+corpora — the better point on the curve than `probes=32` (which
+roughly triples latency for a similar recall gain). Existing
+sessions/deployments that explicitly `SET turbovec.probes` are
+unaffected; this only changes the compiled-in default.
+
+New regression test `index_am_probes_defaults_to_16` guards the
+default against silent drift (matches the `index_am_iterative_scan_
+defaults_to_off` precedent from v1.20.1).
+
+**Migration**: `ALTER EXTENSION pg_turbovec UPDATE TO '1.22.2';` is
+sufficient. No REINDEX.
+
 ## [1.22.1] — 2026-07-05
 
 **Closes a real fraction of the IVF build-cliff gap — scan/build-path

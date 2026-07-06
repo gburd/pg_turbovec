@@ -85,14 +85,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.22.1, 2026-07-05)
+### Current (as of v1.22.2, 2026-07-06)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.22.1   | `REINDEX INDEX` once |
-| 1.2.x              | 1.22.1   | `REINDEX INDEX` once |
-| 1.3.x              | 1.22.1   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.22.x     | 1.22.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.22.2   | `REINDEX INDEX` once |
+| 1.2.x              | 1.22.2   | `REINDEX INDEX` once |
+| 1.3.x              | 1.22.2   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.22.x     | 1.22.2   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.22.2 raises `turbovec.probes`'s default from 8 to 16** — the
+old default capped out-of-the-box recall at R@10=0.796 (SIFT-1M) /
+R@10=0.407 (GIST-1M), measured during the v1.22.1 a cloud VM competitive
+re-benchmark. `probes=16` reaches R@10=0.918 / 0.557 for ~1.5-1.6×
+the latency — the better point on the curve for a default most users
+never tune. Scan-side default only, no wire change, no SQL surface
+change, no REINDEX.
 
 **v1.22.1 closes a real fraction of the IVF build-cliff gap** —
 `gemm_lloyd_assign`'s Lloyd-loop cross-term GEMM (the dominant

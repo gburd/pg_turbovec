@@ -1936,6 +1936,25 @@ mod tests {
         );
     }
 
+    /// `turbovec.probes` defaults to 16 (v1.22.2; was 8 through
+    /// v1.22.1). The old default of 8 capped IVF recall well below any
+    /// reasonable SLO out of the box -- measured R@10=0.796 on SIFT-1M
+    /// and R@10=0.407 on GIST-1M (see CHANGELOG.md's v1.22.2 entry).
+    /// This test only asserts the compiled-in GUC default is 16 (a
+    /// SHOW check), NOT a recall number -- recall is corpus-dependent
+    /// and already covered by the recall-floor / recall-frontier
+    /// tests elsewhere in this file. Guards against a future change
+    /// silently reverting the default.
+    #[pg_test]
+    fn index_am_probes_defaults_to_16() {
+        let val: Option<String> = Spi::get_one("SHOW turbovec.probes").unwrap();
+        assert_eq!(
+            val,
+            Some("16".to_string()),
+            "turbovec.probes must default to 16 (v1.22.2 recall-floor fix)"
+        );
+    }
+
     // ---- Oversampling (differentiator #5): tunable recall ----
     //
     // These tests share a corpus builder: `n` rows of `dim`-dim
@@ -4599,7 +4618,7 @@ mod tests {
             "1.7.1", "1.7.2", "1.7.3", "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0",
             "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
-            "1.22.1",
+            "1.22.1", "1.22.2",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

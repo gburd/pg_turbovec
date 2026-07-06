@@ -12,7 +12,7 @@
 //! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
 //! | `turbovec.search_k`              | int  | 32      | 1..=100000     |
-//! | `turbovec.probes`                | int  | 8       | 1..=65536      |
+//! | `turbovec.probes`                | int  | 16      | 1..=65536      |
 //! | `turbovec.iterative_scan`        | enum | off     | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
@@ -35,7 +35,7 @@ pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(32);
-pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(8);
+pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(16);
 
 /// IVF-3: iterative-scan cap on probe-set growth under a selective
 /// `WHERE` filter, the IVF analogue of `ivfflat.max_probes`.
@@ -52,8 +52,8 @@ pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(8);
 /// probe set reaches `lists` the whole corpus has been scanned and the
 /// next drain returns false (exhausted).
 ///
-/// Default `64` mirrors a typical `ivfflat.max_probes` and is 8× the
-/// `turbovec.probes` default of 8. Clamped to `lists` at scan time, so
+/// Default `64` mirrors a typical `ivfflat.max_probes` and is 4× the
+/// `turbovec.probes` default of 16. Clamped to `lists` at scan time, so
 /// a value larger than the index's cell count just means "widen to all
 /// cells". No effect on flat (`lists = 0`) or vacuum-degraded indexes,
 /// which have no cells to widen and keep the v1.8.0 `k`-growth refill.
@@ -496,7 +496,7 @@ pub fn register_gucs() {
 
     GucRegistry::define_int_guc(
         c_str(b"turbovec.probes\0"),
-        c_str(b"IVF cells to scan per query (default 8); ignored by flat indexes.\0"),
+        c_str(b"IVF cells to scan per query (default 16); ignored by flat indexes.\0"),
         c_str(
             b"For an index built WITH (lists = N), amgettuple coarse-searches the N cell centroids, picks the `probes` nearest cells, and fine-searches only those cells' contiguous code ranges. This is the IVF latency/recall dial (analogous to ivfflat.probes / hnsw.ef_search): lower = faster, lower recall; higher = slower, higher recall. probes >= lists reduces to the exact flat scan. Clamped to [1, lists] at scan time. No effect on flat (lists = 0) or vacuum-degraded indexes, which always scan the whole corpus.\0",
         ),

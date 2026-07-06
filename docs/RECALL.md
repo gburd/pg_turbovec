@@ -1578,5 +1578,11 @@ license-encumbered). Conversion scripts:
 If you publish results derived from this benchmark suite, please
 cite the upstream paper as well:
 
-> Codrai, R. *TurboQuant: Online Vector Quantization with Near-
-> optimal Distortion Rate.* arXiv:2504.19874, 2025.
+> Zandieh, A., Daliri, M., Hadian, M., Mirrokni, V. *TurboQuant:
+> Online Vector Quantization with Near-optimal Distortion Rate.*
+> arXiv:2504.19874, 2025.
+>
+> (Corrected 2026-07-06: this previously attributed the paper to
+> "Codrai, R." -- that's the GitHub handle of the `turbovec`
+> Rust/Python IMPLEMENTATION's author, not a TurboQuant paper author.
+> See an internal design note.)

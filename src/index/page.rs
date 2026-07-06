@@ -50,7 +50,12 @@
 //!  272     4  tombstone_first (BlockNumber)           |  v4 (E-2)
 //!  276     4  tombstone_count (u32)                   |
 //!  280     8  tombstone_bytes (u64)                   |
-//!  288   ...  reserved (zero)                         /
+//!  288     4  graph_first    (BlockNumber)            |  v6 (Phase G-2a)
+//!  292     4  graph_count    (u32)                    |
+//!  296     8  graph_offsets_bytes (u64)                |
+//!  304     8  graph_neighbors_bytes (u64)              |
+//!  312     4  graph_entry_point (u32)                 |
+//!  316   ...  reserved (zero)                         /
 //! ```
 //!
 //! After the meta block come three contiguous page chains for
@@ -70,6 +75,22 @@
 //! byte chains (no fixed row stride): every page after the page
 //! header is `PAYLOAD_BYTES` of raw bytes, with the last page
 //! holding the residual tail.
+//!
+//! `kind = KIND_GRAPH` (v6, Phase G-2a) is a DIFFERENT index shape
+//! from `KIND_SINGLE`/`KIND_COLBERT`: the codes/scales/ids chains
+//! are laid out exactly like a flat single-vector index (same
+//! TurboQuant row storage — a graph node's vector is stored
+//! identically to a flat row), but `lists` stays 0 (a graph index
+//! is not IVF) and an EIGHTH chain (the adjacency chain, CSR-style:
+//! a flat `u32` offsets array of length `n_vectors + 1` immediately
+//! followed by a flat `u32` neighbor-id array) is appended after
+//! whichever prior chains this kind's meta fields point past
+//! (blocked + rotation, since a graph index reuses the prepared-
+//! layout path). `graph_entry_point` is the slot id the greedy
+//! beam search starts from. A single-vector (`KIND_SINGLE`) or
+//! ColBERT (`KIND_COLBERT`) meta page has the graph fields zeroed,
+//! which decodes as "no adjacency chain" — the additive
+//! backward-compat path; see [`VERSION`]'s doc comment.
 //!
 //! ## Why no PageAddItem / line pointers?
 //!
@@ -128,17 +149,45 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       is a brand-new on-disk shape (token slots, doc-id repeated
 ///       in the ids chain) that only a v5 binary produces; there is
 ///       no in-place migration of a v4 index into a v5 ColBERT one.
-pub const VERSION: u8 = 5;
+/// `6` - Phase G-2a: ADDITIVE Vamana-graph index kind
+///       (an internal design note).
+///       `kind = KIND_GRAPH` (`2`) marks a `WITH (graph = true)`
+///       build: the codes/scales/ids chains are stored exactly like
+///       a flat single-vector index (same TurboQuant row storage),
+///       plus a new adjacency chain (CSR: `u32` offsets of length
+///       `n_vectors + 1` followed by a flat `u32` neighbor-id array)
+///       and a `graph_entry_point` slot id. **A single-vector or
+///       ColBERT index still emits version 4/5 respectively** —
+///       `encode` only writes 6 when `kind == KIND_GRAPH`, so v4 and
+///       v5 relfiles are BYTE-IDENTICAL under the v6 binary (the new
+///       graph fields were already zeroed-reserved bytes on v4/v5),
+///       and existing v4/v5 indexes need no REINDEX. A graph index is
+///       a brand-new on-disk shape that only a v6 binary produces;
+///       there is no in-place migration of a v4/v5 index into a v6
+///       graph one — it is built fresh via `WITH (graph = true)`.
+pub const VERSION: u8 = 6;
+
+/// Wire version a ColBERT (`KIND_COLBERT`) index emits. Frozen at 5
+/// — [`VERSION`] moved on to 6 for the Phase G-2a graph kind, but a
+/// ColBERT build's own on-disk shape hasn't changed, so it keeps
+/// emitting the same bytes it always has. [`MetaPageData::mark_colbert`]
+/// stamps this, not [`VERSION`].
+const COLBERT_VERSION: u8 = 5;
 
 /// Index kind discriminator (page offset 30, formerly a reserved
 /// byte). `0` = single-vector (the v1..v4 default; a `vector` column
 /// with `vec_*_ops`). `1` = ColBERT/multivector token index (a
-/// `turbovec.vector[]` column with `vec_colbert_ops`, Phase F-2). A
-/// v4 meta page has this byte zeroed, so it decodes as single-vector
-/// — the additive backward-compat path.
+/// `turbovec.vector[]` column with `vec_colbert_ops`, Phase F-2). `2`
+/// = Vamana graph index (a `vector` column built `WITH (graph =
+/// true)`, Phase G-2a). A v4 or v5 meta page has this byte zeroed or
+/// set to `KIND_COLBERT` respectively, never `KIND_GRAPH`, so it
+/// never misdecodes as a graph index — the additive backward-compat
+/// path.
 pub const KIND_SINGLE: u8 = 0;
 /// ColBERT/multivector token index kind. See [`KIND_SINGLE`].
 pub const KIND_COLBERT: u8 = 1;
+/// Vamana graph index kind (Phase G-2a). See [`KIND_SINGLE`].
+pub const KIND_GRAPH: u8 = 2;
 
 /// The on-disk version we read **and** write today. Decode
 /// accepts strictly older versions for migration-HINT purposes
@@ -180,9 +229,11 @@ pub struct MetaPageData {
     /// indexes built before the prepared-layout work landed.
     pub version: u8,
     pub bit_width: u8,
-    /// Index kind: [`KIND_SINGLE`] (0, single-vector) or
-    /// [`KIND_COLBERT`] (1, multivector token index). A v4 meta page
-    /// has the kind byte zeroed, so it decodes as single-vector.
+    /// Index kind: [`KIND_SINGLE`] (0, single-vector),
+    /// [`KIND_COLBERT`] (1, multivector token index), or
+    /// [`KIND_GRAPH`] (2, Vamana graph index, Phase G-2a). A v4/v5
+    /// meta page has the kind byte zeroed or set to `KIND_COLBERT`,
+    /// never `KIND_GRAPH`, so it decodes as single-vector/colbert.
     pub kind: u8,
     pub dim: u32,
     pub n_vectors: u64,
@@ -276,6 +327,25 @@ pub struct MetaPageData {
     /// Byte length of the tombstone bitmap (`ceil(n_vectors / 8)`).
     /// `0` ⇒ no tombstones (all slots live).
     pub tombstone_bytes: u64,
+
+    // ---- v6 fields (Phase G-2a graph index) ----
+    /// First block of the graph adjacency chain (CSR: a flat `u32`
+    /// offsets array of length `n_vectors + 1`, immediately followed
+    /// by a flat `u32` neighbor-id array). `0` when this is not a
+    /// graph index (`kind != KIND_GRAPH`) or the graph is empty.
+    pub graph_first: u32,
+    /// Number of pages in the adjacency chain.
+    pub graph_count: u32,
+    /// Byte length of the CSR offsets sub-chain (`(n_vectors + 1) *
+    /// 4`). Needed to find where the neighbor-id sub-chain starts
+    /// within the flat byte chain.
+    pub graph_offsets_bytes: u64,
+    /// Byte length of the CSR neighbor-id sub-chain.
+    pub graph_neighbors_bytes: u64,
+    /// Slot id of the graph's entry point (where greedy beam search
+    /// starts). `0` when this is not a graph index or the graph is
+    /// empty.
+    pub graph_entry_point: u32,
 }
 
 impl MetaPageData {
@@ -418,7 +488,59 @@ impl MetaPageData {
             tombstone_first: 0,
             tombstone_count: 0,
             tombstone_bytes: 0,
+            // v6 graph fields default to "no adjacency chain";
+            // set_graph_chain() fills them in (after every prior
+            // chain) when the build opts into kind = KIND_GRAPH.
+            graph_first: 0,
+            graph_count: 0,
+            graph_offsets_bytes: 0,
+            graph_neighbors_bytes: 0,
+            graph_entry_point: 0,
         }
+    }
+
+    /// Lay out the v6 graph adjacency chain (Phase G-2a) AFTER every
+    /// prior chain (row-major codes/scales/ids, blocked, rotation,
+    /// and — harmlessly, since a graph build never sets `lists` —
+    /// the IVF coarse/cell-dir/tombstone chains), and stamp `kind =
+    /// KIND_GRAPH` + bump `version` to [`VERSION`] (6) in lock-step,
+    /// mirroring [`Self::mark_colbert`]'s pattern. Must be called on
+    /// a meta already planned by [`Self::plan_with_blocked`] (so
+    /// every prior chain's offsets are fixed).
+    ///
+    /// `offsets_bytes` is the byte length of the CSR offsets
+    /// sub-chain (`(n_vectors + 1) * 4`); `neighbors_bytes` is the
+    /// byte length of the flat neighbor-id sub-chain. The two
+    /// sub-chains are concatenated into ONE flat byte chain (offsets
+    /// first, then neighbors) starting at `graph_first`. Pass `0` for
+    /// both on an empty (0-row) graph build, which leaves this a
+    /// no-op (both chain fields stay 0).
+    pub fn set_graph_chain(&mut self, offsets_bytes: u64, neighbors_bytes: u64, entry_point: u32) {
+        if offsets_bytes == 0 && neighbors_bytes == 0 {
+            self.graph_first = 0;
+            self.graph_count = 0;
+            self.graph_offsets_bytes = 0;
+            self.graph_neighbors_bytes = 0;
+            self.graph_entry_point = 0;
+            return;
+        }
+        let after_every_prior_chain = 1
+            + self.codes_count
+            + self.scales_count
+            + self.ids_count
+            + self.blocked_count
+            + self.rotation_count
+            + self.coarse_count
+            + self.cell_dir_count
+            + self.tombstone_count;
+        let total_bytes = offsets_bytes + neighbors_bytes;
+        self.graph_first = after_every_prior_chain;
+        self.graph_count = Self::byte_pages_needed(total_bytes);
+        self.graph_offsets_bytes = offsets_bytes;
+        self.graph_neighbors_bytes = neighbors_bytes;
+        self.graph_entry_point = entry_point;
+        self.kind = KIND_GRAPH;
+        self.version = VERSION;
     }
 
     /// Lay out the v4 IVF chains (coarse centroids + cell directory)
@@ -473,15 +595,15 @@ impl MetaPageData {
 
     /// Mark this meta page as a ColBERT / multivector token index
     /// (Phase F-2). Flips `kind` to [`KIND_COLBERT`] and bumps
-    /// `version` to [`VERSION`] (5) in lock-step, so `encode` emits
-    /// the v5 wire format. Call AFTER `plan_with_blocked` /
+    /// `version` to `COLBERT_VERSION` (5) in lock-step, so `encode`
+    /// emits the v5 wire format. Call AFTER `plan_with_blocked` /
     /// `set_ivf_chains` (which always plan a single-vector v4 layout);
     /// the chain layout is otherwise identical to a single-vector IVF
     /// index — only the discriminator changes. A single-vector index
     /// never calls this, so it stays byte-identical to v1.16.0.
     pub fn mark_colbert(&mut self) {
         self.kind = KIND_COLBERT;
-        self.version = VERSION;
+        self.version = COLBERT_VERSION;
     }
 
     /// Set the inline codebook fields. `centroids` must have
@@ -529,6 +651,7 @@ impl MetaPageData {
             + self.coarse_count
             + self.cell_dir_count
             + self.tombstone_count
+            + self.graph_count
     }
 
     /// Serialise the meta header (no PG page header) to a
@@ -540,14 +663,20 @@ impl MetaPageData {
         // Wire-version is ADDITIVE per kind and lives in `self.version`,
         // kept in lock-step with `self.kind` (plan_with_blocked sets
         // version 4 + KIND_SINGLE; mark_colbert() flips both to 5 +
-        // KIND_COLBERT). A single-vector index emits version 4 so its
-        // relfile bytes are byte-identical to v1.16.0; only a ColBERT
-        // index emits 5. The `kind` byte (offset 6, a formerly-zeroed
-        // reserved byte) is the real discriminator; the version byte
-        // is the belt-and-braces signal a pre-v5 binary uses to refuse
-        // the index outright.
+        // KIND_COLBERT; set_graph_chain() flips both to 6 +
+        // KIND_GRAPH). A single-vector index emits version 4 so its
+        // relfile bytes are byte-identical to v1.16.0; a ColBERT index
+        // emits 5; a graph index emits 6. The `kind` byte (offset 6, a
+        // formerly-zeroed reserved byte) is the real discriminator;
+        // the version byte is the belt-and-braces signal a pre-vN
+        // binary uses to refuse the index outright.
         debug_assert!(
-            (self.kind == KIND_COLBERT) == (self.version >= 5),
+            match self.kind {
+                KIND_SINGLE => self.version == 4,
+                KIND_COLBERT => self.version == 5,
+                KIND_GRAPH => self.version == 6,
+                _ => false,
+            },
             "version/kind out of sync: kind={} version={}",
             self.kind,
             self.version,
@@ -606,6 +735,15 @@ impl MetaPageData {
         out[e2_base + 4..e2_base + 8].copy_from_slice(&self.tombstone_first.to_le_bytes());
         out[e2_base + 8..e2_base + 12].copy_from_slice(&self.tombstone_count.to_le_bytes());
         out[e2_base + 12..e2_base + 20].copy_from_slice(&self.tombstone_bytes.to_le_bytes());
+        // v6 fields begin at e2_base + 20 = 264 (page offset 288):
+        // graph_first + graph_count (u32 each) + graph_offsets_bytes +
+        // graph_neighbors_bytes (u64 each) + graph_entry_point (u32).
+        let v6_base = e2_base + 20;
+        out[v6_base..v6_base + 4].copy_from_slice(&self.graph_first.to_le_bytes());
+        out[v6_base + 4..v6_base + 8].copy_from_slice(&self.graph_count.to_le_bytes());
+        out[v6_base + 8..v6_base + 16].copy_from_slice(&self.graph_offsets_bytes.to_le_bytes());
+        out[v6_base + 16..v6_base + 24].copy_from_slice(&self.graph_neighbors_bytes.to_le_bytes());
+        out[v6_base + 24..v6_base + 28].copy_from_slice(&self.graph_entry_point.to_le_bytes());
         // Trailing bytes reserved (zero).
         out
     }
@@ -682,6 +820,11 @@ impl MetaPageData {
             tombstone_first: 0,
             tombstone_count: 0,
             tombstone_bytes: 0,
+            graph_first: 0,
+            graph_count: 0,
+            graph_offsets_bytes: 0,
+            graph_neighbors_bytes: 0,
+            graph_entry_point: 0,
         };
 
         if version >= 2 {
@@ -756,6 +899,25 @@ impl MetaPageData {
                     u32::from_le_bytes(bytes[e2_base + 8..e2_base + 12].try_into().unwrap());
                 me.tombstone_bytes =
                     u64::from_le_bytes(bytes[e2_base + 12..e2_base + 20].try_into().unwrap());
+            }
+            // v6 graph fields (data offset 264..292, page offset
+            // 288..316). Additive: a pre-G-2a v4/v5 meta has these
+            // bytes zeroed ("no adjacency chain"), the backward-compat
+            // path, no REINDEX. Only decoded when the buffer is long
+            // enough; a short test buffer (>=264, <292) leaves them at
+            // the struct default of 0.
+            let v6_base = e2_base + 20; // 264
+            if bytes.len() >= v6_base + 28 {
+                me.graph_first =
+                    u32::from_le_bytes(bytes[v6_base..v6_base + 4].try_into().unwrap());
+                me.graph_count =
+                    u32::from_le_bytes(bytes[v6_base + 4..v6_base + 8].try_into().unwrap());
+                me.graph_offsets_bytes =
+                    u64::from_le_bytes(bytes[v6_base + 8..v6_base + 16].try_into().unwrap());
+                me.graph_neighbors_bytes =
+                    u64::from_le_bytes(bytes[v6_base + 16..v6_base + 24].try_into().unwrap());
+                me.graph_entry_point =
+                    u32::from_le_bytes(bytes[v6_base + 24..v6_base + 28].try_into().unwrap());
             }
         }
 
@@ -856,6 +1018,27 @@ impl MetaPageData {
         false
     }
 
+    /// Returns `true` when the meta page is in a wire format the
+    /// Phase G-2a (v6) binary cannot read.
+    ///
+    /// **Deliberately always `false`.** v6 is purely additive: a v4
+    /// single-vector or v5 ColBERT meta page decodes under the v6
+    /// binary with the graph fields zeroed (`kind` stays
+    /// `KIND_SINGLE`/`KIND_COLBERT`), and the existing decode paths
+    /// are byte-compatible with v4/v5. So a v4/v5 index remains fully
+    /// readable and writable under v6 with NO REINDEX. There is no
+    /// pre-v6 format a v6 binary genuinely cannot read (v1/v2 are
+    /// already caught by `is_legacy_v1`/`is_legacy_v2`; v3/v4/v5 read
+    /// fine). The predicate exists to satisfy the `AGENTS.md`
+    /// migration contract (every wire bump ships an `is_legacy_v{N}()`)
+    /// and gives a future v7 a place to flag a genuinely-unreadable
+    /// v6-and-earlier format. Today it never trips. See
+    /// `docs/UPGRADING.md`.
+    #[allow(dead_code)]
+    pub fn is_legacy_v5(&self) -> bool {
+        false
+    }
+
     /// Returns `true` when this meta page describes a ColBERT /
     /// multivector token index (Phase F-2, `kind = KIND_COLBERT`,
     /// wire version 5). A single-vector index (the v1..v4 default and
@@ -867,6 +1050,25 @@ impl MetaPageData {
     /// consults it to find the persistent token index.
     pub fn is_colbert(&self) -> bool {
         self.kind == KIND_COLBERT
+    }
+
+    /// Returns `true` when this meta page describes a Vamana graph
+    /// index (Phase G-2a, `kind = KIND_GRAPH`, wire version 6). A
+    /// single-vector or ColBERT index returns `false`.
+    ///
+    /// Unlike ColBERT, a graph index DOES support `ORDER BY <=>`
+    /// scans (the whole point is to match HNSW-style ANN latency), so
+    /// `scan.rs` does not reject it here — it dispatches to the graph
+    /// scan path instead.
+    pub fn is_graph(&self) -> bool {
+        self.kind == KIND_GRAPH
+    }
+
+    /// Returns `true` when this graph index (`is_graph()`) actually
+    /// has a persisted, non-empty adjacency chain to navigate. `false`
+    /// for a non-graph index or an empty (0-row) graph build.
+    pub fn has_graph(&self) -> bool {
+        self.is_graph() && self.graph_first != 0 && self.n_vectors > 0
     }
 
     /// Returns `true` when this index uses the IVF layout
@@ -1328,5 +1530,117 @@ mod tests {
         assert_eq!(meta.kind, KIND_SINGLE);
         assert!(!meta.is_colbert());
         assert!(!meta.is_legacy_v4());
+    }
+
+    /// A Vamana graph index (Phase G-2a) round-trips at wire version 6
+    /// with kind = KIND_GRAPH, and its adjacency chain + entry point
+    /// survive encode/decode.
+    #[test]
+    fn graph_index_emits_v6_with_kind_and_adjacency_chain() {
+        let dim: u32 = 64;
+        let n: u64 = 500;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 3, 200_000, 16, rotation_bytes);
+        meta.set_codebook(
+            &(0..16).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
+            &(0..15).map(|i| i as f32 * 0.05).collect::<Vec<_>>(),
+        );
+        // CSR: (n+1) u32 offsets + some flat u32 neighbor ids.
+        let offsets_bytes = (n + 1) * 4;
+        let neighbors_bytes = n * 16 * 4; // pretend degree ~16
+        meta.set_graph_chain(offsets_bytes, neighbors_bytes, 42);
+        let buf = meta.encode();
+        assert_eq!(buf[4], 6, "graph index must emit wire version 6");
+        assert_eq!(buf[6], KIND_GRAPH);
+        let back = MetaPageData::decode(&buf).expect("decode");
+        assert_eq!(back.version, 6);
+        assert!(back.is_graph());
+        assert!(back.has_graph());
+        assert!(!back.is_colbert());
+        assert!(!back.has_ivf(), "a graph index is not IVF");
+        assert!(!back.is_legacy_v4());
+        assert!(!back.is_legacy_v5());
+        assert_eq!(back.graph_entry_point, 42);
+        assert_eq!(back.graph_offsets_bytes, offsets_bytes);
+        assert_eq!(back.graph_neighbors_bytes, neighbors_bytes);
+        assert!(back.graph_first > 0);
+        assert!(back.graph_count > 0);
+        // The graph chain must follow every prior chain (rotation,
+        // since this build has lists = 0).
+        assert_eq!(
+            back.graph_first,
+            1 + back.codes_count
+                + back.scales_count
+                + back.ids_count
+                + back.blocked_count
+                + back.rotation_count,
+        );
+        assert_eq!(meta, back);
+    }
+
+    /// INVARIANT (Phase G-2a): a single-vector index must still emit
+    /// wire version 4 with ZEROED graph fields, byte-for-byte
+    /// identical to what the v5 binary wrote. Adding KIND_GRAPH /
+    /// bumping VERSION to 6 must NOT change a single-vector relfile.
+    #[test]
+    fn v4_single_vector_bytes_unaffected_by_v6_binary() {
+        let dim: u32 = 384;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, 1000, 7, 12_345, 31, rotation_bytes);
+        let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+        let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
+        meta.set_codebook(&centroids, &boundaries);
+        assert_eq!(meta.kind, KIND_SINGLE);
+        let buf = meta.encode();
+        assert_eq!(buf[4], 4, "single-vector index must emit wire version 4");
+        assert_eq!(buf[6], 0, "single-vector kind byte must be zero");
+        // Every v6 graph byte (page offset 288..316, data offset
+        // 264..292) must be zero on a single-vector index.
+        let graph_region_start = PAGE_HEADER_BYTES + 264;
+        let graph_region_end = PAGE_HEADER_BYTES + 292;
+        assert!(
+            buf[264..292].iter().all(|&b| b == 0),
+            "v6 graph fields must be zeroed on a single-vector meta page"
+        );
+        let _ = (graph_region_start, graph_region_end); // documents the page offsets
+        let back = MetaPageData::decode(&buf).expect("decode");
+        assert_eq!(back.version, 4);
+        assert_eq!(back.kind, KIND_SINGLE);
+        assert!(!back.is_graph());
+        assert!(!back.has_graph());
+        assert_eq!(back.graph_first, 0);
+        assert_eq!(meta, back);
+    }
+
+    /// A forged v5 ColBERT meta page (version byte 5, v6 region zero)
+    /// decodes under the v6 binary as a ColBERT index, NOT a graph
+    /// index and NOT legacy — the additive backward-compat path.
+    #[test]
+    fn decodes_v5_colbert_meta_unaffected_under_v6() {
+        let dim: u32 = 64;
+        let lists: u32 = 16;
+        let n: u64 = 4096;
+        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        meta.set_ivf_chains(
+            lists,
+            u64::from(lists) * u64::from(dim) * 4,
+            u64::from(lists) * 12,
+        );
+        meta.mark_colbert();
+        let buf = meta.encode();
+        assert_eq!(buf[4], 5);
+        assert_eq!(buf[6], KIND_COLBERT);
+        assert!(
+            buf[264..292].iter().all(|&b| b == 0),
+            "v6 graph fields must be zeroed on a v5 colbert meta page"
+        );
+        let back = MetaPageData::decode(&buf).expect("v5 decode under v6");
+        assert_eq!(back.version, 5);
+        assert!(back.is_colbert());
+        assert!(!back.is_graph());
+        assert!(!back.has_graph());
+        assert!(!back.is_legacy_v5());
+        assert_eq!(meta, back);
     }
 }

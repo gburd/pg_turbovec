@@ -929,13 +929,14 @@ mod tests {
     /// `docs/UPGRADING.md` migration matrix.
     #[pg_test]
     fn wire_format_version_is_stable() {
-        // The version emitted by Phase F-2 (v5; ColBERT/multivector
-        // index kind). Bump this only as part of a deliberate
-        // minor/major release with a migration story. NOTE: a
-        // single-vector index still emits wire version 4 bytes (the
-        // bump is additive per-kind); VERSION is the MAXIMUM wire
-        // version the binary writes, reached only by a ColBERT index.
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 5;
+        // The version emitted by Phase G-2a (v6; Vamana graph index
+        // kind). Bump this only as part of a deliberate minor/major
+        // release with a migration story. NOTE: a single-vector index
+        // still emits wire version 4 bytes and a ColBERT index still
+        // emits wire version 5 bytes (the bump is additive per-kind);
+        // VERSION is the MAXIMUM wire version the binary writes,
+        // reached only by a graph index.
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 6;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,

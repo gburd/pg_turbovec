@@ -513,6 +513,145 @@ fn robust_prune(
     selected
 }
 
+/// Scan-time greedy beam search over a persisted [`GraphAdjacency`],
+/// navigating via a caller-supplied BATCH scoring oracle. Mirrors
+/// `ivf::graph_probe`'s beam-search shape (bounded max-heap of
+/// current best results + heap of unvisited candidates to expand,
+/// stopping once the best remaining candidate can no longer improve
+/// the kept set) but flipped to turbovec's NATIVE similarity
+/// convention — **HIGHER score = closer/more similar** (matching
+/// `TurboQuantIndex::search`'s `SearchResults.scores`) — so callers
+/// (the AM scan path in `cache.rs`) can hand the returned scores
+/// straight to the EXISTING `amgettuple` `(1.0 - score)` distance
+/// conversion with no extra sign-translation layer.
+///
+/// `score_batch` scores a BATCH of candidate slot ids in one call
+/// (a node's whole unvisited-neighbor set per hop) rather than one
+/// id at a time, so a turbovec-backed caller can build ONE
+/// `search_masked` mask per hop instead of one per candidate — this
+/// is what keeps the per-hop cost proportional to "one masked search
+/// over the whole index" rather than "one masked search per
+/// candidate". Returns the scores in the SAME order as the input ids.
+///
+/// Returns the `k` best (score DESCENDING, ties → ascending id for
+/// determinism) `(score, id)` pairs found. `ef` (the internal beam
+/// width) is `(k * GRAPH_SCAN_EF_MULTIPLIER).max(GRAPH_SCAN_EF_FLOOR)`,
+/// clamped to `n`.
+///
+/// Deterministic: a fixed serial traversal with a fixed `(score, id)`
+/// tie-break at every heap comparison — same idea as `ivf::graph_probe`.
+pub fn graph_search<F>(
+    adjacency: &GraphAdjacency,
+    entry: u32,
+    k: usize,
+    mut score_batch: F,
+) -> Vec<(f32, u32)>
+where
+    F: FnMut(&[u32]) -> Vec<f32>,
+{
+    let n = adjacency.n();
+    if n == 0 || k == 0 {
+        return Vec::new();
+    }
+    let ef = (k.saturating_mul(GRAPH_SCAN_EF_MULTIPLIER))
+        .max(GRAPH_SCAN_EF_FLOOR)
+        .min(n);
+    let entry = (entry as usize).min(n - 1) as u32;
+
+    // (score, id) ordering: ascending score, ties -> ascending id
+    // (deterministic, no NaN-fallback surprises). Plain `Cand` is a
+    // max-heap-by-score on `BinaryHeap` (pops HIGHEST score first --
+    // what `to_visit` needs, since higher score = closer); wrapping
+    // in `Reverse` flips it into a min-heap-by-score (pops LOWEST
+    // score first -- what `results` needs, to cheaply evict the
+    // current worst-kept candidate).
+    #[derive(Clone, Copy, PartialEq)]
+    struct Cand(f32, u32);
+    impl Eq for Cand {}
+    impl PartialOrd for Cand {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Cand {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0
+                .partial_cmp(&other.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(self.1.cmp(&other.1))
+        }
+    }
+
+    use std::collections::BinaryHeap;
+
+    let entry_score = score_batch(&[entry])[0];
+
+    let mut visited = vec![false; n];
+    visited[entry as usize] = true;
+
+    let mut to_visit: BinaryHeap<Cand> = BinaryHeap::new();
+    to_visit.push(Cand(entry_score, entry));
+
+    use std::cmp::Reverse;
+    let mut results: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
+    results.push(Reverse(Cand(entry_score, entry)));
+
+    while let Some(cur) = to_visit.pop() {
+        // Stopping condition: once the result set is full (`ef`) and
+        // the best remaining candidate to expand is no better than
+        // our current worst kept result, no further expansion can
+        // improve the result set. Standard HNSW/Vamana stopping rule
+        // (see `ivf::graph_probe`'s doc for the same rule in the
+        // opposite (ascending-distance) direction).
+        if results.len() >= ef {
+            if let Some(Reverse(worst)) = results.peek() {
+                if cur.0 <= worst.0 {
+                    break;
+                }
+            }
+        }
+        let mut new_ids: Vec<u32> = Vec::new();
+        for &nb in adjacency.neighbors_of(cur.1 as usize) {
+            if !visited[nb as usize] {
+                visited[nb as usize] = true;
+                new_ids.push(nb);
+            }
+        }
+        if new_ids.is_empty() {
+            continue;
+        }
+        let scores = score_batch(&new_ids);
+        debug_assert_eq!(scores.len(), new_ids.len());
+        for (&nb, &d) in new_ids.iter().zip(scores.iter()) {
+            if results.len() < ef {
+                results.push(Reverse(Cand(d, nb)));
+                to_visit.push(Cand(d, nb));
+            } else {
+                let worse_than_worst = results.peek().is_some_and(|Reverse(w)| d <= w.0);
+                if !worse_than_worst {
+                    results.pop();
+                    results.push(Reverse(Cand(d, nb)));
+                    to_visit.push(Cand(d, nb));
+                }
+                // else: `d` can't improve the kept set and (being
+                // worse than the current worst kept) also can't beat
+                // the stopping check above once popped -- skip adding
+                // to `to_visit`, bounding the heap's growth.
+            }
+        }
+    }
+
+    let mut out: Vec<(f32, u32)> = results.into_iter().map(|Reverse(c)| (c.0, c.1)).collect();
+    // Descending score (closest/most-similar first), ties -> ascending id.
+    out.sort_unstable_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    out.truncate(k);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,5 +846,131 @@ mod tests {
             selected.iter().any(|s| spread_ids.contains(s)),
             "RobustPrune kept only near-duplicate candidates, no diversity: {selected:?}"
         );
+    }
+
+    /// Score oracle for the `graph_search` tests: higher = closer,
+    /// matching turbovec's native convention (`SearchResults.scores`).
+    /// Negative squared distance is a monotonic (order-preserving)
+    /// transform of squared distance, so ranking by this score is
+    /// identical to ranking by ascending distance.
+    fn neg_sq_dist_batch(corpus: &[f32], dim: usize, query: &[f32], ids: &[u32]) -> Vec<f32> {
+        ids.iter()
+            .map(|&id| -sq_dist(query, &corpus[id as usize * dim..(id as usize + 1) * dim]))
+            .collect()
+    }
+
+    #[test]
+    fn graph_search_matches_linear_scan_set_on_a_real_corpus() {
+        let n = 300;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 21);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+
+        let mut qseed = 0x1234_5678u64;
+        for k in [1usize, 5, 10, 20] {
+            for _ in 0..15 {
+                let mut q = vec![0.0f32; dim];
+                for v in q.iter_mut() {
+                    qseed = qseed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    *v = ((qseed >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+                }
+                // Exact linear scan: score every node, take the top-k.
+                let mut exact: Vec<(f32, u32)> = (0..n as u32)
+                    .map(|id| {
+                        (
+                            -sq_dist(&q, &corpus[id as usize * dim..(id as usize + 1) * dim]),
+                            id,
+                        )
+                    })
+                    .collect();
+                exact.sort_unstable_by(|a, b| {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.1.cmp(&b.1))
+                });
+                exact.truncate(k);
+                let exact_set: std::collections::HashSet<u32> =
+                    exact.iter().map(|&(_, id)| id).collect();
+
+                let via_graph =
+                    graph_search(&g, entry, k, |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
+                let graph_set: std::collections::HashSet<u32> =
+                    via_graph.iter().map(|&(_, id)| id).collect();
+
+                // A beam search over an approximate graph is not
+                // guaranteed to find the EXACT top-k on every query
+                // (unlike ivf::graph_probe's small-lists case, which
+                // does match exactly) -- so this asserts a generous
+                // recall floor, not an exact-set match, at a
+                // comfortably-wide ef (the defaults: ef =
+                // max(k*4, 64)). At this corpus/graph scale the beam
+                // is much wider than k, so recall should be high.
+                let hits = exact_set.intersection(&graph_set).count();
+                let recall = hits as f64 / k.min(exact_set.len()).max(1) as f64;
+                assert!(
+                    recall >= 0.7,
+                    "graph_search recall {recall:.2} too low for k={k} (exact={exact_set:?} graph={graph_set:?})"
+                );
+                assert_eq!(
+                    via_graph.len(),
+                    k.min(n),
+                    "graph_search must return k results when n >= k"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_search_deterministic() {
+        let n = 200;
+        let dim = 12;
+        let corpus = synth_corpus(n, dim, 55);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let q = synth_corpus(1, dim, 999);
+        let r1 = graph_search(&g, entry, 10, |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        let r2 = graph_search(&g, entry, 10, |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn graph_search_empty_graph_returns_empty() {
+        let g = GraphAdjacency::empty(0);
+        let out = graph_search(&g, 0, 5, |ids| vec![0.0; ids.len()]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn graph_search_k_zero_returns_empty() {
+        let n = 50;
+        let dim = 8;
+        let corpus = synth_corpus(n, dim, 3);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let q = synth_corpus(1, dim, 4);
+        let out = graph_search(&g, entry, 0, |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn graph_search_results_are_score_descending() {
+        let n = 200;
+        let dim = 12;
+        let corpus = synth_corpus(n, dim, 77);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let q = synth_corpus(1, dim, 88);
+        let out = graph_search(&g, entry, 15, |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        for w in out.windows(2) {
+            assert!(
+                w[0].0 >= w[1].0,
+                "results must be score-descending: {out:?}"
+            );
+        }
     }
 }

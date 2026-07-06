@@ -147,6 +147,26 @@ unsafe fn ambulkdelete_relfile(
         return stats;
     }
 
+    // Phase G-2a: VACUUM/tombstone integration for the graph kind is
+    // explicitly out of scope for G-2a (see
+    // an internal design note § G-2b). The flat
+    // swap-remove path below moves the last live slot into a deleted
+    // hole, which would silently invalidate the adjacency chain's
+    // slot-id references (a neighbor id pointing at a slot that now
+    // holds a different vector) — exactly the kind of silent
+    // corruption this project's own IVF experience (Phase E-2) says
+    // never to ship. ERROR clearly instead, pointing at REINDEX,
+    // which is less code than teaching the graph adjacency chain to
+    // survive an arbitrary swap-remove.
+    if meta.is_graph() {
+        ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "turbovec graph index VACUUM not yet supported",
+            "See an internal design note (G-2b). REINDEX INDEX <name>; after VACUUMing the underlying table to rebuild the graph over the current live rows."
+        );
+    }
+
     // Pass 2 (FLAT path only): swap-remove from the back. dead_slots is built in
     // ascending order (we walked slot 0..n); reverse-iterate to
     // process highest-index dead first. This invariant lets us

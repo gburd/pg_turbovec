@@ -487,7 +487,8 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         error!("turbovec: failed to allocate IndexBuildResult");
     }
 
-    let (cfg_bit_width, cfg_dim, cfg_lists, cfg_assign_dups) = options::read(index_relation);
+    let (cfg_bit_width, cfg_dim, cfg_lists, cfg_assign_dups, cfg_graph) =
+        options::read(index_relation);
     let indexrelid = (*index_relation).rd_id;
     let normalise = guc::NORMALIZE_ON_INSERT.get();
     let lists = cfg_lists.max(0) as usize;
@@ -1331,7 +1332,7 @@ unsafe extern "C-unwind" fn build_callback(
 /// pgvector's `HnswBuildEmpty` pattern.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Relation) {
-    let (bw, dim, _lists, _assign_dups) = options::read(index_relation);
+    let (bw, dim, _lists, _assign_dups, _graph) = options::read(index_relation);
 
     // Plan an empty layout. dim may be 0 if the user didn't
     // pin it via reloptions — the meta page records 0/0/0,

@@ -802,6 +802,26 @@ unsafe fn ivf_build_and_write(
     bit_width: u8,
     build_pool: Option<&rayon::ThreadPool>,
 ) -> usize {
+    // ponytail: one-off profiling instrument for the v1.22.1
+    // build-cliff investigation ("which stage dominates post-GEMM-fix").
+    // Gated on an env var (not a GUC -- this is a diagnostic, not a
+    // supported feature) so it costs nothing in the default path: a
+    // few Instant::now() calls + a stderr eprintln per stage. No SQL
+    // surface, no wire impact. Upgrade path if this proves generally
+    // useful: promote to a real `turbovec.build_trace` GUC.
+    let trace = std::env::var_os("TURBOVEC_BUILD_TRACE").is_some();
+    let t_start = std::time::Instant::now();
+    macro_rules! trace_stage {
+        ($label:expr, $t0:expr) => {
+            if trace {
+                eprintln!(
+                    "[turbovec build trace] {:<24} {:>8.3}s",
+                    $label,
+                    $t0.elapsed().as_secs_f64()
+                );
+            }
+        };
+    }
     // The spill is the authoritative corpus now; its row count is
     // the number of distinct heap vectors seen.
     let spill = state
@@ -832,10 +852,18 @@ unsafe fn ivf_build_and_write(
     //    Deterministic: seeded k-means++ + Lloyd's (see ivf.rs).
     let sample = std::mem::take(&mut state.ivf_sample);
     let sample_count = state.ivf_sample_count;
+    if trace {
+        eprintln!(
+            "[turbovec build trace]   train_kmeans: sample_count={sample_count} lists={lists} dim={dim} pool_threads={}",
+            build_pool.map_or(1, |p| p.current_num_threads())
+        );
+    }
+    let t0 = std::time::Instant::now();
     let model = super::build_pool::install(build_pool, || {
         ivf::train_kmeans(&sample, sample_count, lists, dim)
     });
     drop(sample);
+    trace_stage!("1_train_kmeans", t0);
 
     // 2. Assign every vector to its nearest centroid in a STREAMED
     //    sweep over the disk spill. We read row-blocks (bounded by
@@ -855,6 +883,7 @@ unsafe fn ivf_build_and_write(
     // exactly one cell, so the downstream soft permutation reduces to
     // the single permutation bit-for-bit (verified by
     // ivf_build_permutation_soft_expands_duplicates's M=1 case).
+    let t0 = std::time::Instant::now();
     let assignments: Vec<Vec<u32>> = {
         let mut assignments: Vec<Vec<u32>> = Vec::with_capacity(n_vectors);
         // Reused per-block scratch: spill-read block + id sink (ids
@@ -933,16 +962,19 @@ unsafe fn ivf_build_and_write(
         }
         assignments
     };
+    trace_stage!("2_assign_sweep", t0);
 
     // 3. Stable cell-contiguous permutation + cell directory. With
     //    soft assignment a vector's old index appears once per cell
     //    it landed in, so `permutation` is non-injective and the
     //    directory partitions the EXPANDED slot count (>= n_vectors).
+    let t0 = std::time::Instant::now();
     let (permutation, directory) = ivf::build_permutation_soft(&assignments, lists);
     let n_slots = permutation.len();
     debug_assert!(directory.validate_partition(n_slots as u64).is_ok());
     debug_assert!(n_slots >= n_vectors, "soft expansion never shrinks");
     drop(assignments);
+    trace_stage!("3_build_permutation", t0);
 
     // 4 + 5. Build `perm_ids` (the real external ids in cell order,
     //    with soft-assign duplicates) from the spill's id column, and
@@ -994,6 +1026,7 @@ unsafe fn ivf_build_and_write(
     // First buffer must hold the larger of the calibration prefix and
     // a normal stream chunk.
     let first_cap = calib_rows.max(chunk_rows);
+    let t0 = std::time::Instant::now();
     {
         let mut chunk_flat = vec![0.0f32; first_cap * dim];
         let mut chunk_ids = vec![0u64; first_cap];
@@ -1028,6 +1061,7 @@ unsafe fn ivf_build_and_write(
             new_slot += rows;
         }
     }
+    trace_stage!("4_quantize_encode", t0);
     // The spill is no longer needed; drop it now (unlinks the temp
     // file) before the prepare_eager + write, freeing disk early.
     drop(spill);
@@ -1036,6 +1070,7 @@ unsafe fn ivf_build_and_write(
     let built = idx.slot_to_id().len();
     debug_assert_eq!(built, n_slots);
 
+    let t0 = std::time::Instant::now();
     super::build_pool::install(build_pool, || idx.prepare_eager());
     let idx_rotation = idx.rotation();
     let prepared = relfile::PreparedParts {
@@ -1075,6 +1110,8 @@ unsafe fn ivf_build_and_write(
         prepared,
         ivf_parts,
     );
+    trace_stage!("5_prepare_and_persist", t0);
+    trace_stage!("TOTAL", t_start);
 
     built
 }

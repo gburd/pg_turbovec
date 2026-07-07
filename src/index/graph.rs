@@ -332,6 +332,17 @@ pub fn build_vamana_with_params(
 /// caveat: this does not attempt to reproduce what a bulk build
 /// would have produced had the new row been present from the start,
 /// only a valid, navigable result.
+///
+/// Requires the WHOLE corpus's raw f32 vectors resident — the real
+/// `aminsert` path never has that (see `insert_one_node_via_oracle`
+/// below, which is what `insert.rs` actually calls). Kept as the
+/// simpler reference implementation for tests/future callers that DO
+/// have a resident corpus (e.g. a from-scratch offline rebuild tool);
+/// `#[allow(dead_code)]` because no current caller besides its own
+/// test needs it, but deleting a correct, tested, simpler-to-reason-
+/// about reference implementation just to silence a lint would be a
+/// net loss.
+#[allow(dead_code)]
 pub fn insert_one_node(
     existing: &GraphAdjacency,
     entry: u32,
@@ -358,6 +369,102 @@ pub fn insert_one_node(
         GRAPH_BUILD_L,
         GRAPH_ALPHA,
         GRAPH_DEGREE_R,
+    );
+    GraphAdjacency::from_lists(adj)
+}
+
+/// Real `aminsert` entry point (Phase G-2b): insert ONE new node into
+/// an existing, ALREADY-PERSISTED graph, where the existing corpus's
+/// raw f32 vectors are **not available** — only their persisted
+/// TurboQuant-quantized codes are (the graph kind never keeps a
+/// whole-corpus f32 buffer resident outside of `ambuild`; see the
+/// module doc's "RAM residency" section). The new row's raw f32
+/// vector IS available (the caller just received it from `aminsert`).
+///
+/// `score_existing` must score the new vector against a BATCH of
+/// existing slot ids using the SAME quantized-distance kernel the
+/// scan path already uses (`ReadOnlyIndex::score_slots` via
+/// `cache::GraphIndex`, wired by `insert.rs`) — higher score = closer
+/// (matches `graph_search`'s convention), so this function negates
+/// internally to get an ascending-distance ordering consistent with
+/// [`insert_node_into_graph`]'s `sq_dist`-based (lower = closer)
+/// convention.
+///
+/// **Known, deliberate approximation** (document this clearly, it is
+/// the one real accuracy gap versus the build path's exact
+/// `RobustPrune`): the diversity condition `alpha * dist(p*, p') <=
+/// dist(p, p')` needs a distance BETWEEN TWO EXISTING candidates
+/// (`p*` and `p'`), not just to the new node `p`. There is no
+/// reconstruct-from-quantized-codes primitive in `turbovec` to get
+/// an exact (or even approximate) `p*`-vs-`p'` distance cheaply, and
+/// adding one is out of scope for G-2b (it would need a new codebook
+/// decode primitive upstream or in this crate, plus its own
+/// round-trip test suite). Rather than block incremental insert on
+/// that, this function approximates `dist(p*, p')` using the
+/// difference between EACH candidate's own already-computed
+/// distance-to-`p` (a real, exact, cheap quantity from
+/// `score_existing`): `|dist(p, p*) - dist(p, p')|` is a valid lower
+/// bound on `dist(p*, p')` by the triangle inequality, and using a
+/// lower bound in place of the true value can only make the pruning
+/// rule LESS aggressive (a candidate that would have been pruned by
+/// the exact distance might survive here), never MORE aggressive —
+/// so this never drops a genuinely-diverse edge, it can only
+/// occasionally keep an edge the exact algorithm would have pruned
+/// as redundant. Net effect: the new node's out-degree may run
+/// slightly higher than perfectly diverse RobustPrune would produce
+/// (still hard-capped at `r`), not lower — a safe direction to be
+/// wrong in for a navigability-critical structure. This is a
+/// genuinely different (weaker) guarantee than the build path's
+/// exact RobustPrune and should be revisited if a codebook-decode
+/// primitive becomes available.
+pub fn insert_one_node_via_oracle<S>(
+    existing: &GraphAdjacency,
+    entry: u32,
+    new_vector: &[f32],
+    score_existing: S,
+) -> GraphAdjacency
+where
+    S: Fn(&[f32], &[u32]) -> Vec<f32>,
+{
+    let old_n = existing.n();
+    let new_id = old_n as u32;
+    let mut adj = existing.to_lists();
+    adj.push(Vec::new());
+    if old_n == 0 {
+        // First-ever row: nothing to search from / connect to yet.
+        return GraphAdjacency::from_lists(adj);
+    }
+
+    // dist_to(existing_slot) -- exact: new_vector is a real f32 row,
+    // score_existing scores it against real persisted quantized
+    // codes via the same kernel the scan path trusts.
+    let dist_to = |id: usize| -> f32 {
+        let scores = score_existing(new_vector, &[id as u32]);
+        -scores[0] // score_existing: higher = closer; sq_dist convention: lower = closer.
+    };
+    // dist(a, b) for RobustPrune's diversity check: if either side is
+    // the new node `p`, this IS exact (same as dist_to). If BOTH
+    // sides are existing nodes, approximate via the triangle-
+    // inequality lower bound documented above.
+    let dist = |a: u32, b: u32| -> f32 {
+        if a == new_id {
+            return dist_to(b as usize);
+        }
+        if b == new_id {
+            return dist_to(a as usize);
+        }
+        (dist_to(a as usize) - dist_to(b as usize)).abs()
+    };
+
+    insert_node_into_graph_via(
+        &mut adj,
+        entry,
+        new_id,
+        dist_to,
+        dist,
+        GRAPH_ALPHA,
+        GRAPH_DEGREE_R,
+        GRAPH_BUILD_L,
     );
     GraphAdjacency::from_lists(adj)
 }
@@ -433,15 +540,59 @@ pub(crate) fn insert_node_into_graph(
     alpha: f32,
     r: usize,
 ) {
+    let dist = |a: u32, b: u32| -> f32 {
+        sq_dist(
+            &vectors[a as usize * dim..(a as usize + 1) * dim],
+            &vectors[b as usize * dim..(b as usize + 1) * dim],
+        )
+    };
+    let query = &vectors[p as usize * dim..(p as usize + 1) * dim];
+    let dist_to = |id: usize| sq_dist(query, &vectors[id * dim..(id + 1) * dim]);
+    insert_node_into_graph_via(adj, entry, p, dist_to, dist, alpha, r, l);
+}
+
+/// Generalized (over a distance oracle) core of
+/// [`insert_node_into_graph`]: greedy-search from `entry` toward `p`
+/// (scored via `dist_to`, a function of a candidate node id), then
+/// `RobustPrune` the visited set + `p`'s current out-edges (scored
+/// via `dist`, a function of TWO node ids — needed because
+/// `RobustPrune`'s diversity condition compares distances BETWEEN
+/// candidates, not just to `p`) down to `p`'s real out-edges, then
+/// add + re-prune reverse edges exactly as [`insert_node_into_graph`]
+/// already did. Split into two oracles (rather than one) because the
+/// incremental-insert caller ([`insert_one_node_via_oracle`]) has a
+/// cheap way to score "the new vector vs an existing slot" (the new
+/// vector is a real, resident f32 row; the existing slot's distance
+/// comes from the persisted quantized codes via `score_slots`) but
+/// no way to compute "existing slot A vs existing slot B" any
+/// cheaper than the SAME per-slot quantized scoring the scan path
+/// already does — both oracles end up calling into the same
+/// quantized-score machinery for existing-vs-existing comparisons,
+/// they're just shaped differently for the two comparison kinds this
+/// algorithm needs.
+#[allow(clippy::too_many_arguments)]
+fn insert_node_into_graph_via<F, G>(
+    adj: &mut [Vec<u32>],
+    entry: u32,
+    p: u32,
+    dist_to: F,
+    dist: G,
+    alpha: f32,
+    r: usize,
+    l: usize,
+) where
+    F: Fn(usize) -> f32,
+    G: Fn(u32, u32) -> f32,
+{
     // 1. Greedy search from the entry point toward p, beam l,
     //    collecting the visited (expanded) node set V.
-    let visited = greedy_search_collect_visited(entry, p as usize, l, adj, vectors, dim);
+    let visited = greedy_search_collect_visited_via(entry, p as usize, l, adj, dist_to);
 
     // 2. RobustPrune(p, V ∪ N_out(p), alpha, r).
     let mut candidates: Vec<u32> = Vec::with_capacity(visited.len() + adj[p as usize].len());
     candidates.extend_from_slice(&visited);
     candidates.extend_from_slice(&adj[p as usize]);
-    let selected = robust_prune(p, &candidates, vectors, dim, alpha, r);
+    let selected = robust_prune_via(p, &candidates, &dist, alpha, r);
     adj[p as usize] = selected.clone();
 
     // 3. Add p -> selected edges' reverses (q -> p), re-pruning q
@@ -454,7 +605,7 @@ pub(crate) fn insert_node_into_graph(
         adj[qi].push(p);
         if adj[qi].len() > r {
             let q_candidates = std::mem::take(&mut adj[qi]);
-            adj[qi] = robust_prune(q, &q_candidates, vectors, dim, alpha, r);
+            adj[qi] = robust_prune_via(q, &q_candidates, &dist, alpha, r);
         }
     }
 }
@@ -474,17 +625,17 @@ pub(crate) fn insert_node_into_graph(
 /// the current worst kept result) but over `dim`-dimensional corpus
 /// vectors instead of coarse centroids, and returning the expansion
 /// set rather than the top-k.
-fn greedy_search_collect_visited(
+fn greedy_search_collect_visited_via<D>(
     entry: u32,
     query_id: usize,
     l: usize,
     adj: &[Vec<u32>],
-    vectors: &[f32],
-    dim: usize,
-) -> Vec<u32> {
+    dist_to: D,
+) -> Vec<u32>
+where
+    D: Fn(usize) -> f32,
+{
     let n = adj.len();
-    let query = &vectors[query_id * dim..(query_id + 1) * dim];
-    let dist_to = |id: usize| sq_dist(query, &vectors[id * dim..(id + 1) * dim]);
 
     #[derive(Clone, Copy, PartialEq)]
     struct Cand(f32, u32);
@@ -583,21 +734,18 @@ fn greedy_search_collect_visited(
 /// blindly; it is the crux of why Vamana outperforms a naive k-NN
 /// graph and the one piece of this module most worth double-
 /// checking independently.
-fn robust_prune(
-    p: u32,
-    candidates: &[u32],
-    vectors: &[f32],
-    dim: usize,
-    alpha: f32,
-    r: usize,
-) -> Vec<u32> {
-    let dist = |a: u32, b: u32| -> f32 {
-        sq_dist(
-            &vectors[a as usize * dim..(a as usize + 1) * dim],
-            &vectors[b as usize * dim..(b as usize + 1) * dim],
-        )
-    };
-
+///
+/// Generalized over a `dist(a, b)` oracle (rather than reading raw
+/// `vectors` directly) so this ONE implementation serves both the
+/// build path (oracle = exact `sq_dist` against resident f32 rows)
+/// and the incremental-insert path (oracle = an approximate distance
+/// derived from PERSISTED QUANTIZED CODES for existing rows, since
+/// `aminsert` never has the whole corpus's raw f32 resident — see
+/// `insert_one_node_via_oracle` below).
+fn robust_prune_via<D>(p: u32, candidates: &[u32], dist: D, alpha: f32, r: usize) -> Vec<u32>
+where
+    D: Fn(u32, u32) -> f32,
+{
     let mut cand: Vec<u32> = candidates.iter().copied().filter(|&c| c != p).collect();
     cand.sort_unstable();
     cand.dedup();
@@ -629,6 +777,29 @@ fn robust_prune(
         });
     }
     selected
+}
+
+/// Build-time wrapper of [`robust_prune_via`]: the distance oracle is
+/// exact raw-f32 `sq_dist` against the resident `vectors` buffer.
+/// Only reachable via [`insert_one_node`]/[`insert_node_into_graph`]
+/// now (the build path itself uses [`robust_prune_via`] directly) --
+/// see [`insert_one_node`]'s doc comment for why it's kept.
+#[allow(dead_code)]
+fn robust_prune(
+    p: u32,
+    candidates: &[u32],
+    vectors: &[f32],
+    dim: usize,
+    alpha: f32,
+    r: usize,
+) -> Vec<u32> {
+    let dist = |a: u32, b: u32| -> f32 {
+        sq_dist(
+            &vectors[a as usize * dim..(a as usize + 1) * dim],
+            &vectors[b as usize * dim..(b as usize + 1) * dim],
+        )
+    };
+    robust_prune_via(p, candidates, dist, alpha, r)
 }
 
 /// Scan-time greedy beam search over a persisted [`GraphAdjacency`],
@@ -1121,6 +1292,57 @@ mod tests {
         );
     }
 
+    /// Same scenario as [`insert_one_node_grows_the_adjacency_and_stays_findable`],
+    /// but via [`insert_one_node_via_oracle`] — the REAL `aminsert` entry
+    /// point, which does NOT have the existing corpus's raw f32
+    /// vectors resident (only the new row's). `score_existing` here
+    /// is a stand-in for `cache::GraphIndex`'s real
+    /// `ReadOnlyIndex::score_slots` (exact in this test, since the
+    /// synthetic corpus IS resident here — the real `insert.rs` path
+    /// scores against PERSISTED QUANTIZED codes instead, which is
+    /// lossier; this test only exercises the oracle-based CONTROL
+    /// FLOW, not the accuracy loss from real quantization, which is
+    /// out of scope for a graph.rs-level unit test).
+    #[test]
+    fn insert_one_node_via_oracle_grows_the_adjacency_and_stays_findable() {
+        let n = 200;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 17);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+
+        let new_vec = synth_corpus(1, dim, 4242);
+        let new_id = n as u32;
+
+        let score_existing = |query: &[f32], ids: &[u32]| -> Vec<f32> {
+            ids.iter()
+                .map(|&id| -sq_dist(query, &corpus[id as usize * dim..(id as usize + 1) * dim]))
+                .collect()
+        };
+        let g2 = insert_one_node_via_oracle(&g, entry, &new_vec, score_existing);
+        assert_eq!(g2.n(), n + 1);
+        for i in 0..n {
+            assert!(
+                g2.neighbors_of(i).len() <= GRAPH_DEGREE_R,
+                "pre-existing node {i} exceeded R after insert_one_node_via_oracle"
+            );
+        }
+        assert!(g2.neighbors_of(new_id as usize).len() <= GRAPH_DEGREE_R);
+        assert!(
+            !g2.neighbors_of(new_id as usize).contains(&new_id),
+            "new node must not have a self-loop"
+        );
+
+        let mut extended = corpus.clone();
+        extended.extend_from_slice(&new_vec);
+        let out = graph_search(&g2, entry, 5, &[], |ids| {
+            neg_sq_dist_batch(&extended, dim, &new_vec, ids)
+        });
+        assert!(
+            out.iter().any(|&(_, id)| id == new_id),
+            "newly-inserted node (via oracle) is not findable via graph_search for its own vector: {out:?}"
+        );
+    }
+
     /// Score oracle for the `graph_search` tests: higher = closer,
     /// matching turbovec's native convention (`SearchResults.scores`).
     /// Negative squared distance is a monotonic (order-preserving)
@@ -1167,8 +1389,9 @@ mod tests {
                 let exact_set: std::collections::HashSet<u32> =
                     exact.iter().map(|&(_, id)| id).collect();
 
-                let via_graph =
-                    graph_search(&g, entry, k, &[], |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
+                let via_graph = graph_search(&g, entry, k, &[], |ids| {
+                    neg_sq_dist_batch(&corpus, dim, &q, ids)
+                });
                 let graph_set: std::collections::HashSet<u32> =
                     via_graph.iter().map(|&(_, id)| id).collect();
 
@@ -1225,7 +1448,9 @@ mod tests {
         let corpus = synth_corpus(n, dim, 3);
         let (g, entry) = build_vamana(&corpus, n, dim);
         let q = synth_corpus(1, dim, 4);
-        let out = graph_search(&g, entry, 0, &[], |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
+        let out = graph_search(&g, entry, 0, &[], |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
         assert!(out.is_empty());
     }
 
@@ -1272,7 +1497,9 @@ mod tests {
 
         // Tombstone every 7th id (avoid the entry point itself --
         // that degenerate case gets its own test below).
-        let dead: Vec<u32> = (0..n as u32).filter(|id| id % 7 == 0 && *id != entry).collect();
+        let dead: Vec<u32> = (0..n as u32)
+            .filter(|id| id % 7 == 0 && *id != entry)
+            .collect();
         let bitmap = tombstone_bitmap(n, &dead);
         let dead_set: std::collections::HashSet<u32> = dead.iter().copied().collect();
 

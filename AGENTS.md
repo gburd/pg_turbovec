@@ -85,14 +85,31 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.22.2, 2026-07-06)
+### Current (as of v1.23.0, 2026-07-06)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.22.2   | `REINDEX INDEX` once |
-| 1.2.x              | 1.22.2   | `REINDEX INDEX` once |
-| 1.3.x              | 1.22.2   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.22.x     | 1.22.2   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.23.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.23.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.23.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.22.x     | 1.23.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.23.0 adds `WITH (graph = true)`** — Phase G-2a, a new opt-in
+Vamana-style navigable-graph index kind, the first step toward
+matching HNSW's query latency while keeping TurboQuant's storage
+compression (an internal design note). Wire format v6,
+ADDITIVE per kind: existing v4/v5 indexes decode byte-identical, no
+REINDEX. Determinism is relaxed for this kind ONLY (fixed-seed/one-
+machine, not byte-identical cross-machine — an explicit, documented
+trade-off, not an oversight). **Correctness-first scope**: real
+Vamana build (greedy search + RobustPrune) + real beam-search scan,
+verified recall against exact linear scan, but VACUUM/`aminsert`
+against a graph index raise a clear `ERROR` (not yet supported) and
+the real 5M-scale HNSW-latency gate has NOT been measured — no
+latency/recall-vs-HNSW claim is made by this release. See
+an internal design note for the sub-phase breakdown
+(G-2b VACUUM, G-2c SIMD/parallelism, G-2d the gate measurement, all
+follow-up work).
 
 **v1.22.2 raises `turbovec.probes`'s default from 8 to 16** — the
 old default capped out-of-the-box recall at R@10=0.796 (SIFT-1M) /
@@ -154,19 +171,23 @@ SIFT-1M/128d ~2ms vs ~900ms). Upgrade via `ALTER EXTENSION
 pg_turbovec UPDATE`, no REINDEX. See `CHANGELOG.md` and
 `docs/UPGRADING.md`.
 
-`MetaPageData::version` is **5** as of v1.17.0 (was **4** for
-v1.10.0–v1.16.x), but the bump is **strictly additive per index
-kind**: a single-vector index (`vec_*_ops` over a `vector` column)
-still emits wire **version 4** with a zeroed `kind` byte (page offset
-30), **byte-identical to v1.16.0**; only a ColBERT index
-(`vec_colbert_ops` over a `vector[]` column, Phase F-2) is v5
-(`kind = KIND_COLBERT`). A v4 meta decodes as `KIND_SINGLE`, so
-`is_legacy_v4()` never trips and v1.4.x–v1.16.x single-vector indexes
-need **no REINDEX**. v1.11–v1.13 changes (tombstones, out-of-core
-build, out-of-core query) remain additive within v4. IVF is opt-in
-via `WITH (lists = N)`; as of v1.13.0 IVF is out-of-core end-to-end
-(build AND query), so a >RAM IVF index
-can be built and served on a RAM-constrained host.
+`MetaPageData::version` is **6** as of v1.23.0 (was **5** for
+v1.17.0–v1.22.x, **4** for v1.10.0–v1.16.x), but every bump is
+**strictly additive per index kind**: a single-vector index
+(`vec_*_ops` over a `vector` column) still emits wire **version 4**
+with a zeroed `kind` byte (page offset 30), **byte-identical to
+v1.16.0**; a ColBERT index (`vec_colbert_ops` over a `vector[]`
+column, Phase F-2) is v5 (`kind = KIND_COLBERT`); a graph index
+(`WITH (graph = true)`, Phase G-2a) is v6 (`kind = KIND_GRAPH`). A
+v4 meta decodes as `KIND_SINGLE` and a v5 meta decodes unaffected
+under the v6 binary, so `is_legacy_v4()` never trips and v1.4.x–
+v1.22.x single-vector/ColBERT indexes need **no REINDEX**. IVF is
+opt-in via `WITH (lists = N)`; as of v1.13.0 IVF is out-of-core
+end-to-end (build AND query), so a >RAM IVF index can be built and
+served on a RAM-constrained host. The graph kind is NOT out-of-core
+(RAM-resident by design, per an internal design note's explicit
+trade-off) and does not yet support VACUUM or `aminsert` (v1.23.0,
+see that release's CHANGELOG entry).
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.

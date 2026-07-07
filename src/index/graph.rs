@@ -540,10 +540,29 @@ fn robust_prune(
 ///
 /// Deterministic: a fixed serial traversal with a fixed `(score, id)`
 /// tie-break at every heap comparison — same idea as `ivf::graph_probe`.
+///
+/// `tombstones` is the Phase E-2/G-2b per-slot bitmap (LSB-first,
+/// bit set ⇒ slot dead) read by the caller via
+/// `relfile::read_tombstones` — an empty slice means "nothing has
+/// been vacuumed" (every id is live), matching the convention
+/// `scan.rs`'s `apply_tombstones` already uses for the IVF path. A
+/// tombstoned node is treated as if it had been deleted from the
+/// graph entirely: it is never added to `results`, and once
+/// discovered as a neighbor of some live node it is dropped rather
+/// than pushed onto `to_visit` — so its own out-edges are never
+/// followed either (a dead node can't be `cur`, since only ids that
+/// passed the tombstone check ever enter the heap). If the persisted
+/// `entry` itself is tombstoned (VACUUM normally re-points
+/// `graph_entry_point` at a fallback live slot when this happens —
+/// see `vacuum.rs`'s `graph_tombstone_dead` — but this is a defensive
+/// second layer for any caller that hands in a stale/foreign entry),
+/// fall back to the first non-tombstoned id in ascending order; if
+/// every id is dead, returns an empty result rather than panicking.
 pub fn graph_search<F>(
     adjacency: &GraphAdjacency,
     entry: u32,
     k: usize,
+    tombstones: &[u8],
     mut score_batch: F,
 ) -> Vec<(f32, u32)>
 where
@@ -553,10 +572,26 @@ where
     if n == 0 || k == 0 {
         return Vec::new();
     }
+    let is_dead = |id: u32| -> bool {
+        if tombstones.is_empty() {
+            return false;
+        }
+        let slot = id as usize;
+        let byte = slot / 8;
+        byte < tombstones.len() && (tombstones[byte] >> (slot % 8)) & 1 != 0
+    };
     let ef = (k.saturating_mul(GRAPH_SCAN_EF_MULTIPLIER))
         .max(GRAPH_SCAN_EF_FLOOR)
         .min(n);
     let entry = (entry as usize).min(n - 1) as u32;
+    let entry = if is_dead(entry) {
+        match (0..n as u32).find(|&id| !is_dead(id)) {
+            Some(fallback) => fallback,
+            None => return Vec::new(), // every id tombstoned
+        }
+    } else {
+        entry
+    };
 
     // (score, id) ordering: ascending score, ties -> ascending id
     // (deterministic, no NaN-fallback surprises). Plain `Cand` is a
@@ -612,9 +647,17 @@ where
         }
         let mut new_ids: Vec<u32> = Vec::new();
         for &nb in adjacency.neighbors_of(cur.1 as usize) {
+            // A tombstoned neighbor contributes nothing: it can never
+            // be returned and its own out-edges must never be
+            // followed. Marking it `visited` (without adding it to
+            // `new_ids`) is enough to guarantee both -- it never
+            // enters `results`/`to_visit`, so it never becomes `cur`
+            // and its out-edges are never walked.
             if !visited[nb as usize] {
                 visited[nb as usize] = true;
-                new_ids.push(nb);
+                if !is_dead(nb) {
+                    new_ids.push(nb);
+                }
             }
         }
         if new_ids.is_empty() {
@@ -895,7 +938,7 @@ mod tests {
                     exact.iter().map(|&(_, id)| id).collect();
 
                 let via_graph =
-                    graph_search(&g, entry, k, |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
+                    graph_search(&g, entry, k, &[], |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
                 let graph_set: std::collections::HashSet<u32> =
                     via_graph.iter().map(|&(_, id)| id).collect();
 
@@ -929,10 +972,10 @@ mod tests {
         let corpus = synth_corpus(n, dim, 55);
         let (g, entry) = build_vamana(&corpus, n, dim);
         let q = synth_corpus(1, dim, 999);
-        let r1 = graph_search(&g, entry, 10, |ids| {
+        let r1 = graph_search(&g, entry, 10, &[], |ids| {
             neg_sq_dist_batch(&corpus, dim, &q, ids)
         });
-        let r2 = graph_search(&g, entry, 10, |ids| {
+        let r2 = graph_search(&g, entry, 10, &[], |ids| {
             neg_sq_dist_batch(&corpus, dim, &q, ids)
         });
         assert_eq!(r1, r2);
@@ -941,7 +984,7 @@ mod tests {
     #[test]
     fn graph_search_empty_graph_returns_empty() {
         let g = GraphAdjacency::empty(0);
-        let out = graph_search(&g, 0, 5, |ids| vec![0.0; ids.len()]);
+        let out = graph_search(&g, 0, 5, &[], |ids| vec![0.0; ids.len()]);
         assert!(out.is_empty());
     }
 
@@ -952,7 +995,7 @@ mod tests {
         let corpus = synth_corpus(n, dim, 3);
         let (g, entry) = build_vamana(&corpus, n, dim);
         let q = synth_corpus(1, dim, 4);
-        let out = graph_search(&g, entry, 0, |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
+        let out = graph_search(&g, entry, 0, &[], |ids| neg_sq_dist_batch(&corpus, dim, &q, ids));
         assert!(out.is_empty());
     }
 
@@ -963,7 +1006,7 @@ mod tests {
         let corpus = synth_corpus(n, dim, 77);
         let (g, entry) = build_vamana(&corpus, n, dim);
         let q = synth_corpus(1, dim, 88);
-        let out = graph_search(&g, entry, 15, |ids| {
+        let out = graph_search(&g, entry, 15, &[], |ids| {
             neg_sq_dist_batch(&corpus, dim, &q, ids)
         });
         for w in out.windows(2) {
@@ -972,5 +1015,116 @@ mod tests {
                 "results must be score-descending: {out:?}"
             );
         }
+    }
+
+    /// Build a LSB-first per-slot tombstone bitmap with the given
+    /// dead ids set, matching `relfile::read_tombstones`'s on-disk
+    /// convention.
+    fn tombstone_bitmap(n: usize, dead: &[u32]) -> Vec<u8> {
+        let mut bm = vec![0u8; n.div_ceil(8)];
+        for &id in dead {
+            bm[id as usize / 8] |= 1u8 << (id as usize % 8);
+        }
+        bm
+    }
+
+    /// Phase G-2b: a tombstoned node must never be returned, and the
+    /// live-set results must match a brute-force scan restricted to
+    /// the live ids only (not just "close to" -- an exact set match,
+    /// since the corpus here is small enough for the beam to find
+    /// the true top-k of the live set with the default ef).
+    #[test]
+    fn graph_search_never_returns_a_tombstoned_id() {
+        let n = 300;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 321);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+
+        // Tombstone every 7th id (avoid the entry point itself --
+        // that degenerate case gets its own test below).
+        let dead: Vec<u32> = (0..n as u32).filter(|id| id % 7 == 0 && *id != entry).collect();
+        let bitmap = tombstone_bitmap(n, &dead);
+        let dead_set: std::collections::HashSet<u32> = dead.iter().copied().collect();
+
+        let q = synth_corpus(1, dim, 654);
+        for k in [1usize, 5, 10, 20] {
+            let out = graph_search(&g, entry, k, &bitmap, |ids| {
+                neg_sq_dist_batch(&corpus, dim, &q, ids)
+            });
+            for &(_, id) in &out {
+                assert!(
+                    !dead_set.contains(&id),
+                    "graph_search returned tombstoned id {id} for k={k}"
+                );
+            }
+
+            // Brute-force top-k restricted to the live set.
+            let mut exact: Vec<(f32, u32)> = (0..n as u32)
+                .filter(|id| !dead_set.contains(id))
+                .map(|id| {
+                    (
+                        -sq_dist(&q, &corpus[id as usize * dim..(id as usize + 1) * dim]),
+                        id,
+                    )
+                })
+                .collect();
+            exact.sort_unstable_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            exact.truncate(k);
+            let exact_set: std::collections::HashSet<u32> =
+                exact.iter().map(|&(_, id)| id).collect();
+            let graph_set: std::collections::HashSet<u32> = out.iter().map(|&(_, id)| id).collect();
+            let hits = exact_set.intersection(&graph_set).count();
+            let recall = hits as f64 / k.min(exact_set.len()).max(1) as f64;
+            assert!(
+                recall >= 0.7,
+                "tombstone-aware recall {recall:.2} too low for k={k}"
+            );
+        }
+    }
+
+    /// Phase G-2b entry-point-tombstoned case: `graph_search` must
+    /// fall back to a live id rather than starting (and getting
+    /// stuck at) a dead entry point, and must still return only live
+    /// ids.
+    #[test]
+    fn graph_search_falls_back_when_entry_point_is_tombstoned() {
+        let n = 250;
+        let dim = 12;
+        let corpus = synth_corpus(n, dim, 111);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+
+        let bitmap = tombstone_bitmap(n, &[entry]);
+        let q = synth_corpus(1, dim, 222);
+        let out = graph_search(&g, entry, 10, &bitmap, |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        assert!(
+            !out.is_empty(),
+            "graph_search returned nothing when only the entry point was tombstoned"
+        );
+        for &(_, id) in &out {
+            assert_ne!(id, entry, "returned the tombstoned entry point itself");
+        }
+    }
+
+    /// Degenerate case: every node tombstoned. Must return empty, not
+    /// panic.
+    #[test]
+    fn graph_search_fully_tombstoned_corpus_returns_empty() {
+        let n = 100;
+        let dim = 8;
+        let corpus = synth_corpus(n, dim, 5);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let all_dead: Vec<u32> = (0..n as u32).collect();
+        let bitmap = tombstone_bitmap(n, &all_dead);
+        let q = synth_corpus(1, dim, 9);
+        let out = graph_search(&g, entry, 5, &bitmap, |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        assert!(out.is_empty());
     }
 }

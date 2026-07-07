@@ -84,8 +84,25 @@ unsafe fn aminsert_impl(
     // Encode CTID into u64 using the canonical pgrx layout.
     let id = pgrx::itemptr::item_pointer_to_u64(*heap_tid);
 
+    // Phase G-2a: a Vamana graph index is a build-time-only artifact
+    // for this sub-phase (incremental insert/VACUUM integration is
+    // G-2b, explicitly out of scope here — see
+    // an internal design note). Rather than silently
+    // corrupting the adjacency chain (a generic insert would rewrite
+    // the relfile via the flat write_full_with_prepared path, which
+    // knows nothing about `kind = KIND_GRAPH` and would drop the
+    // graph fields on the next commit), refuse clearly and point at
+    // REINDEX.
+    if let Some(meta) = relfile::read_meta(index_relation) {
+        if meta.is_graph() {
+            error!(
+                "turbovec aminsert: INSERT into a graph index (built WITH (graph = true)) is not yet supported (see an internal design note G-2b). REINDEX INDEX <name>; after bulk-loading new rows, or use a flat/IVF index for tables with ongoing INSERTs."
+            );
+        }
+    }
+
     let normalise = guc::NORMALIZE_ON_INSERT.get();
-    let (bit_width, _, _, _) = options::read(index_relation);
+    let (bit_width, _, _, _, _graph) = options::read(index_relation);
 
     aminsert_relfile(
         index_relation,

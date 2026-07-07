@@ -4,6 +4,68 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.23.0] — 2026-07-06
+
+**Phase G-2a: `WITH (graph = true)`, a new Vamana-style navigable-
+graph index kind** — the first step toward matching HNSW's query
+latency while keeping TurboQuant's storage compression, per
+an internal design note's long-standing roadmap.
+
+Builds a real single-pass Vamana graph (DiskANN's algorithm: greedy
+search + RobustPrune per node, in a deterministic randomized
+insertion order) over the full corpus. A graph node's vector storage
+is identical to a flat index's (same TurboQuant encode path); the
+new adjacency chain (CSR: offsets + flat neighbor ids) and an
+entry-point slot id are the only new on-disk structures. Scan is a
+greedy beam search from the entry point, feeding results through the
+existing `xs_recheckorderby` machinery every other kind already uses
+— no new correctness surface there.
+
+**Wire format v6, additive** (same pattern as v5's `KIND_COLBERT`):
+existing v4 (single-vector) and v5 (ColBERT) indexes decode
+byte-identical under the v6 binary — verified by dedicated tests. No
+REINDEX for any existing index. A graph index is a brand-new shape
+only a v6 binary produces.
+
+**Determinism: relaxed for this kind only**, per the plan doc's
+explicit "three fundamental tensions" framing — deterministic for a
+fixed seed on one machine/thread-count (required for the test suite
+and for `REINDEX` reproducibility on a given host), but NOT
+byte-identical across machines/ISAs the way flat/IVF/ColBERT indexes
+are. WAL/streaming replication are unaffected either way (replicas
+replay the primary's actual page bytes, never rebuild independently).
+
+**Scope of this release (G-2a, correctness-first — see
+an internal design note for the full sub-phase
+breakdown)**: build + scan work end to end with real, verified
+recall against an exact linear scan on test corpora. Explicitly NOT
+yet done, each tracked as a numbered follow-up:
+- G-2b: VACUUM/tombstone integration. `ambulkdelete` and `aminsert`
+  against a graph index currently raise a clear `ERROR` rather than
+  silently corrupting the graph — rebuild the index after bulk
+  loading/deleting, the same operational model IVF's original
+  build-then-query-only phase used before tombstones landed.
+- G-2c: SIMD-optimized traversal + build parallelism. This release's
+  distance computation is plain scalar Rust; the build is
+  correctness-first, not speed-optimized.
+- G-2d: the real 5M-scale, AVX2-hardware HNSW-latency gate
+  measurement this whole feature is ultimately judged against
+  (an internal design note's gate: p50 ≤ 1.3× HNSW AND storage
+  ≥ 6× smaller AND recall ≥ IVF at matched budget, at 5M rows/
+  R@0.96 on AVX2). **Not run in this release** — no latency or
+  recall-vs-HNSW claim is made here; that measurement is the honest
+  next step before this feature can be called production-ready, and
+  the plan doc's own framing ("the bet failed, keep IVF" is a real
+  possible outcome) still stands.
+
+New reloption `WITH (graph = true)`, mutually exclusive with
+`WITH (lists = N)` on the same index (enforced in `amoptions`). 24
+new tests (287 total, up from 263), drift-check/compile-matrix/fmt
+clean, CI green.
+
+**Migration**: `ALTER EXTENSION pg_turbovec UPDATE TO '1.23.0';` is
+sufficient. No REINDEX for existing indexes.
+
 ## [1.22.2] — 2026-07-06
 
 **Raises `turbovec.probes`'s default from 8 to 16 — the out-of-the-

@@ -233,6 +233,57 @@ impl ReadOnlyIndex {
             .map(|id| allowed.contains(id))
             .collect()
     }
+
+    /// External id stored at slot `slot`. Used by the graph scan path
+    /// (Phase G-2a) to translate the entry point / adjacency's slot
+    /// ids to CTIDs.
+    pub fn id_at_slot(&self, slot: usize) -> u64 {
+        self.slot_to_id[slot]
+    }
+
+    /// Score exactly the slots in `ids` against `query`, returning
+    /// their scores in THE SAME ORDER as `ids` (turbovec's native
+    /// higher-is-closer convention, matching
+    /// `TurboQuantIndex::search`'s `SearchResults.scores`).
+    ///
+    /// Phase G-2a's graph scan path uses this as the per-hop batch
+    /// scoring oracle `graph::graph_search` needs: reuses the
+    /// EXISTING masked-search kernel (`search_with_mask`) rather than
+    /// hand-rolling a new distance kernel — turbovec's blocked kernel
+    /// already skips 32-vector blocks with no allowed slot, so a
+    /// small `ids` batch (a graph node's out-degree, typically ~32)
+    /// costs close to `O(n/32)` block-skip checks, not a full `O(n)`
+    /// scan, even though the mask itself is `O(n)` to allocate. A
+    /// SIMD-aware, allocation-free per-hop scorer is exactly the kind
+    /// of optimisation an internal design note scopes
+    /// to G-2c, not this correctness-first sub-phase.
+    ///
+    /// `ids` must be non-empty and every id must be `< self.len()`;
+    /// duplicates are tolerated (the mask is idempotent) but the
+    /// output would then have fewer entries than `ids.len()` for the
+    /// duplicated id, which the graph search never does (each hop's
+    /// candidate batch is already deduplicated via the `visited`
+    /// bitmap in `graph::graph_search`).
+    pub fn score_slots(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
+        let n = self.len();
+        let mut mask = vec![false; n];
+        for &id in ids {
+            mask[id as usize] = true;
+        }
+        let res: SearchResults = self.inner.search_with_mask(query, ids.len(), Some(&mask));
+        let mut by_slot: std::collections::HashMap<u32, f32> =
+            std::collections::HashMap::with_capacity(res.indices.len());
+        for (&slot, &score) in res.indices.iter().zip(res.scores.iter()) {
+            by_slot.insert(slot as u32, score);
+        }
+        ids.iter()
+            .map(|id| {
+                *by_slot
+                    .get(id)
+                    .expect("score_slots: masked search dropped a requested slot")
+            })
+            .collect()
+    }
 }
 
 /// Out-of-core (Phase B-1/B-2) cell-scoped IVF index. Unlike
@@ -293,6 +344,62 @@ pub(crate) struct OocIvfIndex {
     /// Slot -> external id (8 B/vec; small, kept resident). Compact
     /// sub-index slots are remapped to global slots, then to ids.
     slot_to_id: Vec<u64>,
+}
+
+/// Phase G-2a: RAM-resident Vamana graph index. Wraps a
+/// [`ReadOnlyIndex`] (the graph's vector storage is IDENTICAL to a
+/// flat index's — same codes/scales/ids, same TurboQuant encode
+/// path) with the persisted adjacency chain + entry point.
+///
+/// Per query ([`Self::search`]) it runs `graph::graph_search`,
+/// navigating the adjacency via [`ReadOnlyIndex::score_slots`] as the
+/// per-hop batch scoring oracle — no new distance kernel, reusing the
+/// existing masked-search kernel per the module's correctness-first
+/// G-2a scope (SIMD-aware per-hop scoring without the `O(n)`-mask
+/// allocation per hop is G-2c work).
+pub(crate) struct GraphIndex {
+    inner: std::sync::Arc<ReadOnlyIndex>,
+    adjacency: crate::index::graph::GraphAdjacency,
+    entry_point: u32,
+}
+
+impl GraphIndex {
+    pub(crate) fn new(
+        inner: std::sync::Arc<ReadOnlyIndex>,
+        adjacency: crate::index::graph::GraphAdjacency,
+        entry_point: u32,
+    ) -> Self {
+        Self {
+            inner,
+            adjacency,
+            entry_point,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Top-`k` greedy beam search over the graph. Returns `(scores,
+    /// ids)` in the SAME shape as [`ReadOnlyIndex::search`] (scores
+    /// descending, translated to external ids) so the AM scan path's
+    /// existing `populate_batch` / `xs_recheckorderby` machinery needs
+    /// no graph-specific branch.
+    pub(crate) fn search(&self, query: &[f32], k: usize) -> (Vec<f32>, Vec<u64>) {
+        if self.len() == 0 || k == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let hits = crate::index::graph::graph_search(&self.adjacency, self.entry_point, k, |ids| {
+            self.inner.score_slots(query, ids)
+        });
+        let mut scores = Vec::with_capacity(hits.len());
+        let mut ids = Vec::with_capacity(hits.len());
+        for (s, slot) in hits {
+            scores.push(s);
+            ids.push(self.inner.id_at_slot(slot as usize));
+        }
+        (scores, ids)
+    }
 }
 
 impl OocIvfIndex {
@@ -701,6 +808,9 @@ pub(crate) enum ScanHandle {
     /// buffer is faulted per-probed-cell off the mmap; the resident
     /// set is bounded by `probes * cell_size`, not `O(n)`.
     Ooc(Arc<OocIvfIndex>),
+    /// RAM-resident Vamana graph index (Phase G-2a). Navigated via
+    /// greedy beam search instead of a flat/masked whole-index scan.
+    Graph(Arc<GraphIndex>),
 }
 
 impl ScanHandle {
@@ -709,6 +819,7 @@ impl ScanHandle {
             ScanHandle::ReadOnly(a) => a.len(),
             ScanHandle::Mutable(a) => a.read().len(),
             ScanHandle::Ooc(a) => a.len(),
+            ScanHandle::Graph(a) => a.len(),
         }
     }
 
@@ -727,6 +838,10 @@ impl ScanHandle {
             // cell-scoped path). Returning empty is the safe inert
             // fallback should a future caller hit it.
             ScanHandle::Ooc(_) => (Vec::new(), Vec::new()),
+            // The graph scan path always routes through `graph()` /
+            // `GraphIndex::search`, not this whole-index arm; same
+            // inert fallback as Ooc should a future caller hit it.
+            ScanHandle::Graph(a) => a.search(queries, k),
         }
     }
 
@@ -737,6 +852,16 @@ impl ScanHandle {
     pub(crate) fn ooc(&self) -> Option<Arc<OocIvfIndex>> {
         match self {
             ScanHandle::Ooc(a) => Some(a.clone()),
+            _ => None,
+        }
+    }
+
+    /// The Vamana [`GraphIndex`], when this handle is the graph
+    /// variant (Phase G-2a). The graph scan path uses this instead of
+    /// `search`/`search_masked`. `None` for every other arm.
+    pub(crate) fn graph(&self) -> Option<Arc<GraphIndex>> {
+        match self {
+            ScanHandle::Graph(a) => Some(a.clone()),
             _ => None,
         }
     }
@@ -759,6 +884,9 @@ impl ScanHandle {
             // OOC never uses the whole-index mask path; the scan
             // routes it through `OocIvfIndex::search_ooc` instead.
             ScanHandle::Ooc(_) => None,
+            // The graph scan path routes through `graph()` /
+            // `GraphIndex::search` instead of a slot mask.
+            ScanHandle::Graph(_) => None,
         }
     }
 
@@ -771,7 +899,7 @@ impl ScanHandle {
     pub(crate) fn allow_slot_mask(&self, allowed: &HashSet<u64>) -> Option<Vec<bool>> {
         match self {
             ScanHandle::ReadOnly(a) => Some(a.allow_slot_mask(allowed)),
-            ScanHandle::Mutable(_) | ScanHandle::Ooc(_) => None,
+            ScanHandle::Mutable(_) | ScanHandle::Ooc(_) | ScanHandle::Graph(_) => None,
         }
     }
 }
@@ -823,6 +951,9 @@ enum Stored {
     /// probed cell. Installed by the IVF scan path when
     /// `turbovec.out_of_core` is on.
     Ooc(Arc<OocIvfIndex>),
+    /// RAM-resident Vamana graph index (Phase G-2a). Installed by the
+    /// graph scan path for a `kind = KIND_GRAPH` index.
+    Graph(Arc<GraphIndex>),
 }
 
 impl Stored {
@@ -832,6 +963,7 @@ impl Stored {
             Stored::Mutable(a) => ScanHandle::Mutable(a.clone()),
             Stored::ReadOnly(a) => ScanHandle::ReadOnly(a.clone()),
             Stored::Ooc(a) => ScanHandle::Ooc(a.clone()),
+            Stored::Graph(a) => ScanHandle::Graph(a.clone()),
         }
     }
 }
@@ -913,6 +1045,9 @@ pub fn lookup(
         // the knn `lookup` (positive attnum) never matches one. Treat
         // it as a miss for the knn path (it can't be mutated in place).
         Stored::Ooc(_) => None,
+        // Same reasoning as Ooc: a Graph entry is AM-key-only and has
+        // no id-addressed mutable form.
+        Stored::Graph(_) => None,
     }
 }
 
@@ -1112,6 +1247,34 @@ pub(crate) fn scan_install_ooc(
     ScanHandle::Ooc(arc)
 }
 
+/// Index-AM scan install for a Vamana graph index (Phase G-2a): cache
+/// a freshly-built [`GraphIndex`] under `key`. Returns the installed
+/// [`ScanHandle::Graph`].
+pub(crate) fn scan_install_graph(
+    key: CacheKey,
+    index: GraphIndex,
+    bytes: usize,
+    relfilenode: u32,
+    n_rows: i64,
+) -> ScanHandle {
+    let arc = Arc::new(index);
+    let mut g = CACHE.lock();
+    g.insert(
+        key,
+        Entry {
+            index: Stored::Graph(arc.clone()),
+            bytes,
+            relfilenode,
+            n_rows,
+            seq: next_seq(),
+            dirty: false,
+            persist: None,
+        },
+    );
+    enforce_cap(&mut g);
+    ScanHandle::Graph(arc)
+}
+
 /// AM-path install: insert or replace the entry for `key` and
 /// attach the supplied `PersistState` mirror so subsequent
 /// `aminsert` calls can mutate the in-memory index and defer the
@@ -1267,6 +1430,7 @@ pub fn am_entry_variant(rel_oid: pg_sys::Oid) -> Option<&'static str> {
                 Stored::Ooc(_) => "ooc",
                 Stored::ReadOnly(_) => "readonly",
                 Stored::Mutable(_) => "mutable",
+                Stored::Graph(_) => "graph",
             };
             if tag == "ooc" {
                 return Some("ooc");

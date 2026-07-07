@@ -512,6 +512,7 @@ pub(crate) unsafe fn write_full(
         am_version,
         None,
         None,
+        None,
     );
 }
 
@@ -556,6 +557,20 @@ pub(crate) struct IvfParts<'a> {
     pub colbert: bool,
 }
 
+/// Phase G-2a graph parts, persisted by
+/// [`write_full_with_prepared_graph`] when an index is built
+/// `WITH (graph = true)`.
+///
+/// `offsets_bytes` / `neighbors_bytes` are the two concatenated CSR
+/// sub-chains produced by `graph::GraphAdjacency::encode_offsets` /
+/// `encode_neighbors`; `entry_point` is the slot id greedy search
+/// starts from (`graph::build_vamana`'s second return value).
+pub(crate) struct GraphParts<'a> {
+    pub offsets_bytes: &'a [u8],
+    pub neighbors_bytes: &'a [u8],
+    pub entry_point: u32,
+}
+
 /// High-level helper: write a fully-built `IdMapIndex` plus the
 /// prepared SIMD-blocked layout and inline codebook to the
 /// relation. Backends opening the resulting v2 index skip both
@@ -588,6 +603,7 @@ pub(crate) unsafe fn write_full_with_prepared(
         slot_to_id,
         am_version,
         Some(prepared),
+        None,
         None,
     );
 }
@@ -626,6 +642,47 @@ pub(crate) unsafe fn write_full_with_prepared_ivf(
         am_version,
         Some(prepared),
         Some(ivf),
+        None,
+    );
+}
+
+/// High-level helper: same as [`write_full_with_prepared`] but also
+/// persists the v6 graph adjacency chain (Phase G-2a). The caller
+/// (the graph build path in `build.rs`) has already built the
+/// `IdMapIndex`/codes/scales/ids exactly as a flat build would (a
+/// graph node's vector storage is identical to a flat index's row)
+/// and separately run `graph::build_vamana` over the same corpus to
+/// get the adjacency + entry point.
+///
+/// # Safety
+///
+/// Same constraints as [`write_full`]: caller holds an exclusive
+/// relation lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn write_full_with_prepared_graph(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    scales: &[f32],
+    slot_to_id: &[u64],
+    am_version: u32,
+    prepared: PreparedParts<'_>,
+    graph: GraphParts<'_>,
+) {
+    write_full_inner(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        packed_codes,
+        scales,
+        slot_to_id,
+        am_version,
+        Some(prepared),
+        None,
+        Some(graph),
     );
 }
 
@@ -925,6 +982,7 @@ unsafe fn write_full_inner(
     am_version: u32,
     prepared: Option<PreparedParts<'_>>,
     ivf: Option<IvfParts<'_>>,
+    graph: Option<GraphParts<'_>>,
 ) {
     // v1.7.1 revert: restored to v1.6.0's single-pass batched-
     // GenericXLog flow. Phase W-2 (v1.7.0) split this into
@@ -977,6 +1035,20 @@ unsafe fn write_full_inner(
         if iv.colbert {
             meta.mark_colbert();
         }
+    }
+    // v6 graph (Phase G-2a): lay the adjacency chain out after EVERY
+    // prior chain (including the IVF chains above, though a graph
+    // build never sets `lists > 0` in practice — `set_graph_chain`
+    // computes its offset from whatever chains preceded it, so this
+    // is correct either way) and stamp `kind = KIND_GRAPH` + bump
+    // `version` to 6. A `None` graph (the ordinary flat/IVF/ColBERT
+    // build) is a no-op here, leaving the meta unchanged.
+    if let Some(g) = &graph {
+        meta.set_graph_chain(
+            g.offsets_bytes.len() as u64,
+            g.neighbors_bytes.len() as u64,
+            g.entry_point,
+        );
     }
     let new_total = meta.total_blocks().max(1);
 
@@ -1100,6 +1172,27 @@ unsafe fn write_full_inner(
                     1,
                     crate::index::page::PAYLOAD_BYTES as u32,
                     iv.cell_dir_bytes.len() as u64,
+                );
+            }
+        }
+
+        // v6 graph (Phase G-2a): adjacency chain, two concatenated
+        // flat byte sub-chains (offsets then neighbors). Only written
+        // when this is a graph build (the chain was planned by
+        // set_graph_chain above).
+        if let Some(g) = &graph {
+            if !g.offsets_bytes.is_empty() || !g.neighbors_bytes.is_empty() {
+                let mut combined =
+                    Vec::with_capacity(g.offsets_bytes.len() + g.neighbors_bytes.len());
+                combined.extend_from_slice(g.offsets_bytes);
+                combined.extend_from_slice(g.neighbors_bytes);
+                write_chain_at(
+                    rel,
+                    meta.graph_first,
+                    &combined,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    combined.len() as u64,
                 );
             }
         }
@@ -1579,6 +1672,45 @@ pub(crate) unsafe fn read_cell_directory(
     );
     debug_assert_eq!(bytes.len(), n_bytes as usize);
     Some(CellDirectory::decode(&bytes, lists))
+}
+
+/// Read the v6 graph adjacency chain (Phase G-2a) into a
+/// [`crate::index::graph::GraphAdjacency`]. Returns `None` for a
+/// non-graph index (`kind != KIND_GRAPH`) or an empty (0-row) graph
+/// build.
+///
+/// # Safety
+///
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_graph_adjacency(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Option<crate::index::graph::GraphAdjacency> {
+    use crate::index::graph::GraphAdjacency;
+    if !meta.has_graph() {
+        return None;
+    }
+    let n = meta.n_vectors as usize;
+    let total_bytes = meta.graph_offsets_bytes + meta.graph_neighbors_bytes;
+    let combined = read_chain(
+        rel,
+        meta.graph_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        total_bytes,
+    );
+    debug_assert_eq!(combined.len(), total_bytes as usize);
+    let split = meta.graph_offsets_bytes as usize;
+    if split > combined.len() {
+        error!(
+            "turbovec relfile: corrupt graph adjacency chain (offsets_bytes exceeds chain length)"
+        );
+    }
+    let (offsets_bytes, neighbors_bytes) = combined.split_at(split);
+    match GraphAdjacency::decode(offsets_bytes, neighbors_bytes, n) {
+        Ok(g) => Some(g),
+        Err(e) => error!("turbovec relfile: corrupt graph adjacency chain: {}", e),
+    }
 }
 
 /// Read the v4 E-2 tombstone bitmap (one bit per slot, LSB-first;

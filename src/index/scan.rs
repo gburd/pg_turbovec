@@ -480,7 +480,26 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     // turbovec.cache_size_mb; `on` always, `off` never.
                     let codes_bytes = (meta.n_vectors as u64)
                         .saturating_mul(((meta.dim as u64) * (meta.bit_width as u64)) / 8);
-                    if guc::out_of_core_cell_scoped(codes_bytes)
+                    if meta.has_graph() {
+                        // Phase G-2a: a graph index is never IVF (a
+                        // build never sets both), so this branch is
+                        // mutually exclusive with the out_of_core_
+                        // cell_scoped branch below. Always installs
+                        // the RAM-resident GraphIndex — G-2a is
+                        // explicitly a RAM-resident design (see
+                        // an internal design note); there is no
+                        // out-of-core graph path to fall back to.
+                        install_graph_index(
+                            (*scan).indexRelation,
+                            &meta,
+                            key,
+                            relfile_node,
+                            version_as_i64,
+                            n_in_index,
+                            dim_u32,
+                            bit_width_u8,
+                        )
+                    } else if guc::out_of_core_cell_scoped(codes_bytes)
                         && meta.has_ivf()
                         && meta.has_prepared_layout()
                     {
@@ -573,22 +592,31 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         //   - the handle is Mutable (post-insert / dirty-xact mirror,
         //     whose slot order has diverged from the cell directory —
         //     search_masked returns None and we drop the mask).
-        let ivf_results = ivf_setup_and_search(
-            scan,
-            &arc,
-            &(*opaque).query,
-            k,
-            n_live,
-            (*opaque).allow.as_ref(),
-        );
-        let (scores, ids) = match ivf_results {
-            Some((ctx, scores, ids)) => {
-                (*opaque).ivf = Some(ctx);
-                (scores, ids)
-            }
-            None => {
-                (*opaque).ivf = None;
-                flat_search(&arc, &(*opaque).query, k, (*opaque).allow.as_ref())
+        //
+        // Phase G-2a: a graph handle takes its own dedicated path
+        // (greedy beam search, not a cell mask) — checked first since
+        // it is mutually exclusive with the IVF/flat paths below.
+        let (scores, ids) = if let Some(g) = arc.graph() {
+            (*opaque).ivf = None;
+            g.search(&(*opaque).query, k)
+        } else {
+            let ivf_results = ivf_setup_and_search(
+                scan,
+                &arc,
+                &(*opaque).query,
+                k,
+                n_live,
+                (*opaque).allow.as_ref(),
+            );
+            match ivf_results {
+                Some((ctx, scores, ids)) => {
+                    (*opaque).ivf = Some(ctx);
+                    (scores, ids)
+                }
+                None => {
+                    (*opaque).ivf = None;
+                    flat_search(&arc, &(*opaque).query, k, (*opaque).allow.as_ref())
+                }
             }
         };
         (*opaque).arc = Some(arc);
@@ -753,6 +781,76 @@ unsafe fn install_whole_index(
     let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
     let total_bytes = bytes_per_vec * (n_in_index.max(1));
     cache::scan_install(key, stored_index, total_bytes, relfile_node, version_as_i64)
+}
+
+/// Phase G-2a: build and install a RAM-resident [`cache::GraphIndex`]
+/// for a `kind = KIND_GRAPH` index. The vector storage half is built
+/// EXACTLY like [`install_whole_index`] (a graph node's codes/
+/// scales/ids are identical to a flat index's row); the only new
+/// read is the adjacency chain.
+///
+/// # Safety
+///
+/// `rel` holds a live index relation reference; `meta` came from
+/// `relfile::read_meta(rel)` on the same relation and has
+/// `meta.has_graph() == true`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn install_graph_index(
+    rel: pg_sys::Relation,
+    meta: &crate::index::page::MetaPageData,
+    key: CacheKey,
+    relfile_node: u32,
+    version_as_i64: i64,
+    n_in_index: usize,
+    dim_u32: u32,
+    bit_width_u8: u8,
+) -> cache::ScanHandle {
+    let (codes, scales, ids) = relfile::read_full(rel, meta);
+    let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
+        let blocked = relfile::read_blocked(rel, meta);
+        let centroids = meta.centroids_slice().to_vec();
+        let boundaries = meta.boundaries_slice().to_vec();
+        let rotation = relfile::read_rotation(rel, meta);
+        let rotation_opt = if rotation.is_empty() {
+            None
+        } else {
+            Some(rotation)
+        };
+        cache::ReadOnlyIndex::from_prepared_parts(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+            blocked,
+            meta.n_blocks_blocked as usize,
+            centroids,
+            boundaries,
+            rotation_opt,
+        )
+    } else {
+        cache::ReadOnlyIndex::from_parts(
+            meta.bit_width as usize,
+            meta.dim as usize,
+            meta.n_vectors as usize,
+            codes,
+            scales,
+            ids,
+        )
+    };
+    let adjacency = relfile::read_graph_adjacency(rel, meta)
+        .expect("install_graph_index: has_graph() was true but the adjacency chain is missing");
+    let graph_index = cache::GraphIndex::new(
+        std::sync::Arc::new(stored_index),
+        adjacency,
+        meta.graph_entry_point,
+    );
+    let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
+    let adjacency_bytes =
+        (meta.graph_offsets_bytes + meta.graph_neighbors_bytes) as usize / n_in_index.max(1);
+    let total_bytes = (bytes_per_vec + adjacency_bytes) * (n_in_index.max(1));
+    cache::scan_install_graph(key, graph_index, total_bytes, relfile_node, version_as_i64)
 }
 
 /// Phase B-1/B-2: build and install an out-of-core cell-scoped

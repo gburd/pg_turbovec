@@ -154,6 +154,35 @@ impl GraphAdjacency {
         }
     }
 
+    /// Expand the CSR representation into the mutable
+    /// `Vec<Vec<u32>>` shape [`insert_node_into_graph`] and the
+    /// build loop operate on. Used by the incremental-insert path
+    /// (`insert.rs`, Phase G-2b) to rehydrate a persisted adjacency,
+    /// mutate it in RAM, and re-flatten via [`Self::from_lists`].
+    pub(crate) fn to_lists(&self) -> Vec<Vec<u32>> {
+        (0..self.n())
+            .map(|i| self.neighbors_of(i).to_vec())
+            .collect()
+    }
+
+    /// Inverse of [`Self::to_lists`]: flatten a `Vec<Vec<u32>>` back
+    /// to CSR, sorting each node's own list ascending first (same
+    /// canonicalisation [`build_vamana_with_params`] applies before
+    /// persisting).
+    pub(crate) fn from_lists(mut adj: Vec<Vec<u32>>) -> Self {
+        let n = adj.len();
+        let mut offsets = vec![0u32; n + 1];
+        for i in 0..n {
+            offsets[i + 1] = offsets[i] + adj[i].len() as u32;
+        }
+        let mut neighbors = Vec::with_capacity(offsets[n] as usize);
+        for row in &mut adj {
+            row.sort_unstable();
+            neighbors.extend_from_slice(row);
+        }
+        Self { offsets, neighbors }
+    }
+
     /// Serialise the offsets array to little-endian bytes (the first
     /// of the two concatenated sub-chains).
     pub fn encode_offsets(&self) -> Vec<u8> {
@@ -271,45 +300,66 @@ pub fn build_vamana_with_params(
     order.shuffle(&mut rng);
 
     for &p in &order {
-        // 1. Greedy search from the entry point toward p, beam l,
-        //    collecting the visited (expanded) node set V.
-        let visited = greedy_search_collect_visited(entry, p as usize, l, &adj, vectors, dim);
-
-        // 2. RobustPrune(p, V ∪ N_out(p), alpha, r).
-        let mut candidates: Vec<u32> = Vec::with_capacity(visited.len() + adj[p as usize].len());
-        candidates.extend_from_slice(&visited);
-        candidates.extend_from_slice(&adj[p as usize]);
-        let selected = robust_prune(p, &candidates, vectors, dim, alpha, r);
-        adj[p as usize] = selected.clone();
-
-        // 3. Add p -> selected edges' reverses (q -> p), re-pruning q
-        //    if that pushes it over the degree bound.
-        for &q in &selected {
-            let qi = q as usize;
-            if adj[qi].contains(&p) {
-                continue;
-            }
-            adj[qi].push(p);
-            if adj[qi].len() > r {
-                let q_candidates = std::mem::take(&mut adj[qi]);
-                adj[qi] = robust_prune(q, &q_candidates, vectors, dim, alpha, r);
-            }
-        }
+        insert_node_into_graph(&mut adj, entry, p, vectors, dim, l, alpha, r);
     }
 
     // Flatten to CSR. Each node's own list sorted ascending (fixed,
     // deterministic byte layout regardless of insertion order within
     // the list).
-    let mut offsets = vec![0u32; n + 1];
-    for i in 0..n {
-        offsets[i + 1] = offsets[i] + adj[i].len() as u32;
+    (GraphAdjacency::from_lists(adj), entry)
+}
+
+/// Phase G-2b incremental insert: add ONE new node (id `new_id ==
+/// existing.n()`, i.e. the next slot) to an existing, already-built
+/// [`GraphAdjacency`], using the exact same per-node Vamana step
+/// (`insert_node_into_graph`) the bulk build loop runs for every
+/// node. `vectors` must be `(existing.n() + 1) * dim` `f32` -- the
+/// FULL corpus INCLUDING the new row appended at the end (the
+/// caller, `insert.rs`, already has to hold this resident to encode
+/// the new row via the same TurboQuant path every other kind's
+/// `aminsert` uses, and `insert_node_into_graph`'s greedy search
+/// needs random access to any existing row).
+///
+/// Returns the new [`GraphAdjacency`] with `n() == existing.n() + 1`
+/// and, since the entry point never moves for an insert (Vamana's
+/// entry point is a build-time medoid choice, not something later
+/// inserts re-derive -- re-computing an exact medoid on every insert
+/// would be `O(n)` per row, and an approximate one already-central
+/// node stays a perfectly good entry point after one more row joins
+/// the graph), `entry` unchanged from what the caller passed in.
+///
+/// See [`insert_node_into_graph`]'s doc comment for the determinism
+/// caveat: this does not attempt to reproduce what a bulk build
+/// would have produced had the new row been present from the start,
+/// only a valid, navigable result.
+pub fn insert_one_node(
+    existing: &GraphAdjacency,
+    entry: u32,
+    vectors: &[f32],
+    dim: usize,
+) -> GraphAdjacency {
+    let old_n = existing.n();
+    let new_n = old_n + 1;
+    debug_assert_eq!(vectors.len(), new_n * dim);
+    let mut adj = existing.to_lists();
+    adj.push(Vec::new());
+    let new_id = old_n as u32;
+    if old_n == 0 {
+        // First-ever row: nothing to search from / connect to yet.
+        // Leave it edgeless, matching build_vamana's own n==1 case.
+        return GraphAdjacency::from_lists(adj);
     }
-    let mut neighbors = Vec::with_capacity(offsets[n] as usize);
-    for row in &mut adj {
-        row.sort_unstable();
-        neighbors.extend_from_slice(row);
-    }
-    (GraphAdjacency { offsets, neighbors }, entry)
+    insert_node_into_graph(
+        &mut adj,
+        entry,
+        new_id,
+        vectors,
+        dim,
+        GRAPH_BUILD_L,
+        GRAPH_ALPHA,
+        GRAPH_DEGREE_R,
+    );
+    GraphAdjacency::from_lists(adj)
 }
 
 /// Approximate medoid: the mean vector, then the actual corpus point
@@ -339,6 +389,74 @@ fn approx_medoid(vectors: &[f32], n: usize, dim: usize) -> u32 {
         }
     }
     best
+}
+
+/// Insert ONE node `p` into an in-progress (or already-complete)
+/// adjacency `adj`, using Vamana's own per-node insertion step:
+/// greedy-search from `entry` toward `p`'s vector to collect a
+/// candidate/visited set, `RobustPrune` that set down to `p`'s
+/// out-edges, then add the reverse edge for each new neighbor
+/// (re-pruning that neighbor's own list if it now exceeds the degree
+/// bound `r`).
+///
+/// This is the EXACT per-node body [`build_vamana_with_params`]'s
+/// main loop already runs for every node during a bulk build --
+/// extracted here so it has exactly one implementation, called once
+/// per node during a build (via that loop) and once for a single new
+/// row during an incremental `aminsert` (Phase G-2b, see
+/// `insert.rs`). `adj[p as usize]` must already be sized (an empty
+/// `Vec::new()` slot is fine, as it is throughout the build loop) --
+/// callers on the incremental path must `push(Vec::new())` for the
+/// new node before calling this.
+///
+/// Determinism note: this does NOT claim to produce the same graph a
+/// node would have gotten had it been present at build time -- the
+/// build's insertion ORDER matters (each node's greedy search
+/// navigates whatever partial graph existed before it), so a node
+/// inserted incrementally, after the graph is already built, sees a
+/// materially different (already-complete) graph than it would have
+/// seen mid-build. It only guarantees a VALID, navigable result: `p`
+/// gets up to `r` real out-edges found by greedy search + RobustPrune
+/// over the CURRENT graph, and every neighbor that gains a reverse
+/// edge to `p` stays within the degree bound. No byte-determinism
+/// guarantee is made or needed here (the module doc's determinism
+/// section is about a fixed BUILD being reproducible, not about
+/// incremental insert matching a hypothetical bulk build).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_node_into_graph(
+    adj: &mut [Vec<u32>],
+    entry: u32,
+    p: u32,
+    vectors: &[f32],
+    dim: usize,
+    l: usize,
+    alpha: f32,
+    r: usize,
+) {
+    // 1. Greedy search from the entry point toward p, beam l,
+    //    collecting the visited (expanded) node set V.
+    let visited = greedy_search_collect_visited(entry, p as usize, l, adj, vectors, dim);
+
+    // 2. RobustPrune(p, V ∪ N_out(p), alpha, r).
+    let mut candidates: Vec<u32> = Vec::with_capacity(visited.len() + adj[p as usize].len());
+    candidates.extend_from_slice(&visited);
+    candidates.extend_from_slice(&adj[p as usize]);
+    let selected = robust_prune(p, &candidates, vectors, dim, alpha, r);
+    adj[p as usize] = selected.clone();
+
+    // 3. Add p -> selected edges' reverses (q -> p), re-pruning q
+    //    if that pushes it over the degree bound.
+    for &q in &selected {
+        let qi = q as usize;
+        if adj[qi].contains(&p) {
+            continue;
+        }
+        adj[qi].push(p);
+        if adj[qi].len() > r {
+            let q_candidates = std::mem::take(&mut adj[qi]);
+            adj[qi] = robust_prune(q, &q_candidates, vectors, dim, alpha, r);
+        }
+    }
 }
 
 /// Build-time greedy search from `entry` toward the vector at
@@ -888,6 +1006,118 @@ mod tests {
         assert!(
             selected.iter().any(|s| spread_ids.contains(s)),
             "RobustPrune kept only near-duplicate candidates, no diversity: {selected:?}"
+        );
+    }
+
+    /// Phase G-2b: `insert_node_into_graph` adding ONE new node onto
+    /// an already-built graph must produce a valid, navigable result
+    /// -- the new node gets real out-edges (found by greedy search
+    /// over the existing graph), no self-loop, degree bound `r`
+    /// respected on both the new node and any neighbor that gained a
+    /// reverse edge.
+    #[test]
+    fn insert_node_into_graph_adds_a_valid_navigable_node() {
+        let n = 200;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 42);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+
+        // Rehydrate the CSR adjacency into the mutable Vec<Vec<u32>>
+        // shape insert_node_into_graph operates on (same shape the
+        // build loop uses internally).
+        let mut adj: Vec<Vec<u32>> = (0..n).map(|i| g.neighbors_of(i).to_vec()).collect();
+
+        // New node's vector + id (one past the existing corpus).
+        let mut extended = corpus.clone();
+        let new_vec = synth_corpus(1, dim, 999);
+        extended.extend_from_slice(&new_vec);
+        let new_id = n as u32;
+        adj.push(Vec::new());
+
+        insert_node_into_graph(
+            &mut adj,
+            entry,
+            new_id,
+            &extended,
+            dim,
+            GRAPH_BUILD_L,
+            GRAPH_ALPHA,
+            GRAPH_DEGREE_R,
+        );
+
+        assert!(
+            !adj[new_id as usize].is_empty(),
+            "new node got zero out-edges -- not navigable"
+        );
+        assert!(
+            adj[new_id as usize].len() <= GRAPH_DEGREE_R,
+            "new node's out-degree {} exceeds R={GRAPH_DEGREE_R}",
+            adj[new_id as usize].len()
+        );
+        assert!(
+            !adj[new_id as usize].contains(&new_id),
+            "new node has a self-loop"
+        );
+        // Every neighbor of the new node must, after the reverse-edge
+        // step, itself point back at the new node (mutual
+        // navigability) and stay within the degree bound.
+        for &nb in &adj[new_id as usize] {
+            assert!(
+                adj[nb as usize].contains(&new_id),
+                "neighbor {nb} of the new node has no reverse edge back"
+            );
+            assert!(
+                adj[nb as usize].len() <= GRAPH_DEGREE_R,
+                "neighbor {nb}'s out-degree {} exceeds R={GRAPH_DEGREE_R} after reverse-edge insert",
+                adj[nb as usize].len()
+            );
+        }
+        // Every pre-existing node's degree bound must still hold too
+        // (a reverse edge to some UNRELATED node must never happen).
+        for i in 0..n {
+            assert!(
+                adj[i].len() <= GRAPH_DEGREE_R,
+                "pre-existing node {i}'s out-degree {} exceeds R={GRAPH_DEGREE_R} after insert",
+                adj[i].len()
+            );
+        }
+    }
+
+    /// Phase G-2b: `insert_one_node` (the public API `insert.rs`
+    /// calls) round-trips through CSR correctly, produces a graph
+    /// findable via `graph_search` for the new row's own vector (a
+    /// minimal "is it actually reachable" sanity check), and leaves
+    /// every pre-existing node's edges within the degree bound.
+    #[test]
+    fn insert_one_node_grows_the_adjacency_and_stays_findable() {
+        let n = 200;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 17);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+
+        let mut extended = corpus.clone();
+        let new_vec = synth_corpus(1, dim, 4242);
+        extended.extend_from_slice(&new_vec);
+        let new_id = n as u32;
+
+        let g2 = insert_one_node(&g, entry, &extended, dim);
+        assert_eq!(g2.n(), n + 1);
+        for i in 0..n {
+            assert!(
+                g2.neighbors_of(i).len() <= GRAPH_DEGREE_R,
+                "pre-existing node {i} exceeded R after insert_one_node"
+            );
+        }
+        assert!(g2.neighbors_of(new_id as usize).len() <= GRAPH_DEGREE_R);
+
+        // Querying for the new row's own vector should surface it in
+        // the top few results via graph_search over the grown graph.
+        let out = graph_search(&g2, entry, 5, &[], |ids| {
+            neg_sq_dist_batch(&extended, dim, &new_vec, ids)
+        });
+        assert!(
+            out.iter().any(|&(_, id)| id == new_id),
+            "newly-inserted node is not findable via graph_search for its own vector: {out:?}"
         );
     }
 

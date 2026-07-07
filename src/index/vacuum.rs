@@ -147,24 +147,26 @@ unsafe fn ambulkdelete_relfile(
         return stats;
     }
 
-    // Phase G-2a: VACUUM/tombstone integration for the graph kind is
-    // explicitly out of scope for G-2a (see
-    // an internal design note § G-2b). The flat
-    // swap-remove path below moves the last live slot into a deleted
-    // hole, which would silently invalidate the adjacency chain's
-    // slot-id references (a neighbor id pointing at a slot that now
-    // holds a different vector) — exactly the kind of silent
-    // corruption this project's own IVF experience (Phase E-2) says
-    // never to ship. ERROR clearly instead, pointing at REINDEX,
-    // which is less code than teaching the graph adjacency chain to
-    // survive an arbitrary swap-remove.
+    // Phase G-2b: graph indexes tombstone exactly like IVF (see the
+    // module doc's "IVF indexes tombstone instead of swap-removing"
+    // section above, and an internal design note's "VACUUM (all
+    // graph phases)" note). Swap-remove would move the last live
+    // slot into a deleted hole, silently invalidating every
+    // adjacency-chain neighbor id that pointed at the moved-from or
+    // moved-to slot (the graph has no notion of "this slot's
+    // identity changed"). Instead we leave every row and the whole
+    // adjacency chain untouched and OR the newly dead slots into the
+    // SAME per-slot tombstone bitmap chain IVF uses (the storage
+    // helpers in relfile.rs are already generic over slot index,
+    // not IVF-specific). The scan path (`scan.rs` / `graph.rs`)
+    // excludes tombstoned slots from traversal and results.
     if meta.is_graph() {
-        ereport!(
-            PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "turbovec graph index VACUUM not yet supported",
-            "See an internal design note (G-2b). REINDEX INDEX <name>; after VACUUMing the underlying table to rebuild the graph over the current live rows."
-        );
+        let next_version = meta.am_version.saturating_add(1);
+        let total_dead = graph_tombstone_dead(index, &meta, &dead_slots, next_version);
+        let live = meta.n_vectors.saturating_sub(total_dead);
+        (*stats).num_index_tuples = live as f64;
+        (*stats).tuples_removed += dead_count as f64;
+        return stats;
     }
 
     // Pass 2 (FLAT path only): swap-remove from the back. dead_slots is built in
@@ -274,6 +276,67 @@ unsafe fn ivf_tombstone_dead(
     }
     let total_dead: u64 = bitmap.iter().map(|b| b.count_ones() as u64).sum();
     relfile::write_tombstones_and_meta(index, meta, &bitmap, new_am_version);
+    total_dead
+}
+
+/// Graph tombstone path (Phase G-2b). Identical shape to
+/// [`ivf_tombstone_dead`] — reads any existing tombstone bitmap, ORs
+/// in the newly `dead_slots`, and persists the merged bitmap via
+/// [`relfile::write_tombstones_and_meta`] without moving a row or
+/// touching the adjacency chain.
+///
+/// One graph-specific wrinkle: if the tombstoned set includes the
+/// current `graph_entry_point` (the slot `graph_search` starts every
+/// traversal from), a dead entry point would leave the scan path
+/// starting from a node it must never return or expand through. We
+/// pick a fallback here — the first still-live slot (ascending slot
+/// order) — and stamp it onto the meta page in the SAME write as the
+/// tombstone bitmap, so there is never a moment where a persisted
+/// meta page points at a dead entry point. If every slot is dead the
+/// entry point is left at 0 (meaningless but harmless: any query
+/// against a fully-dead corpus is degenerate regardless).
+///
+/// Returns the TOTAL number of tombstoned (dead) slots after the
+/// merge.
+///
+/// # Safety
+///
+/// Caller holds an exclusive relation lock (VACUUM does).
+unsafe fn graph_tombstone_dead(
+    index: pg_sys::Relation,
+    meta: &MetaPageData,
+    dead_slots: &[usize],
+    new_am_version: u32,
+) -> u64 {
+    let n_bytes = (meta.n_vectors as usize).div_ceil(8);
+    let mut bitmap = relfile::read_tombstones(index, meta);
+    if bitmap.len() < n_bytes {
+        bitmap.resize(n_bytes, 0u8);
+    }
+    for &slot in dead_slots {
+        if slot >= meta.n_vectors as usize {
+            continue;
+        }
+        bitmap[slot / 8] |= 1u8 << (slot % 8);
+    }
+    let total_dead: u64 = bitmap.iter().map(|b| b.count_ones() as u64).sum();
+
+    let is_dead = |slot: usize| -> bool {
+        let byte = slot / 8;
+        byte < bitmap.len() && (bitmap[byte] >> (slot % 8)) & 1 != 0
+    };
+    let entry_meta = if is_dead(meta.graph_entry_point as usize) {
+        let fallback = (0..meta.n_vectors as usize)
+            .find(|&s| !is_dead(s))
+            .unwrap_or(0) as u32;
+        MetaPageData {
+            graph_entry_point: fallback,
+            ..*meta
+        }
+    } else {
+        *meta
+    };
+    relfile::write_tombstones_and_meta(index, &entry_meta, &bitmap, new_am_version);
     total_dead
 }
 

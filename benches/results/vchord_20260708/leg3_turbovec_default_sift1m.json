@@ -1,0 +1,32 @@
+[
+  {
+    "engine": "turbovec_default",
+    "lists": 1000,
+    "probes": 8,
+    "search_k": 32,
+    "build_s": 34.35,
+    "idx_bytes": 141361152,
+    "idx_total_bytes": 141361152,
+    "p50": 1.6,
+    "p95": 1.782,
+    "mean": 1.611,
+    "qps_1conn": 620.641,
+    "recall": 0.7962,
+    "load": "3.08"
+  },
+  {
+    "engine": "turbovec_default",
+    "lists": 4000,
+    "probes": 8,
+    "search_k": 32,
+    "build_s": 178.26,
+    "idx_bytes": 142934016,
+    "idx_total_bytes": 142934016,
+    "p50": 3.036,
+    "p95": 3.169,
+    "mean": 2.863,
+    "qps_1conn": 349.301,
+    "recall": 0.6969,
+    "load": "13.97"
+  }
+]

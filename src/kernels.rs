@@ -168,4 +168,126 @@ mod tests {
             expected
         );
     }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (Hegel). The distance kernels are the
+    // innermost hot path (every scan scores through them) and the
+    // graph/IVF scoring math depends on exact metric identities, so
+    // these pin the algebraic contracts across all finite inputs
+    // rather than the three hand-picked vectors the example tests use.
+    // -----------------------------------------------------------------
+
+    use hegel::generators::{self};
+
+    /// A pair of equal-length finite-f32 vectors of a drawn length.
+    /// NaN/inf excluded: the kernels are metric primitives over real
+    /// coordinates; embeddings are always finite (the type's input
+    /// validation rejects non-finite values upstream).
+    #[hegel::composite]
+    fn vec_pair(tc: hegel::TestCase) -> (Vec<f32>, Vec<f32>) {
+        let dim = tc.draw(generators::integers::<usize>().min_value(0).max_value(256));
+        let coord = || {
+            generators::floats::<f32>()
+                .min_value(-1e6)
+                .max_value(1e6)
+                .allow_nan(false)
+                .allow_infinity(false)
+        };
+        let a = tc.draw(generators::vecs(coord()).min_size(dim).max_size(dim));
+        let b = tc.draw(generators::vecs(coord()).min_size(dim).max_size(dim));
+        (a, b)
+    }
+
+    /// `l2_sq` is symmetric, non-negative, and zero exactly on equal
+    /// vectors. These are the metric axioms the greedy-search
+    /// ordering and RobustPrune's diversity check depend on.
+    #[hegel::test]
+    fn prop_l2_sq_is_a_nonneg_symmetric_metric(tc: hegel::TestCase) {
+        let (a, b) = tc.draw(vec_pair());
+        let ab = l2_sq(&a, &b);
+        let ba = l2_sq(&b, &a);
+        assert!(ab >= 0.0, "l2_sq negative: {ab}");
+        assert!(
+            (ab - ba).abs() <= 1e-6 * (1.0 + ab.abs()),
+            "l2_sq asymmetric: {ab} vs {ba}"
+        );
+        assert_eq!(l2_sq(&a, &a), 0.0, "l2_sq(a,a) != 0");
+    }
+
+    /// `dot` is commutative. (The scan scores q·v; the build scores
+    /// v·v' -- both rely on order-independence.)
+    #[hegel::test]
+    fn prop_dot_is_commutative(tc: hegel::TestCase) {
+        let (a, b) = tc.draw(vec_pair());
+        let ab = dot(&a, &b);
+        let ba = dot(&b, &a);
+        assert!(
+            (ab - ba).abs() <= 1e-6 * (1.0 + ab.abs()),
+            "dot not commutative: {ab} vs {ba}"
+        );
+    }
+
+    /// The polarization identity |a-b|^2 == |a|^2 - 2(a.b) + |b|^2.
+    /// This is the exact algebra that lets the quantized scan turn a
+    /// dot-product score into an L2 ranking; if it drifts, the graph
+    /// beam search orders candidates wrong. A weak relative tolerance
+    /// accounts for f64 summation on large-magnitude coords.
+    #[hegel::test]
+    fn prop_l2_sq_matches_polarization_identity(tc: hegel::TestCase) {
+        let (a, b) = tc.draw(vec_pair());
+        let lhs = l2_sq(&a, &b);
+        let rhs = norm2(&a) - 2.0 * dot(&a, &b) + norm2(&b);
+        let scale = 1.0 + lhs.abs() + rhs.abs();
+        assert!(
+            (lhs - rhs).abs() <= 1e-5 * scale,
+            "polarization identity drift: |a-b|^2={lhs} vs |a|^2-2a.b+|b|^2={rhs}"
+        );
+    }
+
+    /// `normalise_to_vec` yields a unit-norm vector (or an all-zero
+    /// passthrough for the zero vector), and is idempotent:
+    /// normalising an already-normalised vector is a no-op. Cosine
+    /// scan correctness depends on both.
+    #[hegel::test]
+    fn prop_normalise_is_unit_norm_and_idempotent(tc: hegel::TestCase) {
+        let dim = tc.draw(generators::integers::<usize>().min_value(1).max_value(256));
+        let v: Vec<f32> = tc.draw(
+            generators::vecs(
+                generators::floats::<f32>()
+                    .min_value(-1e3)
+                    .max_value(1e3)
+                    .allow_nan(false)
+                    .allow_infinity(false),
+            )
+            .min_size(dim)
+            .max_size(dim),
+        );
+        let once = normalise_to_vec(&v);
+        let norm = norm2(&once).sqrt();
+        // Either a genuine unit vector, or the zero passthrough (input
+        // was all-zero, or so tiny it underflows to zero norm).
+        assert!(
+            (norm - 1.0).abs() < 1e-4 || norm == 0.0,
+            "normalised vector has norm {norm} (neither 1 nor 0)"
+        );
+        let twice = normalise_to_vec(&once);
+        for (x, y) in once.iter().zip(twice.iter()) {
+            assert!((x - y).abs() < 1e-5, "normalise not idempotent: {x} vs {y}");
+        }
+    }
+
+    /// `l1_abs` is symmetric and non-negative (the manhattan-distance
+    /// operator surface relies on both).
+    #[hegel::test]
+    fn prop_l1_abs_is_nonneg_symmetric(tc: hegel::TestCase) {
+        let (a, b) = tc.draw(vec_pair());
+        let ab = l1_abs(&a, &b);
+        let ba = l1_abs(&b, &a);
+        assert!(ab >= 0.0, "l1_abs negative: {ab}");
+        assert!(
+            (ab - ba).abs() <= 1e-6 * (1.0 + ab.abs()),
+            "l1_abs asymmetric"
+        );
+        assert_eq!(l1_abs(&a, &a), 0.0, "l1_abs(a,a) != 0");
+    }
 }

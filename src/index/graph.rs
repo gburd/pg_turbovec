@@ -1607,4 +1607,267 @@ mod tests {
         });
         assert!(out.is_empty());
     }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (Hegel / hegeltest).
+    //
+    // These generalise the hand-written example tests above: each one
+    // pins a contract that must hold for EVERY (corpus, dim, seed, R,
+    // ...) combination, not just the single fixed shape a `#[test]`
+    // happened to pick. Hegel draws the parameters, runs the real
+    // build/search/codec, and shrinks any failure to a minimal
+    // counterexample. They run under the plain `cargo test` runner
+    // (no PostgreSQL backend needed -- this whole module is pure
+    // Rust), alongside the pgrx `#[pg_test]` suite.
+    //
+    // Generator discipline: dim is drawn small-but-varied (the codec
+    // and adjacency invariants are dimension-independent; recall is
+    // the only dimension-sensitive property and its generator is
+    // widened accordingly). n is drawn across the R+1 navigability
+    // boundary so both the "too few nodes to fill degree R" and the
+    // "comfortably connected" regimes are exercised.
+    // -----------------------------------------------------------------
+
+    use hegel::generators::{self};
+
+    /// A generated corpus: (flat row-major f32 buffer, n, dim, seed).
+    /// n and dim are drawn independently; the vectors themselves come
+    /// from the deterministic `synth_corpus` keyed on the drawn seed,
+    /// so Hegel shrinks the *shape* and the *seed*, and replay is
+    /// exact.
+    #[hegel::composite]
+    fn corpus_shape(tc: hegel::TestCase) -> (Vec<f32>, usize, usize, u64) {
+        // n spans 0..400: includes the empty/one/two-node degenerate
+        // cases AND corpora comfortably past R+1 where navigability
+        // must hold. dim spans 1..64: cheap but varied.
+        let n = tc.draw(generators::integers::<usize>().min_value(0).max_value(400));
+        let dim = tc.draw(generators::integers::<usize>().min_value(1).max_value(64));
+        let seed = tc.draw(generators::integers::<u64>());
+        (synth_corpus(n, dim, seed), n, dim, seed)
+    }
+
+    /// Tier-1 round-trip: encode -> decode is the identity on any
+    /// built adjacency. This is the corruption-prevention property --
+    /// the persisted relfile bytes MUST decode back to exactly what
+    /// was built (a real block-offset collision bug in this exact
+    /// codec path was found and fixed in v1.24.0). Generalises
+    /// `adjacency_encode_decode_round_trip`.
+    #[hegel::test]
+    fn prop_adjacency_encode_decode_round_trip(tc: hegel::TestCase) {
+        let (corpus, n, dim, _seed) = tc.draw(corpus_shape());
+        let (g, _entry) = build_vamana(&corpus, n, dim);
+        let offsets = g.encode_offsets();
+        let neighbors = g.encode_neighbors();
+        let back = GraphAdjacency::decode(&offsets, &neighbors, n)
+            .expect("decode of freshly-encoded adjacency must succeed");
+        assert_eq!(g, back, "encode->decode was not the identity");
+    }
+
+    /// Round-trip through the mutable `Vec<Vec<u32>>` shape the
+    /// incremental-insert path (`insert.rs`) rehydrates into. Because
+    /// `from_lists` canonicalises (sorts each row ascending) and the
+    /// build already emits ascending rows, `from_lists(to_lists(g))`
+    /// must be the identity. Generalises the implicit contract the
+    /// insert path relies on.
+    #[hegel::test]
+    fn prop_to_lists_from_lists_round_trip(tc: hegel::TestCase) {
+        let (corpus, n, dim, _seed) = tc.draw(corpus_shape());
+        let (g, _entry) = build_vamana(&corpus, n, dim);
+        let back = GraphAdjacency::from_lists(g.to_lists());
+        assert_eq!(g, back, "to_lists->from_lists was not the identity");
+    }
+
+    /// Structural invariant: no node's out-degree exceeds R, for any
+    /// R the build is parameterised with. RobustPrune's hard cap is
+    /// the whole point of the degree bound (unbounded fan-out would
+    /// blow the CSR size estimate and the scan cost model).
+    /// Generalises `max_out_degree_is_bounded_by_r`.
+    #[hegel::test]
+    fn prop_out_degree_bounded_by_r(tc: hegel::TestCase) {
+        let (corpus, n, dim, _seed) = tc.draw(corpus_shape());
+        let r = tc.draw(generators::integers::<usize>().min_value(1).max_value(64));
+        let (g, _entry) =
+            build_vamana_with_params(&corpus, n, dim, r, r * 2, GRAPH_ALPHA, GRAPH_SEED);
+        for i in 0..g.n() {
+            assert!(
+                g.neighbors_of(i).len() <= r,
+                "node {i} out-degree {} > R={r} (n={n} dim={dim})",
+                g.neighbors_of(i).len()
+            );
+        }
+    }
+
+    /// Structural invariant: no self-loops and every neighbor list is
+    /// strictly ascending with no duplicates -- for ANY corpus. The
+    /// scan/insert paths assume both (ascending for the tombstone
+    /// merge, no-self-loop for the greedy-search visited bookkeeping).
+    /// Merges `no_self_loops` + `neighbor_ids_are_ascending_and_
+    /// deduplicated` into one invariant over generated corpora.
+    #[hegel::test]
+    fn prop_neighbor_lists_are_wellformed(tc: hegel::TestCase) {
+        let (corpus, n, dim, _seed) = tc.draw(corpus_shape());
+        let (g, _entry) = build_vamana(&corpus, n, dim);
+        for i in 0..g.n() {
+            let nbrs = g.neighbors_of(i);
+            assert!(
+                !nbrs.contains(&(i as u32)),
+                "node {i} has a self-loop (n={n} dim={dim})"
+            );
+            for w in nbrs.windows(2) {
+                assert!(
+                    w[0] < w[1],
+                    "node {i} neighbor list not strictly ascending (n={n} dim={dim})"
+                );
+            }
+            assert!(
+                nbrs.iter().all(|&id| (id as usize) < n),
+                "node {i} references an out-of-range neighbor id (n={n})"
+            );
+        }
+    }
+
+    /// Navigability: once n is comfortably past R+1, no live node is
+    /// left totally isolated (zero out-edges) -- an isolated node is
+    /// unreachable by greedy search and silently lost. Generalises
+    /// `every_node_has_at_least_one_neighbor_on_a_real_corpus`. The
+    /// n generator is floored above R+2 so the property is only
+    /// asserted in the regime where it must hold (a 1- or 2-node
+    /// corpus legitimately has isolated-ish structure, covered by the
+    /// separate degenerate-case example tests).
+    #[hegel::test]
+    fn prop_no_isolated_nodes_above_degree_floor(tc: hegel::TestCase) {
+        let dim = tc.draw(generators::integers::<usize>().min_value(1).max_value(48));
+        let seed = tc.draw(generators::integers::<u64>());
+        // n well above R+1 (default R=32): draw 40..400.
+        let n = tc.draw(generators::integers::<usize>().min_value(40).max_value(400));
+        let corpus = synth_corpus(n, dim, seed);
+        let (g, _entry) = build_vamana(&corpus, n, dim);
+        for i in 0..n {
+            assert!(
+                !g.neighbors_of(i).is_empty(),
+                "node {i} is isolated (n={n} dim={dim} seed={seed}) -- navigability gap"
+            );
+        }
+    }
+
+    /// Determinism contract: same (corpus, seed) -> byte-identical
+    /// adjacency AND identical entry point, for any drawn shape. This
+    /// underpins single-host REINDEX reproducibility and the test
+    /// suite's own stability. Generalises
+    /// `build_is_deterministic_for_a_fixed_seed`.
+    #[hegel::test]
+    fn prop_build_is_deterministic(tc: hegel::TestCase) {
+        let (corpus, n, dim, _seed) = tc.draw(corpus_shape());
+        let (g1, e1) = build_vamana(&corpus, n, dim);
+        let (g2, e2) = build_vamana(&corpus, n, dim);
+        assert_eq!(g1, g2, "non-deterministic adjacency (n={n} dim={dim})");
+        assert_eq!(e1, e2, "non-deterministic entry point (n={n} dim={dim})");
+    }
+
+    /// Parse robustness (Tier-1): `decode` must NEVER panic on
+    /// arbitrary bytes -- it returns `Err` on any malformed input.
+    /// The relfile reader hands `decode` whatever bytes the chain
+    /// pages contain; a panic there would be an unrecoverable scan
+    /// crash instead of a clean corruption error. Draws fully
+    /// arbitrary byte buffers and node counts.
+    #[hegel::test]
+    fn prop_decode_never_panics_on_garbage(tc: hegel::TestCase) {
+        let offsets = tc.draw(generators::binary().max_size(512));
+        let neighbors = tc.draw(generators::binary().max_size(512));
+        let n = tc.draw(generators::integers::<usize>().max_value(200));
+        // Contract: returns Result, never panics. We don't assert Ok
+        // or Err -- only that it doesn't crash on garbage.
+        let _ = GraphAdjacency::decode(&offsets, &neighbors, n);
+    }
+
+    /// Any bytes that DO decode successfully must re-encode to the
+    /// exact same bytes (decode is injective on its valid domain).
+    /// This is the other half of the codec round-trip, driven from
+    /// the bytes side rather than the built-graph side, so it also
+    /// covers hand-constructed adjacencies the build path would never
+    /// emit.
+    #[hegel::test]
+    fn prop_decode_then_encode_is_identity_when_valid(tc: hegel::TestCase) {
+        let offsets = tc.draw(generators::binary().max_size(512));
+        let neighbors = tc.draw(generators::binary().max_size(512));
+        let n = tc.draw(generators::integers::<usize>().max_value(120));
+        if let Ok(g) = GraphAdjacency::decode(&offsets, &neighbors, n) {
+            assert_eq!(g.encode_offsets(), offsets, "offsets re-encode mismatch");
+            assert_eq!(
+                g.encode_neighbors(),
+                neighbors,
+                "neighbors re-encode mismatch"
+            );
+            assert_eq!(g.n(), n, "decoded node count disagrees with requested n");
+        }
+    }
+
+    /// Search contract: `graph_search` returns exactly `min(k, n)`
+    /// results, all of them distinct, all valid live ids -- for any
+    /// corpus, any k, any query. (Recall QUALITY is a separate,
+    /// dimension-sensitive property below; this one is the pure
+    /// structural contract every caller relies on.) Generalises the
+    /// `assert_eq!(via_graph.len(), k.min(n))` corner of
+    /// `graph_search_matches_linear_scan_set_on_a_real_corpus`.
+    #[hegel::test]
+    fn prop_graph_search_returns_k_distinct_valid_results(tc: hegel::TestCase) {
+        let dim = tc.draw(generators::integers::<usize>().min_value(1).max_value(48));
+        let n = tc.draw(generators::integers::<usize>().min_value(1).max_value(300));
+        let seed = tc.draw(generators::integers::<u64>());
+        let corpus = synth_corpus(n, dim, seed);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let k = tc.draw(generators::integers::<usize>().min_value(1).max_value(64));
+        let q = synth_corpus(1, dim, seed ^ 0x9E37_79B9);
+        let out = graph_search(&g, entry, k, &[], |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        assert_eq!(out.len(), k.min(n), "wrong result count (n={n} k={k})");
+        let ids: std::collections::HashSet<u32> = out.iter().map(|&(_, id)| id).collect();
+        assert_eq!(ids.len(), out.len(), "graph_search returned duplicate ids");
+        assert!(
+            ids.iter().all(|&id| (id as usize) < n),
+            "graph_search returned an out-of-range id (n={n})"
+        );
+    }
+
+    /// Tombstone consistency: no tombstoned id is EVER returned by a
+    /// scan, for any corpus / any dead set / any query. This is the
+    /// hard correctness guarantee VACUUM relies on (a returned dead
+    /// row is a visibility bug). Generalises the fixed-set exclusion
+    /// checks in the pg_test suite down to the pure-Rust core.
+    #[hegel::test]
+    fn prop_graph_search_never_returns_tombstoned_ids(tc: hegel::TestCase) {
+        let dim = tc.draw(generators::integers::<usize>().min_value(1).max_value(32));
+        let n = tc.draw(generators::integers::<usize>().min_value(1).max_value(300));
+        let seed = tc.draw(generators::integers::<u64>());
+        let corpus = synth_corpus(n, dim, seed);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        // Draw a dead set as a subset of valid ids (unique, in range).
+        let dead: Vec<u32> = tc.draw(
+            generators::vecs(
+                generators::integers::<u32>()
+                    .min_value(0)
+                    .max_value(n as u32 - 1),
+            )
+            .max_size(n)
+            .unique(true),
+        );
+        let bitmap = tombstone_bitmap(n, &dead);
+        let dead_set: std::collections::HashSet<u32> = dead.iter().copied().collect();
+        let k = tc.draw(generators::integers::<usize>().min_value(1).max_value(32));
+        let q = synth_corpus(1, dim, seed ^ 0xABCD_1234);
+        let out = graph_search(&g, entry, k, &bitmap, |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        for &(_, id) in &out {
+            assert!(
+                !dead_set.contains(&id),
+                "graph_search returned tombstoned id {id} (n={n} dead={dead:?})"
+            );
+        }
+        // Also: if EVERY id is dead, the result must be empty.
+        if dead.len() == n {
+            assert!(out.is_empty(), "fully-tombstoned corpus returned results");
+        }
+    }
 }

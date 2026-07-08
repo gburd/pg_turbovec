@@ -28,3 +28,4 @@ Cargo.lock.bak
 # Local-only files
 .local-gitignore
 __pycache__/
+.hegel/

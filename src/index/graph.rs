@@ -873,10 +873,33 @@ where
         .max(GRAPH_SCAN_EF_FLOOR)
         .min(n);
     let entry = (entry as usize).min(n - 1) as u32;
-    let entry = if is_dead(entry) {
-        match (0..n as u32).find(|&id| !is_dead(id)) {
+    // Defense in depth (the primary fix lives in VACUUM's own
+    // fallback selection, `vacuum.rs::graph_tombstone_dead` -- this
+    // is a second layer in case any future write path ever installs
+    // an entry point without re-checking this): an entry point that
+    // is ALIVE but has zero LIVE out-neighbors is just as useless as
+    // a dead one -- the very first hop's expansion yields nothing,
+    // and the search returns (at best) only the entry point itself.
+    // A low-degree entry point whose only out-edge points at a slot
+    // that gets tombstoned is a genuine dead-end; fall back to a
+    // live node that still has a live neighbor.
+    let entry_has_live_neighbor = |id: u32| -> bool {
+        adjacency
+            .neighbors_of(id as usize)
+            .iter()
+            .any(|&nb| !is_dead(nb))
+    };
+    let entry = if is_dead(entry) || !entry_has_live_neighbor(entry) {
+        match (0..n as u32).find(|&id| !is_dead(id) && entry_has_live_neighbor(id)) {
             Some(fallback) => fallback,
-            None => return Vec::new(), // every id tombstoned
+            // No live node has a live neighbor (a maximally
+            // fragmented graph) -- fall back further to just "any
+            // live node", matching the pre-existing degenerate-case
+            // behaviour rather than returning empty prematurely.
+            None => match (0..n as u32).find(|&id| !is_dead(id)) {
+                Some(fallback) => fallback,
+                None => return Vec::new(), // every id tombstoned
+            },
         }
     } else {
         entry

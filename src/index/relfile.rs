@@ -1764,7 +1764,13 @@ pub(crate) unsafe fn write_tombstones_and_meta(
     // The tombstone chain is the last chain in the file. Its first
     // block is whatever the existing tombstone chain already used
     // (reuse in place) or, on the first vacuum, the first free block
-    // after every other chain.
+    // after every other chain -- INCLUDING the graph adjacency chain
+    // (Phase G-2b: a graph index's tombstone chain must be placed
+    // AFTER `graph_count`, or its computed offset collides with the
+    // already-persisted graph chain, silently corrupting it on the
+    // very next incremental `aminsert` -- a real bug found and fixed
+    // during G-2b's own test-writing; `graph_count` is `0` for
+    // every non-graph kind, so this is a no-op for flat/IVF/ColBERT).
     let after_all_other_chains = 1
         + old.codes_count
         + old.scales_count
@@ -1772,7 +1778,8 @@ pub(crate) unsafe fn write_tombstones_and_meta(
         + old.blocked_count
         + old.rotation_count
         + old.coarse_count
-        + old.cell_dir_count;
+        + old.cell_dir_count
+        + old.graph_count;
     let tombstone_first = if old.tombstone_first != 0 {
         old.tombstone_first
     } else {

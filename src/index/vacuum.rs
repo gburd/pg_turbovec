@@ -325,9 +325,43 @@ unsafe fn graph_tombstone_dead(
         let byte = slot / 8;
         byte < bitmap.len() && (bitmap[byte] >> (slot % 8)) & 1 != 0
     };
-    let entry_meta = if is_dead(meta.graph_entry_point as usize) {
-        let fallback = (0..meta.n_vectors as usize)
-            .find(|&s| !is_dead(s))
+    // Robustness fix for a real degenerate case in the entry-point
+    // fallback: checking ONLY "is the entry point itself dead" is
+    // not enough. `graph_search` starts its FIRST hop by expanding
+    // the entry point's out-edges; if the entry point survives but
+    // EVERY one of its neighbors is now tombstoned, that first
+    // expansion yields zero live candidates and the search
+    // terminates immediately, returning (at best) just the entry
+    // point itself. Treat "entry point has no live out-neighbor" as
+    // equally disqualifying as "entry point itself is dead".
+    // (Discovered while chasing a separate test-data-generation bug
+    // -- an uncorrelated `random()` subquery that made every test
+    // row identical -- but this guard stands on its own: a
+    // low-degree entry point whose only edges get tombstoned is a
+    // genuine dead-end regardless of the corpus.)
+    let adjacency = relfile::read_graph_adjacency(index, meta);
+    let entry_has_live_neighbor = adjacency.as_ref().is_some_and(|adj| {
+        let ep = meta.graph_entry_point as usize;
+        ep < adj.n() && adj.neighbors_of(ep).iter().any(|&nb| !is_dead(nb as usize))
+    });
+    let entry_needs_fallback = is_dead(meta.graph_entry_point as usize) || !entry_has_live_neighbor;
+    let entry_meta = if entry_needs_fallback {
+        // Fallback candidate: the first live slot that ALSO has at
+        // least one live out-neighbor (so the new entry point can
+        // actually expand on its first hop), falling back further to
+        // just "the first live slot" if no such node exists (a
+        // heavily-fragmented graph -- still better than a
+        // provably-dead-end entry point, and `graph_search` itself
+        // degrades gracefully to "just the entry point" rather than
+        // panicking either way).
+        let fallback = adjacency
+            .as_ref()
+            .and_then(|adj| {
+                (0..meta.n_vectors as usize).find(|&s| {
+                    !is_dead(s) && adj.neighbors_of(s).iter().any(|&nb| !is_dead(nb as usize))
+                })
+            })
+            .or_else(|| (0..meta.n_vectors as usize).find(|&s| !is_dead(s)))
             .unwrap_or(0) as u32;
         MetaPageData {
             graph_entry_point: fallback,

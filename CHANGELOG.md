@@ -4,6 +4,81 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.24.0] — 2026-07-08
+
+**Phase G-2b: VACUUM + incremental INSERT for the graph index kind.**
+Both operations previously raised a clear `ERROR` against a
+`WITH (graph = true)` index (v1.23.0 was build+scan only, correctness-
+first); this release turns them into working functionality. No wire-
+format change — wire format stays **v6**, existing v4/v5/v6 indexes
+decode byte-identical, **no REINDEX**. Minor bump because a
+previously-`ERROR`ing operation becomes real capability (same reasoning
+v1.23.0 used to justify G-2a as a minor).
+
+**VACUUM (`ambulkdelete`)** now uses the same per-slot tombstone bitmap
+mechanism IVF already uses (the generic `relfile::read_tombstones` /
+`write_tombstones_and_meta` path, confirmed to have zero IVF-specific
+assumptions). Tombstoned nodes never enter scan results and their
+out-edges are never followed; a fully-tombstoned corpus returns empty
+cleanly. `graph_search` gained a `tombstones` parameter threaded
+through the scan path.
+
+**INSERT (`aminsert`)** does a whole-relfile rewrite per insert
+(read every chain back, quantize+append the new vector, run a Vamana
+insertion via `insert_one_node_via_oracle`, persist). This is a
+**deliberate O(n)-per-insert cost** — explicitly NOT the
+deferred/batched path other kinds get — appropriate for the
+build-then-serve model the graph kind targets; heavy incremental
+churn should still REINDEX. The insertion distance oracle uses the
+exact quantized-code scan kernel for `dist(new, existing)` and a
+triangle-inequality lower bound for the `dist(existing, existing)`
+RobustPrune diversity check (documented safe-direction approximation:
+can only make pruning less aggressive, never drops a genuinely diverse
+edge, still hard-capped at degree R).
+
+**Two real bugs found and fixed during G-2b's own test-writing:**
+
+1. **Relfile corruption on insert-after-VACUUM.**
+   `write_tombstones_and_meta`'s block-offset formula for placing a
+   new tombstone chain omitted `+ graph_count`, so a graph index's
+   tombstone chain (once VACUUM wrote one) computed an offset that
+   collided with the already-persisted graph adjacency chain,
+   corrupting it on the next incremental insert (`corrupt graph
+   adjacency chain: graph offsets[n]=0 != neighbors.len()=...`).
+   Root-caused via instrumentation showing `graph_first ==
+   tombstone_first`. `graph_count` is `0` for every non-graph kind,
+   so the fix is a no-op for flat/IVF/ColBERT. A second, related fix
+   re-persists a pre-existing tombstone bitmap after the main graph
+   write (which plans a fresh meta from scratch and would otherwise
+   silently drop it).
+
+2. **VACUUM entry-point dead-end.** The entry-point fallback fired
+   only when the entry point itself was tombstoned, never when the
+   entry point SURVIVED but every one of its out-neighbors was
+   tombstoned — a low-degree entry point whose only edge points at a
+   now-dead slot is a genuine dead-end (first beam-search hop expands
+   to zero live candidates). Both the VACUUM-side fallback selection
+   and the scan-side entry pick now treat "no live out-neighbor" as
+   equally disqualifying as "dead" and prefer a fallback that itself
+   has a live neighbor.
+
+**Also corrected a test-harness bug** (not a shipped-code bug): the
+graph #[pg_test] corpora were generated with an uncorrelated
+`random()` subquery that PostgreSQL hoisted and evaluated once,
+making every test row identical (`n_distinct = 1`) and producing
+spurious "recall collapse" numbers that had nothing to do with the
+feature under test. Correlating the inner `generate_series` to the
+outer row restored genuine per-row randomness; the
+insert/vacuum/quantization paths were correct all along.
+
+**Migration:** `ALTER EXTENSION pg_turbovec UPDATE TO '1.24.0';` only.
+No REINDEX, no wire change, no SQL-surface change. A v1.23.0 graph
+index that was built and never mutated is unaffected; graph indexes
+can now be VACUUMed and incrementally inserted into in place.
+
+Still deferred (unchanged from v1.23.0): G-2c (SIMD traversal + build
+parallelism), G-2d (the 5M-scale AVX2 HNSW-latency gate).
+
 ## [1.23.0] — 2026-07-06
 
 **Phase G-2a: `WITH (graph = true)`, a new Vamana-style navigable-

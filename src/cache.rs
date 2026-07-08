@@ -361,6 +361,16 @@ pub(crate) struct GraphIndex {
     inner: std::sync::Arc<ReadOnlyIndex>,
     adjacency: crate::index::graph::GraphAdjacency,
     entry_point: u32,
+    /// Phase G-2b: per-slot tombstone bitmap (LSB-first, bit set ⇒
+    /// dead), read ONCE at cache-install time
+    /// (`scan.rs::install_graph_index`) exactly like the IVF path
+    /// reads it once per scan-open. Freshness is enforced by the
+    /// SAME mechanism as every other cached field here: VACUUM bumps
+    /// `am_version`, which busts this whole `GraphIndex` out of the
+    /// cache (`scan_lookup`'s relfilenode/n_rows freshness check), so
+    /// a stale bitmap can never outlive the vacuum that produced it.
+    /// Empty when nothing has been deleted.
+    tombstones: Vec<u8>,
 }
 
 impl GraphIndex {
@@ -368,11 +378,13 @@ impl GraphIndex {
         inner: std::sync::Arc<ReadOnlyIndex>,
         adjacency: crate::index::graph::GraphAdjacency,
         entry_point: u32,
+        tombstones: Vec<u8>,
     ) -> Self {
         Self {
             inner,
             adjacency,
             entry_point,
+            tombstones,
         }
     }
 
@@ -389,9 +401,13 @@ impl GraphIndex {
         if self.len() == 0 || k == 0 {
             return (Vec::new(), Vec::new());
         }
-        let hits = crate::index::graph::graph_search(&self.adjacency, self.entry_point, k, |ids| {
-            self.inner.score_slots(query, ids)
-        });
+        let hits = crate::index::graph::graph_search(
+            &self.adjacency,
+            self.entry_point,
+            k,
+            &self.tombstones,
+            |ids| self.inner.score_slots(query, ids),
+        );
         let mut scores = Vec::with_capacity(hits.len());
         let mut ids = Vec::with_capacity(hits.len());
         for (s, slot) in hits {

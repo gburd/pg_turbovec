@@ -85,14 +85,35 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.23.0, 2026-07-06)
+### Current (as of v1.24.0, 2026-07-08)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.23.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.23.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.23.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.22.x     | 1.23.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.24.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.24.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.24.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.23.x     | 1.24.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.24.0 adds VACUUM + incremental INSERT for the graph kind**
+(Phase G-2b). Both previously raised a clear `ERROR` (v1.23.0 was
+build+scan only); they now work. **No wire change** — wire format
+stays v6, byte-identical to v1.23.0, no REINDEX. VACUUM reuses the
+generic per-slot tombstone bitmap IVF already uses; `aminsert` is a
+deliberate O(n)-per-row whole-relfile rewrite (build-then-serve
+model; heavy churn should still REINDEX). Two real bugs fixed en
+route: a tombstone-chain/graph-adjacency-chain block-offset collision
+that corrupted a graph index on insert-after-VACUUM (`write_
+tombstones_and_meta` omitted `+ graph_count`, a no-op for every
+non-graph kind), and a VACUUM entry-point fallback that missed the
+"entry point survives but all its out-neighbors got tombstoned"
+dead-end. Also caught + fixed a **test-harness** data-generation bug
+(not shipped code): an uncorrelated `random()` subquery PostgreSQL
+hoisted, making every graph-test row identical (`n_distinct=1`) and
+producing spurious "recall collapse" failures; correlating the inner
+`generate_series` to the outer row fixed it, and confirmed the
+insert/vacuum/quantization paths were correct all along. Still
+deferred: G-2c (SIMD traversal + build parallelism), G-2d (the
+5M-scale AVX2 HNSW-latency gate).
 
 **v1.23.0 adds `WITH (graph = true)`** — Phase G-2a, a new opt-in
 Vamana-style navigable-graph index kind, the first step toward

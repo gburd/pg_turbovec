@@ -841,10 +841,18 @@ unsafe fn install_graph_index(
     };
     let adjacency = relfile::read_graph_adjacency(rel, meta)
         .expect("install_graph_index: has_graph() was true but the adjacency chain is missing");
+    // Phase G-2b: read the per-slot tombstone bitmap ONCE at
+    // cache-install time, same as the IVF path reads it once per
+    // scan-open (`ivf_setup_and_search`). Empty when nothing has
+    // been vacuumed. A `GraphIndex` is busted out of the cache on
+    // any `am_version` bump (VACUUM bumps it), so a stale bitmap can
+    // never outlive the vacuum that produced it.
+    let tombstones = relfile::read_tombstones(rel, meta);
     let graph_index = cache::GraphIndex::new(
         std::sync::Arc::new(stored_index),
         adjacency,
         meta.graph_entry_point,
+        tombstones,
     );
     let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
     let adjacency_bytes =

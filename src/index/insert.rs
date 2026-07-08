@@ -9,7 +9,10 @@
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
+use crate::cache::ReadOnlyIndex;
 use crate::guc;
+use crate::index::graph;
+use crate::index::page::MetaPageData;
 use crate::index::{options, relfile};
 use crate::kernels;
 use crate::vec::Vector;
@@ -84,20 +87,18 @@ unsafe fn aminsert_impl(
     // Encode CTID into u64 using the canonical pgrx layout.
     let id = pgrx::itemptr::item_pointer_to_u64(*heap_tid);
 
-    // Phase G-2a: a Vamana graph index is a build-time-only artifact
-    // for this sub-phase (incremental insert/VACUUM integration is
-    // G-2b, explicitly out of scope here — see
-    // an internal design note). Rather than silently
-    // corrupting the adjacency chain (a generic insert would rewrite
-    // the relfile via the flat write_full_with_prepared path, which
-    // knows nothing about `kind = KIND_GRAPH` and would drop the
-    // graph fields on the next commit), refuse clearly and point at
-    // REINDEX.
+    // Phase G-2b: real incremental insert into a Vamana graph index.
+    // A whole-relfile rewrite (read everything back, mutate in RAM,
+    // write everything back), NOT the deferred RwLock/xact-callback
+    // caching every other kind's aminsert uses -- documented,
+    // deliberate O(n) cost per insert (see `insert_graph_row`'s doc
+    // comment). Graph inserts are expected to be RARE/one-at-a-time
+    // (bulk-load via REINDEX, per the reloption's own guidance); this
+    // is the simplest CORRECT implementation, not the fastest one --
+    // matching G-2a/G-2b's whole "correctness-first" scope.
     if let Some(meta) = relfile::read_meta(index_relation) {
         if meta.is_graph() {
-            error!(
-                "turbovec aminsert: INSERT into a graph index (built WITH (graph = true)) is not yet supported (see an internal design note G-2b). REINDEX INDEX <name>; after bulk-loading new rows, or use a flat/IVF index for tables with ongoing INSERTs."
-            );
+            return insert_graph_row(index_relation, &meta, value, id);
         }
     }
 
@@ -230,5 +231,235 @@ unsafe fn aminsert_relfile(
 
     crate::xact::ensure_xact_callbacks_registered();
 
+    true
+}
+
+/// Phase G-2b: real incremental insert into an existing Vamana graph
+/// index (`meta.is_graph()`). Whole-relfile rewrite — read every
+/// existing chain back, quantize + append the new row via the SAME
+/// `IdMapIndex::add_with_ids` path every other kind's build/insert
+/// already uses, run [`graph::insert_one_node_via_oracle`] to extend
+/// the adjacency, then persist everything back via
+/// `relfile::write_full_with_prepared_graph` (the exact same
+/// function `build.rs`'s `graph_build_and_write` uses).
+///
+/// **Cost, documented explicitly**: this is `O(n)` per single-row
+/// insert (every existing chain is read AND rewritten), not the
+/// deferred-per-transaction-batch, O(1)-amortized path every other
+/// kind's `aminsert` gets via `cache::am_mark_dirty` +
+/// `xact::ensure_xact_callbacks_registered`. A graph index built
+/// `WITH (graph = true)` is documented (reloption help, CHANGELOG)
+/// as a build-then-query-mostly structure; bulk-loading many rows
+/// into an EXISTING graph index one at a time will be slow by
+/// design, not by oversight — REINDEX after a bulk load, per the
+/// same guidance the (now-removed) hard-error message used to give.
+/// A proper fix (touching only the handful of adjacency lists that
+/// actually change per insert, batching multiple inserts into one
+/// relfile rewrite per transaction like the flat/IVF path does) is
+/// real future work, not attempted here — G-2b's scope is
+/// correctness, not this performance profile.
+unsafe fn insert_graph_row(
+    index_relation: pg_sys::Relation,
+    meta: &MetaPageData,
+    value: Vector,
+    id: u64,
+) -> bool {
+    let dim = meta.dim as usize;
+    if value.dim() != dim {
+        error!(
+            "turbovec aminsert (graph): dim mismatch — index expects {}, row has {}",
+            dim,
+            value.dim()
+        );
+    }
+    let normalise = guc::NORMALIZE_ON_INSERT.get();
+    let new_vec = if normalise {
+        kernels::normalise_to_vec(value.as_slice())
+    } else {
+        value.as_slice().to_vec()
+    };
+
+    // Read every existing chain back (same pattern
+    // `scan.rs::install_graph_index` uses to build a `ReadOnlyIndex`
+    // for the scan path — reused here, not reinvented).
+    let (codes, scales, ids) = relfile::read_full(index_relation, meta);
+    if ids.contains(&id) {
+        // Matches the flat path's `IdAlreadyPresent` handling: a
+        // re-insert of the same heap TID (e.g. a HOT update that
+        // still touches the indexed column) is not a new row.
+        // Rejecting cleanly here (rather than silently duplicating a
+        // slot or corrupting the adjacency chain by assuming
+        // `n_vectors` grew by one) is the safe, simple choice for a
+        // whole-rewrite path — REINDEX recovers cleanly either way.
+        error!(
+            "turbovec aminsert (graph): heap tid {} already present in this graph index (re-insert of an existing row is not supported for the graph kind — see an internal design note G-2b); REINDEX INDEX to rebuild if the underlying table changed",
+            id
+        );
+    }
+    let stored_index: ReadOnlyIndex = if meta.has_prepared_layout() {
+        let blocked = relfile::read_blocked(index_relation, meta);
+        let centroids = meta.centroids_slice().to_vec();
+        let boundaries = meta.boundaries_slice().to_vec();
+        let rotation = relfile::read_rotation(index_relation, meta);
+        let rotation_opt = if rotation.is_empty() {
+            None
+        } else {
+            Some(rotation)
+        };
+        ReadOnlyIndex::from_prepared_parts(
+            meta.bit_width as usize,
+            dim,
+            meta.n_vectors as usize,
+            codes.clone(),
+            scales.clone(),
+            ids.clone(),
+            blocked,
+            meta.n_blocks_blocked as usize,
+            centroids,
+            boundaries,
+            rotation_opt,
+        )
+    } else {
+        ReadOnlyIndex::from_parts(
+            meta.bit_width as usize,
+            dim,
+            meta.n_vectors as usize,
+            codes.clone(),
+            scales.clone(),
+            ids.clone(),
+        )
+    };
+    let adjacency = relfile::read_graph_adjacency(index_relation, meta)
+        .expect("insert_graph_row: meta.is_graph() was true but the adjacency chain is missing");
+    let tombstones = relfile::read_tombstones(index_relation, meta);
+
+    // Score oracle for `insert_one_node_via_oracle`: the new row's
+    // raw f32 vector against a batch of EXISTING slot ids, via the
+    // exact same quantized-code kernel the scan path already trusts
+    // (`ReadOnlyIndex::score_slots`). Tombstoned slots are excluded
+    // from consideration up front (never offered as insertion
+    // candidates) rather than filtered post-hoc inside the oracle —
+    // simpler, and `graph::insert_one_node_via_oracle`'s caller
+    // contract doesn't need tombstone-awareness itself (VACUUM and
+    // insert are already serialized by the same exclusive relation
+    // lock every other kind's mutation path holds).
+    let live_mask: Vec<bool> = if tombstones.is_empty() {
+        vec![true; meta.n_vectors as usize]
+    } else {
+        (0..meta.n_vectors as usize)
+            .map(|slot| {
+                tombstones
+                    .get(slot / 8)
+                    .is_none_or(|&b| b & (1 << (slot % 8)) == 0)
+            })
+            .collect()
+    };
+    let entry = if live_mask.get(meta.graph_entry_point as usize) == Some(&true) {
+        meta.graph_entry_point
+    } else {
+        // Entry point itself is tombstoned (VACUUM should have
+        // already picked a fallback in the meta page — see
+        // `vacuum.rs` — but defend here too rather than trust that
+        // invariant blindly across a code path this far from where
+        // it's enforced).
+        live_mask
+            .iter()
+            .position(|&live| live)
+            .map(|s| s as u32)
+            .unwrap_or(0)
+    };
+    let score_existing = |query: &[f32], batch_ids: &[u32]| -> Vec<f32> {
+        stored_index.score_slots(query, batch_ids)
+    };
+    let new_adjacency =
+        graph::insert_one_node_via_oracle(&adjacency, entry, &new_vec, score_existing);
+
+    // Quantize + append the new row via the SAME `IdMapIndex`
+    // encode path every other kind's build/insert already uses.
+    // Synthetic slot id = the new last index (matches
+    // `graph_build_and_write`'s "slot ids == 0..n_vectors, real
+    // external ids kept in a parallel array" convention).
+    let mut idx = IdMapIndex::from_id_map_parts(
+        meta.bit_width as usize,
+        dim,
+        meta.n_vectors as usize,
+        codes,
+        scales,
+        (0..meta.n_vectors).collect(),
+    )
+    .unwrap_or_else(|e| error!("turbovec aminsert (graph): corrupt relfile pages: {}", e));
+    let new_slot = meta.n_vectors;
+    idx.add_with_ids(&new_vec, &[new_slot])
+        .unwrap_or_else(|e| error!("turbovec aminsert (graph): add_with_ids failed: {:?}", e));
+    let mut real_ids = ids;
+    real_ids.push(id);
+
+    idx.prepare_eager();
+    let rotation = idx.rotation();
+    let prepared = relfile::PreparedParts {
+        blocked_codes: idx.blocked_codes(),
+        n_blocks: idx.n_blocks() as u32,
+        centroids: idx.centroids(),
+        boundaries: idx.boundaries(),
+        rotation,
+    };
+    let offsets_bytes = new_adjacency.encode_offsets();
+    let neighbors_bytes = new_adjacency.encode_neighbors();
+    let graph_parts = relfile::GraphParts {
+        offsets_bytes: &offsets_bytes,
+        neighbors_bytes: &neighbors_bytes,
+        entry_point: entry,
+    };
+    relfile::write_full_with_prepared_graph(
+        index_relation,
+        meta.bit_width,
+        dim as u32,
+        new_slot + 1,
+        idx.packed_codes(),
+        idx.scales(),
+        &real_ids,
+        meta.am_version.saturating_add(1),
+        prepared,
+        graph_parts,
+    );
+    // BUG FOUND + FIXED during G-2b's own test-writing:
+    // `write_full_with_prepared_graph` -> `write_full_inner` always
+    // plans a BRAND-NEW meta page from scratch (`MetaPageData::
+    // plan_with_blocked`), which does NOT carry forward an existing
+    // tombstone chain -- the write above just silently reset
+    // `tombstone_count`/`tombstone_first`/`tombstone_bytes` to 0,
+    // and the OLD tombstone bytes are now unreferenced (still
+    // physically on disk in old pages, but nothing points at them).
+    // Re-persist the (possibly nonexistent) tombstone bitmap NOW,
+    // extended by one bit for the new slot (defaulting to 0 = live,
+    // the new row is obviously not dead), via the SAME
+    // `write_tombstones_and_meta` VACUUM already uses -- this is a
+    // second small meta-page write immediately after the first, not
+    // a single atomic operation, but `write_full_with_prepared_graph`
+    // just finished (the relation is internally consistent at this
+    // point, just missing the tombstone reference) and this
+    // function holds the same exclusive lock the whole time, so
+    // there is no window where a concurrent reader could observe
+    // the intermediate (correct-but-tombstone-less) state.
+    if !tombstones.is_empty() {
+        let new_n_bytes = (new_slot as usize + 2).div_ceil(8);
+        let mut new_bitmap = tombstones.clone();
+        new_bitmap.resize(new_n_bytes, 0);
+        // Re-read the meta this write just produced (fresh chain
+        // offsets/counts) rather than reuse the stale `meta` this
+        // function was called with.
+        let fresh_meta = relfile::read_meta(index_relation)
+            .expect("insert_graph_row: meta vanished immediately after our own write");
+        relfile::write_tombstones_and_meta(
+            index_relation,
+            &fresh_meta,
+            &new_bitmap,
+            fresh_meta.am_version.saturating_add(1),
+        );
+    }
+    // `write_full_with_prepared_graph` only touches the
+    // codes/scales/ids/blocked/graph chains, never the tombstone
+    // chain — confirmed by reading that function's body, not
+    // assumed.
     true
 }

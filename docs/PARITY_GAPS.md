@@ -285,7 +285,7 @@ does not define arithmetic for `sparsevec`, so neither do we.
 | AM | pgvector | pg_turbovec |
 |----|----------|-------------|
 | `ivfflat` | ✓ (Lloyd k-means) | ✓ - `WITH (lists = N)`, TurboQuant-quantized, byte-deterministic, out-of-core |
-| `hnsw` | ✓ | partial - `WITH (graph = true)` (v1.23.0, Phase G-2a): real Vamana build+scan with verified recall, but NOT yet VACUUM/insert-capable, NOT yet SIMD-optimized, and NOT yet measured against HNSW at the 5M-scale latency gate an internal design note sets before calling this production-ready. See that doc + an internal design note. |
+| `hnsw` | ✓ | partial - `WITH (graph = true)` (Vamana build+scan v1.23.0/Phase G-2a; **VACUUM + incremental INSERT v1.24.0/Phase G-2b**): real Vamana build+scan with verified recall, now also VACUUM-able and insert-able in place (tombstone bitmap + O(n)-per-row whole-relfile-rewrite insert). Still NOT yet SIMD-optimized (G-2c) and NOT yet measured against HNSW at the 5M-scale latency gate an internal design note sets before calling this production-ready (G-2d). See that doc + an internal design note. |
 | `turbovec` | n/a | ✓ - TurboQuant flat (the default, `lists=0`) |
 
 ## Operator classes

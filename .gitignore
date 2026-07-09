@@ -29,3 +29,7 @@ Cargo.lock.bak
 .local-gitignore
 __pycache__/
 .hegel/
+# Local dev / agent / editor config (never committed)
+.claude/
+.envrc
+.mcp.json

@@ -98,35 +98,63 @@ Before tagging:
    git commit -m "Release vX.Y.Z"
    ```
 
-6. **Tag and push**:
+6. **Tag and push** — this TRIGGERS the automated publish:
 
    ```bash
    git tag -s -m "Release vX.Y.Z" vX.Y.Z
    git push origin main
    git push origin vX.Y.Z
-   ```
-
-7. **Create the Codeberg release**:
-
-   * Open <https://codeberg.org/gregburd/pg_turbovec/releases/new>.
-   * Pick the `vX.Y.Z` tag.
-   * Title: `pg_turbovec X.Y.Z` (or `… X.Y.Z-rcN`).
-   * Body: paste the relevant `CHANGELOG.md` section.
-   * Attach the `pg_turbovec-X.Y.Z.tar.gz` source tarball:
-
-     ```bash
-     git archive --format=tar.gz --prefix=pg_turbovec-X.Y.Z/ \
-         -o pg_turbovec-X.Y.Z.tar.gz vX.Y.Z
-     ```
-
-8. **Mirror to GitHub** (if maintaining a mirror):
-
-   ```bash
    git push github main
    git push github vX.Y.Z
    ```
 
-   then mirror the release notes by hand.
+   Pushing the `vX.Y.Z` tag to Codeberg (`origin`) fires
+   `.forgejo/workflows/release.yml` on the **self-hosted Forgejo
+   runner**, which:
+   1. compiles + runs `scripts/drift-check.sh` (the release gate — the
+      full `cargo pgrx test` matrix runs separately on the GitHub
+      mirror, so a tag should only be cut once that matrix is green),
+   2. builds the PGXN **source** dist zip via `scripts/make-dist.sh`
+      (renders `META.json` from `META.json.in`, runs `cargo pgrx
+      schema` to generate the install SQL, zips a PGXN-layout source
+      archive),
+   3. attaches the zip to a Codeberg release,
+   4. uploads the dist to **PGXN** (`manager.pgxn.org/upload`),
+   5. drafts + submits a **postgresql.org news** announcement (feeds
+      pgsql-announce) via `ci/announce.sh`.
+
+   The GitHub mirror does NOT publish to PGXN or announce — those run
+   ONCE, on the Codeberg side.
+
+### One-time setup for the automated publish
+
+The release workflow needs a **self-hosted Forgejo runner** (Codeberg's
+hosted runners have a 10-minute job cap that a pgrx build blows past)
+and these repo secrets (Codeberg → Settings → Actions → Secrets):
+
+| Secret | Purpose | Required? |
+|---|---|---|
+| `RELEASE_TOKEN` | Codeberg token, repo/release write (attach the dist) | yes |
+| `PGXN_USER`, `PGXN_PASSWORD` | PGXN Manager credentials (username/password — PGXN has no API tokens) | for PGXN upload |
+| `PGORG_USER`, `PGORG_PASSWORD` | postgresql.org password-login account | for the announce |
+| `PGORG_ORG_ID`, `PGORG_EMAIL_ID`, `PGORG_TAGS` | postgresql.org approved-org id, confirmed-email id, space-separated NewsTag ids | for the announce |
+
+Register the runner with `bash scripts/install-forgejo-runner.sh` (see
+`docs/CI.md`). If a secret group is unset, that step no-ops cleanly
+(PGXN skips; announce prints the drafted text to paste by hand at
+<https://www.postgresql.org/account/news/new/>) — a release never fails
+for lack of publish config. **`turbovec` is a pgrx extension, so the
+PGXN dist is a SOURCE archive built with `cargo pgrx install`, NOT a
+`pgxn install`-able package** (PGXN's model assumes a PGXS `Makefile`;
+pgrx has none). It is published for discoverability + version-pinning;
+the caveat is stated in the dist's README and the Codeberg release
+notes.
+
+If the self-hosted runner is NOT yet registered, do the publish steps
+by hand: run `bash scripts/make-dist.sh pg16` locally, attach the zip
+to a Codeberg release, `curl` it to PGXN (see the workflow's
+"Publish to PGXN" step for the exact command), and run
+`bash ci/announce.sh X.Y.Z` to get the announcement draft.
 
 ## crates.io publish (optional, post-1.0.0)
 

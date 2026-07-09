@@ -1,0 +1,53 @@
+{
+   "name": "pg_turbovec",
+   "abstract": "Compressed vector similarity search for PostgreSQL (TurboQuant quantizer)",
+   "description": "A PostgreSQL extension for exact and approximate nearest-neighbour vector search, storing vectors in 2- or 4-bit TurboQuant-quantised form for ~16x smaller on-disk footprint than pgvector at 4-bit. Provides a dedicated index access method with L2/inner-product/cosine/L1 distance operators, an opt-in IVF layer (WITH (lists = N)) that is out-of-core end-to-end so a larger-than-RAM index can be built and queried, an opt-in Vamana navigable-graph index kind (WITH (graph = true)), filtered/hybrid ANN via an in-kernel allowlist, and pgvector-compatible type and operator surface so it can coexist with pgvector. Built with pgrx (Rust).",
+   "version": "@VERSION@",
+   "maintainer": [
+      "Gregory Burd <greg@burd.me>"
+   ],
+   "license": "apache_2_0",
+   "provides": {
+      "pg_turbovec": {
+         "abstract": "Compressed vector similarity search (TurboQuant quantizer)",
+         "file": "sql/pg_turbovec--@VERSION@.sql",
+         "docfile": "README.md",
+         "version": "@VERSION@"
+      }
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "13.0.0"
+         }
+      }
+   },
+   "resources": {
+      "repository": {
+         "url": "https://codeberg.org/gregburd/pg_turbovec.git",
+         "web": "https://codeberg.org/gregburd/pg_turbovec",
+         "type": "git"
+      },
+      "bugtracker": {
+         "web": "https://codeberg.org/gregburd/pg_turbovec/issues"
+      }
+   },
+   "generated_by": "Gregory Burd",
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   },
+   "tags": [
+      "vector",
+      "vector search",
+      "similarity search",
+      "nearest neighbor",
+      "ann",
+      "embeddings",
+      "quantization",
+      "turboquant",
+      "ivf",
+      "index",
+      "pgvector"
+   ]
+}

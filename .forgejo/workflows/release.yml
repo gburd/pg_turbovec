@@ -1,0 +1,125 @@
+name: Release
+
+# Codeberg (Forgejo Actions) tag-triggered publish. Codeberg is the canonical
+# origin; a vX.Y.Z tag here builds + gates + produces the PGXN *source* dist
+# zip, attaches it to a Codeberg release, publishes the distribution to PGXN,
+# and submits a release announcement to the postgresql.org news system (which
+# feeds pgsql-announce). The GitHub mirror's release workflow (if any) must NOT
+# publish to PGXN or announce -- those happen ONCE, here.
+#
+# RUNNER: this MUST run on a SELF-HOSTED Forgejo runner. Codeberg's hosted
+# runners have a 10-minute job cap (see .forgejo/workflows/test.yml), and a
+# pgrx release (build PostgreSQL + cargo-pgrx toolchain, run the gate, generate
+# the schema) takes far longer. Register one with
+# `bash scripts/install-forgejo-runner.sh` (labels: docker,ubuntu-latest); see
+# docs/CI.md. Until a self-hosted runner is registered against the repo, this
+# workflow will queue and not run -- that is intentional (a release must not run
+# on a runner that will time out mid-build and leave a half-published state).
+#
+# SECRETS the maintainer must set on the Codeberg repo (Settings -> Actions ->
+# Secrets):
+#   RELEASE_TOKEN                 - Codeberg token with repo/release write (for the release attach)
+#   PGXN_USER, PGXN_PASSWORD      - PGXN Manager credentials (username/password; PGXN has no tokens)
+#   PGORG_USER, PGORG_PASSWORD    - postgresql.org password-login account (optional; announce degrades to a printed draft if unset)
+#   PGORG_ORG_ID, PGORG_EMAIL_ID, PGORG_TAGS - postgresql.org org/email/newstag ids (optional; see ci/announce.sh)
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: [self-hosted]
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install build deps
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential git curl ca-certificates pkg-config zip \
+            clang libclang-dev llvm-dev \
+            libssl-dev libreadline-dev zlib1g-dev flex bison \
+            libopenblas-dev postgresql-server-dev-16 postgresql-16 sudo
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tag + history
+
+      - name: Install Rust + cargo-pgrx
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          . "$HOME/.cargo/env"
+          # cargo-pgrx must match the pgrx version in Cargo.toml (0.17.0).
+          PGRX_VER="$(grep -m1 '^pgrx = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          cargo install --locked cargo-pgrx --version "${PGRX_VER:-0.17.0}"
+          cargo pgrx init --pg16 "$(which pg_config)"
+
+      - name: Gate the release (compile + drift-check)
+        run: |
+          . "$HOME/.cargo/env"
+          export RUSTFLAGS="-L /usr/lib/x86_64-linux-gnu"
+          # The full `cargo pgrx test` matrix runs on the GitHub mirror; the
+          # release gate here is the compile-matrix + drift-check (fast, and
+          # what the versioning policy mechanically enforces). A tag should
+          # only be cut after the GitHub test matrix is green.
+          cargo build --release --no-default-features --features pg16
+          bash scripts/drift-check.sh
+
+      - name: Build source distribution (PGXN zip)
+        id: dist
+        run: |
+          . "$HOME/.cargo/env"
+          export RUSTFLAGS="-L /usr/lib/x86_64-linux-gnu"
+          bash scripts/make-dist.sh pg16
+          echo "zip=pg_turbovec-${GITHUB_REF_NAME#v}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Create Codeberg release
+        uses: https://code.forgejo.org/forgejo/release-action@v2
+        with:
+          direction: upload
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag: ${{ github.ref_name }}
+          title: ${{ github.ref_name }}
+          files: ${{ steps.dist.outputs.zip }}
+          release-notes: |
+            pg_turbovec ${{ github.ref_name }}
+
+            PGXN *source* distribution (a pgrx extension; build with
+            `cargo pgrx install` -- see README.md). Full changelog in
+            CHANGELOG.md.
+
+      - name: Publish to PGXN
+        env:
+          PGXN_USER: ${{ secrets.PGXN_USER }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          if [ -z "$PGXN_USER" ] || [ -z "$PGXN_PASSWORD" ]; then
+            echo "PGXN_USER/PGXN_PASSWORD secrets not set; skipping PGXN upload." >&2
+            exit 0
+          fi
+          # PGXN Manager upload API: authenticated multipart POST of the dist
+          # zip. A successful upload returns a 3xx redirect to the new release
+          # page; 409 means the version is already published; 4xx/5xx are real
+          # errors.
+          code=$(curl -sS -o /tmp/pgxn_resp.txt -w '%{http_code}' \
+            --user "$PGXN_USER:$PGXN_PASSWORD" \
+            -F "archive=@${{ steps.dist.outputs.zip }};type=application/zip" \
+            https://manager.pgxn.org/upload)
+          echo "PGXN upload HTTP $code"; cat /tmp/pgxn_resp.txt || true
+          case "$code" in
+            2*|3*) echo "PGXN upload accepted." ;;
+            409)   echo "::warning::PGXN reports this version already published; skipping." ;;
+            *)     echo "PGXN upload failed (HTTP $code)" >&2; exit 1 ;;
+          esac
+
+      - name: Announce to PostgreSQL news/announce
+        env:
+          PGORG_USER: ${{ secrets.PGORG_USER }}
+          PGORG_PASSWORD: ${{ secrets.PGORG_PASSWORD }}
+          PGORG_ORG_ID: ${{ secrets.PGORG_ORG_ID }}
+          PGORG_EMAIL_ID: ${{ secrets.PGORG_EMAIL_ID }}
+          PGORG_TAGS: ${{ secrets.PGORG_TAGS }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash ci/announce.sh "$VERSION"

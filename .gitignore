@@ -33,3 +33,8 @@ __pycache__/
 .claude/
 .envrc
 .mcp.json
+
+# PGXN dist artifacts (META.json is rendered from META.json.in at dist time)
+/META.json
+/pg_turbovec-*.zip
+/sql/pg_turbovec--*.sql

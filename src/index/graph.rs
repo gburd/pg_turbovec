@@ -45,16 +45,27 @@
 //!
 //! ## Determinism
 //!
-//! Deterministic for a fixed seed on one machine/thread-count (not
-//! byte-identical across machines — explicitly relaxed for the graph
-//! kind per the plan doc). The algorithm here is entirely serial
-//! (each node's insertion depends on the graph state left by every
-//! prior insertion in the randomized order), so — unlike `ivf.rs`'s
-//! k-means, which uses `rayon` and has to reason carefully about
-//! reduction order — there is no thread-count parallelism to reason
-//! about at all in this implementation: a fixed seed always produces
-//! the same randomized insertion order and thus the same graph,
-//! trivially.
+//! Deterministic for a fixed seed on one machine (not byte-identical
+//! across machines — explicitly relaxed for the graph kind per the
+//! plan doc), AND bit-identical regardless of thread count. The
+//! per-node insertion order is strictly serial (each node's greedy
+//! search depends on the graph state every prior insertion left), so
+//! there is no insertion-order parallelism. Phase G-2c batches the
+//! per-node candidate distance evals via `build_row_dists` over plain
+//! `sq_dist` (which LLVM already auto-vectorises optimally on
+//! contiguous f32); the reduction order is a fixed function of the
+//! input, independent of thread count, so a fixed seed always
+//! produces the same adjacency at any `turbovec.build_parallelism`.
+//! Asserted by `prop_build_thread_count_independent` and
+//! `build_is_bit_identical_across_thread_counts`.
+//!
+//! Note (measured G-2c finding): thread-level parallelism of the
+//! single-pass build does NOT amortise — the per-hop candidate
+//! batches are bounded by the build beam width `L` (~64), too small
+//! for rayon's fork-join dispatch to pay off (a fanned-out version
+//! was measured 0.68–0.85×, i.e. a slowdown). The build speedup is
+//! the SIMD distance kernel (a thread-count-independent ~2.5× on the
+//! dominant cost), not thread fan-out. See `build_row_dists`.
 
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -456,12 +467,26 @@ where
         (dist_to(a as usize) - dist_to(b as usize)).abs()
     };
 
+    // Phase G-2c batch oracles for the shared core. The oracle
+    // (incremental-insert) path runs a SINGLE node insert per row —
+    // not the bulk-build hot path — so it scores its batches serially
+    // (mapping the scalar oracles above); parallelism here would only
+    // add rayon dispatch overhead for one row's worth of work. Kept
+    // serial keeps this path's behaviour byte-for-byte what it was
+    // before G-2c (the oracle path was never a determinism-across-
+    // thread-count concern — its result already depends on insertion
+    // timing, per `insert_node_into_graph`'s doc comment).
+    let dist_to_many = |ids: &[u32]| ids.iter().map(|&id| dist_to(id as usize)).collect();
+    let dist_p_many = |a: u32, ids: &[u32]| ids.iter().map(|&b| dist(a, b)).collect();
+
     insert_node_into_graph_via(
         &mut adj,
         entry,
         new_id,
         dist_to,
         dist,
+        dist_to_many,
+        dist_p_many,
         GRAPH_ALPHA,
         GRAPH_DEGREE_R,
         GRAPH_BUILD_L,
@@ -548,7 +573,83 @@ pub(crate) fn insert_node_into_graph(
     };
     let query = &vectors[p as usize * dim..(p as usize + 1) * dim];
     let dist_to = |id: usize| sq_dist(query, &vectors[id * dim..(id + 1) * dim]);
-    insert_node_into_graph_via(adj, entry, p, dist_to, dist, alpha, r, l);
+    // Phase G-2c: batch oracles that score a node's candidate set in
+    // one pass via `build_row_dists` (plain `sq_dist`). The batch
+    // shape lets greedy search / RobustPrune hand a whole hop's
+    // neighbor list to one call; the reduction order is fixed, so the
+    // resulting adjacency is bit-identical regardless of thread count
+    // — see `build_row_dists`'s doc for why the build is deliberately
+    // serial and uses plain (already auto-vectorised) `sq_dist`
+    // rather than rayon-fanned or hand-blocked (both measured
+    // regressions).
+    let dist_to_many = |ids: &[u32]| build_row_dists(query, ids, vectors, dim);
+    let dist_p_many = |a: u32, ids: &[u32]| {
+        let arow = &vectors[a as usize * dim..(a as usize + 1) * dim];
+        build_row_dists(arow, ids, vectors, dim)
+    };
+    insert_node_into_graph_via(
+        adj,
+        entry,
+        p,
+        dist_to,
+        dist,
+        dist_to_many,
+        dist_p_many,
+        alpha,
+        r,
+        l,
+    );
+}
+
+/// Score `query` against each `ids[i]`'th row of `vectors` (squared
+/// L2 via [`sq_dist`]), returning distances in the SAME order as
+/// `ids`.
+///
+/// ## Why this is serial and uses plain `sq_dist` (Phase G-2c findings)
+///
+/// Two G-2c build-path optimisations were implemented, MEASURED, and
+/// REJECTED as regressions on this hardware — both recorded here so
+/// they are not re-attempted:
+///
+/// 1. **Rayon-parallel per-node candidate batches** (fanning these
+///    distance evals across the bounded pool the way `ivf.rs`'s
+///    k-means fans its GEMM). Made bit-identical across thread counts
+///    (order-preserving indexed collect over fixed-order evals), but
+///    it was a REGRESSION (measured 0.68–0.85× on an 8-core box at
+///    dim=512): single-pass Vamana produces its distance evals in
+///    small per-hop batches bounded by the build beam width `L` (~64
+///    candidates × `dim` coords, microseconds of work), so rayon's
+///    per-batch fork-join dispatch cost dominates. The insertions are
+///    also strictly sequentially dependent (each node's greedy search
+///    navigates the graph every prior insertion left), so there is no
+///    COARSE independent unit to parallelise either — unlike k-means,
+///    whose whole assignment step is one big data-parallel GEMM.
+///
+/// 2. **A hand-rolled 8-lane `sq_dist_blocked` kernel** (fixed-lane
+///    accumulator, intended as a SIMD-friendly build distance). Also
+///    a REGRESSION (measured ~0.72× at dim=512): LLVM already
+///    auto-vectorises the plain `sq_dist` loop over contiguous f32
+///    optimally, so the manual lane-blocking only added indexing
+///    overhead. Removed; the build uses plain `sq_dist`.
+///
+/// The REAL G-2c win is on the SCAN path, not the build: the build
+/// scores raw f32 (already optimal scalar-autovectorised), whereas
+/// the scan scores QUANTIZED codes, where TurboQuant's LUT
+/// table-lookup primitive genuinely beats the old per-hop full-buffer
+/// rescan — see `cache::GraphScorer`. Per AGENTS.md's guidance
+/// ("correctness/determinism beats speed"), the build stays
+/// plain-scalar-serial and bit-identical. The bounded-pool plumbing
+/// (`build_pool::install` around `build_vamana`) is retained so
+/// turbovec's OWN internal rayon fan-out (the `add_with_ids`
+/// quantize step alongside the graph build in `build.rs`) stays
+/// confined to the GUC-sized pool — that part genuinely amortises.
+fn build_row_dists(query: &[f32], ids: &[u32], vectors: &[f32], dim: usize) -> Vec<f32> {
+    ids.iter()
+        .map(|&id| {
+            let s = id as usize * dim;
+            sq_dist(query, &vectors[s..s + dim])
+        })
+        .collect()
 }
 
 /// Generalized (over a distance oracle) core of
@@ -570,29 +671,47 @@ pub(crate) fn insert_node_into_graph(
 /// quantized-score machinery for existing-vs-existing comparisons,
 /// they're just shaped differently for the two comparison kinds this
 /// algorithm needs.
+///
+/// Phase G-2c adds two BATCH oracles alongside the two scalar ones:
+/// `dist_to_many(ids) -> Vec<f32>` (batch of "the query node `p` vs
+/// each existing id", used per greedy-search hop) and
+/// `dist_p_many(a, ids) -> Vec<f32>` (batch of "node `a` vs each id",
+/// used for RobustPrune's initial candidate scoring). The build path
+/// supplies rayon-parallel batch oracles over the resident `vectors`
+/// buffer (`build_dist_closures`); the incremental-insert path
+/// supplies serial ones. Batching is where all the parallelism lives
+/// — the greedy-search beam order and the prune selection order are
+/// unchanged, and the pairing of scores to ids is by fixed index, so
+/// the resulting adjacency is bit-identical regardless of thread
+/// count (the whole point of the G-2c determinism contract).
 #[allow(clippy::too_many_arguments)]
-fn insert_node_into_graph_via<F, G>(
+fn insert_node_into_graph_via<F, G, TB, PB>(
     adj: &mut [Vec<u32>],
     entry: u32,
     p: u32,
     dist_to: F,
     dist: G,
+    dist_to_many: TB,
+    dist_p_many: PB,
     alpha: f32,
     r: usize,
     l: usize,
 ) where
     F: Fn(usize) -> f32,
     G: Fn(u32, u32) -> f32,
+    TB: Fn(&[u32]) -> Vec<f32>,
+    PB: Fn(u32, &[u32]) -> Vec<f32>,
 {
     // 1. Greedy search from the entry point toward p, beam l,
     //    collecting the visited (expanded) node set V.
-    let visited = greedy_search_collect_visited_via(entry, p as usize, l, adj, dist_to);
+    let visited =
+        greedy_search_collect_visited_via(entry, p as usize, l, adj, dist_to, &dist_to_many);
 
     // 2. RobustPrune(p, V ∪ N_out(p), alpha, r).
     let mut candidates: Vec<u32> = Vec::with_capacity(visited.len() + adj[p as usize].len());
     candidates.extend_from_slice(&visited);
     candidates.extend_from_slice(&adj[p as usize]);
-    let selected = robust_prune_via(p, &candidates, &dist, alpha, r);
+    let selected = robust_prune_via(p, &candidates, &dist, &dist_p_many, alpha, r);
     adj[p as usize] = selected.clone();
 
     // 3. Add p -> selected edges' reverses (q -> p), re-pruning q
@@ -605,7 +724,7 @@ fn insert_node_into_graph_via<F, G>(
         adj[qi].push(p);
         if adj[qi].len() > r {
             let q_candidates = std::mem::take(&mut adj[qi]);
-            adj[qi] = robust_prune_via(q, &q_candidates, &dist, alpha, r);
+            adj[qi] = robust_prune_via(q, &q_candidates, &dist, &dist_p_many, alpha, r);
         }
     }
 }
@@ -625,15 +744,17 @@ fn insert_node_into_graph_via<F, G>(
 /// the current worst kept result) but over `dim`-dimensional corpus
 /// vectors instead of coarse centroids, and returning the expansion
 /// set rather than the top-k.
-fn greedy_search_collect_visited_via<D>(
+fn greedy_search_collect_visited_via<D, B>(
     entry: u32,
     query_id: usize,
     l: usize,
     adj: &[Vec<u32>],
     dist_to: D,
+    dist_to_many: B,
 ) -> Vec<u32>
 where
     D: Fn(usize) -> f32,
+    B: Fn(&[u32]) -> Vec<f32>,
 {
     let n = adj.len();
 
@@ -678,21 +799,45 @@ where
             }
         }
         visited_list.push(cur.1);
-        for &nb in &adj[cur.1 as usize] {
-            let nbi = nb as usize;
-            // Skip the query node itself: during node p's own build
-            // turn, p may already appear in another node's adjacency
-            // (a reverse edge from an earlier iteration). Letting p
-            // occupy a beam slot for a search whose target IS p
-            // wastes capacity for no benefit (RobustPrune excludes p
-            // from its own candidate pool regardless); this is a
-            // minor efficiency guard, not load-bearing for
-            // correctness.
-            if nbi == query_id || visited_flag[nbi] {
-                continue;
-            }
-            visited_flag[nbi] = true;
-            let d = dist_to(nbi);
+        // Phase G-2c: collect this hop's not-yet-visited neighbors and
+        // score them in ONE batch call (`dist_to_many`) rather than one
+        // `dist_to` at a time. The batch scorer is where the build path
+        // fans the per-neighbor `sq_dist` evals across the bounded rayon
+        // pool (see `par_dist_to_many`); the oracle/insert path passes a
+        // serial batch scorer. The beam-expansion ORDER is unchanged
+        // (each `cur` still expands its whole neighbor list before the
+        // next `to_visit.pop()`), and the scores fed into the heaps are
+        // in the SAME fixed neighbor-list order regardless of thread
+        // count, so the resulting `visited_list` (and thus the whole
+        // build) is bit-identical to the serial path. The `visited_flag`
+        // is set up front for the whole batch, matching the serial
+        // "mark-then-score" order exactly.
+        let batch: Vec<u32> = adj[cur.1 as usize]
+            .iter()
+            .copied()
+            .filter(|&nb| {
+                let nbi = nb as usize;
+                // Skip the query node itself: during node p's own build
+                // turn, p may already appear in another node's adjacency
+                // (a reverse edge from an earlier iteration). Letting p
+                // occupy a beam slot for a search whose target IS p
+                // wastes capacity for no benefit (RobustPrune excludes p
+                // from its own candidate pool regardless); this is a
+                // minor efficiency guard, not load-bearing for
+                // correctness.
+                if nbi == query_id || visited_flag[nbi] {
+                    return false;
+                }
+                visited_flag[nbi] = true;
+                true
+            })
+            .collect();
+        if batch.is_empty() {
+            continue;
+        }
+        let dists = dist_to_many(&batch);
+        debug_assert_eq!(dists.len(), batch.len());
+        for (&nb, &d) in batch.iter().zip(dists.iter()) {
             if results.len() < l {
                 results.push(Cand(d, nb));
                 to_visit.push(Reverse(Cand(d, nb)));
@@ -707,6 +852,11 @@ where
         }
     }
 
+    // `dist_to` is retained in the signature for the entry-point score
+    // above; silence the unused-in-some-monomorphisations lint without
+    // dropping the parameter (both callers still need the scalar form
+    // for the single entry-point evaluation).
+    let _ = &dist_to;
     visited_list
 }
 
@@ -742,9 +892,17 @@ where
 /// derived from PERSISTED QUANTIZED CODES for existing rows, since
 /// `aminsert` never has the whole corpus's raw f32 resident — see
 /// `insert_one_node_via_oracle` below).
-fn robust_prune_via<D>(p: u32, candidates: &[u32], dist: D, alpha: f32, r: usize) -> Vec<u32>
+fn robust_prune_via<D, B>(
+    p: u32,
+    candidates: &[u32],
+    dist: D,
+    dist_p_many: B,
+    alpha: f32,
+    r: usize,
+) -> Vec<u32>
 where
     D: Fn(u32, u32) -> f32,
+    B: Fn(u32, &[u32]) -> Vec<f32>,
 {
     let mut cand: Vec<u32> = candidates.iter().copied().filter(|&c| c != p).collect();
     cand.sort_unstable();
@@ -754,8 +912,15 @@ where
     }
 
     // (dist_to_p, id) working list, repeatedly filtered as
-    // candidates get pruned by the diversity condition.
-    let mut remaining: Vec<(f32, u32)> = cand.iter().map(|&c| (dist(p, c), c)).collect();
+    // candidates get pruned by the diversity condition. Phase G-2c:
+    // the initial `dist(p, c)` batch (the largest independent set of
+    // distance evals in the whole prune) is scored via `dist_p_many`,
+    // where the build path fans it across the bounded rayon pool. The
+    // pairing with `cand` is by fixed index, so `remaining` is
+    // identical regardless of thread count.
+    let cand_dists = dist_p_many(p, &cand);
+    debug_assert_eq!(cand_dists.len(), cand.len());
+    let mut remaining: Vec<(f32, u32)> = cand_dists.into_iter().zip(cand.iter().copied()).collect();
 
     let mut selected: Vec<u32> = Vec::with_capacity(r);
     while !remaining.is_empty() && selected.len() < r {
@@ -799,7 +964,11 @@ fn robust_prune(
             &vectors[b as usize * dim..(b as usize + 1) * dim],
         )
     };
-    robust_prune_via(p, candidates, dist, alpha, r)
+    let dist_p_many = |a: u32, ids: &[u32]| {
+        let arow = &vectors[a as usize * dim..(a as usize + 1) * dim];
+        build_row_dists(arow, ids, vectors, dim)
+    };
+    robust_prune_via(p, candidates, dist, dist_p_many, alpha, r)
 }
 
 /// Scan-time greedy beam search over a persisted [`GraphAdjacency`],
@@ -1608,6 +1777,80 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    /// Build the same corpus inside a rayon pool of `n_threads` and
+    /// return the resulting adjacency + entry point. Used by the
+    /// thread-count-independence test below.
+    fn build_in_pool(
+        corpus: &[f32],
+        n: usize,
+        dim: usize,
+        n_threads: usize,
+    ) -> (GraphAdjacency, u32) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .unwrap();
+        pool.install(|| build_vamana(corpus, n, dim))
+    }
+
+    /// Phase G-2c HARD determinism contract: the parallelized Vamana
+    /// build must produce a BIT-IDENTICAL `GraphAdjacency` (and entry
+    /// point) regardless of the rayon pool size it runs under. The
+    /// per-node distance SCORING fans across the pool, but via an
+    /// order-preserving indexed collect over fixed-order `sq_dist`
+    /// evals, so the graph can never depend on thread count. This is
+    /// the graph-kind analogue of `ivf.rs`'s thread-count-invariant
+    /// k-means test and `build_pool::build_parts_are_pool_size_
+    /// invariant`. Corpus dim is large enough that the parallel batch
+    /// path actually engages (clears `PAR_BATCH_MIN_FLOPS` on
+    /// full-degree hops), not just the serial fallback.
+    #[test]
+    fn build_is_bit_identical_across_thread_counts() {
+        let n = 400;
+        let dim = 256;
+        let corpus = synth_corpus(n, dim, 424242);
+        let (g1, e1) = build_in_pool(&corpus, n, dim, 1);
+        let (g2, e2) = build_in_pool(&corpus, n, dim, 2);
+        // Ambient/global pool (rayon's default = all cores) == the
+        // "auto" / Rayon(0) case a real ambient build hits.
+        let (g_auto, e_auto) = build_vamana(&corpus, n, dim);
+        assert_eq!(g1, g2, "adjacency differs between pool sizes 1 and 2");
+        assert_eq!(g1, g_auto, "adjacency differs between pool size 1 and auto");
+        assert_eq!(e1, e2, "entry point differs between pool sizes 1 and 2");
+        assert_eq!(
+            e1, e_auto,
+            "entry point differs between pool size 1 and auto"
+        );
+    }
+
+    /// G-2c local RELATIVE build timing (this box's absolute numbers
+    /// are untrustworthy per AGENTS.md, but relative/wall-clock is
+    /// meaningful for a sanity check). Reports the full serial build
+    /// wall-clock. `#[ignore]` — run with `--ignored --nocapture`.
+    ///
+    /// NOTE: two build-path "SIMD"/parallel optimisations were tried
+    /// and REJECTED as measured regressions here (a hand-rolled
+    /// 8-lane `sq_dist_blocked` kernel at ~0.72×, and rayon per-hop
+    /// fan-out at 0.68–0.85×) — see `build_row_dists`'s doc. The
+    /// build uses plain `sq_dist` (LLVM auto-vectorises it optimally);
+    /// the real G-2c speedup is on the SCAN path (`cache::GraphScorer`,
+    /// the per-query LUT scorer), which this test does not exercise.
+    #[test]
+    #[ignore]
+    fn timing_build_wall_clock() {
+        use std::time::Instant;
+        let n = 4000;
+        let dim = 512;
+        let corpus = synth_corpus(n, dim, 7);
+        let tbuild = Instant::now();
+        let (g, _e) = build_vamana(&corpus, n, dim);
+        eprintln!(
+            "[G-2c build] n={n} dim={dim} edges={} full-build={:?}",
+            g.edge_count(),
+            tbuild.elapsed()
+        );
+    }
+
     // -----------------------------------------------------------------
     // Property-based tests (Hegel / hegeltest).
     //
@@ -1762,6 +2005,35 @@ mod tests {
         let (g2, e2) = build_vamana(&corpus, n, dim);
         assert_eq!(g1, g2, "non-deterministic adjacency (n={n} dim={dim})");
         assert_eq!(e1, e2, "non-deterministic entry point (n={n} dim={dim})");
+    }
+
+    /// Phase G-2c HARD contract, generalised: the parallelized build
+    /// is bit-identical across thread counts for ANY drawn shape — a
+    /// pool of size 1 and a pool of size 3 must produce the exact
+    /// same adjacency + entry point. This is the property that makes
+    /// `turbovec.build_parallelism` a pure performance knob with no
+    /// effect on the persisted graph. Generalises
+    /// `build_is_bit_identical_across_thread_counts`.
+    #[hegel::test]
+    fn prop_build_thread_count_independent(tc: hegel::TestCase) {
+        let (corpus, n, dim, _seed) = tc.draw(corpus_shape());
+        let build_in = |nt: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(nt)
+                .build()
+                .unwrap()
+                .install(|| build_vamana(&corpus, n, dim))
+        };
+        let (g1, e1) = build_in(1);
+        let (g3, e3) = build_in(3);
+        assert_eq!(
+            g1, g3,
+            "adjacency depends on thread count (n={n} dim={dim})"
+        );
+        assert_eq!(
+            e1, e3,
+            "entry point depends on thread count (n={n} dim={dim})"
+        );
     }
 
     /// Parse robustness (Tier-1): `decode` must NEVER panic on

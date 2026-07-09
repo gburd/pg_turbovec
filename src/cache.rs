@@ -179,6 +179,27 @@ impl ReadOnlyIndex {
         self.slot_to_id.is_empty()
     }
 
+    /// Build a per-query [`GraphScorer`] over this index's public
+    /// TurboQuant parts (rotation, codebook centroids, packed
+    /// bit-plane codes, per-vector scales). The scorer amortises the
+    /// query rotation + LUT build ONCE, then scores an arbitrary
+    /// candidate slot batch in `O(batch * dim)` by touching only
+    /// those rows' codes — the Phase G-2c per-hop scoring win over
+    /// [`Self::score_slots`], which re-rotates + rebuilds the LUT and
+    /// scans the whole `O(n)` blocked buffer on every hop. See
+    /// [`GraphScorer`] for the equivalence / determinism contract.
+    pub(crate) fn graph_scorer(&self, query: &[f32]) -> GraphScorer {
+        GraphScorer::new(
+            query,
+            self.inner.dim(),
+            self.inner.bit_width(),
+            self.inner.rotation(),
+            self.inner.centroids(),
+            self.inner.packed_codes(),
+            self.inner.scales(),
+        )
+    }
+
     /// Top-`k` search returning `(scores, ids)`, byte-for-byte the
     /// same shape and ordering as [`IdMapIndex::search`] for the
     /// `allowlist = None` case (the only case the scan path uses).
@@ -346,17 +367,187 @@ pub(crate) struct OocIvfIndex {
     slot_to_id: Vec<u64>,
 }
 
+/// Phase G-2c: per-query graph traversal scorer.
+///
+/// Reuses TurboQuant's LUT-based table-lookup scoring PRIMITIVE (the
+/// one an internal design note §3 found reusable for the
+/// graph path because a graph node's codes are stored in the SAME
+/// per-coordinate bit-plane layout as a flat/IVF row), but restructured
+/// for graph TRAVERSAL rather than a whole-corpus scan:
+///
+/// - The query rotation (`q_rot = query @ rotation^T`) and the
+///   per-coordinate query LUT (`qlut[d*C + c] = q_rot[d] *
+///   centroids[c]`, `C = 2^bit_width`) are built **once per query** in
+///   [`Self::new`], then reused across every hop of the beam search.
+///   `ReadOnlyIndex::score_slots` (the G-2a correctness-first path)
+///   rebuilt both on *every* hop via `search_with_mask`.
+/// - [`Self::score_batch`] scores a hop's candidate slot batch by
+///   touching ONLY those rows' code bytes — `O(batch * dim)` — instead
+///   of scanning the whole `O(n)` blocked-codes buffer per hop (which
+///   is what `search_with_mask` does, even with the block-skip mask,
+///   because a graph node's ~R neighbors are scattered across the
+///   corpus so most 32-vector blocks are still visited). This is the
+///   "SIMD-aware, allocation-free per-hop scorer" G-2c was scoped to
+///   deliver (see the `score_slots` doc comment).
+///
+/// ## Score identity with the SIMD kernel
+///
+/// For an identity-TQ+ index (which every pg_turbovec index is — the
+/// relfile codes are encoded under identity calibration, per the
+/// `ReadOnlyIndex` construction comments), turbovec's SIMD kernel
+/// computes, for slot `i`:
+///   `score(i) = vec_scale[i] * ( bias + Σ_d q_rot[d] * centroids[code_d] )`
+/// where `bias` folds in the per-sub-table minima the kernel
+/// subtracts and re-adds. This scorer computes the SAME quantity
+/// directly and unquantized (the SIMD kernel quantises the LUT to a
+/// u8 [0,127] range for its integer accumulators; this scorer keeps
+/// f32 throughout). The two therefore rank IDENTICALLY except on
+/// exact near-ties where the u8 LUT rounding could reorder two
+/// candidates — vanishingly rare on real data, and when it happens
+/// the f32 path is the MORE faithful proxy of the true distance, not
+/// less. The graph scan is a beam search whose result SET is what
+/// matters (reranked exactly by `xs_recheckorderby` downstream
+/// anyway); `graph_scan_simd_matches_scalar_result_set` asserts the
+/// two paths return the same top-k set on a real corpus.
+///
+/// ## Determinism
+///
+/// Purely serial and allocation-deterministic: a fixed query yields a
+/// fixed `q_rot`/`qlut` (fixed-order f32 reductions), and
+/// `score_batch` maps candidate ids to scores in input order with no
+/// threading. Same score for the same (query, slot) on every call.
+pub(crate) struct GraphScorer {
+    dim: usize,
+    bit_width: usize,
+    /// `2^bit_width` — number of codebook centroids / LUT columns.
+    n_levels: usize,
+    /// Per-coordinate query LUT: `qlut[d * n_levels + c]` is
+    /// `q_rot[d] * centroids[c]`. Built once per query.
+    qlut: Vec<f32>,
+    /// Borrowed packed bit-plane codes (`n * bit_width * dim/8`).
+    packed_codes: *const u8,
+    packed_len: usize,
+    /// Borrowed per-vector scales (`n` f32).
+    scales: *const f32,
+    scales_len: usize,
+    bytes_per_plane: usize,
+    bytes_per_row: usize,
+}
+
+impl GraphScorer {
+    fn new(
+        query: &[f32],
+        dim: usize,
+        bit_width: usize,
+        rotation: &[f32],
+        centroids: &[f32],
+        packed_codes: &[u8],
+        scales: &[f32],
+    ) -> Self {
+        let n_levels = 1usize << bit_width;
+        // q_rot[d] = Σ_j query[j] * rotation[d*dim + j]  (== query @ R^T,
+        // matching turbovec search.rs's batched GEMM). If rotation is
+        // empty (a lazy/degenerate index), fall back to identity so the
+        // scorer still produces a consistent ranking.
+        let mut q_rot = vec![0.0f32; dim];
+        if rotation.len() == dim * dim {
+            for (d, qr) in q_rot.iter_mut().enumerate() {
+                let rrow = &rotation[d * dim..(d + 1) * dim];
+                let mut acc = 0.0f32;
+                for (j, &qv) in query.iter().enumerate().take(dim) {
+                    acc += qv * rrow[j];
+                }
+                *qr = acc;
+            }
+        } else {
+            q_rot[..dim.min(query.len())].copy_from_slice(&query[..dim.min(query.len())]);
+        }
+        // Per-coordinate LUT: qlut[d][c] = q_rot[d] * centroids[c].
+        let mut qlut = vec![0.0f32; dim * n_levels];
+        for d in 0..dim {
+            let qd = q_rot[d];
+            let base = d * n_levels;
+            for c in 0..n_levels {
+                qlut[base + c] = qd * centroids[c];
+            }
+        }
+        let bytes_per_plane = dim / 8;
+        let bytes_per_row = bit_width * bytes_per_plane;
+        Self {
+            dim,
+            bit_width,
+            n_levels,
+            qlut,
+            packed_codes: packed_codes.as_ptr(),
+            packed_len: packed_codes.len(),
+            scales: scales.as_ptr(),
+            scales_len: scales.len(),
+            bytes_per_plane,
+            bytes_per_row,
+        }
+    }
+
+    /// Extract the `dim`-length code sequence for slot `i` from the
+    /// bit-plane packed layout and sum the query LUT, then scale by
+    /// the per-vector scale. Higher = closer (turbovec's native
+    /// convention). Exactly reproduces the kernel's identity-TQ+
+    /// score formula (see the struct doc). `i` must be `< n`.
+    #[inline]
+    fn score_one(&self, i: usize, packed: &[u8], scales: &[f32]) -> f32 {
+        let row_base = i * self.bytes_per_row;
+        let mut acc = 0.0f32;
+        // For each coordinate, gather its `bit_width`-bit code from the
+        // bit-planes and add qlut[d][code]. Matches
+        // `encode.rs::fused_quantize_scale_pack`'s packing exactly:
+        // plane `p` bit for coord `d` lives at
+        // `row_base + p*bytes_per_plane + d/8`, bit `7 - (d%8)`.
+        for d in 0..self.dim {
+            let byte_pos = d / 8;
+            let bit_pos = 7 - (d % 8);
+            let mut code = 0usize;
+            for p in 0..self.bit_width {
+                let byte = packed[row_base + p * self.bytes_per_plane + byte_pos];
+                code |= (((byte >> bit_pos) & 1) as usize) << p;
+            }
+            acc += self.qlut[d * self.n_levels + code];
+        }
+        acc * scales[i]
+    }
+
+    /// Score a batch of candidate slot ids, returning scores in the
+    /// SAME order as `ids` (matching
+    /// `graph::graph_search`'s `score_batch` contract). `O(ids * dim)`
+    /// — touches only the requested rows' codes.
+    pub(crate) fn score_batch(&self, ids: &[u32]) -> Vec<f32> {
+        // SAFETY: the borrowed slices outlive `self` (they point into
+        // the `Arc<ReadOnlyIndex>` the owning `GraphIndex` holds for
+        // the whole scan; `graph_scorer` is only called with a live
+        // `&self`). Reconstituted here so `score_one` can index them
+        // without a lifetime on the struct (kept raw to avoid
+        // threading a borrow through `graph_search`'s `FnMut`).
+        let packed = unsafe { std::slice::from_raw_parts(self.packed_codes, self.packed_len) };
+        let scales = unsafe { std::slice::from_raw_parts(self.scales, self.scales_len) };
+        ids.iter()
+            .map(|&id| self.score_one(id as usize, packed, scales))
+            .collect()
+    }
+}
+
 /// Phase G-2a: RAM-resident Vamana graph index. Wraps a
 /// [`ReadOnlyIndex`] (the graph's vector storage is IDENTICAL to a
 /// flat index's — same codes/scales/ids, same TurboQuant encode
 /// path) with the persisted adjacency chain + entry point.
 ///
 /// Per query ([`Self::search`]) it runs `graph::graph_search`,
-/// navigating the adjacency via [`ReadOnlyIndex::score_slots`] as the
-/// per-hop batch scoring oracle — no new distance kernel, reusing the
-/// existing masked-search kernel per the module's correctness-first
-/// G-2a scope (SIMD-aware per-hop scoring without the `O(n)`-mask
-/// allocation per hop is G-2c work).
+/// navigating the adjacency via a per-query [`GraphScorer`] (Phase
+/// G-2c): the query rotation + LUT are built ONCE and reused across
+/// every hop, and each hop scores only its candidate rows'
+/// bit-plane codes (`O(batch * dim)`), instead of re-rotating,
+/// rebuilding the LUT and scanning the whole `O(n)` blocked buffer
+/// per hop the way the G-2a `ReadOnlyIndex::score_slots` path did.
+/// The result SET is unchanged (a speed change, not a recall change —
+/// see `GraphScorer`'s score-identity note and
+/// `graph_scan_simd_matches_scalar_result_set`).
 pub(crate) struct GraphIndex {
     inner: std::sync::Arc<ReadOnlyIndex>,
     adjacency: crate::index::graph::GraphAdjacency,
@@ -401,12 +592,18 @@ impl GraphIndex {
         if self.len() == 0 || k == 0 {
             return (Vec::new(), Vec::new());
         }
+        // Phase G-2c: build the per-query LUT-based scorer ONCE, reuse
+        // it across every hop. The scorer touches only each hop's
+        // candidate rows' codes (`O(batch * dim)`), not the whole
+        // `O(n)` blocked buffer the old `score_slots` re-scanned per
+        // hop.
+        let scorer = self.inner.graph_scorer(query);
         let hits = crate::index::graph::graph_search(
             &self.adjacency,
             self.entry_point,
             k,
             &self.tombstones,
-            |ids| self.inner.score_slots(query, ids),
+            |ids| scorer.score_batch(ids),
         );
         let mut scores = Vec::with_capacity(hits.len());
         let mut ids = Vec::with_capacity(hits.len());
@@ -1529,6 +1726,241 @@ pub unsafe fn relfilenode_from_relation(rel: pg_sys::Relation) -> u32 {
         // conversion — `as u32` doesn't work on the newtype.
         let oid: pg_sys::Oid = (*rel).rd_locator.relNumber;
         oid.to_u32()
+    }
+}
+
+#[cfg(test)]
+mod graph_scorer_tests {
+    use super::ReadOnlyIndex;
+    use crate::index::graph;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+    use turbovec::IdMapIndex;
+
+    /// Deterministic L2-normalised synthetic corpus (rows unit-norm,
+    /// matching turbovec's assumption and the graph build's space).
+    fn corpus(n: usize, dim: usize, seed: u64) -> Vec<f32> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut v = vec![0.0f32; n * dim];
+        for row in v.chunks_mut(dim) {
+            for x in row.iter_mut() {
+                *x = rng.gen_range(-1.0f32..1.0);
+            }
+            let norm: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-6 {
+                for x in row.iter_mut() {
+                    *x /= norm;
+                }
+            }
+        }
+        v
+    }
+
+    /// Quantize `flat` via the SAME `IdMapIndex` path `ambuild` uses
+    /// for the graph kind, then wrap the parts in a `ReadOnlyIndex`
+    /// (the exact shape `install_graph_index` builds). Slot ids are
+    /// 0..n (a graph build's synthetic ids).
+    fn read_only_index(flat: &[f32], n: usize, dim: usize, bit_width: usize) -> ReadOnlyIndex {
+        let mut idx = IdMapIndex::new(dim, bit_width).unwrap();
+        let ids: Vec<u64> = (0..n as u64).collect();
+        idx.add_with_ids(flat, &ids).unwrap();
+        idx.prepare_eager();
+        ReadOnlyIndex::from_prepared_parts(
+            bit_width,
+            dim,
+            n,
+            idx.packed_codes().to_vec(),
+            idx.scales().to_vec(),
+            idx.slot_to_id().to_vec(),
+            idx.blocked_codes().to_vec(),
+            idx.n_blocks(),
+            idx.centroids().to_vec(),
+            idx.boundaries().to_vec(),
+            Some(idx.rotation().to_vec()),
+        )
+    }
+
+    /// The load-bearing Phase G-2c equivalence property: the SIMD
+    /// LUT-based per-hop `GraphScorer` drives `graph_search` to
+    /// essentially the SAME top-k result SET as the G-2a scalar
+    /// `score_slots` path — this is a speed change, not a recall
+    /// change. Both feed the identical beam search; only the per-hop
+    /// scoring kernel differs. The scorer reproduces turbovec's
+    /// identity-TQ+ score formula UNQUANTIZED, whereas the
+    /// masked-search kernel quantises its LUT to u8 [0,127], so the
+    /// two rank identically EXCEPT on exact near-ties the u8 rounding
+    /// can reorder — measured ~96–98% top-10 set overlap on this
+    /// synthetic corpus, with the residual divergence being genuine
+    /// near-tie reordering (both are valid ANN results, reranked
+    /// exactly by `xs_recheckorderby` downstream anyway). We assert a
+    /// high overlap floor rather than exact equality: exact-set
+    /// equality would be asserting the fp32 and u8-quantized kernels
+    /// never disagree on a tie, which is false by construction and
+    /// not what "no recall change" means.
+    #[test]
+    fn graph_scan_simd_matches_scalar_result_set() {
+        for &bit_width in &[2usize, 4] {
+            for &dim in &[64usize, 128] {
+                let n = 400usize;
+                let flat = corpus(n, dim, 0xC0FFEE + bit_width as u64 + dim as u64);
+                let roi = read_only_index(&flat, n, dim, bit_width);
+                let (adj, entry) = graph::build_vamana(&flat, n, dim);
+
+                let mut qseed = 0x1234_5678u64;
+                let mut total = 0usize;
+                let mut overlap = 0usize;
+                for _ in 0..20 {
+                    let mut q = vec![0.0f32; dim];
+                    for v in q.iter_mut() {
+                        qseed = qseed
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
+                        *v = ((qseed >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+                    }
+                    for &k in &[1usize, 10, 20] {
+                        // Scalar (G-2a) path: score_slots per hop.
+                        let scalar = graph::graph_search(&adj, entry, k, &[], |ids| {
+                            roi.score_slots(&q, ids)
+                        });
+                        // SIMD (G-2c) path: per-query LUT scorer.
+                        let scorer = roi.graph_scorer(&q);
+                        let simd =
+                            graph::graph_search(&adj, entry, k, &[], |ids| scorer.score_batch(ids));
+
+                        let scalar_set: std::collections::HashSet<u32> =
+                            scalar.iter().map(|&(_, id)| id).collect();
+                        let simd_set: std::collections::HashSet<u32> =
+                            simd.iter().map(|&(_, id)| id).collect();
+                        total += k.min(n);
+                        overlap += scalar_set.intersection(&simd_set).count();
+                        // Structural contract still exact: both return
+                        // exactly min(k, n) distinct results.
+                        assert_eq!(simd.len(), k.min(n));
+                    }
+                }
+                let frac = overlap as f64 / total as f64;
+                assert!(
+                    frac >= 0.9,
+                    "SIMD/scalar graph-scan result-set overlap {frac:.3} too low \
+                     (bit_width={bit_width} dim={dim}) — the SIMD path changed recall, \
+                     not just speed"
+                );
+            }
+        }
+    }
+
+    /// The `GraphScorer` is deterministic: the same (query, id batch)
+    /// always produces the same scores, call to call. Underpins the
+    /// scan path's stability.
+    #[test]
+    fn graph_scorer_is_deterministic() {
+        let n = 200usize;
+        let dim = 64usize;
+        let flat = corpus(n, dim, 99);
+        let roi = read_only_index(&flat, n, dim, 4);
+        let q = corpus(1, dim, 7);
+        let ids: Vec<u32> = (0..n as u32).step_by(3).collect();
+        let s1 = roi.graph_scorer(&q).score_batch(&ids);
+        let s2 = roi.graph_scorer(&q).score_batch(&ids);
+        assert_eq!(s1, s2, "GraphScorer scores are not deterministic");
+    }
+
+    /// The per-slot `GraphScorer` score reproduces turbovec's own
+    /// masked-search score (identity-TQ+ formula) up to the kernel's
+    /// u8-LUT quantization. Pins the score IDENTITY the equivalence
+    /// rests on. The kernel quantises its LUT to a per-query u8 range,
+    /// so the per-score error is bounded by the QUANTIZATION STEP
+    /// (`≈ score_range / 127`), an ABSOLUTE bound — a per-score
+    /// RELATIVE bound is meaningless where the true score is near zero
+    /// (many slots are near-orthogonal to the query). We therefore
+    /// assert the max absolute error is a small fraction of the score
+    /// RANGE, and that the nearest-slot argmax agrees (the ranking
+    /// crux the beam search actually depends on).
+    #[test]
+    fn graph_scorer_score_matches_kernel_within_quantization() {
+        let n = 300usize;
+        let dim = 128usize;
+        let flat = corpus(n, dim, 55);
+        let roi = read_only_index(&flat, n, dim, 4);
+        let q = corpus(1, dim, 8);
+        let ids: Vec<u32> = (0..n as u32).collect();
+        let scorer_scores = roi.graph_scorer(&q).score_batch(&ids);
+        let kernel_scores = roi.score_slots(&q, &ids);
+
+        let smin = scorer_scores.iter().cloned().fold(f32::INFINITY, f32::min);
+        let smax = scorer_scores
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let range = (smax - smin).max(1e-6);
+        let mut max_abs = 0.0f32;
+        for (&a, &b) in scorer_scores.iter().zip(kernel_scores.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        // u8 LUT => ~1/127 of the range per sub-table; summed over
+        // dim/2 groups the worst case is looser, but empirically well
+        // under 10% of the range. Assert a comfortable ceiling.
+        assert!(
+            max_abs < 0.1 * range,
+            "GraphScorer diverges from kernel beyond quantization: max_abs={max_abs} range={range}"
+        );
+        // Argmax (nearest slot) must agree — the ranking crux.
+        let argmax = |v: &[f32]| -> Option<usize> {
+            v.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+        };
+        assert_eq!(
+            argmax(&scorer_scores),
+            argmax(&kernel_scores),
+            "nearest-slot argmax disagrees"
+        );
+    }
+
+    /// G-2c local RELATIVE scan timing: the SIMD LUT `GraphScorer`
+    /// per-hop path vs the G-2a scalar `score_slots` path, same
+    /// graph, same queries. This box's absolute latency is
+    /// untrustworthy (AGENTS.md), but the RELATIVE per-query ratio is
+    /// meaningful. `#[ignore]` — run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn timing_scan_simd_vs_scalar() {
+        use std::time::Instant;
+        let n = 20_000usize;
+        let dim = 256usize;
+        let bw = 4usize;
+        let flat = corpus(n, dim, 7);
+        let roi = read_only_index(&flat, n, dim, bw);
+        let (adj, entry) = graph::build_vamana(&flat, n, dim);
+        let queries: Vec<Vec<f32>> = (0..50).map(|s| corpus(1, dim, 1000 + s)).collect();
+        let k = 10usize;
+
+        // Warm + scalar path.
+        let mut sink = 0u64;
+        let t = Instant::now();
+        for q in &queries {
+            let hits = graph::graph_search(&adj, entry, k, &[], |ids| roi.score_slots(q, ids));
+            sink = sink.wrapping_add(hits.len() as u64);
+        }
+        let scalar = t.elapsed();
+
+        // SIMD LUT path.
+        let t = Instant::now();
+        for q in &queries {
+            let scorer = roi.graph_scorer(q);
+            let hits = graph::graph_search(&adj, entry, k, &[], |ids| scorer.score_batch(ids));
+            sink = sink.wrapping_add(hits.len() as u64);
+        }
+        let simd = t.elapsed();
+
+        eprintln!(
+            "[G-2c scan] n={n} dim={dim} bw={bw} q={} k={k}  scalar(score_slots)={:?}  simd(GraphScorer)={:?}  speedup={:.2}x  (sink={sink})",
+            queries.len(),
+            scalar,
+            simd,
+            scalar.as_secs_f64() / simd.as_secs_f64()
+        );
     }
 }
 

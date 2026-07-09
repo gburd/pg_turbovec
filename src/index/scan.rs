@@ -572,7 +572,22 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // ceil(k_pref * oversample) without float-rounding surprises;
         // k_pref <= 100_000 and oversample <= 100 so the product fits
         // an f64 exactly well within u64 range.
-        let k_oversampled = (k_pref as f64 * oversample).ceil() as usize;
+        //
+        // Gap-B (an internal design note): at high
+        // dim the quantized ranking places true neighbours at rank
+        // ~200-800 within the probed cells, below a small search_k, so
+        // recall caps below the retrieval ceiling. turbovec.hi_dim_rerank
+        // (auto by default) applies a dim-scaled candidate FLOOR for
+        // dim >= 256, recovering that recall via a wider exact-L2
+        // recheck. It only ever RAISES the count -- an explicit
+        // search_k/oversample override past the floor always wins --
+        // and does nothing at low dim (where recall already plateaus).
+        let k_oversampled = crate::guc::hi_dim_rerank_candidate_count(
+            crate::guc::HI_DIM_RERANK.get(),
+            dim,
+            k_pref,
+            oversample,
+        );
         let k = k_oversampled.min(n_live.max(1)).max(1);
 
         // Phase C operator-path allowlist: parse turbovec.allowlist

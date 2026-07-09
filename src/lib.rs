@@ -2221,6 +2221,63 @@ mod tests {
         assert_eq!(a.len(), 20, "search_k=20 scan should return 20 ids");
     }
 
+    /// Gap-B fix (`turbovec.hi_dim_rerank`): on a high-dimension index
+    /// the dim-scaled candidate floor recovers recall the narrow
+    /// default `search_k` drops, via the exact-L2 reorder recheck --
+    /// end-to-end through the real scan path, not just the decision
+    /// function's unit tests. `off` (honour the small search_k) must
+    /// give NO BETTER recall than `auto` (apply the dim floor), and
+    /// `auto` must clear a meaningful recall bar the narrow window
+    /// misses. dim=384 crosses HI_DIM_RERANK_MIN_DIM=256, so `auto`
+    /// floors the candidate window at 384.
+    #[pg_test]
+    fn hi_dim_rerank_raises_high_dim_recall() {
+        build_oversample_corpus("t_hidim", 4000, 384, 4);
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        // Deliberately narrow search_k: at 384-dim the quantized rank
+        // scatters true NNs past 16, so `off` under-recalls and `auto`
+        // (dim floor 384) recovers them.
+        Spi::run("SET turbovec.search_k = 16").unwrap();
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
+
+        let mut off_total = 0.0f64;
+        let mut auto_total = 0.0f64;
+        let mut n = 0.0f64;
+        let mut auto_ge_off_everywhere = true;
+        for seed in ["h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8"] {
+            let qlit = query_vector_literal(384, seed);
+            let truth = exact_topk_ids("t_hidim", &qlit, 10);
+
+            Spi::run("SET turbovec.hi_dim_rerank = off").unwrap();
+            let r_off = recall_at(&index_topk_ids("t_hidim", &qlit, 10), &truth);
+            Spi::run("SET turbovec.hi_dim_rerank = auto").unwrap();
+            let r_auto = recall_at(&index_topk_ids("t_hidim", &qlit, 10), &truth);
+
+            if r_auto + 1e-9 < r_off {
+                auto_ge_off_everywhere = false;
+            }
+            off_total += r_off;
+            auto_total += r_auto;
+            n += 1.0;
+        }
+        let off_mean = off_total / n;
+        let auto_mean = auto_total / n;
+        // The floor must never REDUCE recall on any query (it only
+        // ever widens the candidate set).
+        assert!(
+            auto_ge_off_everywhere,
+            "hi_dim_rerank=auto regressed recall vs off on some query"
+        );
+        // And it must MEASURABLY help in aggregate at 384-dim/search_k=16.
+        assert!(
+            auto_mean > off_mean + 1e-9,
+            "hi_dim_rerank=auto ({auto_mean:.3}) did not beat off ({off_mean:.3}) at 384-dim"
+        );
+        Spi::run("RESET turbovec.hi_dim_rerank").unwrap();
+        Spi::run("RESET turbovec.search_k").unwrap();
+        Spi::run("RESET turbovec.oversample").unwrap();
+    }
+
     /// Oversample composes with a selective WHERE filter: iterative
     /// scan still kicks in. Oversample sets the initial k; iterative
     /// refill grows from there to satisfy the LIMIT over a sparse
@@ -5256,7 +5313,7 @@ mod tests {
             "1.7.1", "1.7.2", "1.7.3", "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0",
             "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
-            "1.22.1", "1.22.2", "1.23.0", "1.24.0",
+            "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

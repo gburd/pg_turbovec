@@ -250,6 +250,36 @@ SET turbovec.max_probes = 64;
 SET turbovec.oversample = 1.0;  -- 1.0 .. 100.0
 ```
 
+### `turbovec.hi_dim_rerank`
+
+```sql
+-- Gap-B fix (v1.25.0). At high dimension the lossy quantized score
+-- is noisy enough that a true nearest neighbour often sits at rank
+-- ~200-800 WITHIN the probed cells, below a small search_k -- so
+-- end-to-end recall caps well below the retrieval ceiling (e.g.
+-- GIST-1M/960d ~0.86 out of a 0.99+ ceiling). This is an in-cell
+-- quantized-RANKING loss, NOT a retrieval one: the true NNs ARE in
+-- the probed cells (measured cell recall 0.98-0.996 at probes
+-- 64-128; see an internal design note). The cure
+-- is scan-side only -- fetch a WIDER candidate set so the always-on
+-- exact-L2 reorder recheck re-ranks enough survivors to recover the
+-- true top-k (measured: an SQ4 analog lifts R@10 0.666 -> 0.978 at
+-- 960-dim by reranking ~800 candidates instead of ~64).
+--
+-- This must NOT blanket-widen: at low dim recall already plateaus by
+-- search_k~=25, so widening there is pure latency tax. Hence a
+-- DIM-AWARE floor: `auto` (the default) applies a candidate floor of
+-- clamp(dim, 256..=1024) ONLY for indexes with dim >= 256, and only
+-- ever RAISES the count -- an explicit search_k/oversample override
+-- past the floor always wins. So SIFT-128 is untouched (no latency
+-- cost); GIST-960 / OpenAI-1536 / the 512-768d families get the
+-- wider window automatically. `on` applies the floor regardless of
+-- dim; `off` honours search_k/oversample exactly (pre-fix behaviour).
+-- No wire-format change, no REINDEX; identical result set to setting
+-- search_k/oversample by hand to the same candidate count.
+SET turbovec.hi_dim_rerank = auto;  -- off | auto | on
+```
+
 ### `turbovec.allowlist`
 
 ```sql

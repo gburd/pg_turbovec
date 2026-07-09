@@ -4,6 +4,58 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.25.0] — 2026-07-09
+
+**Gap-B fix: `turbovec.hi_dim_rerank`, a dimension-aware exact-L2
+rerank-window widening that recovers high-dimensional recall.** Minor
+bump (one new GUC, additive). **No wire-format change** (stays v6,
+byte-identical to v1.24.0), no new operators/types/functions, **no
+REINDEX**.
+
+An offline investigation (an internal design note,
+using FAISS's trusted quantizers as measurement vehicles) established
+that the high-dim recall gap — e.g. GIST-1M/960d capping ~0.86 where
+pgvector HNSW and VectorChord reach 0.95-0.98 — is **NOT retrieval-
+bound**. The true nearest neighbours DO land in the probed IVF cells
+(measured cell recall 0.978 at probes=64, 0.996 at probes=128). The
+real bottleneck is **in-cell quantized ranking**: at high dim the
+lossy 4-bit score is noisy enough that a true neighbour often sits at
+rank ~200-800 *within* the probed cells, below a small `search_k`, so
+it never enters the exact-L2 reorder recheck. This corrects the prior
+"retrieval-recall ceiling" framing in
+an internal design note (corrections noted
+in-place).
+
+The cure is scan-side only: fetch a **wider candidate set** so the
+always-on exact-L2 reorder queue (`xs_recheckorderby`) re-ranks enough
+survivors to recover the true top-k. Measured: an SQ4 analog of
+TurboQuant's per-coordinate scalar quant lifts R@10 from 0.666 to
+**0.978** at 960-dim by reranking ~800 candidates instead of ~64.
+
+This must not blanket-widen: at low dim recall already plateaus by
+`search_k≈25`, so widening there is pure latency tax. Hence a
+**dimension-aware floor**. `turbovec.hi_dim_rerank`:
+- `auto` (default): apply a candidate floor of `clamp(dim, 256..=1024)`
+  **only** for indexes with `dim >= 256`, and only ever RAISE the
+  count — an explicit `search_k`/`oversample` override past the floor
+  always wins. SIFT-128 is untouched (zero latency cost); GIST-960,
+  OpenAI-1536, and the 512-768d embedding families get the wider
+  window out of the box.
+- `on`: apply the floor regardless of dim.
+- `off`: honour `search_k`/`oversample` exactly (pre-1.25.0 behaviour).
+
+The result set is identical to setting `search_k`/`oversample` by hand
+to the same candidate count — this is a smarter default, not a new
+mechanism. Verified end-to-end by the `hi_dim_rerank_raises_high_dim_recall`
+`#[pg_test]` (384-dim corpus: `auto` measurably beats `off`, never
+regresses any query) plus the `hi_dim_rerank_tests` unit tests on the
+dim-scaling decision function.
+
+**Migration:** `ALTER EXTENSION pg_turbovec UPDATE TO '1.25.0';`. No
+REINDEX. The new `auto` default improves high-dim recall out of the
+box at a small high-dim-only latency cost; `SET turbovec.hi_dim_rerank
+= off` restores exact pre-1.25.0 scan-candidate behaviour.
+
 ## [1.24.0] — 2026-07-08
 
 **Phase G-2b: VACUUM + incremental INSERT for the graph index kind.**

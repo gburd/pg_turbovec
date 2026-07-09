@@ -21,6 +21,7 @@
 //! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
 //! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
 //! | `turbovec.coarse_graph`          | enum | auto    | off, auto, on  |
+//! | `turbovec.hi_dim_rerank`         | enum | auto    | off, auto, on  |
 //! | `turbovec.allowlist`             | str  | `""`    | CSV of bigint ids |
 
 use core::ffi::CStr;
@@ -143,6 +144,90 @@ pub enum CoarseGraphMode {
 
 pub static COARSE_GRAPH: GucSetting<CoarseGraphMode> =
     GucSetting::<CoarseGraphMode>::new(CoarseGraphMode::Auto);
+
+/// High-dimension automatic rerank-window widening (Phase Gap-B fix).
+///
+/// The offline Gap-B investigation
+/// (an internal design note) established that the
+/// high-dimensional recall gap (e.g. GIST-1M/960d capping ~0.86) is
+/// NOT retrieval-bound (the true NNs land in the probed cells) but
+/// **in-cell quantized-ranking-bound**: at high dim the lossy 4-bit
+/// quantized score is noisy enough that a true neighbour often sits at
+/// rank ~200-800 *within* the probed cells, below a small `search_k`.
+/// The cure is purely scan-side: fetch a WIDER candidate set so the
+/// exact-L2 reorder-queue recheck (`xs_recheckorderby`) can pull it
+/// back — measured to lift an SQ4 analog from R@10=0.666 to 0.978 at
+/// 960-dim by reranking ~800 candidates instead of ~64.
+///
+/// This must NOT blanket-raise the candidate count: at low dim recall
+/// already plateaus by `search_k≈25` (see the search_k default's doc
+/// and `benches/results/searchk_recall_frontier_*.json`), so widening
+/// there is pure latency tax for zero recall. Hence a DIM-AWARE floor,
+/// applied only when the user has left `search_k`/`oversample` at
+/// their defaults (an explicit user override always wins).
+///
+/// `auto` (default): apply the dim-scaled floor for high-dim indexes
+/// only. `on`: always apply it. `off`: never (pre-fix behaviour —
+/// the user tunes `search_k`/`oversample` by hand). No wire-format
+/// change, no REINDEX; a scan-side GUC only.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
+pub enum HiDimRerankMode {
+    /// Never auto-widen; honour `search_k`/`oversample` exactly.
+    #[name = c"off"]
+    Off,
+    /// Auto-widen for high-dim indexes only, and only when the user
+    /// left `search_k`/`oversample` at their defaults (the default).
+    #[name = c"auto"]
+    Auto,
+    /// Always apply the dim-scaled floor, regardless of dim.
+    #[name = c"on"]
+    On,
+}
+
+pub static HI_DIM_RERANK: GucSetting<HiDimRerankMode> =
+    GucSetting::<HiDimRerankMode>::new(HiDimRerankMode::Auto);
+
+/// Dimension at/above which `auto` mode starts widening the candidate
+/// window. Below this the search_k recall plateau holds and widening
+/// is pure latency tax; at/above it the in-cell quantized-ranking
+/// noise (Gap-B) makes a wider exact-L2 recheck worthwhile. 256 is a
+/// conservative floor: SIFT-128 stays untouched; GIST-960, OpenAI-
+/// 1536, and the 512/768-d embedding families get the wider window.
+pub const HI_DIM_RERANK_MIN_DIM: usize = 256;
+
+/// The dim-scaled candidate-count floor `auto`/`on` enforce, grounded
+/// in the Gap-B measurement (~800 candidates ≈ full recovery at
+/// 960-d). Scales linearly with dim past the threshold and is capped
+/// so it never explodes: `floor = clamp(dim, 256..=1024)` candidates.
+/// A dim=960 index floors at 960; a dim=1536 index caps at 1024
+/// (past which the recheck cost outweighs the marginal recall on the
+/// measured curve). Returns the candidate count the scan should use,
+/// given the user's own `k_pref`/`oversample` (their override always
+/// wins — the floor only ever RAISES the count, never lowers it).
+pub fn hi_dim_rerank_candidate_count(
+    mode: HiDimRerankMode,
+    dim: usize,
+    user_k: usize,
+    user_oversample: f64,
+) -> usize {
+    let user_count = (user_k as f64 * user_oversample).ceil() as usize;
+    let apply = match mode {
+        HiDimRerankMode::Off => false,
+        HiDimRerankMode::On => true,
+        HiDimRerankMode::Auto => {
+            // Auto: only for high-dim, AND only if the user hasn't
+            // already asked for a wider window than the floor would
+            // give (defaults are search_k=32, oversample=1.0 =>
+            // user_count=32; any hand-raise past the floor wins).
+            dim >= HI_DIM_RERANK_MIN_DIM
+        }
+    };
+    if !apply {
+        return user_count;
+    }
+    let floor = dim.clamp(HI_DIM_RERANK_MIN_DIM, 1024);
+    user_count.max(floor)
+}
 
 /// Decide whether coarse-cell selection should build/use the
 /// [`crate::index::ivf::CentroidGraph`] for an index with `lists`
@@ -542,6 +627,17 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_enum_guc(
+        c_str(b"turbovec.hi_dim_rerank\0"),
+        c_str(b"Auto-widen the exact-L2 rerank candidate window for high-dimension indexes (off | auto | on; default auto).\0"),
+        c_str(
+            b"Gap-B fix. At high dimension the lossy quantized score is noisy enough that a true nearest neighbour often sits at rank ~200-800 WITHIN the probed cells, below a small search_k -- so end-to-end recall caps well below the retrieval ceiling (e.g. GIST-1M/960d ~0.86). This is an in-cell quantized-RANKING loss, NOT a retrieval one (the true NNs ARE in the probed cells; measured cell recall 0.98-0.996 at probes 64-128). The cure is scan-side only: fetch a WIDER candidate set so the executor's exact-L2 reorder-queue recheck (xs_recheckorderby) re-ranks enough survivors to recover the true top-k -- measured to lift an SQ4 analog from R@10=0.666 to 0.978 at 960-dim by reranking ~800 candidates. This must not blanket-widen: at low dim recall already plateaus by search_k~=25, so widening there is pure latency tax. auto (the default) therefore applies a DIM-SCALED candidate floor (clamp(dim, 256..=1024)) ONLY for indexes with dim >= 256, and only ever RAISES the count -- an explicit search_k/oversample override past the floor always wins. on applies the floor regardless of dim; off honours search_k/oversample exactly (pre-fix behaviour). No wire-format change, no REINDEX; identical result set to setting search_k/oversample by hand to the same candidate count. See an internal design note.\0",
+        ),
+        &HI_DIM_RERANK,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     // REMOVED (v1.22.0): `turbovec.mmap_static_blocked` was a
     // deprecated no-op since v1.19.0 (pg_turbovec stopped mmapping
     // the relfile that release) and has now been removed per the
@@ -681,5 +777,102 @@ mod coarse_graph_tests {
             CoarseGraphMode::Auto,
             GRAPH_MIN_LISTS + 1
         ));
+    }
+}
+
+#[cfg(test)]
+mod hi_dim_rerank_tests {
+    use super::{hi_dim_rerank_candidate_count, HiDimRerankMode, HI_DIM_RERANK_MIN_DIM};
+
+    /// off honours the user's search_k*oversample exactly, at any dim.
+    #[test]
+    fn off_never_widens() {
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 32, 1.0),
+            32
+        );
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 960, 32, 1.0),
+            32
+        );
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 1536, 32, 1.0),
+            32
+        );
+    }
+
+    /// auto leaves low-dim untouched (below the threshold the recall
+    /// plateau holds, widening is pure latency tax).
+    #[test]
+    fn auto_does_not_touch_low_dim() {
+        // dim just below the threshold -> user's 32 unchanged.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(
+                HiDimRerankMode::Auto,
+                HI_DIM_RERANK_MIN_DIM - 1,
+                32,
+                1.0
+            ),
+            32
+        );
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 32, 1.0),
+            32
+        );
+    }
+
+    /// auto floors the candidate count at clamp(dim, 256..=1024) for
+    /// high-dim indexes, grounded in the Gap-B ~800-candidate recovery.
+    #[test]
+    fn auto_floors_high_dim_at_dim_scaled_window() {
+        // dim exactly at threshold -> floor = 256.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, HI_DIM_RERANK_MIN_DIM, 32, 1.0),
+            HI_DIM_RERANK_MIN_DIM
+        );
+        // GIST-960 -> floor 960.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 32, 1.0),
+            960
+        );
+        // OpenAI-1536 -> capped at 1024 (past which the recheck cost
+        // outweighs the marginal recall on the measured curve).
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 32, 1.0),
+            1024
+        );
+    }
+
+    /// The floor only ever RAISES the count: an explicit user override
+    /// past the floor always wins (search_k or oversample).
+    #[test]
+    fn user_override_past_floor_wins() {
+        // user asks for 2000 via search_k on a 960-d index: floor 960
+        // does not lower it.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2000, 1.0),
+            2000
+        );
+        // user asks for 1000 via oversample (search_k=32, os=32 ->
+        // 1024) on a 960-d index: 1024 > 960, user wins.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 32, 32.0),
+            1024
+        );
+        // below the floor, the floor wins (that's the whole point).
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 10, 1.0),
+            960
+        );
+    }
+
+    /// on applies the floor regardless of dim (even low dim).
+    #[test]
+    fn on_floors_regardless_of_dim() {
+        // low dim under `on` -> floored at 256 (the min clamp).
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::On, 64, 32, 1.0),
+            256
+        );
     }
 }

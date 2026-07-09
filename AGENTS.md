@@ -85,14 +85,29 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.24.0, 2026-07-08)
+### Current (as of v1.25.0, 2026-07-09)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.24.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.24.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.24.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.23.x     | 1.24.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.25.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.25.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.25.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.24.x     | 1.25.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.25.0 adds `turbovec.hi_dim_rerank`** (enum off/auto/on, default
+auto) — the Gap-B fix. An offline investigation
+(an internal design note) established the
+high-dim recall gap (GIST-1M/960d ~0.86) is NOT retrieval-bound (the
+true NNs DO land in the probed cells — cell recall 0.98-0.996 at
+probes 64-128) but an in-cell quantized-RANKING loss, curable
+scan-side by a wider exact-L2 rerank window (measured: an SQ4 analog
+goes R@10 0.666→0.978 at 960d by reranking ~800 vs ~64 candidates).
+`auto` applies a `clamp(dim, 256..=1024)` candidate floor only for
+`dim >= 256` (SIFT-128 untouched; explicit `search_k`/`oversample`
+override wins), so it's a smarter default, not a new mechanism
+— identical result set to setting the candidate count by hand. One
+new GUC, additive; no wire change (v6), no REINDEX. This also
+CORRECTS the earlier "retrieval-recall ceiling" root-cause claim.
 
 **v1.24.0 adds VACUUM + incremental INSERT for the graph kind**
 (Phase G-2b). Both previously raised a clear `ERROR` (v1.23.0 was

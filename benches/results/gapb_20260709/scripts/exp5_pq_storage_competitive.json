@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "corpus": 1000000,
+    "n_query": 1000,
+    "K": 10,
+    "dim": 960,
+    "lists": 1000,
+    "gt": "published-exact-L2-1M",
+    "faiss": "1.14.3",
+    "note": "PQ at storage-competitive m (36/68 B/vec) + exact-L2 rerank; bytes/vec = m for PQ-256 (1 byte/subq)."
+  },
+  "indexes": {
+    "IVFPQ32": {
+      "bytes_per_vec_approx": 36,
+      "raw": {
+        "64": {
+          "recall": 0.2672,
+          "ms": 0.382
+        },
+        "128": {
+          "recall": 0.2671,
+          "ms": 0.679
+        }
+      },
+      "exact_rerank": {
+        "p128_sk200": {
+          "recall": 0.8056,
+          "ms": 0.973
+        },
+        "p128_sk800": {
+          "recall": 0.9503,
+          "ms": 1.693
+        }
+      }
+    },
+    "IVFPQ64": {
+      "bytes_per_vec_approx": 68,
+      "raw": {
+        "64": {
+          "recall": 0.3721,
+          "ms": 0.705
+        },
+        "128": {
+          "recall": 0.3728,
+          "ms": 1.299
+        }
+      },
+      "exact_rerank": {
+        "p128_sk200": {
+          "recall": 0.911,
+          "ms": 1.562
+        },
+        "p128_sk800": {
+          "recall": 0.9838,
+          "ms": 2.262
+        }
+      }
+    }
+  }
+}

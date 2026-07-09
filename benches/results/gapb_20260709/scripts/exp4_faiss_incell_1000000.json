@@ -1,0 +1,152 @@
+{
+  "meta": {
+    "corpus": 1000000,
+    "n_query": 1000,
+    "K": 10,
+    "dim": 960,
+    "lists": 1000,
+    "probes": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "gt": "published-exact-L2-1M",
+    "faiss": "1.14.3",
+    "shared_coarse_quantizer": true
+  },
+  "indexes": {
+    "IVFFlat": {
+      "per_probe": {
+        "16": {
+          "recall": 0.7961,
+          "ms_per_query": 2.158
+        },
+        "32": {
+          "recall": 0.9041,
+          "ms_per_query": 4.518
+        },
+        "64": {
+          "recall": 0.9687,
+          "ms_per_query": 8.514
+        },
+        "128": {
+          "recall": 0.9941,
+          "ms_per_query": 16.155
+        }
+      }
+    },
+    "IVFSQ4": {
+      "per_probe": {
+        "16": {
+          "recall": 0.5865,
+          "ms_per_query": 1.641
+        },
+        "32": {
+          "recall": 0.6372,
+          "ms_per_query": 3.022
+        },
+        "64": {
+          "recall": 0.6602,
+          "ms_per_query": 6.107
+        },
+        "128": {
+          "recall": 0.6655,
+          "ms_per_query": 11.643
+        }
+      }
+    },
+    "IVFSQ8": {
+      "per_probe": {
+        "16": {
+          "recall": 0.7889,
+          "ms_per_query": 1.205
+        },
+        "32": {
+          "recall": 0.8924,
+          "ms_per_query": 2.347
+        },
+        "64": {
+          "recall": 0.9511,
+          "ms_per_query": 4.446
+        },
+        "128": {
+          "recall": 0.9733,
+          "ms_per_query": 8.499
+        }
+      }
+    },
+    "IVFPQ480": {
+      "per_probe": {
+        "16": {
+          "recall": 0.7671,
+          "ms_per_query": 2.155
+        },
+        "32": {
+          "recall": 0.8531,
+          "ms_per_query": 4.271
+        },
+        "64": {
+          "recall": 0.8989,
+          "ms_per_query": 7.294
+        },
+        "128": {
+          "recall": 0.9136,
+          "ms_per_query": 14.873
+        }
+      }
+    },
+    "IVFSQ4_exact_rerank": {
+      "per_config": {
+        "p64_sk64": {
+          "recall": 0.9306,
+          "ms_per_query": 6.08
+        },
+        "p64_sk200": {
+          "recall": 0.9461,
+          "ms_per_query": 6.255
+        },
+        "p64_sk800": {
+          "recall": 0.9532,
+          "ms_per_query": 7.153
+        },
+        "p128_sk64": {
+          "recall": 0.9556,
+          "ms_per_query": 11.856
+        },
+        "p128_sk200": {
+          "recall": 0.9714,
+          "ms_per_query": 11.899
+        },
+        "p128_sk800": {
+          "recall": 0.9785,
+          "ms_per_query": 12.898
+        }
+      }
+    },
+    "HNSW_M32": {
+      "per_ef": {
+        "40": {
+          "recall": 0.7258,
+          "ms_per_query": 0.165
+        },
+        "80": {
+          "recall": 0.8293,
+          "ms_per_query": 0.292
+        },
+        "120": {
+          "recall": 0.8817,
+          "ms_per_query": 0.402
+        },
+        "200": {
+          "recall": 0.9271,
+          "ms_per_query": 0.699
+        },
+        "400": {
+          "recall": 0.9682,
+          "ms_per_query": 1.354
+        }
+      }
+    }
+  }
+}

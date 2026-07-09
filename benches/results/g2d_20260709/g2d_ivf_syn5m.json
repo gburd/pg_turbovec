@@ -1,0 +1,32 @@
+[
+  {
+    "engine": "ivf",
+    "lists": 2236,
+    "probes": 16,
+    "search_k": 32,
+    "build_s": 3565.72,
+    "idx_bytes": 3945611264,
+    "idx_total_bytes": 3945611264,
+    "p50": 120.335,
+    "p95": 134.369,
+    "mean": 121.454,
+    "qps_1conn": 8.234,
+    "recall": 0.2732,
+    "load": "3.69"
+  },
+  {
+    "engine": "ivf",
+    "lists": 2236,
+    "probes": 16,
+    "search_k": 64,
+    "build_s": 3565.72,
+    "idx_bytes": 3945611264,
+    "idx_total_bytes": 3945611264,
+    "p50": 120.85,
+    "p95": 134.789,
+    "mean": 122.286,
+    "qps_1conn": 8.178,
+    "recall": 0.4066,
+    "load": "3.62"
+  }
+]

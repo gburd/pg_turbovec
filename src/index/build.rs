@@ -1240,8 +1240,22 @@ unsafe fn graph_build_and_write(
     // Build the Vamana adjacency over the SAME resident buffer, in
     // the raw L2-normalised vector space (see the module doc on
     // `graph.rs` for why no rotation is needed here, unlike IVF).
-    let (adjacency, entry_point) =
-        super::build_pool::install(build_pool, || graph::build_vamana(&flat, n_vectors, dim));
+    // Phase G-2d(a): pick the single-pass or the partitioned/merge
+    // parallel build from `turbovec.graph_build_partitions` (auto
+    // derives P from the corpus size + build-pool budget). Both emit
+    // the identical on-disk CSR shape (no wire change); the
+    // partitioned build is what lets the graph kind scale to millions
+    // of rows (the single-pass build is inherently serial — see
+    // an internal design note).
+    let partitions =
+        crate::guc::graph_build_partitions(n_vectors, super::build_pool::resolve_pool_size());
+    let (adjacency, entry_point) = super::build_pool::install(build_pool, || {
+        if partitions <= 1 {
+            graph::build_vamana(&flat, n_vectors, dim)
+        } else {
+            graph::build_vamana_partitioned(&flat, n_vectors, dim, partitions)
+        }
+    });
     drop(flat);
 
     super::build_pool::install(build_pool, || idx.prepare_eager());

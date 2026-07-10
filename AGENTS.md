@@ -85,14 +85,25 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.25.1, 2026-07-09)
+### Current (as of v1.26.0, 2026-07-10)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.25.1   | `REINDEX INDEX` once |
-| 1.2.x              | 1.25.1   | `REINDEX INDEX` once |
-| 1.3.x              | 1.25.1   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.25.0     | 1.25.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.26.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.26.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.26.0   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.25.x     | 1.26.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.26.0 (Phase G-2d(a)) adds a partitioned/merge PARALLEL build for
+the graph kind** so it scales past the single-pass serial ceiling
+(which didn't complete at 5M). Partition into P shards → build each in
+parallel → stitch via a parallel cross-shard refinement + reverse-edge
+pass. New GUC `turbovec.graph_build_partitions` (int, default auto).
+**No wire change** (identical v6 CSR), no REINDEX — only changes how
+NEW graph indexes are built. Verified: recall parity (partitioned
+MATCHES/BEATS single-pass, 0.958→0.996 R@10 findable regime), ~8×
+build speedup (P=16, 200k, 8-core), bit-identical determinism across
+(corpus, seed, P) and pool sizes. Unblocks the 5M/10M a cloud VM gate re-run.
 
 **v1.25.1 is a release-tooling + docs/benchmark patch** — no shippable
 code change (binary byte-identical to v1.25.0; no wire/SQL change, no

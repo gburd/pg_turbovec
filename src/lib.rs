@@ -2764,6 +2764,129 @@ mod tests {
         );
     }
 
+    /// Phase G-2d(a): a `WITH (graph = true)` build with
+    /// `turbovec.graph_build_partitions` forcing the PARTITIONED build
+    /// path must produce a valid v6 KIND_GRAPH index (same on-disk
+    /// shape — no wire change) and meet the same recall floor the
+    /// single-pass build does. Corpus is sized above
+    /// `2 * GRAPH_MIN_SHARD_ROWS` so the forced shard count survives
+    /// the too-small-to-shard cap and the partitioned code path is
+    /// genuinely exercised end-to-end (build.rs -> guc decision ->
+    /// graph::build_vamana_partitioned).
+    #[pg_test]
+    fn graph_index_partitioned_build_recall_floor() {
+        use_turbovec();
+        let n_rows = 5000;
+        let dim = 16;
+
+        Spi::run("CREATE TABLE t_gpart (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("SELECT setseed(0.29)").unwrap();
+        // Correlated inner generate_series (per AGENTS.md: an
+        // uncorrelated random() subquery gets hoisted and makes every
+        // row identical).
+        Spi::run(&format!(
+            "INSERT INTO t_gpart \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
+        .unwrap();
+
+        Spi::run("CREATE TEMP TABLE q_gpart (qid int PRIMARY KEY, q vector)").unwrap();
+        Spi::run("SELECT setseed(0.83)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO q_gpart \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, 12) AS g"
+        ))
+        .unwrap();
+
+        // Force the partitioned build: 2 shards (n=5000 >
+        // 2*GRAPH_MIN_SHARD_ROWS=4000, and n/GRAPH_MIN_SHARD_ROWS=2
+        // so P=2 survives the too-small cap).
+        Spi::run("SET turbovec.graph_build_partitions = 2").unwrap();
+        Spi::run(
+            "CREATE INDEX t_gpart_idx ON t_gpart USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true)",
+        )
+        .unwrap();
+        Spi::run("RESET turbovec.graph_build_partitions").unwrap();
+        Spi::run("ANALYZE t_gpart").unwrap();
+
+        // Same wire-format assertion: the partitioned build emits the
+        // IDENTICAL v6 KIND_GRAPH shape (no wire change).
+        {
+            let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_gpart_idx'::regclass::oid")
+                .unwrap()
+                .expect("index oid");
+            use crate::index::relfile;
+            unsafe {
+                let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+                let m = relfile::read_meta(rel).expect("meta must exist after build");
+                pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+                assert_eq!(
+                    m.version, 6,
+                    "partitioned graph index must still be wire version 6 (no wire change)"
+                );
+                assert!(
+                    m.is_graph(),
+                    "partitioned graph index must have kind = KIND_GRAPH"
+                );
+                assert!(
+                    m.has_graph(),
+                    "partitioned graph index must have a persisted adjacency chain"
+                );
+                assert!(!m.has_ivf(), "a graph index must never be IVF-backed");
+                assert_eq!(m.n_vectors, n_rows as u64);
+            }
+        }
+
+        let qids: Vec<i64> = fetch_ids("SELECT qid FROM q_gpart ORDER BY qid");
+        assert_eq!(qids.len(), 12);
+
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for qid in &qids {
+            Spi::run("SET enable_indexscan = off").unwrap();
+            Spi::run("SET enable_indexonlyscan = off").unwrap();
+            Spi::run("SET enable_seqscan = on").unwrap();
+            let gt = fetch_ids(&format!(
+                "SELECT t.id FROM t_gpart t, (SELECT q FROM q_gpart WHERE qid = {qid}) qq \
+                 ORDER BY t.emb <=> qq.q LIMIT 10"
+            ));
+            assert_eq!(gt.len(), 10, "GT top-10 must return 10 rows");
+            assert_distinct_ids(&gt);
+
+            Spi::run("SET enable_seqscan = off").unwrap();
+            Spi::run("SET enable_indexscan = on").unwrap();
+            Spi::run("SET enable_indexonlyscan = on").unwrap();
+            Spi::run("SET turbovec.search_k = 40").unwrap();
+            let idx = fetch_ids(&format!(
+                "SELECT t.id FROM t_gpart t, (SELECT q FROM q_gpart WHERE qid = {qid}) qq \
+                 ORDER BY t.emb <=> qq.q LIMIT 10"
+            ));
+            assert_eq!(idx.len(), 10, "index top-10 must return 10 rows");
+            assert_distinct_ids(&idx);
+
+            use std::collections::HashSet;
+            let gt_set: HashSet<i64> = gt.iter().copied().collect();
+            hits += idx.iter().filter(|id| gt_set.contains(id)).count();
+            total += 10;
+        }
+
+        let recall = hits as f64 / total as f64;
+        eprintln!("partitioned graph index recall-floor: {n_rows}x{dim} recall@10 = {recall:.3}");
+        assert!(
+            recall >= 0.7,
+            "partitioned graph index recall@10 = {recall:.3} fell below the 0.7 floor"
+        );
+    }
+
     /// A 0-row `WITH (graph = true)` build must not panic and must
     /// leave a scannable (empty-result) index behind.
     #[pg_test]
@@ -5313,7 +5436,7 @@ mod tests {
             "1.7.1", "1.7.2", "1.7.3", "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0",
             "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
-            "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1",
+            "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

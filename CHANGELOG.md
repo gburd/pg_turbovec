@@ -4,6 +4,57 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.26.0] — 2026-07-10
+
+**Phase G-2d(a): a partitioned/merge parallel build for the graph index
+kind, so it scales past the single-pass build's serial ceiling.** Minor
+bump (new GUC `turbovec.graph_build_partitions`, new build path,
+additive). **NO wire-format change** (stays v6, byte-identical on-disk
+CSR), no new operators/types/functions, **no REINDEX**.
+
+The single-pass Vamana build is serial by necessity (each insertion
+navigates the graph every prior insertion left; G-2c showed
+thread-parallelizing it doesn't amortize) and did not complete at 5M
+rows (>2h26m, an internal design note). This adds a
+structurally-parallel build: **partition** the corpus into P shards
+(contiguous ranges of the deterministic shuffled insertion order —
+each shard a uniform random sample), **build each shard's sub-graph in
+parallel** across the bounded rayon pool, then **stitch** via a
+parallel cross-shard refinement pass (greedy-search the merged graph
+from a global medoid entry + RobustPrune per node) and a deterministic
+parallel reverse-edge pass. No explicit persisted bridge edges are
+needed — the refinement pass creates cross-shard navigability, so the
+frozen v6 CSR is sufficient.
+
+**Measured (verified, not just claimed):**
+- **Recall parity — partitioned MATCHES or BEATS single-pass.** In a
+  findable high-recall regime (queries drawn from the corpus,
+  20k×64): single-pass R@10=0.958, partitioned (P=8) **R@10=0.996**
+  (+0.038). In a cross-cluster regime: 0.630 → 0.754 (+0.124). The
+  refinement pass's greedy search over the merged graph surfaces
+  better cross-shard neighbours than incremental insertion, so the
+  partitioned graph is HIGHER quality, not a speed-for-recall trade.
+- **~8× parallel build speedup** (relative serial-vs-partitioned
+  wall-clock, 8-core AVX2 box, 200k×64): P=16 ≈ 7.99×, P=8 ≈ 6.45×.
+  Both the per-shard builds and the refinement/reverse passes
+  parallelize — unlike the single-pass build.
+- **Deterministic**: bit-identical for a fixed (corpus, seed, P) AND
+  across rayon pool sizes {1, 2, auto} (partition is a pure function
+  of the seed; every parallel stage uses an index-ordered collect /
+  staged fixed-id writes).
+
+**`turbovec.graph_build_partitions`** (int, default `auto`): `auto`
+derives P from corpus size + build-pool budget (single-pass below a
+size threshold); `0`/`1` forces the single-pass reference build; `N`
+forces N shards. The single-pass `build_vamana` is retained intact
+(all its tests pass) and is what `P<=1` runs — verified identical.
+
+**Migration:** `ALTER EXTENSION pg_turbovec UPDATE TO '1.26.0';`. No
+REINDEX — existing v6 graph indexes are unaffected; the parallel build
+only changes how NEW `WITH (graph = true)` indexes are constructed, to
+the identical on-disk shape. The 5M/10M a cloud VM gate re-run (now that the
+build completes at scale) is the follow-up this unblocks.
+
 ## [1.25.1] — 2026-07-09
 
 **Release-tooling + docs/benchmark patch. No shippable code change —

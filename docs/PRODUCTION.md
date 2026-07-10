@@ -280,6 +280,37 @@ SET turbovec.oversample = 1.0;  -- 1.0 .. 100.0
 SET turbovec.hi_dim_rerank = auto;  -- off | auto | on
 ```
 
+### `turbovec.graph_build_partitions`
+
+```sql
+-- Phase G-2d(a) (v1.26.0). Build-time knob for the graph index kind
+-- (WITH (graph = true)) ONLY. The single-pass Vamana build is serial
+-- by necessity (each insertion navigates the graph every prior
+-- insertion left) and does not complete in a usable time at millions
+-- of rows. The partitioned build splits the corpus into P shards,
+-- builds each shard's sub-graph IN PARALLEL across the build pool,
+-- then stitches them with a parallel cross-shard refinement pass --
+-- ~8x faster (P=16, 200k rows, 8-core) and, because the refinement
+-- pass's greedy search over the merged graph surfaces better
+-- cross-shard neighbours than incremental insertion, it MATCHES or
+-- BEATS the single-pass build's recall (0.958 -> 0.996 R@10 in a
+-- findable regime), not a speed-for-recall trade.
+--
+-- It emits the IDENTICAL on-disk CSR shape a single-pass build does:
+-- no wire-format change, no REINDEX, and it only affects how NEW
+-- graph indexes are built (existing ones are untouched). Bit-identical
+-- for a fixed (corpus, seed, P) and across build-pool sizes.
+--
+--   auto (default) -- derive P from corpus size + build-pool budget
+--                     (single-pass below a size threshold where the
+--                     serial build is already fast enough).
+--   0 or 1         -- force the single-pass reference build.
+--   N (>= 2)       -- force N shards (capped by corpus size).
+-- Composes with turbovec.build_parallelism (the pool size the shards
+-- and the refinement pass fan across).
+SET turbovec.graph_build_partitions = 0;  -- 0=auto | 1=single-pass | N=shards
+```
+
 ### `turbovec.allowlist`
 
 ```sql

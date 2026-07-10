@@ -428,6 +428,38 @@ layout is sketched in [`src/index/page.rs`](../src/index/page.rs);
 the v0.4..v1.2 side-table layout shown below is preserved here as
 historical context only.
 
+#### On-disk per-vector byte formula (Phase Q-0, wire v7)
+
+Through wire v6, the relfile persisted each vector's quantized codes
+**twice**: the row-major bit-plane `packed_codes` chain AND the
+SIMD-`blocked` chain (`pack::repack(packed_codes, …)`). The blocked
+layout is a pure function of the packed codes, so **v1.27.0 (Phase
+Q-0) dropped the blocked chain from disk** and recomputes it once per
+backend at index-open (per-query latency unchanged; the recomputed
+layout is bit-identical to what used to be persisted). The dominant
+O(n) term is now stored ONCE:
+
+```text
+per-vector on-disk bytes ≈ dim/8 * bit_width   (codes, ONCE — was ×2 pre-v7)
+                         + 4                    (per-vector f32 scale)
+                         + 8                    (slot→id u64)
+```
+
+plus O(1) fixed overhead (meta page, rotation matrix `dim*dim*4`,
+inline codebook). At scale the codes term dominates, so dropping the
+second copy roughly HALVES the index. Worked examples (100M vectors,
+codes term only):
+
+| dim / bits | codes/vec | pre-v7 (×2) | v7 (×1) |
+|---|---|---|---|
+| 768 / 2-bit | 192 B | 39.6 GB | **19.8 GB** |
+| 768 / 4-bit | 384 B | 78 GB | **39.6 GB** (now fits 40 GB) |
+| 1536 / 2-bit | 384 B | 78 GB | **39.6 GB** (now fits 40 GB) |
+
+This cleared the storage blocker for the a large-index storage target target
+(an internal design note Requirement 1). See
+[`UPGRADING.md`](UPGRADING.md) — v7 is a wire bump, REINDEX required.
+
 ```sql
 -- Pre-Phase-Q (v1.0.x..v1.2.0); no longer used.
 CREATE TABLE turbovec.am_storage (
@@ -465,7 +497,7 @@ backend that only ever scans never pays it.
 
 | Callback              | Action                                                                 |
 |-----------------------|------------------------------------------------------------------------|
-| `ambuild`             | Heap-scan the column, normalise (if GUC on), build `IdMapIndex`, persist to the relfile via `relfile::write_full_with_prepared` (codes/scales/ids/blocked chains + meta page) |
+| `ambuild`             | Heap-scan the column, normalise (if GUC on), build `IdMapIndex`, persist to the relfile via `relfile::write_full_with_prepared` (codes/scales/ids chains + rotation + inline codebook + meta page; Phase Q-0 no longer persists the blocked chain — recomputed at open) |
 | `ambuildempty`        | INSERT empty payload row                                              |
 | `aminsert`            | Lazy-load `IdMapIndex` from relfile pages into cache, `add_with_ids`, mark dirty; `PreCommit` xact callback flushes via `relfile::write_full_with_prepared` once per transaction |
 | `ambeginscan`         | Resolve opclass strategy, attach query datum slot                      |

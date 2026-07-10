@@ -746,8 +746,6 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // index skip it forever.
         let rotation = idx.rotation();
         let prepared = relfile::PreparedParts {
-            blocked_codes: idx.blocked_codes(),
-            n_blocks: idx.n_blocks() as u32,
             centroids: idx.centroids(),
             boundaries: idx.boundaries(),
             rotation,
@@ -1120,8 +1118,6 @@ unsafe fn ivf_build_and_write(
     super::build_pool::install(build_pool, || idx.prepare_eager());
     let idx_rotation = idx.rotation();
     let prepared = relfile::PreparedParts {
-        blocked_codes: idx.blocked_codes(),
-        n_blocks: idx.n_blocks() as u32,
         centroids: idx.centroids(),
         boundaries: idx.boundaries(),
         rotation: idx_rotation,
@@ -1261,8 +1257,6 @@ unsafe fn graph_build_and_write(
     super::build_pool::install(build_pool, || idx.prepare_eager());
     let idx_rotation = idx.rotation();
     let prepared = relfile::PreparedParts {
-        blocked_codes: idx.blocked_codes(),
-        n_blocks: idx.n_blocks() as u32,
         centroids: idx.centroids(),
         boundaries: idx.boundaries(),
         rotation: idx_rotation,

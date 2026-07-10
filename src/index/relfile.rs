@@ -516,21 +516,20 @@ pub(crate) unsafe fn write_full(
     );
 }
 
-/// Prepared parts of an [`IdMapIndex`] required for Phase P /
-/// Phase R-2's blocked-layout + rotation persistence.
+/// Prepared parts of an [`IdMapIndex`] required for Phase R-2's
+/// persisted rotation + Lloyd-Max codebook.
 ///
-/// `blocked_codes.len()` must equal the byte length of the output
-/// of `pack::repack(packed_codes, n_vectors, bit_width, dim)`,
-/// `n_blocks` the matching block count, `centroids` /
-/// `boundaries` the Lloyd-Max codebook for `(bit_width, dim)`,
-/// and `rotation` the row-major `dim * dim` `f32` orthogonal
-/// rotation matrix produced by
-/// `turbovec::rotation::make_rotation_matrix(dim)`. All five
-/// come straight off `IdMapIndex` after a `prepare_eager()` +
-/// `rotation()` call.
+/// Phase Q-0 (v7) note: the SIMD-blocked chain is NO LONGER persisted
+/// — it's a pure function of the packed codes (`pack::repack`) and is
+/// recomputed once per backend at index-open (see
+/// `scan::install_whole_index`). So this struct no longer carries
+/// `blocked_codes` / `n_blocks`. `centroids` / `boundaries` are the
+/// Lloyd-Max codebook for `(bit_width, dim)`, and `rotation` the
+/// row-major `dim * dim` `f32` orthogonal rotation matrix produced by
+/// `turbovec::rotation::make_rotation_matrix(dim)`. All three come
+/// straight off `IdMapIndex` after a `prepare_eager()` + `rotation()`
+/// call.
 pub(crate) struct PreparedParts<'a> {
-    pub blocked_codes: &'a [u8],
-    pub n_blocks: u32,
     pub centroids: &'a [f32],
     pub boundaries: &'a [f32],
     pub rotation: &'a [f32],
@@ -883,21 +882,17 @@ pub(crate) unsafe fn write_blocked_phase_and_meta(
     layout: PackedPhaseLayout,
     prepared: Option<PreparedParts<'_>>,
 ) {
-    let (blocked_bytes, n_blocks_blocked, rotation_bytes) = match &prepared {
-        Some(p) => (
-            p.blocked_codes.len() as u64,
-            p.n_blocks,
-            std::mem::size_of_val(p.rotation) as u64,
-        ),
-        None => (0, 0, 0),
+    let (_n_blocks_blocked, rotation_bytes) = match &prepared {
+        Some(p) => (0u32, std::mem::size_of_val(p.rotation) as u64),
+        None => (0, 0),
     };
     let mut meta = MetaPageData::plan_with_blocked(
         layout.bit_width,
         layout.dim,
         layout.n_vectors,
         layout.am_version,
-        blocked_bytes,
-        n_blocks_blocked,
+        /* blocked_bytes = */ 0,
+        /* n_blocks_blocked = */ 0,
         rotation_bytes,
     );
     if let Some(p) = &prepared {
@@ -927,17 +922,8 @@ pub(crate) unsafe fn write_blocked_phase_and_meta(
 
     if layout.n_vectors > 0 {
         if let Some(p) = &prepared {
-            if !p.blocked_codes.is_empty() {
-                write_chain_at(
-                    rel,
-                    meta.blocked_first,
-                    p.blocked_codes,
-                    1,
-                    crate::index::page::PAYLOAD_BYTES as u32,
-                    p.blocked_codes.len() as u64,
-                );
-            }
-
+            // Phase Q-0 (v7): the SIMD-blocked chain is no longer
+            // persisted; only the rotation chain is written here.
             if !p.rotation.is_empty() {
                 let rotation_bytes_buf: &[u8] = std::slice::from_raw_parts(
                     p.rotation.as_ptr().cast::<u8>(),
@@ -998,21 +984,21 @@ unsafe fn write_full_inner(
     assert_eq!(slot_to_id.len() as u64, n_vectors);
     assert_eq!(scales.len() as u64, n_vectors);
 
-    let (blocked_bytes, n_blocks_blocked, rotation_bytes) = match &prepared {
-        Some(p) => (
-            p.blocked_codes.len() as u64,
-            p.n_blocks,
-            std::mem::size_of_val(p.rotation) as u64,
-        ),
-        None => (0, 0, 0),
+    // Phase Q-0 (v7): the SIMD-blocked chain is no longer persisted
+    // (it's recomputed from the packed codes at index-open), so we
+    // always plan a ZERO-length blocked chain regardless of
+    // `prepared`. The rotation chain IS still persisted.
+    let rotation_bytes = match &prepared {
+        Some(p) => std::mem::size_of_val(p.rotation) as u64,
+        None => 0,
     };
     let mut meta = MetaPageData::plan_with_blocked(
         bit_width,
         dim,
         n_vectors,
         am_version,
-        blocked_bytes,
-        n_blocks_blocked,
+        /* blocked_bytes = */ 0,
+        /* n_blocks_blocked = */ 0,
         rotation_bytes,
     );
     if let Some(p) = &prepared {
@@ -1106,29 +1092,20 @@ unsafe fn write_full_inner(
             n_vectors,
         );
 
-        // v2: prepared SIMD-blocked layout. Stored as a flat
-        // byte chain (stride = 1, rows_per_page = PAYLOAD_BYTES)
-        // since the blocked buffer doesn't have a meaningful
-        // per-row stride at this layer — the consumer
-        // (turbovec::search) treats it as opaque bytes.
+        // v3: persisted rotation matrix. Stored as a flat-byte
+        // chain (stride = 1, rows_per_page = PAYLOAD_BYTES). The
+        // consumer
+        // (`turbovec::IdMapIndex::from_id_map_parts_with_prepared`)
+        // pre-fills the rotation `OnceLock` from these bytes and
+        // skips the per-backend QR decomposition that dominates
+        // warm-scan latency at large dim.
+        //
+        // Phase Q-0 (v7): the SIMD-blocked chain is NO LONGER
+        // written here — it's recomputed from the packed codes at
+        // index-open via `pack::repack` (halving the on-disk
+        // footprint). Only the rotation + inline codebook are
+        // persisted alongside the row-major codes/scales/ids.
         if let Some(p) = &prepared {
-            if !p.blocked_codes.is_empty() {
-                write_chain_at(
-                    rel,
-                    meta.blocked_first,
-                    p.blocked_codes,
-                    1,
-                    crate::index::page::PAYLOAD_BYTES as u32,
-                    p.blocked_codes.len() as u64,
-                );
-            }
-
-            // v3: persisted rotation matrix. Same flat-byte
-            // chain shape as `blocked`. The consumer
-            // (`turbovec::IdMapIndex::from_id_map_parts_with_prepared`)
-            // pre-fills the rotation `OnceLock` from these bytes
-            // and skips the per-backend QR decomposition that
-            // dominates warm-scan latency at large dim.
             if !p.rotation.is_empty() {
                 let rotation_bytes_buf: &[u8] = std::slice::from_raw_parts(
                     p.rotation.as_ptr().cast::<u8>(),
@@ -1563,17 +1540,21 @@ pub(crate) unsafe fn read_full(
     (codes, scales, ids)
 }
 
-/// Read the prepared SIMD-blocked layout from the v2 chain.
-/// Returns the raw byte buffer; caller is expected to know
+/// Read the prepared SIMD-blocked layout from a pre-v7 blocked
+/// chain. Returns the raw byte buffer; caller is expected to know
 /// `n_blocks` from the meta page.
 ///
-/// Returns an empty vector for v1 indexes or empty v2 indexes
-/// (signalled by `meta.blocked_bytes == 0`); in either case the
-/// scan path falls back to per-backend `pack::repack`.
+/// Returns an empty vector when no blocked chain is present
+/// (signalled by `meta.blocked_bytes == 0`). Phase Q-0 (v7) NO
+/// LONGER persists the blocked chain — the install path recomputes
+/// it via `pack::repack` — so on a v7 index this always returns
+/// empty. Kept (`#[allow(dead_code)]`) for the pre-v7 round-trip
+/// tests and as documentation of the retired chain shape.
 ///
 /// # Safety
 ///
 /// Caller must hold a relation reference.
+#[allow(dead_code)]
 pub(crate) unsafe fn read_blocked(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<u8> {
     if meta.blocked_bytes == 0 || meta.blocked_first == 0 {
         return Vec::new();

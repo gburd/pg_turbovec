@@ -44,22 +44,15 @@ unsafe fn flush_to_relfile(
         idx.slot_to_id(),
         state.version as u32,
         {
-            // Pre-bake the SIMD-blocked layout and codebook so
-            // backends opening the post-commit relfile in the
-            // future don't pay the per-backend ~12–15 s
-            // `pack::repack` and ~5–8 s Lloyd-Max compute.
-            // Phase P; mirrors the ambuild path. Single-row
-            // aminserts pay this on every commit — in the
-            // existing rewrite-everything model that's an
-            // acceptable cost (we already rewrite all chains
-            // here), and the deferred-commit batching in
-            // cache.rs amortises it across all the rows in one
-            // transaction.
+            // Pre-bake the codebook + rotation so backends opening
+            // the post-commit relfile don't pay the per-backend
+            // ~5–8 s Lloyd-Max compute / QR. Phase P; mirrors the
+            // ambuild path. Phase Q-0 (v7) no longer persists the
+            // SIMD-blocked chain — it's recomputed from the packed
+            // codes at index-open — so we don't hand it over here.
             idx.prepare_eager();
             let rotation = idx.rotation();
             crate::index::relfile::PreparedParts {
-                blocked_codes: idx.blocked_codes(),
-                n_blocks: idx.n_blocks() as u32,
                 centroids: idx.centroids(),
                 boundaries: idx.boundaries(),
                 rotation,

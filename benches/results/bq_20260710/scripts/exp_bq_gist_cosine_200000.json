@@ -1,0 +1,55 @@
+{
+  "meta": {
+    "corpus": 200000,
+    "n_query": 1000,
+    "dim": 960,
+    "metric": "cosine (unit-normalized, pg_turbovec's metric)",
+    "gt": "self-computed exact cosine top100",
+    "bytes_per_vec_bq": 120,
+    "faiss": "1.14.3"
+  },
+  "binarizations": {
+    "rawsign": {
+      "ones_fraction": 0.9999,
+      "binary_flat_raw": {
+        "R@10": 0.0,
+        "R@100": 0.0004
+      },
+      "binary_flat_rerank": {
+        "sk200": {
+          "R@10": 0.0013,
+          "R@100": 0.0012
+        },
+        "sk800": {
+          "R@10": 0.0058,
+          "R@100": 0.0047
+        },
+        "sk2000": {
+          "R@10": 0.0126,
+          "R@100": 0.0119
+        }
+      }
+    },
+    "meancenter": {
+      "ones_fraction": 0.4207,
+      "binary_flat_raw": {
+        "R@10": 0.0783,
+        "R@100": 0.1157
+      },
+      "binary_flat_rerank": {
+        "sk200": {
+          "R@10": 0.3684,
+          "R@100": 0.1794
+        },
+        "sk800": {
+          "R@10": 0.6086,
+          "R@100": 0.3832
+        },
+        "sk2000": {
+          "R@10": 0.7759,
+          "R@100": 0.5704
+        }
+      }
+    }
+  }
+}

@@ -297,7 +297,14 @@ unsafe fn insert_graph_row(
         );
     }
     let stored_index: ReadOnlyIndex = if meta.has_prepared_layout() {
-        let blocked = relfile::read_blocked(index_relation, meta);
+        // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
+        // packed codes (no longer persisted on disk).
+        let (blocked, n_blocks) = turbovec::pack::repack(
+            &codes,
+            meta.n_vectors as usize,
+            meta.bit_width as usize,
+            dim,
+        );
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(index_relation, meta);
@@ -314,7 +321,7 @@ unsafe fn insert_graph_row(
             scales.clone(),
             ids.clone(),
             blocked,
-            meta.n_blocks_blocked as usize,
+            n_blocks,
             centroids,
             boundaries,
             rotation_opt,
@@ -397,8 +404,6 @@ unsafe fn insert_graph_row(
     idx.prepare_eager();
     let rotation = idx.rotation();
     let prepared = relfile::PreparedParts {
-        blocked_codes: idx.blocked_codes(),
-        n_blocks: idx.n_blocks() as u32,
         centroids: idx.centroids(),
         boundaries: idx.boundaries(),
         rotation,

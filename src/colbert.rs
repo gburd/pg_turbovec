@@ -440,7 +440,14 @@ unsafe fn load_persistent_colbert_inner(
     // simplest correct reuse and the cache keeps it warm across calls.
     let (codes, scales, ids) = relfile::read_full(index_rel, &meta);
     let stored = if meta.has_prepared_layout() {
-        let blocked = relfile::read_blocked(index_rel, &meta);
+        // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
+        // packed codes (no longer persisted on disk).
+        let (blocked, n_blocks) = turbovec::pack::repack(
+            &codes,
+            meta.n_vectors as usize,
+            meta.bit_width as usize,
+            meta.dim as usize,
+        );
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(index_rel, &meta);
@@ -457,7 +464,7 @@ unsafe fn load_persistent_colbert_inner(
             scales,
             ids,
             blocked,
-            meta.n_blocks_blocked as usize,
+            n_blocks,
             centroids,
             boundaries,
             rotation_opt,

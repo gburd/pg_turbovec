@@ -859,15 +859,18 @@ mod tests {
             assert!(
                 m.has_prepared_layout(),
                 "build must persist prepared layout: \
-                 blocked_bytes={}, codebook_n_levels={}, \
-                 rotation_count={}, version={}",
-                m.blocked_bytes,
+                 codebook_n_levels={}, rotation_count={}, version={}",
                 m.codebook_n_levels,
                 m.rotation_count,
                 m.version,
             );
-            assert!(m.blocked_bytes > 0, "blocked chain must be non-empty");
+            // Phase Q-0 (v7): the blocked chain is NO LONGER persisted
+            // (recomputed from packed codes at index-open). The
+            // rotation + codebook ARE still persisted.
+            assert_eq!(m.version, 7, "build must emit wire version 7");
+            assert_eq!(m.blocked_bytes, 0, "v7 must not persist a blocked chain");
             assert!(m.rotation_count > 0, "rotation chain must be non-empty");
+            assert!(m.codebook_n_levels > 0, "codebook must be persisted");
         }
     }
 
@@ -929,14 +932,15 @@ mod tests {
     /// `docs/UPGRADING.md` migration matrix.
     #[pg_test]
     fn wire_format_version_is_stable() {
-        // The version emitted by Phase G-2a (v6; Vamana graph index
-        // kind). Bump this only as part of a deliberate minor/major
-        // release with a migration story. NOTE: a single-vector index
-        // still emits wire version 4 bytes and a ColBERT index still
-        // emits wire version 5 bytes (the bump is additive per-kind);
-        // VERSION is the MAXIMUM wire version the binary writes,
-        // reached only by a graph index.
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 6;
+        // Phase Q-0 (v7): the codes-dedup change is NOT additive — a
+        // v7 relfile drops the SIMD-blocked chain and is not
+        // byte-compatible with any prior version for ANY kind. So
+        // EVERY kind (single-vector, ColBERT, graph) now emits wire
+        // version 7; the `kind` byte discriminates. VERSION is the
+        // single wire version the binary writes. Bump this only as
+        // part of a deliberate minor/major release with a migration
+        // story (this one requires REINDEX; see docs/UPGRADING.md).
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 7;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,
@@ -2709,7 +2713,7 @@ mod tests {
                 let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
                 let m = relfile::read_meta(rel).expect("meta must exist after build");
                 pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
-                assert_eq!(m.version, 6, "graph index must be wire version 6");
+                assert_eq!(m.version, 7, "graph index must be wire version 7");
                 assert!(m.is_graph(), "graph index must have kind = KIND_GRAPH");
                 assert!(
                     m.has_graph(),
@@ -2830,8 +2834,8 @@ mod tests {
                 let m = relfile::read_meta(rel).expect("meta must exist after build");
                 pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
                 assert_eq!(
-                    m.version, 6,
-                    "partitioned graph index must still be wire version 6 (no wire change)"
+                    m.version, 7,
+                    "partitioned graph index must be wire version 7"
                 );
                 assert!(
                     m.is_graph(),
@@ -4586,15 +4590,118 @@ mod tests {
         }
     }
 
-    /// Phase P: `ambuild` persists the prepared SIMD-blocked
-    /// layout and Lloyd-Max codebook into the relfile, so a
-    /// fresh backend opening the index reads them off disk
-    /// instead of recomputing them. We can't reach across
-    /// backends from inside a pgrx test, but we *can* verify
-    /// the on-disk meta page records the prepared layout and
-    /// that constructing an `IdMapIndex` via
-    /// `from_id_map_parts_with_prepared` matches the freshly-
-    /// built one bit-for-bit.
+    /// Phase Q-0: measure the on-disk storage reduction from dropping
+    /// the persisted SIMD-blocked chain. Builds a real index at a
+    /// representative dim/bit_width, reads the meta page, and
+    /// confirms (a) the blocked chain is NOT on disk (`blocked_bytes
+    /// == 0`) and (b) the would-be blocked chain (`pack::repack`
+    /// output) is comparable in size to the packed codes chain — i.e.
+    /// persisting it would have roughly DOUBLED the dominant O(n)
+    /// term. Reports the real `pg_relation_size` and the per-vector
+    /// byte accounting so the win is visible in the test log.
+    #[pg_test]
+    fn phase_q0_storage_is_deduplicated() {
+        use crate::index::page::MetaPageData;
+        use crate::index::relfile;
+        use_turbovec();
+
+        // 512 rows of 128-d vectors, 4-bit. 128/8*4 = 64 packed
+        // bytes/row. Big enough that the O(n) code chains dominate
+        // the fixed meta/rotation/codebook overhead.
+        let dim = 128usize;
+        Spi::run("CREATE TABLE t_q0 (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_q0 \
+             SELECT i, ('[' || string_agg( \
+                 ((hashtext(i::text || ':' || k::text) % 2000) / 1000.0 - 1)::text, \
+             ',') || ']')::vector \
+             FROM generate_series(1, 512) AS gs(i), \
+                  generate_series(1, {dim}) AS sub(k) \
+             GROUP BY i"
+        ))
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_q0_idx ON t_q0 USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        let indexrelid_u32: Option<i64> =
+            Spi::get_one("SELECT 't_q0_idx'::regclass::oid::int8").unwrap();
+        let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
+
+        let (meta, codes) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let (c, _s, _i) = relfile::read_full(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (m, c)
+        };
+
+        // v7: blocked chain is NOT persisted.
+        assert_eq!(meta.version, 7);
+        assert_eq!(meta.blocked_bytes, 0, "v7 must not persist a blocked chain");
+        assert_eq!(meta.blocked_count, 0);
+        assert_eq!(meta.blocked_first, 0);
+
+        // The would-be blocked chain (what pre-v7 persisted alongside
+        // the packed codes).
+        let (blocked, _n_blocks) = turbovec::pack::repack(
+            &codes,
+            meta.n_vectors as usize,
+            meta.bit_width as usize,
+            meta.dim as usize,
+        );
+        let packed_bytes = codes.len();
+        let blocked_bytes = blocked.len();
+
+        // The dropped blocked chain is the same order of magnitude as
+        // the packed chain (both O(n * dim * bits / 8)); persisting it
+        // was the doubling we eliminated.
+        assert!(
+            blocked_bytes >= packed_bytes,
+            "blocked ({blocked_bytes}) should be >= packed ({packed_bytes})"
+        );
+
+        // On-disk pages: with the blocked chain the index would have
+        // needed `blocked_count` MORE pages.
+        let would_be_blocked_pages = MetaPageData::byte_pages_needed(blocked_bytes as u64);
+        let actual_pages = meta.total_blocks();
+        let would_be_pages = actual_pages + would_be_blocked_pages;
+
+        let rel_bytes: Option<i64> =
+            Spi::get_one("SELECT pg_relation_size('t_q0_idx'::regclass)::int8").unwrap();
+        let rel_bytes = rel_bytes.unwrap();
+
+        eprintln!(
+            "phase-q0 storage dedup (512 x {dim}d 4-bit): \
+             packed={packed_bytes} B, dropped blocked={blocked_bytes} B; \
+             actual pages={actual_pages}, would-be-with-blocked={would_be_pages} \
+             ({} fewer pages, {:.1}% of the pre-v7 code-chain footprint); \
+             pg_relation_size={rel_bytes} B ({:.1} B/vec on disk)",
+            would_be_blocked_pages,
+            100.0 * actual_pages as f64 / would_be_pages as f64,
+            rel_bytes as f64 / meta.n_vectors as f64,
+        );
+
+        // The blocked chain would have been a material fraction of the
+        // whole index; dropping it is a real win, not noise.
+        assert!(
+            would_be_blocked_pages >= meta.codes_count,
+            "dropped blocked chain ({would_be_blocked_pages} pages) must be \
+             at least as large as the packed codes chain ({} pages) \
+             — confirms the ~2x code-storage dedup",
+            meta.codes_count,
+        );
+
+        Spi::run("DROP TABLE t_q0 CASCADE").unwrap();
+    }
+
+    /// Phase P (v1.3.0) round-trip: a freshly-built index records the
+    /// prepared layout (codebook + rotation) and constructs a
+    /// matching `IdMapIndex`. Phase Q-0 (v7): the blocked layout is
+    /// recomputed from the packed codes (no longer on disk) rather
+    /// than read back.
     #[pg_test]
     fn relfile_prepared_layout_skips_runtime_pack() {
         use crate::index::page::MetaPageData;
@@ -4636,12 +4743,12 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(meta.version, 4, "new index must use the v4 wire format");
+        assert_eq!(meta.version, 7, "new index must use the v7 wire format");
         assert!(
             meta.has_prepared_layout(),
-            "meta must record blocked + codebook: blocked_bytes={} cb_levels={}",
-            meta.blocked_bytes,
+            "meta must record codebook + rotation: cb_levels={} rotation_count={}",
             meta.codebook_n_levels,
+            meta.rotation_count,
         );
         assert_eq!(
             meta.codebook_n_levels, 16,
@@ -4654,13 +4761,13 @@ mod tests {
         for w in bs.windows(2) {
             assert!(w[0] < w[1], "boundaries must be sorted: {:?}", bs);
         }
-        // The blocked chain is a real chain: count > 0, first > meta.
-        assert!(
-            meta.blocked_first > meta.ids_first,
-            "blocked chain must follow ids"
-        );
-        assert!(meta.blocked_count >= 1);
-        assert!(meta.blocked_bytes > 0);
+        // Phase Q-0 (v7): the SIMD-blocked chain is NO LONGER
+        // persisted (de-duplicated to halve on-disk size). The meta
+        // records a zero-length blocked chain; the install path
+        // recomputes it from the packed codes via `pack::repack`.
+        assert_eq!(meta.blocked_bytes, 0, "v7 must not persist a blocked chain");
+        assert_eq!(meta.blocked_first, 0);
+        assert_eq!(meta.blocked_count, 0);
 
         // (2) Read the prepared chain and assert it round-trips
         // through `from_id_map_parts_with_prepared` to a working
@@ -4674,14 +4781,23 @@ mod tests {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             let (c, s, i) = relfile::read_full(rel, &m);
-            let b = relfile::read_blocked(rel, &m);
+            // Phase Q-0 (v7): recompute the blocked layout (not on disk).
+            let (b, nb) = turbovec::pack::repack(
+                &c,
+                m.n_vectors as usize,
+                m.bit_width as usize,
+                m.dim as usize,
+            );
             let cents = m.centroids_slice().to_vec();
             let bnds = m.boundaries_slice().to_vec();
             let rot = relfile::read_rotation(rel, &m);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
-            (c, s, i, b, m.n_blocks_blocked as usize, cents, bnds, rot)
+            (c, s, i, b, nb, cents, bnds, rot)
         };
-        assert_eq!(blocked.len() as u64, meta.blocked_bytes);
+        assert!(
+            !blocked.is_empty(),
+            "recomputed blocked layout is non-empty"
+        );
         // Phase R-2: rotation chain must be a `dim*dim` `f32`
         // matrix (`16*16 = 256` elements at this corpus).
         assert_eq!(rotation.len(), (meta.dim as usize) * (meta.dim as usize));
@@ -4807,14 +4923,14 @@ mod tests {
             Spi::get_one("SELECT 't_old_idx'::regclass::oid::int8").unwrap();
         let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
-        // Initial meta is v4 (the version we write today; IVF-1).
+        // Initial meta is v7 (the version we write today; Phase Q-0).
         let v_current_meta: MetaPageData = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v_current_meta.version, 4);
+        assert_eq!(v_current_meta.version, 7);
         assert!(!v_current_meta.is_legacy_v1());
         assert!(!v_current_meta.is_legacy_v2());
         assert!(v_current_meta.has_prepared_layout());
@@ -4910,7 +5026,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v3_meta.version, 4);
+        assert_eq!(v3_meta.version, 7);
         assert!(!v3_meta.is_legacy_v1());
         assert!(!v3_meta.is_legacy_v2());
 
@@ -5033,20 +5149,28 @@ mod tests {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             let (c, s, i) = relfile::read_full(rel, &m);
-            let b = relfile::read_blocked(rel, &m);
+            // Phase Q-0 (v7): recompute the blocked layout (not on disk).
+            let (b, _nb) = turbovec::pack::repack(
+                &c,
+                m.n_vectors as usize,
+                m.bit_width as usize,
+                m.dim as usize,
+            );
             let cents = m.centroids_slice().to_vec();
             let bnds = m.boundaries_slice().to_vec();
             let rot = relfile::read_rotation(rel, &m);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (m, c, s, i, b, cents, bnds, rot)
         };
-        assert_eq!(meta.version, 4);
+        assert_eq!(meta.version, 7);
         assert!(meta.has_prepared_layout());
         assert_eq!(meta.rotation_dim, meta.dim);
         assert!(meta.rotation_count >= 1);
+        // Phase Q-0 (v7): no blocked chain, so the rotation chain
+        // follows the ids chain directly.
         assert!(
-            meta.rotation_first > meta.blocked_first,
-            "rotation chain must follow the blocked chain on disk",
+            meta.rotation_first > meta.ids_first,
+            "rotation chain must follow the ids chain on disk",
         );
 
         // (2) Rotation buffer is the right shape (`dim*dim`
@@ -5072,7 +5196,14 @@ mod tests {
         // the persisted rotation. A top-1 query on a 100-row
         // corpus must finish well under 100 ms; pre-Phase-R-2
         // the lazy QR alone exceeded that budget on debug.
-        let n_blocks = meta.n_blocks_blocked as usize;
+        // Phase Q-0 (v7): recompute n_blocks alongside the blocked
+        // layout above (both are no longer persisted).
+        let (_reblocked, n_blocks) = turbovec::pack::repack(
+            &codes,
+            meta.n_vectors as usize,
+            meta.bit_width as usize,
+            dim,
+        );
         let idx_with_rot = turbovec::IdMapIndex::from_id_map_parts_with_prepared(
             meta.bit_width as usize,
             dim,
@@ -5298,11 +5429,13 @@ mod tests {
         }
     }
 
-    /// Phase Y: forge a v1 (Phase L preview) meta page on top of a
-    /// freshly-built v1.7.x index and confirm `ambeginscan` ERRORs
-    /// at first scan with the migration message. Exercises the
-    /// `is_legacy_v1()` predicate + the `ereport!(ERROR,
-    /// FEATURE_NOT_SUPPORTED, ...)` path in `src/index/scan.rs`.
+    /// Phase Y / Phase Q-0: forge a v1 (Phase L preview) meta page
+    /// on top of a freshly-built current index and confirm
+    /// `ambeginscan` ERRORs at first scan with the migration message.
+    /// Exercises the `is_legacy_v6()` predicate (v1 < v7) + the
+    /// `ereport!(ERROR, FEATURE_NOT_SUPPORTED, ...)` path in
+    /// `src/index/scan.rs`. Phase Q-0 unified the pre-v7 error under
+    /// a single message that NAMES the index.
     ///
     /// The expected-error string must match the primary message
     /// emitted by that ereport! verbatim (the pgrx test framework
@@ -5310,7 +5443,7 @@ mod tests {
     /// wording in `scan.rs`, update both the v1 and v2 strings
     /// here.
     #[pg_test(
-        error = "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)"
+        error = "turbovec index \"legacy_v1_idx\" uses a pre-v7 relfile layout (wire version 1); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
     )]
     fn ambeginscan_errors_on_legacy_v1_meta() {
         use_turbovec();
@@ -5358,11 +5491,11 @@ mod tests {
         .unwrap();
     }
 
-    /// Phase Y: same as `ambeginscan_errors_on_legacy_v1_meta`
-    /// but for the v2 (Phase P, v1.3.x) wire format that lacks
-    /// the persisted rotation chain v1.4.0+ requires.
+    /// Phase Y / Phase Q-0: same as `ambeginscan_errors_on_legacy_v1_meta`
+    /// but for the v2 (Phase P, v1.3.x) wire format. Under v7 every
+    /// pre-v7 version hits the same unified REINDEX error.
     #[pg_test(
-        error = "turbovec index built under pg_turbovec ≤ 1.3 cannot be scanned by pg_turbovec 1.4+"
+        error = "turbovec index \"legacy_v2_idx\" uses a pre-v7 relfile layout (wire version 2); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
     )]
     fn ambeginscan_errors_on_legacy_v2_meta() {
         use_turbovec();
@@ -5392,6 +5525,53 @@ mod tests {
         Spi::run("SET enable_seqscan = off").unwrap();
         Spi::run(
             "SELECT id FROM legacy_v2 \
+             ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
+        )
+        .unwrap();
+    }
+
+    /// Phase Q-0: forge a v6 (Phase G-2a graph-era) meta version byte
+    /// on top of a freshly-built current index and confirm
+    /// `ambeginscan` ERRORs at first scan with the unified pre-v7
+    /// REINDEX message. This is the headline legacy-detection test for
+    /// the v7 codes-dedup wire break: a v6 index (the immediately-
+    /// prior wire version) MUST be detected, not silently misread.
+    /// The error names the index and tells the user exactly what to
+    /// REINDEX.
+    #[pg_test(
+        error = "turbovec index \"legacy_v6_idx\" uses a pre-v7 relfile layout (wire version 6); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
+    )]
+    fn ambeginscan_errors_on_legacy_v6_meta() {
+        use_turbovec();
+        Spi::run("CREATE TABLE legacy_v6 (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO legacy_v6 VALUES \
+                 (1, '[1,0,0,0,0,0,0,0]'), \
+                 (2, '[0,1,0,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX legacy_v6_idx ON legacy_v6 \
+             USING turbovec (emb vec_cosine_ops)",
+        )
+        .unwrap();
+
+        // Patch only the on-disk meta version byte to 6. The chain
+        // offsets stay valid so the decoder accepts the page; only
+        // the version predicate (is_legacy_v6, version < 7) trips.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'legacy_v6_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_version(rel, 6);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run(
+            "SELECT id FROM legacy_v6 \
              ORDER BY emb <=> '[1,0,0,0,0,0,0,0]'::vector LIMIT 1",
         )
         .unwrap();
@@ -5478,7 +5658,7 @@ mod tests {
             "1.7.1", "1.7.2", "1.7.3", "1.8.0", "1.9.0", "1.9.1", "1.10.0", "1.10.1", "1.11.0",
             "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
-            "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0",
+            "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -5695,11 +5875,15 @@ mod tests {
         );
     }
 
-    /// A forged v3 index (version byte = 3, v4 IVF fields absent)
-    /// must still scan flat under the v4 binary, returning correct
-    /// top-k. The no-REINDEX guarantee.
-    #[pg_test]
-    fn ivf_v3_index_still_scans_under_v4_binary() {
+    /// Phase Q-0: a forged v3 index (version byte = 3) is now LEGACY
+    /// under the v7 binary — the codes-dedup wire break ended the
+    /// pre-v7 no-REINDEX guarantee. It must ERROR at scan with the
+    /// unified REINDEX hint, NOT silently scan. (Before Q-0 a v3 flat
+    /// index scanned unchanged under the v4 binary.)
+    #[pg_test(
+        error = "turbovec index \"ivf_v3_idx\" uses a pre-v7 relfile layout (wire version 3); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
+    )]
+    fn ivf_v3_index_is_legacy_under_v7_binary() {
         use_turbovec();
         Spi::run("CREATE TABLE ivf_v3 (id bigint, emb vector)").unwrap();
         // Orthogonal-ish basis so the nearest neighbour is
@@ -5718,10 +5902,7 @@ mod tests {
         )
         .unwrap();
 
-        // Force the on-disk meta page back to version 3. The v4 IVF
-        // fields are already zero (lists=0), so a v3-stamped page is
-        // a legitimate flat v3 index as far as the decoder is
-        // concerned.
+        // Force the on-disk meta page back to version 3.
         let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_v3_idx'::regclass::oid")
             .unwrap()
             .expect("index oid");
@@ -5732,15 +5913,13 @@ mod tests {
         }
         crate::cache::invalidate_all();
 
-        // A v3 index must NOT trip the legacy ERROR path; it scans
-        // flat. Query nearest to id=2's vector.
+        // Under v7 a v3 index trips the legacy ERROR path.
         Spi::run("SET enable_seqscan = off").unwrap();
-        let top: Option<i64> = Spi::get_one(
+        Spi::run(
             "SELECT id FROM ivf_v3 \
              ORDER BY emb <=> '[0,1,0,0,0,0,0,0]'::vector LIMIT 1",
         )
         .unwrap();
-        assert_eq!(top, Some(2), "v3 flat scan under v4 binary must be correct");
     }
 
     /// Build `WITH (lists = 16)` over a few thousand rows; read back
@@ -5775,7 +5954,7 @@ mod tests {
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let meta = crate::index::relfile::read_meta(rel).expect("ivf index has a meta page");
-            assert_eq!(meta.version, 4, "IVF index must be wire v4");
+            assert_eq!(meta.version, 7, "IVF index must be wire v7");
             assert!(meta.has_ivf(), "meta.has_ivf() must be true for lists=16");
             assert_eq!(meta.lists, 16);
             assert_eq!(meta.n_vectors, 3000);
@@ -6053,7 +6232,7 @@ mod tests {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let meta =
                 crate::index::relfile::read_meta(rel).expect("streamed ivf index has a meta page");
-            assert_eq!(meta.version, 4);
+            assert_eq!(meta.version, 7);
             assert!(meta.has_ivf());
             assert_eq!(meta.lists, 32);
             assert_eq!(meta.n_vectors, 15000);
@@ -9787,7 +9966,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (meta.version, meta.kind)
         };
-        assert_eq!(ver, 4, "single-vector index must still emit wire version 4");
+        assert_eq!(ver, 7, "single-vector index must emit wire version 7");
         assert_eq!(kind, crate::index::page::KIND_SINGLE);
         Spi::run("DROP TABLE cb_sv CASCADE").unwrap();
     }

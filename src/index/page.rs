@@ -165,14 +165,34 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       a brand-new on-disk shape that only a v6 binary produces;
 ///       there is no in-place migration of a v4/v5 index into a v6
 ///       graph one — it is built fresh via `WITH (graph = true)`.
-pub const VERSION: u8 = 6;
+/// `7` - Phase Q-0: de-duplicate the on-disk codes storage. Prior
+///       versions persisted the quantized codes TWICE — the
+///       row-major bit-plane `packed_codes` chain AND the
+///       SIMD-`blocked` chain (`pack::repack(packed_codes, …)`),
+///       doubling the dominant O(n) storage term. Since the blocked
+///       layout is a PURE FUNCTION of the packed codes, v7 drops the
+///       blocked chain entirely and recomputes it once per backend at
+///       index-open via `pack::repack` (the same one-time compute a
+///       pre-v2 index already paid on first scan). This roughly halves
+///       the per-vector on-disk footprint (e.g. 768d/4-bit: 384 B
+///       codes stored once, not twice). **This is NOT additive** — a
+///       v7 relfile has no blocked chain, so it is NOT byte-compatible
+///       with any prior version FOR ANY KIND (single-vector, ColBERT,
+///       or graph). Unlike the v4→v5→v6 additive bumps, EVERY kind now
+///       emits wire version 7 (the `kind` byte still discriminates
+///       single/colbert/graph). A pre-v7 index is detected by
+///       [`MetaPageData::is_legacy_v6`] (`version < 7`) and REINDEXed;
+///       there is no in-place migration. The maintainer OK'd this
+///       REINDEX for the 100M-in-40GB storage win — see
+///       `docs/UPGRADING.md`.
+pub const VERSION: u8 = 7;
 
-/// Wire version a ColBERT (`KIND_COLBERT`) index emits. Frozen at 5
-/// — [`VERSION`] moved on to 6 for the Phase G-2a graph kind, but a
-/// ColBERT build's own on-disk shape hasn't changed, so it keeps
-/// emitting the same bytes it always has. [`MetaPageData::mark_colbert`]
-/// stamps this, not [`VERSION`].
-const COLBERT_VERSION: u8 = 5;
+/// Wire version a ColBERT (`KIND_COLBERT`) index emits. As of Phase
+/// Q-0 (v7) this equals [`VERSION`]: the codes-dedup change is not
+/// additive, so a ColBERT index emits v7 like every other kind (the
+/// `kind` byte is the discriminator). [`MetaPageData::mark_colbert`]
+/// stamps `kind = KIND_COLBERT` without changing the version.
+const COLBERT_VERSION: u8 = VERSION;
 
 /// Index kind discriminator (page offset 30, formerly a reserved
 /// byte). `0` = single-vector (the v1..v4 default; a `vector` column
@@ -436,10 +456,13 @@ impl MetaPageData {
         let rotation_first_blkno = blocked_first_blkno + blocked_count;
 
         Self {
-            // A single-vector index emits wire version 4 (byte-
-            // identical to v1.16.0). mark_colbert() bumps this to
-            // VERSION (5) together with `kind`.
-            version: 4,
+            // Phase Q-0 (v7): the codes-dedup change is not additive, so
+            // EVERY kind emits wire version 7 (a v7 relfile has no
+            // blocked chain and is not byte-compatible with any prior
+            // version). `kind` still discriminates single/colbert/graph;
+            // mark_colbert() / set_graph_chain() flip only `kind`, not
+            // the version.
+            version: VERSION,
             bit_width,
             // plan_with_blocked always plans a SINGLE-vector layout;
             // the colbert build calls mark_colbert() after planning
@@ -540,7 +563,8 @@ impl MetaPageData {
         self.graph_neighbors_bytes = neighbors_bytes;
         self.graph_entry_point = entry_point;
         self.kind = KIND_GRAPH;
-        self.version = VERSION;
+        // Phase Q-0 (v7): version stays at VERSION (7) for every kind;
+        // only `kind` discriminates. (Pre-v7 this also bumped version.)
     }
 
     /// Lay out the v4 IVF chains (coarse centroids + cell directory)
@@ -603,6 +627,8 @@ impl MetaPageData {
     /// never calls this, so it stays byte-identical to v1.16.0.
     pub fn mark_colbert(&mut self) {
         self.kind = KIND_COLBERT;
+        // Phase Q-0 (v7): COLBERT_VERSION == VERSION, so this is a
+        // no-op on the version; kept explicit to document intent.
         self.version = COLBERT_VERSION;
     }
 
@@ -660,23 +686,15 @@ impl MetaPageData {
     pub fn encode(&self) -> [u8; PAYLOAD_BYTES] {
         let mut out = [0u8; PAYLOAD_BYTES];
         out[0..4].copy_from_slice(&MAGIC);
-        // Wire-version is ADDITIVE per kind and lives in `self.version`,
-        // kept in lock-step with `self.kind` (plan_with_blocked sets
-        // version 4 + KIND_SINGLE; mark_colbert() flips both to 5 +
-        // KIND_COLBERT; set_graph_chain() flips both to 6 +
-        // KIND_GRAPH). A single-vector index emits version 4 so its
-        // relfile bytes are byte-identical to v1.16.0; a ColBERT index
-        // emits 5; a graph index emits 6. The `kind` byte (offset 6, a
-        // formerly-zeroed reserved byte) is the real discriminator;
-        // the version byte is the belt-and-braces signal a pre-vN
-        // binary uses to refuse the index outright.
+        // Wire-version is Phase Q-0 (v7) and NO LONGER additive-per-
+        // kind: every kind emits version 7 (the codes-dedup change
+        // dropped the blocked chain, so a v7 relfile is not
+        // byte-compatible with any prior version, for any kind). The
+        // `kind` byte (offset 6) is the sole kind discriminator; the
+        // version byte is the belt-and-braces signal a pre-v7 binary
+        // uses to refuse the index outright (is_legacy_v6).
         debug_assert!(
-            match self.kind {
-                KIND_SINGLE => self.version == 4,
-                KIND_COLBERT => self.version == 5,
-                KIND_GRAPH => self.version == 6,
-                _ => false,
-            },
+            self.version == VERSION && matches!(self.kind, KIND_SINGLE | KIND_COLBERT | KIND_GRAPH),
             "version/kind out of sync: kind={} version={}",
             self.kind,
             self.version,
@@ -944,26 +962,36 @@ impl MetaPageData {
     }
 
     /// Returns `true` when this meta page describes an index
-    /// built under a wire format with a prepared blocked layout
-    /// AND a persisted rotation matrix actually present. v1/v2
-    /// indexes and empty (no-rows) v3/v4 indexes return `false`.
+    /// built under a wire format with the prepared caches actually
+    /// present: a persisted Lloyd-Max codebook AND a persisted
+    /// rotation matrix. v1/v2 indexes and empty (no-rows) v3+ indexes
+    /// return `false`.
     ///
-    /// IVF-1 note: this checks `version >= 3` (NOT `>= VERSION`)
-    /// so a v3 index opened by the v4 binary still reports its
-    /// prepared layout and scans flat with no REINDEX. A v4
-    /// `lists = 0` index is structurally a v3 layout and reports
-    /// the same.
+    /// Phase Q-0 (v7) note: v7 no longer persists the SIMD-blocked
+    /// chain (it's recomputed once per backend at index-open via
+    /// `pack::repack`), so this NO LONGER requires `blocked_bytes >
+    /// 0`. It checks `version >= 3` for the historical (pre-v7)
+    /// path where the blocked chain WAS persisted — for those the
+    /// install path reads it — but note ambeginscan errors out on
+    /// any `version < 7` index before install runs, so at runtime
+    /// this only ever returns true for v7 indexes with a non-empty
+    /// codebook + rotation. The install path recomputes the blocked
+    /// layout from the packed codes regardless.
     pub fn has_prepared_layout(&self) -> bool {
-        self.version >= 3
-            && self.blocked_bytes > 0
-            && self.codebook_n_levels > 0
-            && self.rotation_count > 0
+        self.version >= 3 && self.codebook_n_levels > 0 && self.rotation_count > 0
     }
 
     /// Returns `true` when the meta page is in the older v1 wire
     /// format (Phase L preview, pre-v1.3.0). `ambeginscan` uses
     /// this to emit the migration `ERROR` directing the user to
     /// `REINDEX INDEX <name>;`.
+    ///
+    /// Phase Q-0 (v7): superseded at the scan gate by
+    /// [`Self::is_legacy_v6`] (which fires on any `version < 7`), but
+    /// kept for its specific historical meaning and the round-trip
+    /// tests. `#[allow(dead_code)]` because the runtime path now uses
+    /// the broader v6 predicate.
+    #[allow(dead_code)]
     pub fn is_legacy_v1(&self) -> bool {
         self.version < 2
     }
@@ -974,6 +1002,11 @@ impl MetaPageData {
     /// because the rotation chain offsets don't exist on disk
     /// and the lazy QR was the warm-scan hotspot Phase R-2 fixed.
     /// `ambeginscan` uses this to emit the migration `ERROR`.
+    ///
+    /// Phase Q-0 (v7): superseded at the scan gate by
+    /// [`Self::is_legacy_v6`]; kept for its historical meaning and
+    /// the round-trip tests.
+    #[allow(dead_code)]
     pub fn is_legacy_v2(&self) -> bool {
         self.version < 3
     }
@@ -1039,10 +1072,26 @@ impl MetaPageData {
         false
     }
 
+    /// Returns `true` when the meta page is in a wire format the
+    /// Phase Q-0 (v7) binary cannot read — i.e. ANY pre-v7 index
+    /// (v1..v6).
+    ///
+    /// **Unlike the deliberately-always-`false` v3/v4/v5 predicates,
+    /// this one genuinely trips.** Phase Q-0 de-duplicated the on-disk
+    /// codes storage by dropping the persisted SIMD-blocked chain,
+    /// which every prior version (v4 single-vector, v5 ColBERT, v6
+    /// graph) DID persist. A v7 relfile is therefore NOT
+    /// byte-compatible with any pre-v7 index for any kind, so a pre-v7
+    /// index must be REINDEXed. `ambeginscan` (and `amgettuple`'s
+    /// first fetch) uses this to emit a clear `ERROR` naming the index
+    /// with a `HINT: REINDEX INDEX <name>;`. See `docs/UPGRADING.md`.
+    pub fn is_legacy_v6(&self) -> bool {
+        self.version < VERSION
+    }
+
     /// Returns `true` when this meta page describes a ColBERT /
-    /// multivector token index (Phase F-2, `kind = KIND_COLBERT`,
-    /// wire version 5). A single-vector index (the v1..v4 default and
-    /// the v5 `kind = KIND_SINGLE` case) returns `false`.
+    /// multivector token index (Phase F-2, `kind = KIND_COLBERT`). A
+    /// single-vector index returns `false`.
     ///
     /// `scan.rs` consults this to REJECT an `ORDER BY` scan against a
     /// ColBERT index (it has no single-vector orderby semantics —
@@ -1128,7 +1177,7 @@ mod tests {
         let buf = meta.encode();
         let back = MetaPageData::decode(&buf).expect("decode");
         assert_eq!(meta, back);
-        assert_eq!(back.version, 4);
+        assert_eq!(back.version, 7);
         assert!(back.has_prepared_layout());
         assert_eq!(back.centroids_slice(), centroids.as_slice());
         assert_eq!(back.boundaries_slice(), boundaries.as_slice());
@@ -1161,7 +1210,7 @@ mod tests {
         let buf = meta.encode();
         let back = MetaPageData::decode(&buf).expect("decode");
         assert_eq!(meta, back);
-        assert_eq!(back.version, 4);
+        assert_eq!(back.version, 7);
         assert!(back.has_ivf());
         assert_eq!(back.lists, lists);
         // Coarse + cell-dir chains laid out after rotation, no overlap.
@@ -1397,11 +1446,13 @@ mod tests {
     }
 
     #[test]
-    fn decodes_legacy_v3_meta_as_flat_under_v4() {
-        // A v3 meta page (no v4 IVF fields) must decode under the v4
-        // binary as a flat index (lists = 0), readable with NO
-        // REINDEX. We forge a v3 page: first 224 bytes meaningful,
-        // the v4 fields stay zero.
+    fn decodes_legacy_v3_meta_is_rejected_under_v7() {
+        // Phase Q-0 (v7): a v3 meta page (or any pre-v7 version) is
+        // now LEGACY — the codes-dedup change is not additive, so a v7
+        // binary cannot read it and `ambeginscan` errors with a
+        // REINDEX hint. (Before Q-0 a v3 index decoded as a flat v4
+        // index and scanned with no REINDEX.) We forge a v3 page:
+        // first 224 bytes meaningful, the v4+ fields stay zero.
         let mut buf = [0u8; PAYLOAD_BYTES];
         buf[0..4].copy_from_slice(&MAGIC);
         buf[4] = 3; // v3
@@ -1430,22 +1481,12 @@ mod tests {
         buf[216..220].copy_from_slice(&72u32.to_le_bytes()); // rotation_count
         buf[220..224].copy_from_slice(&384u32.to_le_bytes()); // rotation_dim
 
-        let meta = MetaPageData::decode(&buf).expect("v3 decode under v4 binary");
+        let meta = MetaPageData::decode(&buf).expect("v3 still decodes under v7");
         assert_eq!(meta.version, 3);
         assert_eq!(meta.rotation_first, 9);
         assert_eq!(meta.rotation_dim, 384);
-        // v4 IVF fields zeroed => flat, no IVF.
-        assert_eq!(meta.lists, 0);
-        assert!(!meta.has_ivf());
-        assert_eq!(meta.coarse_first, 0);
-        assert_eq!(meta.cell_dir_first, 0);
-        // A v3 index is NOT legacy under v4 — it scans flat, no REINDEX.
-        assert!(!meta.is_legacy_v1());
-        assert!(!meta.is_legacy_v2());
-        assert!(!meta.is_legacy_v3());
-        // It still reports its prepared layout so the flat scan path
-        // works.
-        assert!(meta.has_prepared_layout());
+        // A v3 index IS legacy under v7 — REINDEX required.
+        assert!(meta.is_legacy_v6(), "a v3 index is legacy under v7");
     }
 
     #[test]
@@ -1457,40 +1498,42 @@ mod tests {
     }
 
     /// INVARIANT #1 guard (Phase F-2): a single-vector index must
-    /// still emit wire version 4 with a ZEROED kind byte, byte-for-
-    /// byte identical to what v1.16.0 wrote. Bumping VERSION to 5 must
-    /// NOT change a single-vector relfile.
+    /// INVARIANT (Phase Q-0 / v7): every kind now emits wire version
+    /// 7 (the codes-dedup change is not additive). A single-vector
+    /// index has a ZEROED kind byte; the version byte is 7, NOT 4.
     #[test]
-    fn single_vector_still_emits_v4_bytes() {
+    fn single_vector_emits_v7_bytes() {
         let dim: u32 = 384;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(4, dim, 1000, 7, 12_345, 31, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, 1000, 7, 0, 0, rotation_bytes);
         let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
         meta.set_codebook(&centroids, &boundaries);
         assert_eq!(meta.kind, KIND_SINGLE);
         let buf = meta.encode();
-        // Version byte is 4 (NOT the compiled VERSION = 5) and the
-        // kind byte (offset 6) is zero — exactly the v4 byte layout.
-        assert_eq!(buf[4], 4, "single-vector index must emit wire version 4");
+        assert_eq!(buf[4], 7, "single-vector index must emit wire version 7");
         assert_eq!(buf[6], 0, "single-vector kind byte must be zero");
         let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 4);
+        assert_eq!(back.version, 7);
         assert_eq!(back.kind, KIND_SINGLE);
         assert!(!back.is_colbert());
+        assert!(!back.is_legacy_v6());
+        // v7 no longer persists a blocked chain.
+        assert_eq!(back.blocked_bytes, 0);
+        assert_eq!(back.blocked_first, 0);
         assert_eq!(meta, back);
     }
 
-    /// A ColBERT (multivector) index round-trips at wire version 5
-    /// with kind = KIND_COLBERT, and a v4 single-vector decode is
-    /// distinguishable from it.
+    /// A ColBERT (multivector) index round-trips at wire version 7
+    /// with kind = KIND_COLBERT (Phase Q-0 dropped the additive
+    /// per-kind versioning; the `kind` byte discriminates).
     #[test]
-    fn colbert_index_emits_v5_with_kind() {
+    fn colbert_index_emits_v7_with_kind() {
         let dim: u32 = 64;
         let lists: u32 = 16;
         let n: u64 = 4096; // token slots
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 0, 0, rotation_bytes);
         meta.set_codebook(
             &(0..16).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
             &(0..15).map(|i| i as f32 * 0.05).collect::<Vec<_>>(),
@@ -1503,44 +1546,43 @@ mod tests {
         // A colbert build flips kind AFTER planning.
         meta.mark_colbert();
         let buf = meta.encode();
-        assert_eq!(buf[4], 5, "colbert index must emit wire version 5");
+        assert_eq!(buf[4], 7, "colbert index must emit wire version 7");
         assert_eq!(buf[6], KIND_COLBERT);
         let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 5);
+        assert_eq!(back.version, 7);
         assert!(back.is_colbert());
         assert!(back.has_ivf(), "colbert index is IVF-backed");
-        assert!(!back.is_legacy_v4());
+        assert!(!back.is_legacy_v6());
         assert_eq!(meta, back);
     }
 
-    /// A forged v4 meta page (version byte 4, all v5 region zero)
-    /// decodes under the v5 binary as a single-vector index, NOT
-    /// legacy — the additive backward-compat path.
+    /// A forged v4 (genuine pre-Q-0) meta page IS legacy under the v7
+    /// binary — REINDEX required. (Before Q-0 a v4 index scanned with
+    /// no REINDEX; the codes-dedup wire break ended that.)
     #[test]
-    fn decodes_v4_meta_as_single_vector_under_v5() {
+    fn forged_v4_meta_is_legacy_under_v7() {
         let mut buf =
-            MetaPageData::plan_with_blocked(4, 384, 100, 3, 12_000, 5, u64::from(384u32) * 384 * 4)
+            MetaPageData::plan_with_blocked(4, 384, 100, 3, 0, 0, u64::from(384u32) * 384 * 4)
                 .encode();
-        // Force the version byte to 4 (a genuine pre-F-2 index) and
-        // ensure the kind byte is zero.
+        // Force the version byte to 4 (a genuine pre-Q-0 index).
         buf[4] = 4;
         buf[6] = 0;
-        let meta = MetaPageData::decode(&buf).expect("v4 decode under v5");
+        let meta = MetaPageData::decode(&buf).expect("v4 still decodes under v7");
         assert_eq!(meta.version, 4);
         assert_eq!(meta.kind, KIND_SINGLE);
         assert!(!meta.is_colbert());
-        assert!(!meta.is_legacy_v4());
+        assert!(meta.is_legacy_v6(), "a v4 index is legacy under v7");
     }
 
-    /// A Vamana graph index (Phase G-2a) round-trips at wire version 6
+    /// A Vamana graph index (Phase G-2a) round-trips at wire version 7
     /// with kind = KIND_GRAPH, and its adjacency chain + entry point
     /// survive encode/decode.
     #[test]
-    fn graph_index_emits_v6_with_kind_and_adjacency_chain() {
+    fn graph_index_emits_v7_with_kind_and_adjacency_chain() {
         let dim: u32 = 64;
         let n: u64 = 500;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 3, 200_000, 16, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 3, 0, 0, rotation_bytes);
         meta.set_codebook(
             &(0..16).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
             &(0..15).map(|i| i as f32 * 0.05).collect::<Vec<_>>(),
@@ -1550,23 +1592,22 @@ mod tests {
         let neighbors_bytes = n * 16 * 4; // pretend degree ~16
         meta.set_graph_chain(offsets_bytes, neighbors_bytes, 42);
         let buf = meta.encode();
-        assert_eq!(buf[4], 6, "graph index must emit wire version 6");
+        assert_eq!(buf[4], 7, "graph index must emit wire version 7");
         assert_eq!(buf[6], KIND_GRAPH);
         let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 6);
+        assert_eq!(back.version, 7);
         assert!(back.is_graph());
         assert!(back.has_graph());
         assert!(!back.is_colbert());
         assert!(!back.has_ivf(), "a graph index is not IVF");
-        assert!(!back.is_legacy_v4());
-        assert!(!back.is_legacy_v5());
+        assert!(!back.is_legacy_v6());
         assert_eq!(back.graph_entry_point, 42);
         assert_eq!(back.graph_offsets_bytes, offsets_bytes);
         assert_eq!(back.graph_neighbors_bytes, neighbors_bytes);
         assert!(back.graph_first > 0);
         assert!(back.graph_count > 0);
         // The graph chain must follow every prior chain (rotation,
-        // since this build has lists = 0).
+        // since this build has lists = 0; blocked_count is 0 in v7).
         assert_eq!(
             back.graph_first,
             1 + back.codes_count
@@ -1578,69 +1619,29 @@ mod tests {
         assert_eq!(meta, back);
     }
 
-    /// INVARIANT (Phase G-2a): a single-vector index must still emit
-    /// wire version 4 with ZEROED graph fields, byte-for-byte
-    /// identical to what the v5 binary wrote. Adding KIND_GRAPH /
-    /// bumping VERSION to 6 must NOT change a single-vector relfile.
+    /// A forged v5 ColBERT meta page IS legacy under the v7 binary —
+    /// REINDEX required. (Before Q-0 a v5 ColBERT index scanned with
+    /// no REINDEX; the codes-dedup wire break ended that.)
     #[test]
-    fn v4_single_vector_bytes_unaffected_by_v6_binary() {
-        let dim: u32 = 384;
-        let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(4, dim, 1000, 7, 12_345, 31, rotation_bytes);
-        let centroids: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
-        let boundaries: Vec<f32> = (0..15).map(|i| i as f32 * 0.05 - 0.5).collect();
-        meta.set_codebook(&centroids, &boundaries);
-        assert_eq!(meta.kind, KIND_SINGLE);
-        let buf = meta.encode();
-        assert_eq!(buf[4], 4, "single-vector index must emit wire version 4");
-        assert_eq!(buf[6], 0, "single-vector kind byte must be zero");
-        // Every v6 graph byte (page offset 288..316, data offset
-        // 264..292) must be zero on a single-vector index.
-        let graph_region_start = PAGE_HEADER_BYTES + 264;
-        let graph_region_end = PAGE_HEADER_BYTES + 292;
-        assert!(
-            buf[264..292].iter().all(|&b| b == 0),
-            "v6 graph fields must be zeroed on a single-vector meta page"
-        );
-        let _ = (graph_region_start, graph_region_end); // documents the page offsets
-        let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 4);
-        assert_eq!(back.kind, KIND_SINGLE);
-        assert!(!back.is_graph());
-        assert!(!back.has_graph());
-        assert_eq!(back.graph_first, 0);
-        assert_eq!(meta, back);
-    }
-
-    /// A forged v5 ColBERT meta page (version byte 5, v6 region zero)
-    /// decodes under the v6 binary as a ColBERT index, NOT a graph
-    /// index and NOT legacy — the additive backward-compat path.
-    #[test]
-    fn decodes_v5_colbert_meta_unaffected_under_v6() {
+    fn forged_v5_colbert_meta_is_legacy_under_v7() {
         let dim: u32 = 64;
         let lists: u32 = 16;
         let n: u64 = 4096;
         let rotation_bytes = u64::from(dim) * u64::from(dim) * 4;
-        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 200_000, 781, rotation_bytes);
+        let mut meta = MetaPageData::plan_with_blocked(4, dim, n, 9, 0, 0, rotation_bytes);
         meta.set_ivf_chains(
             lists,
             u64::from(lists) * u64::from(dim) * 4,
             u64::from(lists) * 12,
         );
         meta.mark_colbert();
-        let buf = meta.encode();
-        assert_eq!(buf[4], 5);
-        assert_eq!(buf[6], KIND_COLBERT);
-        assert!(
-            buf[264..292].iter().all(|&b| b == 0),
-            "v6 graph fields must be zeroed on a v5 colbert meta page"
-        );
-        let back = MetaPageData::decode(&buf).expect("v5 decode under v6");
+        let mut buf = meta.encode();
+        // Force the version byte to 5 (a genuine pre-Q-0 ColBERT index).
+        buf[4] = 5;
+        let back = MetaPageData::decode(&buf).expect("v5 still decodes under v7");
         assert_eq!(back.version, 5);
         assert!(back.is_colbert());
         assert!(!back.is_graph());
-        assert!(!back.has_graph());
-        assert!(!back.is_legacy_v5());
-        assert_eq!(meta, back);
+        assert!(back.is_legacy_v6(), "a v5 colbert index is legacy under v7");
     }
 }

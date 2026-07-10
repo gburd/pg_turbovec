@@ -4,6 +4,67 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.27.0] — 2026-07-10
+
+**Phase Q-0: de-duplicate the on-disk quantized-codes storage, roughly
+halving the per-vector index footprint.** Minor bump (wire-format
+change — **REINDEX required**; additive capability, no SQL-surface
+removal). This is the storage blocker cleared for the 100M-vectors-in-
+40GB production target (an internal design note
+Requirement 1).
+
+**The problem.** Every prior version persisted each vector's quantized
+codes TWICE: the row-major bit-plane `packed_codes` chain AND the
+SIMD-`blocked` chain (the output of `pack::repack(packed_codes, …)`).
+That doubled the dominant O(n) storage term. At 100M vectors it was the
+difference between fitting 40 GB and not (e.g. 768d/4-bit: ~78 GB with
+double-storage vs ~39.6 GB with single).
+
+**The fix (Option A — persist only the packed codes).** The blocked
+layout is a PURE FUNCTION of the packed codes, so v7 drops the blocked
+chain entirely from disk and recomputes it once per backend at
+index-open via `pack::repack`. This is the same O(n) one-time compute a
+pre-Phase-P index already paid lazily on first scan; it's paid once per
+`(backend, am_version)` at cache-install and cached in the per-backend
+`ReadOnlyIndex`, so **warm per-query latency is unchanged** and scan
+results (recall, ordering) are **bit-identical** to before (the
+recomputed blocked layout equals the layout that used to be persisted).
+Option A was chosen over Option B (persist blocked, recompute packed via
+the new `pack::unblock`) because `repack` is the forward, already-used
+direction and the OOC path never touches the blocked chain — A keeps
+every hot path simplest.
+
+**Measured storage reduction** (`phase_q0_storage_is_deduplicated`
+#[pg_test], 512×128d 4-bit): the dropped blocked chain is ≥ the packed
+codes chain, i.e. persisting it doubled the code-storage term.
+Per-vector on-disk code bytes: `dim/8 * bit_width` stored ONCE (was
+twice). 100M projections: 768d/2-bit **19.8 GB** (was 39.6), 768d/4-bit
+**39.6 GB** (was 78 — now FITS 40 GB), 1536d/2-bit **39.6 GB** (was 78
+— now FITS).
+
+**Wire format (v6 → v7), NOT additive.** Unlike the additive v4→v5→v6
+per-kind bumps, dropping a persisted chain is a real break for EVERY
+kind: single-vector, ColBERT, IVF, and graph indexes all now emit wire
+version 7 (the `kind` byte still discriminates). A pre-v7 index (v1..v6)
+is detected by the new `MetaPageData::is_legacy_v6()` predicate
+(`version < 7`); `ambeginscan` raises a clear `ERROR` that NAMES the
+index with a `HINT: REINDEX INDEX <name>;` at the first scan — never
+silent corruption. Verified by `ambeginscan_errors_on_legacy_v6_meta`
+(and the retained v1/v2 forgeries, which now also hit the unified v7
+gate).
+
+No SQL surface change (no operators/types/functions/GUCs/opclasses
+added or removed). All index kinds (flat, IVF, graph, ColBERT) continue
+to work.
+
+**Migration:**
+1. `ALTER EXTENSION pg_turbovec UPDATE TO '1.27.0';`
+2. `REINDEX INDEX <name>;` — once per turbovec index, ANY kind.
+
+Until an index is REINDEXed under v7, scans against it ERROR with the
+REINDEX hint (they do NOT return wrong results). See
+`docs/UPGRADING.md`.
+
 ## [1.26.0] — 2026-07-10
 
 **Phase G-2d(a): a partitioned/merge parallel build for the graph index

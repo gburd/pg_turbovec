@@ -85,14 +85,38 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.26.0, 2026-07-10)
+### Current (as of v1.27.0, 2026-07-10)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.26.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.26.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.26.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.25.x     | 1.26.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.27.0   | `REINDEX INDEX` once |
+| 1.2.x              | 1.27.0   | `REINDEX INDEX` once |
+| 1.3.x              | 1.27.0   | `REINDEX INDEX` once |
+| 1.4.x → 1.26.x     | 1.27.0   | `ALTER EXTENSION` **then `REINDEX INDEX` once** (wire v6→v7, codes-dedup) |
+
+**v1.27.0 (Phase Q-0) de-duplicates the on-disk quantized-codes
+storage, roughly HALVING the per-vector index footprint** — the
+storage blocker cleared for the a large-index storage target target
+(an internal design note Requirement 1). Prior
+versions persisted each vector's codes TWICE: the row-major bit-plane
+`packed_codes` chain AND the SIMD-`blocked` chain (`pack::repack`
+output). Since the blocked layout is a pure function of the packed
+codes, v7 drops the blocked chain from disk and recomputes it once per
+backend at index-open via `pack::repack` (per-query latency unchanged;
+scan results bit-identical). **This IS a wire change** (`MetaPageData::
+version` 6→7) and, unlike the additive v4→v5→v6 per-kind bumps, is NOT
+additive: a v7 relfile has no blocked chain, so EVERY kind (single,
+ColBERT, IVF, graph) now emits v7 and every pre-v7 index needs a
+**REINDEX**. A pre-v7 index is detected by `MetaPageData::
+is_legacy_v6()` and `ambeginscan` ERRORs with `HINT: REINDEX INDEX
+<name>;` at first scan (never silent corruption). No SQL-surface
+change. Option A chosen (persist only packed, recompute blocked on
+open) over Option B (persist blocked, recompute packed via the new
+`pack::unblock`) because `repack` is the forward already-used
+direction and the OOC path never touches blocked. Per-vector on-disk
+codes: `dim/8 * bit_width` stored ONCE. 100M projection: 768d/4-bit
+78GB→39.6GB (now fits), 1536d/2-bit 78GB→39.6GB (now fits), 768d/2-bit
+39.6GB→19.8GB.
 
 **v1.26.0 (Phase G-2d(a)) adds a partitioned/merge PARALLEL build for
 the graph kind** so it scales past the single-pass serial ceiling
@@ -226,23 +250,27 @@ SIFT-1M/128d ~2ms vs ~900ms). Upgrade via `ALTER EXTENSION
 pg_turbovec UPDATE`, no REINDEX. See `CHANGELOG.md` and
 `docs/UPGRADING.md`.
 
-`MetaPageData::version` is **6** as of v1.23.0 (was **5** for
-v1.17.0–v1.22.x, **4** for v1.10.0–v1.16.x), but every bump is
-**strictly additive per index kind**: a single-vector index
-(`vec_*_ops` over a `vector` column) still emits wire **version 4**
-with a zeroed `kind` byte (page offset 30), **byte-identical to
-v1.16.0**; a ColBERT index (`vec_colbert_ops` over a `vector[]`
-column, Phase F-2) is v5 (`kind = KIND_COLBERT`); a graph index
-(`WITH (graph = true)`, Phase G-2a) is v6 (`kind = KIND_GRAPH`). A
-v4 meta decodes as `KIND_SINGLE` and a v5 meta decodes unaffected
-under the v6 binary, so `is_legacy_v4()` never trips and v1.4.x–
-v1.22.x single-vector/ColBERT indexes need **no REINDEX**. IVF is
-opt-in via `WITH (lists = N)`; as of v1.13.0 IVF is out-of-core
-end-to-end (build AND query), so a >RAM IVF index can be built and
-served on a RAM-constrained host. The graph kind is NOT out-of-core
-(RAM-resident by design, per an internal design note's explicit
-trade-off) and does not yet support VACUUM or `aminsert` (v1.23.0,
-see that release's CHANGELOG entry).
+`MetaPageData::version` is **7** as of v1.27.0 (was **6** for
+v1.23.0–v1.26.x, **5** for v1.17.0–v1.22.x, **4** for
+v1.10.0–v1.16.x). The v4→v5→v6 bumps were **strictly additive per
+index kind** (single-vector emitted v4, ColBERT v5, graph v6, all
+byte-identical to their predecessors for existing indexes — no
+REINDEX). **v7 (Phase Q-0) BREAKS that additivity on purpose**: it
+de-duplicates the on-disk codes storage by dropping the persisted
+SIMD-blocked chain (recomputed once per backend at index-open via
+`pack::repack`), which every prior version DID persist. A v7 relfile
+is therefore NOT byte-compatible with any pre-v7 index for ANY kind,
+so **every kind now emits wire version 7** (the `kind` byte still
+discriminates single/colbert/graph) and **every pre-v7 index needs a
+REINDEX**. A pre-v7 index (v1..v6) is detected by the genuinely-
+tripping `MetaPageData::is_legacy_v6()` (`version < 7`); `ambeginscan`
+ERRORs with `HINT: REINDEX INDEX <name>;` naming the index. (The
+older `is_legacy_v3/v4/v5` predicates stay deliberately-`false`; the
+single runtime gate is now `is_legacy_v6`.) IVF is opt-in via `WITH
+(lists = N)`; as of v1.13.0 IVF is out-of-core end-to-end (build AND
+query), so a >RAM IVF index can be built and served on a
+RAM-constrained host. The graph kind is NOT out-of-core (RAM-resident
+by design, per an internal design note's explicit trade-off).
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.

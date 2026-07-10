@@ -170,60 +170,71 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
         error!("turbovec: RelationGetIndexScan returned null");
     }
 
-    // Phase Q (v1.3.0) + Phase R-2 (v1.4.0): hard migration
-    // boundary. We refuse to serve scans against an index built
-    // under any pre-Phase-R-2 wire format. Three cases:
-    //   (a) main fork is empty / never initialised — the index
-    //       was built under v1.0.x..v1.1 (side-table only) or
-    //       under a v1.2 binary that bailed before writing the
-    //       relfile.
-    //   (b) main fork is populated but the meta page is the v1
-    //       (Phase L preview) layout that lacks the persisted
-    //       SIMD-blocked chain + Lloyd-Max codebook Phase P
-    //       relies on.
-    //   (c) main fork is populated as v2 (Phase P, v1.3.x) but
-    //       lacks the persisted rotation chain Phase R-2
-    //       relies on. The lazy QR was the warm-scan hotspot.
-    // All three are unrecoverable from the running binary;
-    // require the user to REINDEX. We emit ERROR (not NOTICE)
-    // so a half-broken state can't silently return zero rows.
+    // Phase Q-0 (v1.27.0): hard migration boundary. We refuse to
+    // serve scans against an index built under ANY pre-v7 wire
+    // format. Cases:
+    //   (a) main fork is empty / never initialised (built under
+    //       v1.0.x..v1.2, or a binary that bailed before writing).
+    //   (b) main fork is populated but the meta page is a pre-v7
+    //       layout (v1..v6). Every pre-v7 version persisted the
+    //       SIMD-blocked codes chain that Phase Q-0 dropped to halve
+    //       on-disk size; a v7 binary cannot read those relfiles
+    //       (the chain offsets it expects don't line up). This is a
+    //       deliberate, maintainer-approved wire break — REINDEX is
+    //       required. See docs/UPGRADING.md.
+    // Both are unrecoverable from the running binary. We emit ERROR
+    // (not NOTICE) so a half-broken state can't silently return zero
+    // rows. The error NAMES the index so the user knows exactly what
+    // to REINDEX.
     {
         let relfile_meta = relfile::read_meta(index_relation);
+        // Read the index's own name once for the HINT (RelationGetRelationName
+        // is a C macro with no FFI binding; read rd_rel->relname directly).
+        let idx_name = {
+            let rd_rel = (*index_relation).rd_rel;
+            if rd_rel.is_null() {
+                "<index>".to_string()
+            } else {
+                let name_ptr = std::ptr::addr_of!((*rd_rel).relname) as *const std::os::raw::c_char;
+                std::ffi::CStr::from_ptr(name_ptr)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
         match &relfile_meta {
             None => {
                 ereport!(
                     PgLogLevel::ERROR,
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    "turbovec index has an empty main fork (built under pg_turbovec ≤ 1.2)",
-                    "Run `REINDEX INDEX <name>;` to migrate the index to the v1.4.0 wire format."
+                    format!(
+                        "turbovec index \"{idx_name}\" has an empty main fork (built under pg_turbovec ≤ 1.2)"
+                    ),
+                    format!("Run `REINDEX INDEX {idx_name};` to migrate the index to the v1.27.0 wire format.")
                 );
             }
-            Some(m) if m.is_legacy_v1() && m.n_vectors > 0 => {
+            // Phase Q-0: any pre-v7 index (v1..v6) is unreadable. This
+            // subsumes the old is_legacy_v1 / is_legacy_v2 gates.
+            Some(m) if m.is_legacy_v6() && m.n_vectors > 0 => {
                 ereport!(
                     PgLogLevel::ERROR,
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    "turbovec index uses the legacy v1 relfile layout (built under pg_turbovec 1.2)",
-                    "This index lacks the persisted SIMD-blocked layout + Lloyd-Max codebook required by pg_turbovec ≥ 1.3.0. Run `REINDEX INDEX <name>;` to migrate."
+                    format!(
+                        "turbovec index \"{idx_name}\" uses a pre-v7 relfile layout (wire version {}); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it",
+                        m.version
+                    ),
+                    format!("Run `REINDEX INDEX {idx_name};` to rebuild it under the v7 wire format (this roughly halves the index's on-disk size). See docs/UPGRADING.md.")
                 );
             }
-            Some(m) if m.is_legacy_v2() && m.n_vectors > 0 => {
-                ereport!(
-                    PgLogLevel::ERROR,
-                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    "turbovec index built under pg_turbovec ≤ 1.3 cannot be scanned by pg_turbovec 1.4+",
-                    "Run `REINDEX INDEX <name>;` to migrate. See docs/UPGRADING.md for details."
-                );
-            }
-            // Phase F-2: a ColBERT / multivector token index (kind = 1,
-            // wire v5) has NO single-vector order-by semantics. Its
-            // opclass registers no order-by operator, so the planner
-            // should never pick it for `ORDER BY ... <=> q`; but a
-            // forced index scan (or a future planner change) could
-            // still reach the AM scan path. We REJECT it here with a
-            // clear HINT rather than crash or return garbage. The
-            // ColBERT query path is `turbovec.colbert_search(...)`,
-            // which reads the persistent index directly (cache /
-            // relfile) and never enters `ambeginscan`.
+            // Phase F-2: a ColBERT / multivector token index (kind = 1)
+            // has NO single-vector order-by semantics. Its opclass
+            // registers no order-by operator, so the planner should
+            // never pick it for `ORDER BY ... <=> q`; but a forced
+            // index scan (or a future planner change) could still reach
+            // the AM scan path. We REJECT it here with a clear HINT
+            // rather than crash or return garbage. The ColBERT query
+            // path is `turbovec.colbert_search(...)`, which reads the
+            // persistent index directly (cache / relfile) and never
+            // enters `ambeginscan`.
             Some(m) if m.is_colbert() => {
                 ereport!(
                     PgLogLevel::ERROR,
@@ -751,13 +762,22 @@ unsafe fn install_whole_index(
     // for page access (consistent pinning/locking, crash + streaming-
     // replication semantics). See docs/BUFFER_CACHE_ONLY_DESIGN.md.
     let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
-        // Prepared (SIMD-blocked) layout: read the blocked codes +
-        // rotation chains through the buffer manager. The result is
-        // cached in this per-backend `ReadOnlyIndex`, so the
-        // per-page pin/lock/copy cost is paid once per (backend,
-        // am_version) — warm queries hit the resident buffers, never
-        // the buffer manager.
-        let blocked = relfile::read_blocked(rel, meta);
+        // Prepared layout: read the persisted rotation + inline
+        // codebook through the buffer manager, and RECOMPUTE the
+        // SIMD-blocked layout from the packed codes via
+        // `pack::repack` (Phase Q-0 / v7 no longer persists the
+        // blocked chain — halving the on-disk footprint). The
+        // recompute is the same O(n) one-time cost a pre-Phase-P
+        // index paid lazily on first search; it's paid once per
+        // (backend, am_version) at cache-install, and the result is
+        // cached in this per-backend `ReadOnlyIndex`, so warm
+        // queries never repay it.
+        let (blocked, n_blocks) = turbovec::pack::repack(
+            &codes,
+            meta.n_vectors as usize,
+            meta.bit_width as usize,
+            meta.dim as usize,
+        );
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(rel, meta);
@@ -774,7 +794,7 @@ unsafe fn install_whole_index(
             scales,
             ids,
             blocked,
-            meta.n_blocks_blocked as usize,
+            n_blocks,
             centroids,
             boundaries,
             rotation_opt,
@@ -822,7 +842,14 @@ unsafe fn install_graph_index(
 ) -> cache::ScanHandle {
     let (codes, scales, ids) = relfile::read_full(rel, meta);
     let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
-        let blocked = relfile::read_blocked(rel, meta);
+        // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
+        // packed codes (no longer persisted); see install_whole_index.
+        let (blocked, n_blocks) = turbovec::pack::repack(
+            &codes,
+            meta.n_vectors as usize,
+            meta.bit_width as usize,
+            meta.dim as usize,
+        );
         let centroids = meta.centroids_slice().to_vec();
         let boundaries = meta.boundaries_slice().to_vec();
         let rotation = relfile::read_rotation(rel, meta);
@@ -839,7 +866,7 @@ unsafe fn install_graph_index(
             scales,
             ids,
             blocked,
-            meta.n_blocks_blocked as usize,
+            n_blocks,
             centroids,
             boundaries,
             rotation_opt,

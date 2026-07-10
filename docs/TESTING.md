@@ -74,9 +74,11 @@ recall happens to be.
   `ambulkdelete` dead-tuple removal, parallel vs serial build
   equivalence (same ranked top-k, same relfile size).
 - **Wire-format stability** — `wire_format_version_is_stable`
-  (`EXPECTED_WIRE_FORMAT_VERSION = 3`) and the legacy-meta
+  (`EXPECTED_WIRE_FORMAT_VERSION = 6`) and the legacy-meta
   `ambeginscan` error paths (`is_legacy_v{1,2}` → clear `ERROR` with a
-  `REINDEX` hint).
+  `REINDEX` hint; `is_legacy_v{3,4,5}` are deliberately always-false
+  because v3→v4 IVF, v4→v5 ColBERT, and v5→v6 graph are all ADDITIVE
+  per index kind — an older single-vector index decodes unchanged).
 - **Upgrade matrix** — `migration_files_cover_documented_versions`
   cross-checks `migrations/` against the documented release history.
 
@@ -125,7 +127,9 @@ the trigger for the host/QEMU validation above.
 The matrix tests each PG version independently (build-on-N,
 read-on-N). It does **not** test build-on-16 / read-on-17. The
 on-disk format is PG-version-independent and wire-format-stable
-(`MetaPageData::version = 3` since v1.4.0), so this is low risk, but it
+(`MetaPageData::version = 6` since v1.23.0 — additive per kind: a
+single-vector index still emits 4, ColBERT 5, graph 6; was 3 for
+v1.4.0–v1.9.x), so this is low risk, but it
 is not directly asserted.
 
 ### (d) Concurrency / races

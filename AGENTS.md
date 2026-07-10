@@ -353,7 +353,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 145/145).
+3. Pass `cargo pgrx test pg16` cleanly (current count: 334/334).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`
    (mirror). Use `git push origin vX.Y.Z` and `git push github vX.Y.Z`.

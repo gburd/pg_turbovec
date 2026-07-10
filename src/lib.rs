@@ -3411,6 +3411,48 @@ mod tests {
         assert_distinct_ids(&ids);
     }
 
+    /// Audit gap (2026-07-10): the graph `aminsert` dim-mismatch
+    /// ERROR path (`insert.rs::insert_graph_row`, "dim mismatch —
+    /// index expects N, row has M") had no direct test. Build a
+    /// graph index at one dim, then INSERT a row whose vector has a
+    /// different dim; the aminsert must ERROR cleanly (not corrupt
+    /// the adjacency or silently mis-encode).
+    #[pg_test]
+    fn graph_index_insert_dim_mismatch_errors() {
+        use_turbovec();
+        let dim = 32;
+        Spi::run("CREATE TABLE t_graph_dimx (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("SELECT setseed(0.27)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_graph_dimx \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, 60) AS g"
+        ))
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_graph_dimx_idx ON t_graph_dimx USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true)",
+        )
+        .unwrap();
+        // Insert a wrong-dimension vector (dim+1). The graph aminsert
+        // path must reject it with a clear ERROR.
+        let wrong = (0..dim + 1).map(|_| "0.1").collect::<Vec<_>>().join(",");
+        let bad = std::panic::catch_unwind(|| {
+            Spi::run(&format!(
+                "INSERT INTO t_graph_dimx SELECT 999, '[{wrong}]'::vector"
+            ))
+        });
+        assert!(
+            bad.is_err(),
+            "inserting a {}-dim vector into a {}-dim graph index must ERROR",
+            dim + 1,
+            dim
+        );
+    }
+
     #[pg_test]
     fn knn_rejects_bad_k() {
         Spi::run("CREATE TEMP TABLE pgtv_empty (id bigint, emb turbovec.vector)").unwrap();

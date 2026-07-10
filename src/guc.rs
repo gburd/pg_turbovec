@@ -22,6 +22,7 @@
 //! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
 //! | `turbovec.coarse_graph`          | enum | auto    | off, auto, on  |
 //! | `turbovec.hi_dim_rerank`         | enum | auto    | off, auto, on  |
+//! | `turbovec.graph_build_partitions`| int  | -1      | -1 (auto), 0/1 (single-pass), N |
 //! | `turbovec.allowlist`             | str  | `""`    | CSV of bigint ids |
 
 use core::ffi::CStr;
@@ -732,7 +733,7 @@ pub fn register_gucs() {
         c_str(b"turbovec.iterative_scan\0"),
         c_str(b"Iterative index scan mode (off | relaxed_order).\0"),
         c_str(
-            b"When relaxed_order (the default), amgettuple re-runs the search with a doubled k and feeds new candidates if the executor exhausts the current batch under a selective WHERE filter + ORDER BY dist LIMIT k, capped by turbovec.max_scan_tuples. off restores the pre-v1.8.0 single-batch behaviour. strict_order (pgvector parity) is future work; our reorder queue already restores exact ordering on top of relaxed_order.\0",
+            b"When relaxed_order, amgettuple re-runs the search with a doubled k and feeds new candidates if the executor exhausts the current batch under a selective WHERE filter + ORDER BY dist LIMIT k, capped by turbovec.max_scan_tuples. off (the default since v1.20.1) restores the single-batch behaviour -- the reorder queue can never pop a tuple early when the AM advertises NEG_INFINITY, so relaxed_order otherwise drove the full iterative-refill schedule to completion on every ORDER BY ... LIMIT regardless of LIMIT size (a large latency tax; see docs/UPGRADING.md). Set relaxed_order only if you specifically want the doubled-k refill under a selective filter. The reorder queue already restores exact ordering on top of either mode.\0",
         ),
         &ITERATIVE_SCAN,
         GucContext::Userset,
@@ -782,7 +783,7 @@ pub fn register_gucs() {
         c_str(b"turbovec.graph_build_partitions\0"),
         c_str(b"Shards for the parallel graph-kind build: -1 = auto, 0/1 = single-pass, N = force N shards.\0"),
         c_str(
-            b"Phase G-2d(a). The single-pass Vamana graph build is inherently serial (each node's greedy search navigates the graph every prior insertion left) and does not scale to millions of rows. This partitioned build splits the shuffled insertion order into P contiguous shards, builds each shard's sub-graph in parallel across turbovec.build_parallelism's pool, then a cross-shard refinement pass stitches them into one navigable graph. -1 (the default) derives P from the corpus size (single-pass below a threshold, else clamp(n / target_shard_rows, 2, pool*2)); 0 or 1 force the serial single-pass build (kept for small corpora and determinism debugging); a positive N forces N shards. Deterministic for a fixed (corpus, seed, P). The on-disk CSR bytes are the same shape a single-pass build emits (no wire change, no REINDEX) \xe2\x80\x94 only build wall-clock and the graph's exact adjacency change.\0",
+            b"Phase G-2d(a). The single-pass Vamana graph build is inherently serial (each node's greedy search navigates the graph every prior insertion left) and does not scale to millions of rows. This partitioned build splits the shuffled insertion order into P contiguous shards, builds each shard's sub-graph in parallel across turbovec.build_parallelism's pool, then a cross-shard refinement pass stitches them into one navigable graph. -1 (the default) derives P from the corpus size (single-pass below a threshold, else clamp(n / target_shard_rows, 2, pool*4)); 0 or 1 force the serial single-pass build (kept for small corpora and determinism debugging); a positive N forces N shards. Deterministic for a fixed (corpus, seed, P). The on-disk CSR bytes are the same shape a single-pass build emits (no wire change, no REINDEX) \xe2\x80\x94 only build wall-clock and the graph's exact adjacency change.\0",
         ),
         &GRAPH_BUILD_PARTITIONS,
         -1,

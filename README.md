@@ -8,6 +8,11 @@ Store your vectors in 2- or 4-bit-quantised form alongside the rest of
 your data. Supports:
 
 - exact and approximate nearest-neighbour search
+- **three index kinds**: a **flat** quantized scan (exact-recall-
+  capable), an opt-in **IVF** layer (`WITH (lists = N)`) that is
+  out-of-core end-to-end so a larger-than-RAM index can be built and
+  queried, and an opt-in **Vamana navigable-graph** kind
+  (`WITH (graph = true)`) for low-latency ANN
 - single-precision (`f32`) vectors with on-disk compression to ~16×
   smaller than `pgvector` at 4-bit
 - L2 distance (`<->`), inner product (`<#>`), cosine distance (`<=>`),
@@ -28,15 +33,15 @@ Plus [ACID](https://en.wikipedia.org/wiki/ACID) compliance, point-in-
 time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [other great features](https://www.postgresql.org/about/) of Postgres.
 
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85+-93450a)](https://www.rust-lang.org/)
-[![PostgreSQL 16+](https://img.shields.io/badge/postgres-16+-336791)](https://www.postgresql.org/)
+[![Rust 1.89+](https://img.shields.io/badge/rust-1.89+-93450a)](https://www.rust-lang.org/)
+[![PostgreSQL 13-18](https://img.shields.io/badge/postgres-13--18-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.3.0 - 109/109 `#[pg_test]` cases pass against
-> PostgreSQL 13, 14, 15, 16, 17, and 18 with the default build
-> flags (the relfile-resident page format and the `turbovec`
-> index AM are now default-on; the `experimental_index_am` and
-> `relfile_storage` Cargo features were retired in Phase Q).
+> **Status:** v1.26.0 - 221 `#[pg_test]` cases (334 total test
+> annotations) pass against PostgreSQL 13, 14, 15, 16, 17, and 18
+> with the default build flags (the relfile-resident page format and
+> the `turbovec` index AM are default-on; the `experimental_index_am`
+> and `relfile_storage` Cargo features were retired in Phase Q).
 > See [an internal design note](an internal design note)
 > for what we deliberately skipped, and
 > [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
@@ -505,16 +510,30 @@ nibble-LUT kernels (NEON, AVX2, AVX-512BW).
 
 ## Configuration
 
-`pg_turbovec` exposes five GUCs under the `turbovec.*` namespace
-(USERSET - settable per session):
+`pg_turbovec` exposes 18 GUCs under the `turbovec.*` namespace (all
+USERSET — settable per session). The full reference with tuning
+guidance is in [docs/PRODUCTION.md](docs/PRODUCTION.md); the most
+commonly-tuned ones:
 
 | GUC                              | Type | Default | Range          |
 |----------------------------------|------|---------|----------------|
 | `turbovec.bit_width_default`     | int  | `4`     | `2..=4`        |
+| `turbovec.probes`                | int  | `16`    | `1..=65536`    |
+| `turbovec.search_k`              | int  | `32`    | `1..=100000`   |
+| `turbovec.oversample`            | float| `1.0`   | `1.0..=100.0`  |
+| `turbovec.hi_dim_rerank`         | enum | `auto`  | off, auto, on  |
+| `turbovec.iterative_scan`        | enum | `off`   | off, relaxed_order |
+| `turbovec.max_probes`            | int  | `64`    | `1..=65536`    |
+| `turbovec.max_scan_tuples`       | int  | (see docs) |             |
+| `turbovec.out_of_core`           | enum | `auto`  | off, auto, on  |
+| `turbovec.coarse_graph`          | enum | `auto`  | off, auto, on  |
+| `turbovec.graph_build_partitions`| int  | `-1`    | -1 auto / 0-1 single-pass / N |
+| `turbovec.build_parallelism`     | int  | `0`     | `0..=128`      |
+| `turbovec.scan_parallelism`      | int  | `0`     | `0..=128`      |
 | `turbovec.cache_size_mb`         | int  | `256`   | `0..=65536`    |
-| `turbovec.warn_on_rebuild`       | bool | `true`  | -              |
-| `turbovec.search_concurrency`    | int  | `1`     | `1..=128`      |
 | `turbovec.normalize_on_insert`   | bool | `true`  | -              |
+| `turbovec.warn_on_rebuild`       | bool | `true`  | -              |
+| `turbovec.allowlist`             | str  | `""`    | CSV of heap-TID bigints |
 
 ```sql
 -- Compress harder during this session:

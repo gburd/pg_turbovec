@@ -601,7 +601,7 @@ deprecated no-op since v1.19.0, when the relfile mmap fast path it
 controlled was deleted). `SET turbovec.mmap_static_blocked = ...` now
 errors like any other unknown GUC. See CHANGELOG.md.
 
-All five are `USERSET` — settable per-session.
+All are `USERSET` — settable per-session.
 
 ---
 

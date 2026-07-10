@@ -246,6 +246,36 @@ if [ -f docs/UPGRADING.md ] && [ -d migrations ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 10. GUC count: prose that states "N GUCs" must match the registered
+#     count. Added 2026-07-10 after an audit found README/ARCHITECTURE
+#     claiming "five GUCs" when 18 are registered (and stale GUC
+#     tables). The source of truth is the count of
+#     `c_str(b"turbovec.` registration calls in src/guc.rs.
+# ----------------------------------------------------------------------
+
+if [ -f src/guc.rs ]; then
+    guc_count=$(grep -cE 'c_str\(b"turbovec\.' src/guc.rs)
+    # Any doc prose of the form "<word-number> GUCs" or "<N> GUCs" must
+    # state the right count. We check the common spelled-out mistakes
+    # ("five GUCs") and any "<digits> GUCs" that disagrees.
+    for f in README.md docs/ARCHITECTURE.md docs/PRODUCTION.md; do
+        [ -f "$f" ] || continue
+        # spelled-out numbers that are almost certainly stale
+        if grep -qiE '\b(three|four|five|six|seven|eight|nine|ten) GUCs\b' "$f"; then
+            fail "$f states a spelled-out GUC count; ${guc_count} GUCs are registered in src/guc.rs — write the number (\"${guc_count} GUCs\") or update it."
+        fi
+        # a numeric "<N> GUCs" that disagrees with the real count
+        while read -r n; do
+            [ -z "$n" ] && continue
+            if [ "$n" != "$guc_count" ]; then
+                fail "$f says \"$n GUCs\" but ${guc_count} are registered in src/guc.rs."
+            fi
+        done < <(grep -oiE '\b[0-9]+ GUCs\b' "$f" | grep -oE '^[0-9]+')
+    done
+    say "INFO: ${guc_count} GUCs registered in src/guc.rs"
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

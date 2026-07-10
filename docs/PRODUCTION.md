@@ -178,8 +178,9 @@ SET turbovec.out_of_core = auto;
 
 -- Normalise embeddings on insert. Useful if your embedding
 -- producer doesn't normalise; lets you use cosine distance
--- without an explicit l2_normalize() call. Default off.
-SET turbovec.normalize_on_insert = off;
+-- without an explicit l2_normalize() call. Default ON (true) --
+-- SET to off only if your producer already emits unit vectors.
+SET turbovec.normalize_on_insert = on;
 
 -- Iterative index scan (v1.8.0+). With a selective WHERE filter +
 -- ORDER BY emb <=> q LIMIT k, the executor post-filters the
@@ -220,8 +221,8 @@ SET turbovec.max_scan_tuples = 20000;
 -- widening at min(max_probes, lists). Clamped to lists at scan time.
 -- No effect on flat (lists = 0) or vacuum-degraded indexes (no cells
 -- to widen; they keep the k-growth refill). turbovec.max_scan_tuples
--- still caps total candidate work as a backstop. Default 64 (8x the
--- probes default).
+-- still caps total candidate work as a backstop. Default 64 (4x the
+-- probes default of 16).
 --
 -- The recall-knob model: `probes` is the primary IVF dial (it sets,
 -- and iterative refill widens, the CELL set); `search_k`/`oversample`

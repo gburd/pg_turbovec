@@ -247,6 +247,59 @@ fn coarse_graph_decide(mode: CoarseGraphMode, lists: usize) -> bool {
     }
 }
 
+/// Live-GUC entry: resolve the partitioned-graph-build shard count
+/// `P` for a corpus of `n` rows, given the resolved build-pool thread
+/// count. Returns `1` (single-pass) or `>= 2` (partitioned). Factored
+/// through the pure [`graph_build_partitions_decide`] so the policy is
+/// unit-testable without a live GUC or rayon pool.
+pub fn graph_build_partitions(n: usize, pool_threads: usize) -> usize {
+    graph_build_partitions_decide(GRAPH_BUILD_PARTITIONS.get(), n, pool_threads)
+}
+
+/// Pure decision for [`graph_build_partitions`]. `setting` is the raw
+/// `turbovec.graph_build_partitions` GUC value:
+/// - `-1` = auto: single-pass below
+///   [`crate::index::graph::GRAPH_PARTITION_MIN_ROWS`], else
+///   `clamp(n / GRAPH_TARGET_SHARD_ROWS, 2, pool_threads * K)`.
+/// - `0`/`1` = force single-pass (returns `1`).
+/// - `N >= 2` = force `N` shards, but still capped so a shard never
+///   holds fewer than a sane minimum (a corpus too small to split into
+///   `N` non-trivial shards falls back toward single-pass / fewer
+///   shards) — `min(N, max(1, n / GRAPH_MIN_SHARD_ROWS))`.
+///
+/// Never returns 0. `P == 1` means "single-pass".
+pub fn graph_build_partitions_decide(setting: i32, n: usize, pool_threads: usize) -> usize {
+    use crate::index::graph::{
+        GRAPH_MIN_SHARD_ROWS, GRAPH_PARTITION_MIN_ROWS, GRAPH_TARGET_SHARD_ROWS,
+    };
+    // A corpus that can't even fill two minimum shards is single-pass
+    // regardless of the knob (splitting it just adds stitch overhead
+    // for no parallel win, and tiny shards under-recall).
+    let max_shards_by_size = (n / GRAPH_MIN_SHARD_ROWS).max(1);
+    match setting {
+        // Force single-pass.
+        0 | 1 => 1,
+        // Auto.
+        -1 => {
+            if n < GRAPH_PARTITION_MIN_ROWS {
+                return 1;
+            }
+            let pool = pool_threads.max(1);
+            let by_target = (n / GRAPH_TARGET_SHARD_ROWS).max(2);
+            // Cap by both the pool budget (K=4: oversharding past the
+            // core count keeps the pool busy while shards finish
+            // unevenly AND makes each shard's single-pass build cheaper
+            // per row — the measured sweet spot is ~2*cores, K=4 gives
+            // headroom) and the corpus size.
+            by_target.min(pool * 4).min(max_shards_by_size).max(1)
+        }
+        // Explicit N < 0 other than -1 is nonsensical; treat as auto.
+        n_neg if n_neg < 0 => graph_build_partitions_decide(-1, n, pool_threads),
+        // Force exactly N shards, capped so shards stay non-trivial.
+        n_forced => (n_forced as usize).min(max_shards_by_size).max(1),
+    }
+}
+
 /// Decide whether an IVF scan should be served cell-scoped given the
 /// mode and the index's codes size. `auto` goes cell-scoped when the
 /// codes exceed [`AUTO_OOC_FRACTION`] of `turbovec.cache_size_mb`
@@ -395,6 +448,36 @@ pub static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(20_000);
 /// unit test; query-level equivalence by the
 /// `parallel_build_matches_serial_query` `#[pg_test]`.
 pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Phase G-2d(a): number of partitions/shards for the parallel
+/// (partition -> build shards -> stitch) graph-kind build
+/// (an internal design note). Single-pass Vamana is
+/// inherently serial (each node's greedy search navigates the graph
+/// every prior insertion left, and the per-hop candidate batches are
+/// too small to amortise rayon fork-join — the measured G-2c finding),
+/// so it does not scale to 5M+ rows (>2.5h, incomplete — the G-2d gate
+/// couldn't run). The partitioned build is embarrassingly parallel:
+/// split the shuffled insertion order into `P` contiguous shards,
+/// build each shard's sub-graph IN PARALLEL, then a cross-shard
+/// refinement pass stitches them into one navigable graph.
+///
+/// `0`/`1` force the single-pass [`crate::index::graph::build_vamana`]
+/// (the reference build, kept intact for small corpora + determinism
+/// debugging). `auto` (the default) derives `P` from the corpus size:
+/// single-pass below
+/// [`crate::index::graph::GRAPH_PARTITION_MIN_ROWS`], else
+/// `P = clamp(n / GRAPH_TARGET_SHARD_ROWS, 2, pool * K)` so each
+/// shard's single-pass build is minutes not hours. A positive `N`
+/// forces exactly `N` shards (still falling back to single-pass if `N
+/// <= 1` or the corpus is too small to shard).
+///
+/// No wire-format change: the partitioned build emits the SAME on-disk
+/// CSR shape the single-pass build does. Deterministic for a fixed
+/// (corpus, seed, P) — the partition assignment, per-shard builds
+/// (index-ordered `par_iter` collect) and the stitch (fixed id order,
+/// staged-then-applied writes) are all functions of the input, not
+/// thread scheduling. See [`graph_build_partitions_decide`].
+pub static GRAPH_BUILD_PARTITIONS: GucSetting<i32> = GucSetting::<i32>::new(-1);
 
 /// IVF fine-scan intra-query parallelism (item #2 of the IVF-scaling
 /// work). The IVF out-of-core scan gathers the probed cells into one
@@ -696,6 +779,19 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_int_guc(
+        c_str(b"turbovec.graph_build_partitions\0"),
+        c_str(b"Shards for the parallel graph-kind build: -1 = auto, 0/1 = single-pass, N = force N shards.\0"),
+        c_str(
+            b"Phase G-2d(a). The single-pass Vamana graph build is inherently serial (each node's greedy search navigates the graph every prior insertion left) and does not scale to millions of rows. This partitioned build splits the shuffled insertion order into P contiguous shards, builds each shard's sub-graph in parallel across turbovec.build_parallelism's pool, then a cross-shard refinement pass stitches them into one navigable graph. -1 (the default) derives P from the corpus size (single-pass below a threshold, else clamp(n / target_shard_rows, 2, pool*2)); 0 or 1 force the serial single-pass build (kept for small corpora and determinism debugging); a positive N forces N shards. Deterministic for a fixed (corpus, seed, P). The on-disk CSR bytes are the same shape a single-pass build emits (no wire change, no REINDEX) \xe2\x80\x94 only build wall-clock and the graph's exact adjacency change.\0",
+        ),
+        &GRAPH_BUILD_PARTITIONS,
+        -1,
+        4096,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c_str(b"turbovec.scan_parallelism\0"),
         c_str(b"OS threads used to fine-scan probed IVF cells per query (0 = auto, capped modest; 1 = serial).\0"),
         c_str(
@@ -777,6 +873,75 @@ mod coarse_graph_tests {
             CoarseGraphMode::Auto,
             GRAPH_MIN_LISTS + 1
         ));
+    }
+}
+
+#[cfg(test)]
+mod graph_build_partitions_tests {
+    use super::graph_build_partitions_decide;
+    use crate::index::graph::{
+        GRAPH_MIN_SHARD_ROWS, GRAPH_PARTITION_MIN_ROWS, GRAPH_TARGET_SHARD_ROWS,
+    };
+
+    #[test]
+    fn zero_and_one_force_single_pass() {
+        assert_eq!(graph_build_partitions_decide(0, 10_000_000, 32), 1);
+        assert_eq!(graph_build_partitions_decide(1, 10_000_000, 32), 1);
+    }
+
+    #[test]
+    fn auto_is_single_pass_below_threshold() {
+        assert_eq!(
+            graph_build_partitions_decide(-1, GRAPH_PARTITION_MIN_ROWS - 1, 32),
+            1
+        );
+    }
+
+    #[test]
+    fn auto_shards_above_threshold_and_respects_pool_and_size_caps() {
+        // Big corpus, big pool: bounded by n / target and by pool*2.
+        let n = 5_000_000;
+        let pool = 32;
+        let p = graph_build_partitions_decide(-1, n, pool);
+        assert!(p >= 2, "auto must shard a 5M corpus, got {p}");
+        assert!(p <= pool * 4, "P={p} exceeded pool*4 cap");
+        assert!(
+            p <= (n / GRAPH_TARGET_SHARD_ROWS).max(2),
+            "P={p} exceeded n/target cap"
+        );
+        // Small pool caps harder.
+        let p2 = graph_build_partitions_decide(-1, n, 2);
+        assert!(p2 <= 8, "small pool should cap P low, got {p2}");
+        assert!(p2 >= 2);
+    }
+
+    #[test]
+    fn forced_n_is_capped_by_corpus_size() {
+        // Ask for 100 shards on a corpus that can only fill a few
+        // minimum shards -> capped down.
+        let n = GRAPH_MIN_SHARD_ROWS * 3;
+        let p = graph_build_partitions_decide(100, n, 32);
+        assert_eq!(p, 3, "forced N must cap at n / GRAPH_MIN_SHARD_ROWS");
+        // A tiny corpus forced to shard collapses to single-pass.
+        assert_eq!(
+            graph_build_partitions_decide(100, GRAPH_MIN_SHARD_ROWS - 1, 32),
+            1
+        );
+    }
+
+    #[test]
+    fn forced_n_honored_when_corpus_is_large() {
+        let n = GRAPH_MIN_SHARD_ROWS * 50;
+        assert_eq!(graph_build_partitions_decide(8, n, 4), 8);
+    }
+
+    #[test]
+    fn never_returns_zero() {
+        for setting in [-5, -1, 0, 1, 2, 1000] {
+            for n in [0usize, 1, 100, 10_000, 5_000_000] {
+                assert!(graph_build_partitions_decide(setting, n, 8) >= 1);
+            }
+        }
     }
 }
 

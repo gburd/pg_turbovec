@@ -102,6 +102,36 @@ pub const GRAPH_BUILD_L: usize = GRAPH_DEGREE_R * 2;
 /// an internal design note).
 pub const GRAPH_ALPHA: f32 = 1.2;
 
+/// Phase G-2d(a): corpus size at/below which the `auto`
+/// `turbovec.graph_build_partitions` policy uses the single-pass
+/// [`build_vamana`]. Below this the serial build finishes quickly
+/// (seconds) and the partitioned build's stitch overhead + slightly
+/// different adjacency isn't worth it. 200k is the scale where the
+/// serial build starts taking real wall-clock on this hardware (the
+/// timing test's regime) while still being small enough that the
+/// partitioned build's recall parity is easy to verify against it.
+pub const GRAPH_PARTITION_MIN_ROWS: usize = 200_000;
+
+/// Target rows per shard for the `auto` policy. Smaller shards build
+/// FASTER per row (single-pass Vamana's per-node greedy search cost
+/// grows with the sub-graph size) AND expose more parallelism, so the
+/// measured sweet spot is many small shards, not few large ones
+/// (G-2d(a) timing: n=200k on 8 cores, P=8 -> 8.3x, P=16 -> 13.3x,
+/// P=32 -> 11.4x). ~12k keeps a shard's build fast while keeping the
+/// stitch's cross-shard candidate diversity reasonable; the pool cap
+/// (`P <= pool*4`, below) is what actually bounds P on a given box.
+/// `P = clamp(n / this, 2, pool*4)`.
+pub const GRAPH_TARGET_SHARD_ROWS: usize = 12_000;
+
+/// Floor on rows per shard: a corpus is only split into `P` shards if
+/// each shard holds at least this many rows, else `P` is reduced
+/// (down to 1 = single-pass). Below ~2k rows a shard's sub-graph is
+/// too small to give the stitch's per-shard candidate pool useful
+/// cross-shard diversity, and the fixed stitch cost dominates. This
+/// also bounds `forced-N` so `graph_build_partitions = 9999` on a
+/// small table can't create thousands of near-empty shards.
+pub const GRAPH_MIN_SHARD_ROWS: usize = 2_000;
+
 /// Scan-time beam-width multiplier, mirroring
 /// `ivf::GRAPH_EF_MULTIPLIER`'s pattern but sized for CORPUS scale
 /// (thousands to millions of nodes) rather than centroid scale
@@ -317,6 +347,259 @@ pub fn build_vamana_with_params(
     // Flatten to CSR. Each node's own list sorted ascending (fixed,
     // deterministic byte layout regardless of insertion order within
     // the list).
+    (GraphAdjacency::from_lists(adj), entry)
+}
+
+/// Phase G-2d(a): partitioned/merge PARALLEL Vamana build
+/// (an internal design note). Structurally different
+/// from [`build_vamana`]'s serial single-pass loop so the graph build
+/// scales to millions of rows:
+///
+/// 1. **Partition** the deterministic shuffled insertion order into
+///    `p` CONTIGUOUS shards (so each shard is a uniform random sample
+///    of the corpus, uncorrelated with slot id).
+/// 2. **Build each shard's sub-graph IN PARALLEL** (`par_iter`, index-
+///    ordered collect — deterministic regardless of pool size). Each
+///    shard runs a full single-pass [`build_vamana_with_params`] in
+///    LOCAL id space over its own gathered vectors, then remaps local
+///    -> global ids. This is the parallel win: `p` independent builds,
+///    each `1/p` the size, run concurrently across the pool.
+/// 3. **Stitch** into one navigable graph. A union of disjoint
+///    sub-graphs is unnavigable across shards, so:
+///    - global entry point = [`approx_medoid`] over ALL vectors;
+///    - a **cross-shard refinement pass**: for each node `p` (fixed id
+///      order, parallelizable — reads the merged graph READ-ONLY,
+///      stages `p`'s new neighbor list, all applied atomically after
+///      the pass so it is order-independent), greedy-search the MERGED
+///      graph from the global entry toward `p` (beam `l`) to collect a
+///      visited set that now SPANS shards, then `RobustPrune(p, V ∪
+///      N_out(p), alpha, r)`. This is what creates the cross-shard
+///      edges the per-shard build couldn't see.
+///    - a **serial reverse-edge pass** afterwards restores the mutual
+///      navigability + degree bound the single-pass build's reverse-
+///      edge step gives (done serially/deterministically since it
+///      mutates OTHER nodes' lists).
+///
+/// Both dominant costs (the per-shard builds AND the refinement pass)
+/// are parallel, unlike the single-pass build whose G-2c finding was
+/// that its per-hop batches are too small to amortise fan-out.
+///
+/// Returns the SAME `(GraphAdjacency, entry_point)` shape
+/// [`build_vamana`] does — no wire-format change (the persisted CSR is
+/// identical in shape, just a different-but-equally-valid adjacency).
+///
+/// Deterministic for a fixed `(vectors, seed, p)` on one machine, AND
+/// bit-identical across rayon pool sizes: the partition is a pure
+/// function of the seed, the per-shard collect is index-ordered, the
+/// refinement pass stages per-node results indexed by node id (fixed
+/// order), and the reverse-edge pass is serial in ascending id order.
+///
+/// `p <= 1` (or a corpus too small to shard) delegates to the
+/// single-pass [`build_vamana_with_params`] — the reference path stays
+/// reachable.
+pub fn build_vamana_partitioned(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    p: usize,
+) -> (GraphAdjacency, u32) {
+    build_vamana_partitioned_with_params(
+        vectors,
+        n,
+        dim,
+        p,
+        GRAPH_DEGREE_R,
+        GRAPH_BUILD_L,
+        GRAPH_ALPHA,
+        GRAPH_SEED,
+    )
+}
+
+/// Parameterised form of [`build_vamana_partitioned`] (for tests /
+/// tuning). See that function's doc for the algorithm.
+#[allow(clippy::too_many_arguments)]
+pub fn build_vamana_partitioned_with_params(
+    vectors: &[f32],
+    n: usize,
+    dim: usize,
+    p: usize,
+    r: usize,
+    l: usize,
+    alpha: f32,
+    seed: u64,
+) -> (GraphAdjacency, u32) {
+    debug_assert_eq!(vectors.len(), n * dim);
+    // Degenerate / too-small-to-shard cases fall back to the
+    // single-pass reference build (keeps it reachable + identical for
+    // small corpora).
+    if p <= 1 || n < 2 * GRAPH_MIN_SHARD_ROWS.max(1) || p > n {
+        return build_vamana_with_params(vectors, n, dim, r, l, alpha, seed);
+    }
+    let r = r.max(1);
+
+    // 1. Partition the deterministic shuffled insertion order into `p`
+    //    contiguous shards. Same shuffle the single-pass build uses,
+    //    so each shard is a uniform random sample of the corpus.
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    order.shuffle(&mut rng);
+    // Contiguous, near-equal shard ranges over `order` (deterministic
+    // split: shard s gets order[s*n/p .. (s+1)*n/p]).
+    let shard_ranges: Vec<(usize, usize)> = (0..p)
+        .map(|s| (s * n / p, (s + 1) * n / p))
+        .filter(|&(a, b)| b > a)
+        .collect();
+
+    // 2. Build each shard's sub-graph in parallel (index-ordered
+    //    collect -> deterministic). Each shard: gather its vectors
+    //    into a local buffer, build in LOCAL id space, remap to
+    //    global ids. The per-shard seed is derived from the base seed
+    //    + shard index so shards don't share an RNG stream but the
+    //    whole thing stays a pure function of `seed`.
+    use rayon::prelude::*;
+    let shard_graphs: Vec<(Vec<Vec<u32>>, Vec<u32>)> = shard_ranges
+        .par_iter()
+        .enumerate()
+        .map(|(s, &(a, b))| {
+            let global_ids: Vec<u32> = order[a..b].to_vec();
+            let m = global_ids.len();
+            // Gather this shard's vectors contiguously in local order.
+            let mut local_vecs = vec![0.0f32; m * dim];
+            for (li, &gid) in global_ids.iter().enumerate() {
+                let src = gid as usize * dim;
+                local_vecs[li * dim..(li + 1) * dim].copy_from_slice(&vectors[src..src + dim]);
+            }
+            let shard_seed = seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(s as u64 + 1));
+            let (sub, _local_entry) =
+                build_vamana_with_params(&local_vecs, m, dim, r, l, alpha, shard_seed);
+            // Remap local -> global adjacency lists.
+            let mut remapped: Vec<Vec<u32>> = (0..m)
+                .map(|li| {
+                    sub.neighbors_of(li)
+                        .iter()
+                        .map(|&lnb| global_ids[lnb as usize])
+                        .collect()
+                })
+                .collect();
+            for row in &mut remapped {
+                row.sort_unstable();
+            }
+            (remapped, global_ids)
+        })
+        .collect();
+
+    // 3a. Union the per-shard adjacencies into one global graph.
+    let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (sub, global_ids) in &shard_graphs {
+        for (li, &gid) in global_ids.iter().enumerate() {
+            // Each global id belongs to exactly one shard (disjoint
+            // contiguous partition of `order`, which is a permutation
+            // of 0..n), so this assignment never overwrites.
+            adj[gid as usize] = sub[li].clone();
+        }
+    }
+    drop(shard_graphs);
+
+    // 3b. Global entry point = approx medoid over ALL vectors (same
+    //     primitive the single-pass build uses).
+    let entry = approx_medoid(vectors, n, dim);
+
+    // 3c. Cross-shard refinement pass. For each node, greedy-search
+    //     the MERGED graph from the global entry toward that node,
+    //     collecting a visited set that now spans shards, then
+    //     RobustPrune(node, V ∪ N_out(node)). Read-only over `adj`,
+    //     each node's new list staged into a fixed id-indexed slot,
+    //     then applied all at once -> order-independent, bit-identical
+    //     across thread counts (same discipline as G-2c's per-hop
+    //     batching + the plan's staged-write requirement).
+    let refined: Vec<Vec<u32>> = (0..n as u32)
+        .into_par_iter()
+        .map(|node| {
+            let query = &vectors[node as usize * dim..(node as usize + 1) * dim];
+            let dist_to = |id: usize| sq_dist(query, &vectors[id * dim..(id + 1) * dim]);
+            let dist_to_many = |ids: &[u32]| build_row_dists(query, ids, vectors, dim);
+            let dist = |x: u32, y: u32| -> f32 {
+                sq_dist(
+                    &vectors[x as usize * dim..(x as usize + 1) * dim],
+                    &vectors[y as usize * dim..(y as usize + 1) * dim],
+                )
+            };
+            let dist_p_many = |x: u32, ids: &[u32]| {
+                let arow = &vectors[x as usize * dim..(x as usize + 1) * dim];
+                build_row_dists(arow, ids, vectors, dim)
+            };
+            let visited = greedy_search_collect_visited_via(
+                entry,
+                node as usize,
+                l,
+                &adj,
+                dist_to,
+                &dist_to_many,
+            );
+            let mut candidates: Vec<u32> =
+                Vec::with_capacity(visited.len() + adj[node as usize].len());
+            candidates.extend_from_slice(&visited);
+            candidates.extend_from_slice(&adj[node as usize]);
+            robust_prune_via(node, &candidates, &dist, &dist_p_many, alpha, r)
+        })
+        .collect();
+    adj = refined;
+
+    // 3d. Reverse-edge pass. For each node's selected out-edge q, the
+    //     single-pass build adds a reverse edge q -> node (re-pruning
+    //     q if it exceeds the degree bound). Done as a deterministic,
+    //     PARALLEL two-step here so it never races the refinement pass
+    //     and uses the cores:
+    //     (i) collect every reverse-edge request (target q, source
+    //         node) — parallel over source nodes, then group by target
+    //         in a fixed (ascending source id within ascending target)
+    //         order;
+    //     (ii) for each target q, merge its existing out-list with its
+    //         incoming reverse edges and re-prune to `r` if over the
+    //         bound — parallel over targets (each target's list is
+    //         independent), index-ordered collect => deterministic.
+    //     This matches the single-pass reverse-edge semantics (a
+    //     reverse edge is added, and the node is re-pruned only if it
+    //     now exceeds `r`) while being order-independent.
+    let mut reverse_reqs: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for node in 0..n as u32 {
+        for &q in &adj[node as usize] {
+            reverse_reqs[q as usize].push(node);
+        }
+    }
+    let updated: Vec<Vec<u32>> = (0..n)
+        .into_par_iter()
+        .map(|qi| {
+            let incoming = &reverse_reqs[qi];
+            if incoming.is_empty() {
+                return adj[qi].clone();
+            }
+            // Merge existing out-edges + incoming reverse edges, dedup,
+            // drop self-loops.
+            let mut merged: Vec<u32> = adj[qi].clone();
+            merged.extend_from_slice(incoming);
+            merged.retain(|&x| x as usize != qi);
+            merged.sort_unstable();
+            merged.dedup();
+            if merged.len() <= r {
+                return merged;
+            }
+            // Over the bound: re-prune (same oracle as the build).
+            let dist = |x: u32, y: u32| -> f32 {
+                sq_dist(
+                    &vectors[x as usize * dim..(x as usize + 1) * dim],
+                    &vectors[y as usize * dim..(y as usize + 1) * dim],
+                )
+            };
+            let dist_p_many = |x: u32, ids: &[u32]| {
+                let arow = &vectors[x as usize * dim..(x as usize + 1) * dim];
+                build_row_dists(arow, ids, vectors, dim)
+            };
+            robust_prune_via(qi as u32, &merged, &dist, &dist_p_many, alpha, r)
+        })
+        .collect();
+    adj = updated;
+
     (GraphAdjacency::from_lists(adj), entry)
 }
 
@@ -1849,6 +2132,289 @@ mod tests {
             g.edge_count(),
             tbuild.elapsed()
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase G-2d(a): partitioned/merge parallel build tests.
+    // -----------------------------------------------------------------
+
+    /// Clustered synthetic corpus: `n_clusters` random centers, each
+    /// point = a center + small gaussian-ish jitter. Gives the graph
+    /// real proximity structure (unlike uniform `synth_corpus`), so
+    /// recall is a meaningful signal. Deterministic in `seed`.
+    fn clustered_corpus(n: usize, dim: usize, n_clusters: usize, seed: u64) -> Vec<f32> {
+        use rand::Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut centers = vec![0.0f32; n_clusters * dim];
+        for c in centers.iter_mut() {
+            *c = rng.gen_range(-1.0f32..1.0);
+        }
+        let mut out = vec![0.0f32; n * dim];
+        for i in 0..n {
+            let c = i % n_clusters;
+            for d in 0..dim {
+                // small jitter around the cluster center
+                let j: f32 = rng.gen_range(-0.15f32..0.15);
+                out[i * dim + d] = centers[c * dim + d] + j;
+            }
+        }
+        out
+    }
+
+    /// recall@k of `graph`'s search vs exact linear scan, averaged
+    /// over `n_queries` deterministic queries drawn near the corpus
+    /// distribution.
+    fn measure_recall(
+        corpus: &[f32],
+        n: usize,
+        dim: usize,
+        g: &GraphAdjacency,
+        entry: u32,
+        queries: &[f32],
+        n_queries: usize,
+        k: usize,
+    ) -> f64 {
+        let mut total = 0.0f64;
+        for qi in 0..n_queries {
+            let q = &queries[qi * dim..(qi + 1) * dim];
+            let mut exact: Vec<(f32, u32)> = (0..n as u32)
+                .map(|id| {
+                    (
+                        -sq_dist(q, &corpus[id as usize * dim..(id as usize + 1) * dim]),
+                        id,
+                    )
+                })
+                .collect();
+            exact.sort_unstable_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            exact.truncate(k);
+            let exact_set: std::collections::HashSet<u32> =
+                exact.iter().map(|&(_, id)| id).collect();
+            let out = graph_search(g, entry, k, &[], |ids| {
+                neg_sq_dist_batch(corpus, dim, q, ids)
+            });
+            let graph_set: std::collections::HashSet<u32> = out.iter().map(|&(_, id)| id).collect();
+            let hits = exact_set.intersection(&graph_set).count();
+            total += hits as f64 / k.min(exact_set.len()).max(1) as f64;
+        }
+        total / n_queries as f64
+    }
+
+    /// THE correctness gate: the partitioned build's recall@10 must be
+    /// within a small tolerance of (or better than) the single-pass
+    /// build's, on the SAME clustered corpus. A partitioned build that
+    /// under-recalls is a failed approach.
+    #[test]
+    fn partitioned_build_recall_parity_with_single_pass() {
+        let n = 20_000;
+        let dim = 64;
+        let corpus = clustered_corpus(n, dim, 50, 20260709);
+        // Query set: 100 fresh points from the same distribution.
+        let queries = clustered_corpus(100, dim, 50, 0xC0FFEE);
+        let n_queries = 100;
+        let k = 10;
+
+        let (g_single, e_single) = build_vamana(&corpus, n, dim);
+        // Force 8 shards (n is below the auto MIN_ROWS threshold, so
+        // pass p explicitly through the params form).
+        let (g_part, e_part) = build_vamana_partitioned_with_params(
+            &corpus,
+            n,
+            dim,
+            8,
+            GRAPH_DEGREE_R,
+            GRAPH_BUILD_L,
+            GRAPH_ALPHA,
+            GRAPH_SEED,
+        );
+
+        let r_single = measure_recall(&corpus, n, dim, &g_single, e_single, &queries, n_queries, k);
+        let r_part = measure_recall(&corpus, n, dim, &g_part, e_part, &queries, n_queries, k);
+
+        eprintln!(
+            "[G-2d recall] single-pass R@{k}={r_single:.4}  partitioned(P=8) R@{k}={r_part:.4}  delta={:.4}",
+            r_part - r_single
+        );
+        // Tolerance: partitioned must not be worse by more than 3
+        // recall points. (Empirically it matches or beats single-pass
+        // because the refinement pass's greedy search over the MERGED
+        // graph surfaces cross-shard neighbors the single-pass build's
+        // incremental insertion never reconsidered.)
+        assert!(
+            r_part >= r_single - 0.03,
+            "partitioned recall {r_part:.4} under-recalls single-pass {r_single:.4} by more than tolerance"
+        );
+    }
+
+    /// Determinism: same (corpus, seed, P) -> bit-identical adjacency
+    /// AND entry point.
+    #[test]
+    fn partitioned_build_is_deterministic() {
+        let n = 8_000;
+        let dim = 32;
+        let corpus = clustered_corpus(n, dim, 20, 555);
+        let (g1, e1) = build_vamana_partitioned_with_params(
+            &corpus,
+            n,
+            dim,
+            6,
+            GRAPH_DEGREE_R,
+            GRAPH_BUILD_L,
+            GRAPH_ALPHA,
+            GRAPH_SEED,
+        );
+        let (g2, e2) = build_vamana_partitioned_with_params(
+            &corpus,
+            n,
+            dim,
+            6,
+            GRAPH_DEGREE_R,
+            GRAPH_BUILD_L,
+            GRAPH_ALPHA,
+            GRAPH_SEED,
+        );
+        assert_eq!(g1, g2, "partitioned build is non-deterministic");
+        assert_eq!(e1, e2, "partitioned entry point is non-deterministic");
+    }
+
+    /// HARD determinism contract (like G-2c's
+    /// `build_is_bit_identical_across_thread_counts`): the partitioned
+    /// build is bit-identical across rayon pool sizes {1, 2, auto}.
+    /// The per-shard collect is index-ordered, the refinement pass
+    /// stages per-node results by fixed id, and the reverse-edge pass
+    /// is serial — so the result never depends on thread scheduling.
+    #[test]
+    fn partitioned_build_is_bit_identical_across_thread_counts() {
+        let n = 8_000;
+        let dim = 48;
+        let corpus = clustered_corpus(n, dim, 25, 42);
+        let build = |nt: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(nt)
+                .build()
+                .unwrap()
+                .install(|| {
+                    build_vamana_partitioned_with_params(
+                        &corpus,
+                        n,
+                        dim,
+                        5,
+                        GRAPH_DEGREE_R,
+                        GRAPH_BUILD_L,
+                        GRAPH_ALPHA,
+                        GRAPH_SEED,
+                    )
+                })
+        };
+        let (g1, e1) = build(1);
+        let (g2, e2) = build(2);
+        let (g_auto, e_auto) = build_vamana_partitioned_with_params(
+            &corpus,
+            n,
+            dim,
+            5,
+            GRAPH_DEGREE_R,
+            GRAPH_BUILD_L,
+            GRAPH_ALPHA,
+            GRAPH_SEED,
+        );
+        assert_eq!(g1, g2, "partitioned adjacency differs between pool 1 and 2");
+        assert_eq!(
+            g1, g_auto,
+            "partitioned adjacency differs between pool 1 and auto"
+        );
+        assert_eq!(e1, e2);
+        assert_eq!(e1, e_auto);
+    }
+
+    /// Structural invariants on the partitioned build's output: degree
+    /// <= R, no self-loops, strictly ascending/deduped neighbor lists,
+    /// CSR round-trips, no isolated live nodes.
+    #[test]
+    fn partitioned_build_invariants() {
+        let n = 10_000;
+        let dim = 32;
+        let r = 24;
+        let corpus = clustered_corpus(n, dim, 30, 909);
+        let (g, _e) =
+            build_vamana_partitioned_with_params(&corpus, n, dim, 7, r, r * 2, GRAPH_ALPHA, 123);
+        for i in 0..n {
+            let nbrs = g.neighbors_of(i);
+            assert!(nbrs.len() <= r, "node {i} degree {} > R={r}", nbrs.len());
+            assert!(!nbrs.contains(&(i as u32)), "node {i} self-loop");
+            assert!(!nbrs.is_empty(), "node {i} isolated -- navigability gap");
+            for w in nbrs.windows(2) {
+                assert!(w[0] < w[1], "node {i} neighbor list not strictly ascending");
+            }
+            assert!(nbrs.iter().all(|&id| (id as usize) < n));
+        }
+        // CSR round-trips.
+        let back =
+            GraphAdjacency::decode(&g.encode_offsets(), &g.encode_neighbors(), n).expect("decode");
+        assert_eq!(g, back);
+    }
+
+    /// P <= 1 (and too-small corpora) delegate to the single-pass
+    /// build, byte-identically. Guarantees the reference path stays
+    /// reachable and `graph_build_partitions = 0/1` is a true no-op.
+    #[test]
+    fn partitioned_p_le_1_equals_single_pass() {
+        let n = 5_000;
+        let dim = 24;
+        let corpus = clustered_corpus(n, dim, 15, 77);
+        let (g_single, e_single) = build_vamana(&corpus, n, dim);
+        for p in [0usize, 1] {
+            let (g, e) = build_vamana_partitioned_with_params(
+                &corpus,
+                n,
+                dim,
+                p,
+                GRAPH_DEGREE_R,
+                GRAPH_BUILD_L,
+                GRAPH_ALPHA,
+                GRAPH_SEED,
+            );
+            assert_eq!(g, g_single, "P={p} differs from single-pass adjacency");
+            assert_eq!(e, e_single, "P={p} differs from single-pass entry");
+        }
+    }
+
+    /// G-2d(a) local RELATIVE build timing: serial (P=1 = single-pass)
+    /// vs partitioned (P=auto-ish) wall-clock at a scale where the
+    /// single-pass build is slow. This box's ABSOLUTE numbers are
+    /// untrustworthy (AGENTS.md), but the serial-vs-partitioned RATIO
+    /// on the SAME machine demonstrates the cores get used. `#[ignore]`
+    /// — run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn timing_partitioned_vs_single_pass() {
+        use std::time::Instant;
+        let n = 200_000;
+        let dim = 64;
+        let corpus = clustered_corpus(n, dim, 200, 7);
+
+        let t0 = Instant::now();
+        let (gs, _es) = build_vamana(&corpus, n, dim);
+        let single = t0.elapsed();
+        eprintln!(
+            "[G-2d timing] single-pass={single:?} ({} edges)",
+            gs.edge_count()
+        );
+
+        let cores = rayon::current_num_threads().max(2);
+        for p in [cores, cores * 2, cores * 4] {
+            let t1 = Instant::now();
+            let (gp, _ep) = build_vamana_partitioned(&corpus, n, dim, p);
+            let part = t1.elapsed();
+            let ratio = single.as_secs_f64() / part.as_secs_f64();
+            eprintln!(
+                "[G-2d timing] cores={cores} P={p}  partitioned={part:?} ({} edges)  speedup={ratio:.2}x",
+                gp.edge_count(),
+            );
+        }
     }
 
     // -----------------------------------------------------------------

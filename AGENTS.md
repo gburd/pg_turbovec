@@ -85,14 +85,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.25.0, 2026-07-09)
+### Current (as of v1.25.1, 2026-07-09)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.25.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.25.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.25.0   | `REINDEX INDEX` once (rotation matrix migration) |
-| 1.4.x → 1.24.x     | 1.25.0   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+| 1.0.x / 1.1.x      | 1.25.1   | `REINDEX INDEX` once |
+| 1.2.x              | 1.25.1   | `REINDEX INDEX` once |
+| 1.3.x              | 1.25.1   | `REINDEX INDEX` once (rotation matrix migration) |
+| 1.4.x → 1.25.0     | 1.25.1   | `ALTER EXTENSION pg_turbovec UPDATE` only |
+
+**v1.25.1 is a release-tooling + docs/benchmark patch** — no shippable
+code change (binary byte-identical to v1.25.0; no wire/SQL change, no
+REINDEX). It adds the tag-triggered PGXN + pgsql-announce publish
+pipeline (first release to exercise it) and the Qdrant/ANN-Benchmarks
+competitive benchmark that validated v1.25.0's `hi_dim_rerank` at
+scale (GIST-960-1M recall 0.876→0.953; vs Qdrant we lose latency
+3–18×, win storage 5–8×).
 
 **v1.25.0 adds `turbovec.hi_dim_rerank`** (enum off/auto/on, default
 auto) — the Gap-B fix. An offline investigation

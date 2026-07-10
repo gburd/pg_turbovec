@@ -4,6 +4,45 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.25.1] — 2026-07-09
+
+**Release-tooling + docs/benchmark patch. No shippable code change —
+the compiled binary is byte-identical to v1.25.0** (no `src/` runtime
+change; wire format stays v6; no SQL-surface change; **no REINDEX**).
+This is the release that first exercises the new automated publish
+pipeline.
+
+- **Automated release publishing** (`.forgejo/workflows/release.yml`,
+  `scripts/make-dist.sh`, `META.json.in`, `ci/announce.sh`): a
+  `vX.Y.Z` tag on Codeberg now gates (compile + drift-check), builds a
+  PGXN **source** distribution (renders `META.json` from Cargo.toml's
+  version, runs `cargo pgrx schema` for the install SQL, zips a
+  PGXN-layout archive), attaches it to a Codeberg release, uploads to
+  PGXN, and submits a postgresql.org news announcement (feeds
+  pgsql-announce). Runs on a self-hosted Forgejo runner (Codeberg's
+  hosted 10-min cap can't fit a pgrx build); each publish step no-ops
+  cleanly if its secrets are unset. The PGXN dist is a **source
+  archive built with `cargo pgrx install`**, not a `pgxn install`-able
+  package — published for discoverability + version-pinning. See
+  `RELEASING.md` for the one-time runner + secrets setup.
+- **Qdrant + ANN-Benchmarks-protocol competitive benchmark**
+  (`an internal benchmark note` +
+  `benches/results/qdrant_annbench_20260709/`): validated v1.25.0's
+  `turbovec.hi_dim_rerank` at real scale — on GIST-960-1M, `auto`
+  lifts R@10 from **0.876** (the `off` ceiling) to **0.953**, crossing
+  the ≥0.90 and ≥0.95 bands the pre-fix engine never reached. vs
+  Qdrant (in-RAM, a benchmark host, 1M): Qdrant wins raw latency 3–18×,
+  pg_turbovec wins storage (SIFT 141 MB = 7–8× smaller; GIST 983 MB =
+  5.4× smaller than Qdrant's 5.3 GB). At 10M×960 only Qdrant built in
+  a 90-min budget (turbovec's single-threaded k-means build cliff).
+- **Docs correction**: the 2026-07-08 competitive doc's pg_turbovec
+  SIFT R@10=0.99 latency (16.84 ms) was the out-of-core path; the
+  in-RAM number is **2.6 ms** (verified R@10=0.9915 @ 2.61 ms).
+  Footnoted in place.
+
+**Migration:** `ALTER EXTENSION pg_turbovec UPDATE TO '1.25.1';` — a
+no-op upgrade (nothing in the SQL surface or on-disk format changed).
+
 ## [1.25.0] — 2026-07-09
 
 **Gap-B fix: `turbovec.hi_dim_rerank`, a dimension-aware exact-L2

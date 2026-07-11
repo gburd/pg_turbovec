@@ -1,0 +1,9 @@
+-- pg_turbovec 1.27.2
+--
+-- Build-time-only change: IVF k-means reservoir sampling now defers the
+-- O(dim^2) per-row rotation to only the rows kept in the reservoir
+-- (<= 256*lists), instead of rotating all N accepted rows. On-disk
+-- index format is byte-identical to 1.27.1 (same trained centroids,
+-- same codes). No wire change, no SQL surface change, no REINDEX.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '1.27.2';` is sufficient.

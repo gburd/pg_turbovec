@@ -4,6 +4,45 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.27.2] — 2026-07-11
+
+**Phase Q-4b: kill the IVF build cliff's real bottleneck — the
+per-row rotation in k-means reservoir sampling.** Patch bump —
+build-SPEED change only. The persisted IVF centroids + codes are
+**byte-identical to v1.27.1** for a fixed (corpus, seed, lists, dim);
+no wire-format change (stays v7), no SQL-surface change, **no REINDEX**.
+
+Profiling the real 10M×1024/lists=4096 build (v1.27.1 still did not
+complete in budget despite Q-4a's parallel k-means) found the
+dominant cost was **not** k-means (~4.4%, flat in `n`) but the
+single-threaded scalar `rotate_unit` inside
+`BuildState::ivf_reservoir_push` — **~92% of the projected build.** It
+ran an O(dim²) rotation on **all N accepted rows** during the heap
+scan, even though the reservoir only ever keeps `cap = 256·lists`
+samples. At 10M/lists=4096 that is ~9M O(dim²) rotations computed and
+immediately discarded.
+
+The fix defers the rotation: the reservoir *selection* uses only the
+RNG stream + seen-count + cap (none depend on the rotated values), so
+`rotate_unit` now runs **only for the ≤ cap rows that actually land in
+the sample**. Rotation cost drops from O(N·dim²) to O(cap·dim²),
+removing the `n`-scaling that was the cliff — while producing the
+**identical** k-means training sample (hence identical centroids,
+identical codes). The RNG draw stays unconditional in the replacement
+branch, exactly as before, so the same source rows land in the same
+reservoir slots and receive the same rotation.
+
+Verified: `index::build::reservoir_tests::
+lazy_rotation_is_byte_identical_to_eager` reproduces both the old
+(eager-rotate-always) and new (lazy-rotate-on-keep) reservoir
+algorithms with a shared ChaCha8 seed across 4 corpus sizes × 3 seeds
+(exercising both the fill and the replacement paths) and asserts the
+sample buffers are bit-identical (`f32::to_bits`). Pure-Rust,
+load-independent, green. The full `cargo pgrx test pg16` gate
+(including `ivf_streaming_build_determinism_byte_identical`) must be
+re-run on a quiet host before tagging — the local box was under
+load ~73 at authoring time.
+
 ## [1.27.1] — 2026-07-11
 
 **Phase Q-4a: parallelize the IVF k-means build.** Patch bump —
@@ -13,8 +52,7 @@ no wire-format change (stays v7), no SQL-surface change, **no REINDEX**.
 This only makes NEW `WITH (lists = N)` builds faster.
 
 Q-1 exposed the IVF build cliff as the blocker for scale: a real
-10M×1024 IVF build did not complete in a 90-min budget
-(`an internal benchmark note`). Two remaining serial hot
+10M×1024 IVF build did not complete in a 90-min budget. Two remaining serial hot
 loops in the k-means build are now parallelized **bit-identically**
 (the rest was already parallel from v1.20.0/v1.22.1):
 - **`gemm_lloyd_assign`'s per-row argmin + top-2 tie-break** — run
@@ -179,7 +217,7 @@ pipeline.
   package — published for discoverability + version-pinning. See
   `RELEASING.md` for the one-time runner + secrets setup.
 - **Qdrant + ANN-Benchmarks-protocol competitive benchmark**
-  (`an internal benchmark note` +
+  (an internal design note +
   `benches/results/qdrant_annbench_20260709/`): validated v1.25.0's
   `turbovec.hi_dim_rerank` at real scale — on GIST-960-1M, `auto`
   lifts R@10 from **0.876** (the `off` ceiling) to **0.953**, crossing
@@ -524,7 +562,7 @@ repo hygiene before a release. No wire-format change
   `.githooks/pre-push` so this can't silently reaccumulate.
 - **Literal `\uXXXX` escape-sequence artifacts** (e.g. `\u2014`
   instead of an actual em dash) in an internal design note,
-  an internal design note, an internal design note,
+  an internal design note,
   `src/extras.rs`, `src/index/cost.rs`, and the now-removed
   `.woodpecker/ci.yaml` — cosmetic (doc comments, not code
   behavior), but a real artifact of a write-tool double-escaping
@@ -854,8 +892,7 @@ EXTENSION pg_turbovec UPDATE TO '1.19.0';` is sufficient. Tests: 241
 
 **Tier-1 IVF latency optimizations (scan-path).** No SQL-surface
 change, **no wire change** (`MetaPageData::version = 5`; single-vector
-stays v4), **no REINDEX**. Closes the Tier-1 backlog
-(an internal design note) — narrowing the IVF-vs-HNSW latency
+stays v4), **no REINDEX**. Closes the Tier-1 backlog — narrowing the IVF-vs-HNSW latency
 gap by attacking the actual per-query floor, with evidence rather than
 speculation.
 
@@ -948,7 +985,7 @@ harness: `benches/scripts/colbert/`.
 
 ### Docs
 
-an internal design note and an internal design note
+an internal design note
 updated to record index-native late interaction as **DONE** (was a
 future phase): pg_turbovec is one of two PostgreSQL extensions (with
 VectorChord) with index-native multivector/MaxSim, and the only one
@@ -1448,7 +1485,7 @@ The IVF *query* path is unaffected.
 
 Files: `benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json`,
 `docs/BENCHMARKS.md`, an internal design note,
-an internal design note, an internal design note.
+an internal design note.
 
 ## [1.11.0] — 2026-06-16
 

@@ -420,30 +420,50 @@ impl BuildState {
     /// per accepted vector when `lists > 0`. `raw` is the raw (un-
     /// normalised) input slice; we normalise + rotate before storing
     /// so the sample lives in the clustering space.
+    ///
+    /// The O(dim^2) `rotate_unit` is done LAZILY, only for rows that
+    /// actually land in the reservoir (<= cap = 256*lists), not for
+    /// every one of the n accepted rows. The reservoir selection is
+    /// independent of the rotated values (it depends only on the RNG,
+    /// seen-count, and cap), so deferring the rotation is
+    /// byte-identical to rotating every row: the same source rows land
+    /// in the same slots and get the same rotation. At 10M rows with
+    /// cap ~1M this drops ~9M wasted O(dim^2) rotations -- the
+    /// dominant IVF build cost at scale.
     fn ivf_reservoir_push(&mut self, raw: &[f32], dim: usize) {
         use rand::Rng;
-        let rotation = self
-            .ivf_rotation
-            .as_ref()
-            .expect("ivf_reservoir_push before rotation built");
-        // Normalise then rotate, matching turbovec's encode pipeline.
-        let unit = kernels::normalise_to_vec(raw);
-        let rotated = Self::rotate_unit(rotation, &unit, dim);
 
         let cap = self.ivf_sample_cap();
         self.ivf_seen += 1;
         if self.ivf_sample_count < cap {
+            let rotated = self.rotate_raw(raw, dim);
             self.ivf_sample.extend_from_slice(&rotated);
             self.ivf_sample_count += 1;
         } else {
             // Classic reservoir replacement: replace a random slot
-            // with probability cap / seen.
+            // with probability cap / seen. Draw FIRST (unconditionally,
+            // to keep the RNG stream identical to the eager version),
+            // rotate only on a hit.
             let j = self.ivf_rng.gen_range(0..self.ivf_seen);
             if (j as usize) < cap {
+                let rotated = self.rotate_raw(raw, dim);
                 let base = (j as usize) * dim;
                 self.ivf_sample[base..base + dim].copy_from_slice(&rotated);
             }
         }
+    }
+
+    /// Normalise then rotate a raw row into the clustering space,
+    /// matching turbovec's encode pipeline. Split out of
+    /// `ivf_reservoir_push` so the rotation is paid only for rows kept
+    /// in the reservoir.
+    fn rotate_raw(&self, raw: &[f32], dim: usize) -> Vec<f32> {
+        let rotation = self
+            .ivf_rotation
+            .as_ref()
+            .expect("ivf_reservoir_push before rotation built");
+        let unit = kernels::normalise_to_vec(raw);
+        Self::rotate_unit(rotation, &unit, dim)
     }
 
     /// Drain `pending_flat` / `pending_ids` into the IdMapIndex and
@@ -1538,4 +1558,108 @@ pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Rela
     // If dim was supplied as a non-multiple-of-8 we silently
     // skip the init-fork write; the next ambuild will error
     // with a more informative message.
+}
+
+#[cfg(test)]
+mod reservoir_tests {
+    // Proves the v1.27.2 lazy-rotation refactor of `ivf_reservoir_push`
+    // is byte-identical to the old eager version: the reservoir
+    // selection depends only on the RNG stream + seen-count + cap, not
+    // on the rotated values, so paying `rotate_unit` only for kept rows
+    // yields the identical sample buffer. This is the correctness gate
+    // for the fix that turns the O(n*dim^2) rotation into O(cap*dim^2).
+    use rand::Rng;
+    use rand_chacha::ChaCha8Rng;
+
+    fn rotate(rotation: &[f32], unit: &[f32], dim: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; dim];
+        for (k, o) in out.iter_mut().enumerate() {
+            let rrow = &rotation[k * dim..(k + 1) * dim];
+            out_val(o, rrow, unit, dim);
+        }
+        out
+    }
+    fn out_val(o: &mut f32, rrow: &[f32], unit: &[f32], dim: usize) {
+        let mut s = 0.0f32;
+        for j in 0..dim {
+            s += rrow[j] * unit[j];
+        }
+        *o = s;
+    }
+
+    // EAGER: rotate every row, then decide (the old code).
+    fn eager(rows: &[Vec<f32>], rotation: &[f32], dim: usize, cap: usize, seed: u64) -> Vec<f32> {
+        let mut rng = <ChaCha8Rng as rand::SeedableRng>::seed_from_u64(seed);
+        let mut sample: Vec<f32> = Vec::new();
+        let mut count = 0usize;
+        let mut seen = 0u64;
+        for raw in rows {
+            let rotated = rotate(rotation, raw, dim); // always
+            seen += 1;
+            if count < cap {
+                sample.extend_from_slice(&rotated);
+                count += 1;
+            } else {
+                let j = rng.gen_range(0..seen);
+                if (j as usize) < cap {
+                    let base = (j as usize) * dim;
+                    sample[base..base + dim].copy_from_slice(&rotated);
+                }
+            }
+        }
+        sample
+    }
+
+    // LAZY: decide first, rotate only on keep (the new code).
+    fn lazy(rows: &[Vec<f32>], rotation: &[f32], dim: usize, cap: usize, seed: u64) -> Vec<f32> {
+        let mut rng = <ChaCha8Rng as rand::SeedableRng>::seed_from_u64(seed);
+        let mut sample: Vec<f32> = Vec::new();
+        let mut count = 0usize;
+        let mut seen = 0u64;
+        for raw in rows {
+            seen += 1;
+            if count < cap {
+                let rotated = rotate(rotation, raw, dim);
+                sample.extend_from_slice(&rotated);
+                count += 1;
+            } else {
+                let j = rng.gen_range(0..seen); // draw first, unconditionally
+                if (j as usize) < cap {
+                    let rotated = rotate(rotation, raw, dim);
+                    let base = (j as usize) * dim;
+                    sample[base..base + dim].copy_from_slice(&rotated);
+                }
+            }
+        }
+        sample
+    }
+
+    #[test]
+    fn lazy_rotation_is_byte_identical_to_eager() {
+        let dim = 8usize;
+        // deterministic rotation matrix + rows (unit vectors already;
+        // the rotation is a pure linear map, exact-equality is fine).
+        let rotation: Vec<f32> = (0..dim * dim).map(|i| ((i % 7) as f32) * 0.125 - 0.5).collect();
+        for &(n, lists) in &[(50usize, 1usize), (500, 2), (5000, 4), (12345, 3)] {
+            let cap = lists * 256 / 32; // small cap so replacement path is exercised
+            let cap = cap.max(4);
+            let rows: Vec<Vec<f32>> = (0..n)
+                .map(|r| (0..dim).map(|d| (((r * 31 + d * 17) % 13) as f32) - 6.0).collect())
+                .collect();
+            for &seed in &[1u64, 42, 999999] {
+                let e = eager(&rows, &rotation, dim, cap, seed);
+                let l = lazy(&rows, &rotation, dim, cap, seed);
+                assert_eq!(
+                    e.len(),
+                    l.len(),
+                    "sample length differs n={n} cap={cap} seed={seed}"
+                );
+                assert_eq!(
+                    e.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                    l.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                    "eager vs lazy reservoir sample differs n={n} cap={cap} seed={seed}"
+                );
+            }
+        }
+    }
 }

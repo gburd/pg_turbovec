@@ -1001,7 +1001,7 @@ v1.4.x indexes scan under v1.5.0 with no REINDEX.
   [`u2_meh_tv_4bit_warm_mmap_on.tsv`](../benches/results/u2_meh_tv_4bit_warm_mmap_on.tsv) /
   [`u2_meh_tv_4bit_warm_mmap_off.tsv`](../benches/results/u2_meh_tv_4bit_warm_mmap_off.tsv).
 - Cache-miss diagnosis (Phase U-1, 2026-05-26):
-  [an internal design note](an internal design note). Verdict:
+  an internal design note. Verdict:
   cache works correctly (50 / 50 hits); the Phase S agent's
   hot `HashMap::insert` perf symbol was the one-shot
   `finalise_from_inner` build during warmup1, not a per-query

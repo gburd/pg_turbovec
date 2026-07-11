@@ -524,7 +524,7 @@ repo hygiene before a release. No wire-format change
   `.githooks/pre-push` so this can't silently reaccumulate.
 - **Literal `\uXXXX` escape-sequence artifacts** (e.g. `\u2014`
   instead of an actual em dash) in an internal design note,
-  an internal design note,
+  an internal design note, an internal design note,
   `src/extras.rs`, `src/index/cost.rs`, and the now-removed
   `.woodpecker/ci.yaml` — cosmetic (doc comments, not code
   behavior), but a real artifact of a write-tool double-escaping
@@ -948,7 +948,7 @@ harness: `benches/scripts/colbert/`.
 
 ### Docs
 
-an internal design note
+an internal design note and an internal design note
 updated to record index-native late interaction as **DONE** (was a
 future phase): pg_turbovec is one of two PostgreSQL extensions (with
 VectorChord) with index-native multivector/MaxSim, and the only one
@@ -1448,7 +1448,7 @@ The IVF *query* path is unaffected.
 
 Files: `benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json`,
 `docs/BENCHMARKS.md`, an internal design note,
-an internal design note.
+an internal design note, an internal design note.
 
 ## [1.11.0] — 2026-06-16
 

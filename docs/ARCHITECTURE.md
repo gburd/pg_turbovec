@@ -187,7 +187,7 @@ pg_turbovec/
 and promoted to default-on in v0.9. The relfile-resident format
 (`page.rs` + `relfile.rs`) was introduced as a Phase L preview
 in v1.1.0 and made the only storage strategy in v1.3.0 (Phase Q,
-see [an internal design note](an internal design note) for the
+see an internal design note for the
 historical record).
 
 ---
@@ -220,14 +220,14 @@ to/from `pgvector.vector` collapse to a single `memcpy` and let
 libpq COPY BINARY clients targeting pgvector reuse their wire
 encoders. We considered it for Phase 6 / 1.0 and explicitly
 **skipped it**; the rationale lives in
-[an internal design note § "Binary-compatible varlena layout"](an internal design note).
+`an internal design note § "Binary-compatible varlena layout"`.
 
 Short version: the cross-extension migration is a one-shot
 `UPDATE` through the `real[]` bridge, the storage win comes
 from 16× quantisation rather than varlena layout, and the
 implementation needs a non-trivial chunk of `unsafe` FFI bypassing
 pgrx's `PostgresType` derive. The handoff document
-[an internal design note](an internal design note) enumerates the
+an internal design note enumerates the
 work if a future session wants to pick it up.
 
 ### 3.3 Text I/O
@@ -242,7 +242,7 @@ dimension).
 The planned `tvector_send` / `tvector_recv` mirror of pgvector's
 `vector_send` / `vector_recv` is part of the binary-compatible
 varlena layout that we skipped — see § 3.2 above and
-[an internal design note](an internal design note). Today's
+an internal design note. Today's
 `vector` uses pgrx's CBOR-derived varlena and reaches pgvector
 through explicit `real[]` casts.
 
@@ -567,7 +567,7 @@ index AM is still on the roadmap:
   not yet committed will leave the index empty until rebuilt**
   — acceptable because Postgres expects that of `CREATE INDEX`.
 - Unlogged indexes ship with a populated `INIT_FORKNUM`
-  ([an internal design note](an internal design note) item 2)
+  (an internal design note item 2)
   so crash recovery copies the init fork over the main fork,
   restoring an empty queryable index.
 
@@ -681,7 +681,7 @@ short version of the path from 0.1 to 1.1:
   `experimental_index_am` and `relfile_storage` Cargo features
   are gone. Hard migration boundary: `ambeginscan` raises
   `ERROR` on a v1.0.x..v1.2 index and asks the user to
-  `REINDEX`. See [an internal design note](an internal design note)
+  `REINDEX`. See an internal design note
   for the per-item record.
 
 ---

@@ -2090,7 +2090,7 @@ mod tests {
     /// wall-clock of `train_kmeans` at a build shape where k-means is
     /// slow (lists=4096, a big sample). Ignored by default (minutes);
     /// run with `--ignored --nocapture` to read the ratio. Absolute
-    /// numbers on this box are untrustworthy (see an internal design note
+    /// numbers on this box are untrustworthy (see PROFILING_
     /// BUILD.md); the SAME-RUN ratio is the honest measurement. Also
     /// asserts the centroids are bit-identical between the two runs
     /// (the whole point: the speedup must not cost determinism).

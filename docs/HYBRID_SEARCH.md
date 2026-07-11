@@ -361,7 +361,7 @@ needing to be defined.
 
 - [`FILTERING.md`](FILTERING.md) — metadata filtering & filtered ANN.
 - [`PARITY_GAPS.md`](PARITY_GAPS.md) — full pgvector parity tracker.
-- [an internal design note](an internal design note) — vs Qdrant /
+- an internal design note — vs Qdrant /
   VectorChord, incl. the multivector / hybrid scoreboard rows.
 - [`MIGRATING_FROM_PGVECTOR.md`](MIGRATING_FROM_PGVECTOR.md) —
   coexistence & migration.

@@ -150,7 +150,7 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       in the ids chain) that only a v5 binary produces; there is
 ///       no in-place migration of a v4 index into a v5 ColBERT one.
 /// `6` - Phase G-2a: ADDITIVE Vamana-graph index kind
-///       (an internal design note).
+///       (an internal design note, an internal design note).
 ///       `kind = KIND_GRAPH` (`2`) marks a `WITH (graph = true)`
 ///       build: the codes/scales/ids chains are stored exactly like
 ///       a flat single-vector index (same TurboQuant row storage),

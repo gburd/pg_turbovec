@@ -42,9 +42,7 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 > with the default build flags (the relfile-resident page format and
 > the `turbovec` index AM are default-on; the `experimental_index_am`
 > and `relfile_storage` Cargo features were retired in Phase Q).
-> See [an internal design note](an internal design note)
-> for what we deliberately skipped, and
-> [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
+> See [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
 > for the honest scoreboard of every metric vs pgvector.
 
 ## Why pg_turbovec?
@@ -56,9 +54,7 @@ recall are what pg_turbovec does better than anything else — not raw
 latency (see the honest latency note below).
 
 Head-to-head, warm cache, release build. Storage + recall
-(measured on real embeddings; see
-[`an internal benchmark note`](an internal benchmark note)
-and [an internal design note](an internal design note)):
+(measured on real embeddings):
 
 | metric (1 M × 1536-d, real OpenAI) | pg_turbovec 2-bit | pgvector HNSW |
 |---|---:|---:|
@@ -618,25 +614,12 @@ bridge is the supported interop path.
   the `turbovec` index access method.
 - [`docs/RECALL.md`](docs/RECALL.md) - recall benchmark methodology
   and the latest measured numbers.
-- [an internal design note](an internal design note) - what
-  we deliberately did *not* ship in 1.0 (binary-compat varlena,
-  `bit_hamming_ops` ANN) and the reasoning.
 - [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) - feature-by-feature
   comparison against pgvector.
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) - the published
   head-to-head benchmark (Cohere-wiki 1M vs pgvector HNSW), incl.
   the AVX2 latency frontier and the honest "flat-scan loses on
   latency, wins on storage + exact recall" finding.
-- [an internal design note](an internal design note) - design plan for the IVF
-  coarse-quantizer layer that would turn the flat O(n) scan into a
-  tunable sublinear ANN structure (the path to a competitive
-  latency story at scale).
-- [an internal design note](an internal design note) /
-  [an internal design note](an internal design note)
-  - positioning vs pgvector, VectorChord, pgvectorscale, Qdrant.
-- [an internal design note](an internal design note) - handoff
-  notes for the binary-compatible varlena work, if a future session
-  picks it up.
 - [`docs/BUILDING.md`](docs/BUILDING.md) - Nix-specific build
   recipe (writable `pg_config` wrapper, `BINDGEN_EXTRA_CLANG_ARGS`,
   `RUSTFLAGS` for openblas).
@@ -672,8 +655,7 @@ pgvector + HNSW is the right pick.
 
 **What's not in 1.0?**
 
-TL;DR - see [an internal design note](an internal design note)
-for the full cost/benefit reasoning. The two items most likely to be
+The two items most likely to be
 asked about:
 
 - **Binary-compatible varlena layout for `vector`.** We use a

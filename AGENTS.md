@@ -98,14 +98,14 @@ from the 1.x line unless the cost of doing so is prohibitive.
 **v1.27.1 (Phase Q-4a) parallelizes the IVF k-means build** — a
 build-speed-only patch (measured ~1.91×, bit-identical IVF bytes, no
 wire/SQL change, no REINDEX). The first step against the scale/
-heavy-load blocker (an internal design note G1); the serial
+heavy-load build blocker; the serial
 empty-cell/reseed remainder + a 10M→100M build validation are the
 follow-ups.
 
 **v1.27.0 (Phase Q-0) de-duplicates the on-disk quantized-codes
 storage, roughly HALVING the per-vector index footprint** — the
-storage blocker cleared for the a large-index storage target target
-(an internal design note Requirement 1). Prior
+storage blocker cleared for the large-index storage target.
+Prior
 versions persisted each vector's codes TWICE: the row-major bit-plane
 `packed_codes` chain AND the SIMD-`blocked` chain (`pack::repack`
 output). Since the blocked layout is a pure function of the packed

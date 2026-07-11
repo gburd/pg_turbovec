@@ -47,3 +47,4 @@ __pycache__/
 core
 core.*
 *.hdf5
+benches/results/aurora_qual_*/

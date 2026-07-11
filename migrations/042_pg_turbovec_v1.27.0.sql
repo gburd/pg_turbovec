@@ -15,8 +15,7 @@
 -- `pack::repack` (the same one-time compute a pre-Phase-P index
 -- already paid on first scan; per-query cost is unchanged). This
 -- roughly HALVES the per-vector on-disk footprint -- the storage
--- blocker for the a large-index storage target production target
--- (an internal design note Requirement 1).
+-- blocker for the large-index storage target.
 --
 -- This is NOT additive. A v7 relfile has no blocked chain, so it is
 -- not byte-compatible with any prior version FOR ANY KIND

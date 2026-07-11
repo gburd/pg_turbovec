@@ -39,8 +39,8 @@ centroids + assignment across pool sizes {1, 2, auto};
 `kmeans_deterministic_across_pool_sizes` stays green; full suite
 338/338.
 
-This is the first step toward the scale-and-heavy-load requirements
-(an internal design note G1); the empty-cell/reseed serial remainder and
+This is the first step toward the scale-and-heavy-load build
+goals; the empty-cell/reseed serial remainder and
 a larger-scale (10M→100M) build validation are the follow-ups.
 
 **Migration:** `ALTER EXTENSION pg_turbovec UPDATE TO '1.27.1';` — a
@@ -51,9 +51,8 @@ no-op upgrade for existing indexes; new IVF builds are just faster.
 **Phase Q-0: de-duplicate the on-disk quantized-codes storage, roughly
 halving the per-vector index footprint.** Minor bump (wire-format
 change — **REINDEX required**; additive capability, no SQL-surface
-removal). This is the storage blocker cleared for the 100M-vectors-in-
-40GB production target (an internal design note
-Requirement 1).
+removal). This is the storage blocker cleared for the large-index
+storage target.
 
 **The problem.** Every prior version persisted each vector's quantized
 codes TWICE: the row-major bit-plane `packed_codes` chain AND the

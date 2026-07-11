@@ -456,8 +456,8 @@ codes term only):
 | 768 / 4-bit | 384 B | 78 GB | **39.6 GB** (now fits 40 GB) |
 | 1536 / 2-bit | 384 B | 78 GB | **39.6 GB** (now fits 40 GB) |
 
-This cleared the storage blocker for the a large-index storage target target
-(an internal design note Requirement 1). See
+This cleared the storage blocker for the large-index storage target.
+See
 [`UPGRADING.md`](UPGRADING.md) — v7 is a wire bump, REINDEX required.
 
 ```sql

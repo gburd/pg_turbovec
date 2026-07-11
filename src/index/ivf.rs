@@ -689,11 +689,22 @@ pub fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
 /// `rotation` is the row-major `dim * dim` matrix. `out` is row-major
 /// `n_rows * dim` and is fully overwritten.
 ///
-/// One single-threaded `gemm` call (`Parallelism::None`) so the
-/// reduction order is fixed and the result is bit-deterministic
-/// across runs and machines -- the on-disk IVF bytes must not change.
-/// The orientation is verified elementwise against `rotate_unit` by
-/// the `ivf_batched_rotation_matches_per_row` test.
+/// `Parallelism::Rayon(0)` (== `rayon::current_num_threads()` of the
+/// AMBIENT bounded build pool this runs inside via
+/// `build_pool::install`). Bit-deterministic across runs, machines,
+/// and thread counts on the SAME empirical guarantee v1.22.1
+/// established for `gemm_lloyd_assign`'s cross-term GEMM: gemm's own
+/// internal Rayon(n) tiling produces byte-identical output to
+/// `Parallelism::None` for every thread count, because each output
+/// tile is an independent dot-product reduction over the shared `k`
+/// dimension — the tiling never reduces ACROSS threads, so thread
+/// count can never perturb which f32 adds happen in which order for a
+/// given output element. This is the SAME GEMM crate, the same
+/// non-accumulating overwrite (`read_dst=false`, alpha=0, beta=1), so
+/// the guarantee transfers directly. The orientation is verified
+/// elementwise against `rotate_unit` by the
+/// `ivf_batched_rotation_matches_per_row` test, and thread-count
+/// invariance by `rotate_corpus_bit_identical_across_pool_sizes`.
 ///
 /// gemm semantics: `dst (m x n) = beta * lhs (m x k) @ rhs (k x n)`.
 /// We want `out (n_rows x dim) = corpus (n_rows x dim) @ R^T (dim x
@@ -740,7 +751,7 @@ pub fn rotate_corpus_into(
             false,
             false,
             false,
-            Parallelism::None,
+            Parallelism::Rayon(0),
         );
     }
 }
@@ -978,11 +989,24 @@ fn gemm_lloyd_assign(
             Parallelism::Rayon(0),
         );
     }
-    for i in 0..n_rows {
+    // Per-row argmin + exact top-2 tie-break, parallel over ROWS.
+    // Each `assign[i]` is a pure function of row `i`'s cross scores,
+    // the read-only `cnorm`/`centroids`/`sample` — no cross-row
+    // dependence, no reduction. `par_iter_mut().enumerate()` writes
+    // each output to its fixed index, so the result is byte-identical
+    // to the serial `for i in 0..n_rows` loop regardless of thread
+    // count (data-parallel map, exactly like the seeding D2 fill and
+    // the k-means centroid-update partition above). The GEMM this
+    // reduces is the same one, so this runs inside the SAME ambient
+    // bounded pool (`build_pool::install`) train_kmeans is called in.
+    // This was the last serial per-row term in the Lloyd loop after
+    // v1.22.1 parallelized the cross-term GEMM (Phase Q-4a).
+    use rayon::prelude::*;
+    assign.par_iter_mut().enumerate().for_each(|(i, out)| {
         let row_cross = &cross[i * lists..(i + 1) * lists];
-        // Two smallest GEMM scores `||c||^2 - 2 (v . c)` (monotone in
-        // true sq_dist for a fixed row). Strict `<` keeps the lower
-        // cell id on a score tie.
+        // Two smallest GEMM scores `||c||^2 - 2 (v . c)` (monotone
+        // in true sq_dist for a fixed row). Strict `<` keeps the
+        // lower cell id on a score tie.
         let mut best_c = 0usize;
         let mut best_s = f32::INFINITY;
         let mut snd_c = usize::MAX;
@@ -1003,23 +1027,23 @@ fn gemm_lloyd_assign(
         // winner with assign_one's (dist, cell_id) tie-break: lower
         // distance wins; on an exact tie, lower cell id wins. This
         // matches the scalar Lloyd assignment (`if d < best_d`)
-        // byte-for-byte per iteration, so the per-iteration centroids
-        // are unchanged vs the old scalar path; the only end-state
-        // difference is the convergence early-exit truncating
-        // no-op iterations.
+        // byte-for-byte per iteration, so the per-iteration
+        // centroids are unchanged vs the old scalar path; the only
+        // end-state difference is the convergence early-exit
+        // truncating no-op iterations.
         let v = &sample[i * dim..(i + 1) * dim];
         let d_best = sq_dist(v, &centroids[best_c * dim..(best_c + 1) * dim]);
         if snd_c == usize::MAX {
-            assign[i] = best_c as u32;
-            continue;
+            *out = best_c as u32;
+            return;
         }
         let d_snd = sq_dist(v, &centroids[snd_c * dim..(snd_c + 1) * dim]);
-        assign[i] = if d_snd < d_best || (d_snd == d_best && snd_c < best_c) {
+        *out = if d_snd < d_best || (d_snd == d_best && snd_c < best_c) {
             snd_c as u32
         } else {
             best_c as u32
         };
-    }
+    });
 }
 
 /// Train `lists` coarse centroids on `sample` (a row-major
@@ -1937,6 +1961,189 @@ mod tests {
                  invariant for this shape"
             );
         }
+    }
+
+    /// Phase Q-4a: the FULL persisted CoarseModel — both the coarse
+    /// centroids AND the derived cell assignment — must be
+    /// byte-identical across rayon pool sizes {1, 2, auto}. This is
+    /// the load-bearing determinism contract for parallelizing the
+    /// Lloyd per-row argmin in `gemm_lloyd_assign` and the rotation
+    /// GEMM in `rotate_corpus_into`: IVF is NOT determinism-relaxed
+    /// (unlike the graph kind), so the on-disk relfile bytes (coarse
+    /// centroids + the cell permutation derived from the assignment)
+    /// must not change with the deployment's `turbovec.
+    /// build_parallelism`. The assignment here is computed by
+    /// `batched_assign_soft` — the SAME function the real build path
+    /// (`ivf_build_and_write`) runs to derive the persisted cell
+    /// permutation — so asserting it directly covers the actual
+    /// on-disk bytes, not just the centroids.
+    ///
+    /// Shape clears gemm's internal threading threshold (see
+    /// `kmeans_deterministic_across_pool_sizes`) so the multi-thread
+    /// path is genuinely exercised. `auto` == 0 threads resolves to
+    /// rayon's default (all cores) — the deployment default.
+    #[test]
+    fn ivf_coarse_model_bit_identical_across_pool_sizes() {
+        let dim = 64;
+        let n = 2000;
+        let lists = 64;
+        let mut sample = vec![0.0f32; n * dim];
+        let mut x = 0xF00D_CAFEu64;
+        for v in sample.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+        }
+        // (centroids, flattened soft assignment) built inside a pool
+        // of `n_threads` (0 => rayon default "auto", i.e. all cores).
+        let build_in_pool = |n_threads: usize| -> (Vec<f32>, Vec<Vec<u32>>) {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let model = train_kmeans(&sample, n, lists, dim);
+                // The real build derives the persisted permutation from
+                // batched_assign_soft over the corpus; reuse the sample
+                // as the corpus here (it's already rotated-space f32).
+                let assign = batched_assign_soft(&sample, &model.centroids, n, lists, dim, 1);
+                (model.centroids, assign)
+            })
+        };
+        let serial = build_in_pool(1);
+        for n_threads in [2usize, 0] {
+            let parallel = build_in_pool(n_threads);
+            let label = if n_threads == 0 { "auto" } else { "2" };
+            assert_eq!(
+                serial.0, parallel.0,
+                "CoarseModel centroids differ between pool=1 and pool={label}"
+            );
+            assert_eq!(
+                serial.1, parallel.1,
+                "CoarseModel cell assignment differs between pool=1 and pool={label}"
+            );
+        }
+    }
+
+    /// Phase Q-4a: `rotate_corpus_into` now runs its GEMM under
+    /// `Parallelism::Rayon(0)` (was `None`). Assert the rotated output
+    /// is byte-identical across pool sizes {1, 2, auto} — the same
+    /// gemm-tiling-never-reduces-across-threads guarantee v1.22.1
+    /// established for the Lloyd cross-term GEMM must hold for this
+    /// GEMM shape too, or the on-disk assignment (computed against the
+    /// rotated corpus) would change with thread count.
+    ///
+    /// Shape clears gemm's threading threshold (n_rows*dim*dim =
+    /// 2000*64*64 well above 589,824) so multiple tiles genuinely run
+    /// on multiple threads.
+    #[test]
+    fn rotate_corpus_bit_identical_across_pool_sizes() {
+        let dim = 64;
+        let n = 2000;
+        let mut x = 0xD15E_A5EDu64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        let mut corpus = vec![0.0f32; n * dim];
+        for i in 0..n {
+            crate::kernels::normalise_into(&mut corpus[i * dim..(i + 1) * dim], &{
+                let mut r = vec![0.0f32; dim];
+                for v in r.iter_mut() {
+                    *v = next();
+                }
+                r
+            });
+        }
+        let mut rotation = vec![0.0f32; dim * dim];
+        for v in rotation.iter_mut() {
+            *v = next();
+        }
+        let rotate_in_pool = |n_threads: usize| -> Vec<f32> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut out = vec![0.0f32; n * dim];
+                rotate_corpus_into(&corpus, &rotation, n, dim, &mut out);
+                out
+            })
+        };
+        let serial = rotate_in_pool(1);
+        for n_threads in [2usize, 0] {
+            let parallel = rotate_in_pool(n_threads);
+            let label = if n_threads == 0 { "auto" } else { "2" };
+            assert_eq!(
+                serial, parallel,
+                "rotate_corpus_into output differs between pool=1 and pool={label} \
+                 -- the rotation GEMM's Parallelism::Rayon(0) is not thread-count-\
+                 invariant for this shape"
+            );
+        }
+    }
+
+    /// Phase Q-4a: RELATIVE serial(pool=1)-vs-parallel(pool=auto)
+    /// wall-clock of `train_kmeans` at a build shape where k-means is
+    /// slow (lists=4096, a big sample). Ignored by default (minutes);
+    /// run with `--ignored --nocapture` to read the ratio. Absolute
+    /// numbers on this box are untrustworthy (see an internal design note
+    /// BUILD.md); the SAME-RUN ratio is the honest measurement. Also
+    /// asserts the centroids are bit-identical between the two runs
+    /// (the whole point: the speedup must not cost determinism).
+    ///
+    /// Sub-linear is expected: Lloyd iterations are sequentially
+    /// dependent (iter i reads iter i-1's centroids), so only the
+    /// within-iteration work (the cross-term GEMM + per-row argmin +
+    /// centroid-update accumulation + seeding scan) parallelizes.
+    #[test]
+    #[ignore]
+    fn ivf_kmeans_parallel_speedup() {
+        use std::time::Instant;
+        let dim = 256usize;
+        let lists = 4096usize;
+        // 32 rows/list: a big-enough sample that the Lloyd loop
+        // dominates, small enough to finish an ignored run.
+        let n = lists * 32;
+        let mut x = 0x9E37_79B9u64;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        let mut sample = vec![0.0f32; n * dim];
+        for v in sample.iter_mut() {
+            *v = next();
+        }
+        let run = |n_threads: usize| -> (std::time::Duration, Vec<f32>) {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let t = Instant::now();
+                let c = train_kmeans(&sample, n, lists, dim).centroids;
+                (t.elapsed(), c)
+            })
+        };
+        let auto = rayon::current_num_threads().max(1);
+        let (t_serial, c_serial) = run(1);
+        let (t_par, c_par) = run(auto);
+        assert_eq!(
+            c_serial, c_par,
+            "parallel train_kmeans centroids differ from serial -- speedup cost determinism"
+        );
+        println!(
+            "ivf_kmeans_parallel_speedup @ n={n} dim={dim} lists={lists}:\n  \
+             serial (pool=1):   {t_serial:?}\n  \
+             parallel (pool={auto}): {t_par:?}\n  \
+             speedup: {:.2}x",
+            t_serial.as_secs_f64() / t_par.as_secs_f64().max(1e-9),
+        );
     }
 
     /// GEMM-Lloyd k-means + convergence early-exit must still produce

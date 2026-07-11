@@ -85,14 +85,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.27.0, 2026-07-10)
+### Current (as of v1.27.1, 2026-07-11)
 
 | From               | To       | Action            |
 |--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.27.0   | `REINDEX INDEX` once |
-| 1.2.x              | 1.27.0   | `REINDEX INDEX` once |
-| 1.3.x              | 1.27.0   | `REINDEX INDEX` once |
-| 1.4.x → 1.26.x     | 1.27.0   | `ALTER EXTENSION` **then `REINDEX INDEX` once** (wire v6→v7, codes-dedup) |
+| 1.0.x / 1.1.x      | 1.27.1   | `REINDEX INDEX` once |
+| 1.2.x              | 1.27.1   | `REINDEX INDEX` once |
+| 1.3.x              | 1.27.1   | `REINDEX INDEX` once |
+| 1.4.x → 1.26.x     | 1.27.1   | `ALTER EXTENSION` **then `REINDEX INDEX` once** (wire v6→v7, codes-dedup in v1.27.0) |
+| 1.27.0             | 1.27.1   | `ALTER EXTENSION` only (no-op — v1.27.1 is a build-speed-only patch, byte-identical IVF output) |
+
+**v1.27.1 (Phase Q-4a) parallelizes the IVF k-means build** — a
+build-speed-only patch (measured ~1.91×, bit-identical IVF bytes, no
+wire/SQL change, no REINDEX). The first step against the scale/
+heavy-load blocker (an internal design note G1); the serial
+empty-cell/reseed remainder + a 10M→100M build validation are the
+follow-ups.
 
 **v1.27.0 (Phase Q-0) de-duplicates the on-disk quantized-codes
 storage, roughly HALVING the per-vector index footprint** — the

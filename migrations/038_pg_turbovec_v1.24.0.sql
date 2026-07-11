@@ -35,5 +35,5 @@
 --
 -- Still deferred (unchanged from v1.23.0): G-2c (SIMD-optimized
 -- traversal + build parallelism), G-2d (the 5M-scale AVX2
--- HNSW-latency gate measurement). See an internal design note and
--- an internal design note.
+-- HNSW-latency gate measurement).
+-- .

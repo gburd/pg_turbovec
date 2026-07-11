@@ -115,7 +115,7 @@ pub enum OutOfCoreMode {
 pub static OUT_OF_CORE: GucSetting<OutOfCoreMode> =
     GucSetting::<OutOfCoreMode>::new(OutOfCoreMode::Auto);
 
-/// Phase G-1 (an internal design note): whether IVF coarse-cell
+/// Phase G-1: whether IVF coarse-cell
 /// selection (`coarse_probe`) navigates an in-memory
 /// [`crate::index::ivf::CentroidGraph`] instead of scanning every
 /// centroid. The graph is built once per backend, in-memory, from
@@ -149,7 +149,7 @@ pub static COARSE_GRAPH: GucSetting<CoarseGraphMode> =
 /// High-dimension automatic rerank-window widening (Phase Gap-B fix).
 ///
 /// The offline Gap-B investigation
-/// (an internal design note) established that the
+/// established that the
 /// high-dimensional recall gap (e.g. GIST-1M/960d capping ~0.86) is
 /// NOT retrieval-bound (the true NNs land in the probed cells) but
 /// **in-cell quantized-ranking-bound**: at high dim the lossy 4-bit
@@ -452,7 +452,7 @@ pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Phase G-2d(a): number of partitions/shards for the parallel
 /// (partition -> build shards -> stitch) graph-kind build
-/// (an internal design note). Single-pass Vamana is
+///. Single-pass Vamana is
 /// inherently serial (each node's greedy search navigates the graph
 /// every prior insertion left, and the per-hop candidate batches are
 /// too small to amortise rayon fork-join — the measured G-2c finding),
@@ -715,7 +715,7 @@ pub fn register_gucs() {
         c_str(b"turbovec.hi_dim_rerank\0"),
         c_str(b"Auto-widen the exact-L2 rerank candidate window for high-dimension indexes (off | auto | on; default auto).\0"),
         c_str(
-            b"Gap-B fix. At high dimension the lossy quantized score is noisy enough that a true nearest neighbour often sits at rank ~200-800 WITHIN the probed cells, below a small search_k -- so end-to-end recall caps well below the retrieval ceiling (e.g. GIST-1M/960d ~0.86). This is an in-cell quantized-RANKING loss, NOT a retrieval one (the true NNs ARE in the probed cells; measured cell recall 0.98-0.996 at probes 64-128). The cure is scan-side only: fetch a WIDER candidate set so the executor's exact-L2 reorder-queue recheck (xs_recheckorderby) re-ranks enough survivors to recover the true top-k -- measured to lift an SQ4 analog from R@10=0.666 to 0.978 at 960-dim by reranking ~800 candidates. This must not blanket-widen: at low dim recall already plateaus by search_k~=25, so widening there is pure latency tax. auto (the default) therefore applies a DIM-SCALED candidate floor (clamp(dim, 256..=1024)) ONLY for indexes with dim >= 256, and only ever RAISES the count -- an explicit search_k/oversample override past the floor always wins. on applies the floor regardless of dim; off honours search_k/oversample exactly (pre-fix behaviour). No wire-format change, no REINDEX; identical result set to setting search_k/oversample by hand to the same candidate count. See an internal design note.\0",
+            b"Gap-B fix. At high dimension the lossy quantized score is noisy enough that a true nearest neighbour often sits at rank ~200-800 WITHIN the probed cells, below a small search_k -- so end-to-end recall caps well below the retrieval ceiling (e.g. GIST-1M/960d ~0.86). This is an in-cell quantized-RANKING loss, NOT a retrieval one (the true NNs ARE in the probed cells; measured cell recall 0.98-0.996 at probes 64-128). The cure is scan-side only: fetch a WIDER candidate set so the executor's exact-L2 reorder-queue recheck (xs_recheckorderby) re-ranks enough survivors to recover the true top-k -- measured to lift an SQ4 analog from R@10=0.666 to 0.978 at 960-dim by reranking ~800 candidates. This must not blanket-widen: at low dim recall already plateaus by search_k~=25, so widening there is pure latency tax. auto (the default) therefore applies a DIM-SCALED candidate floor (clamp(dim, 256..=1024)) ONLY for indexes with dim >= 256, and only ever RAISES the count -- an explicit search_k/oversample override past the floor always wins. on applies the floor regardless of dim; off honours search_k/oversample exactly (pre-fix behaviour). No wire-format change, no REINDEX; identical result set to setting search_k/oversample by hand to the same candidate count.\0",
         ),
         &HI_DIM_RERANK,
         GucContext::Userset,

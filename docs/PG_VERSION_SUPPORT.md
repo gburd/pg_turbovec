@@ -145,6 +145,6 @@ new callback you split follows the same convention.
 
 Not supported yet — PG19 is still in upstream beta (`REL_19_BETA1`)
 and the pinned `pgrx = "=0.17.0"` dependency has no `pg19` feature.
-See an internal design note for the blocker detail, the C-API delta
+ for the blocker detail, the C-API delta
 found so far, and the recommended timeline (wait for PG19 RC1+, then
 treat the pgrx upgrade + port as its own dedicated piece of work).

@@ -14,8 +14,8 @@
 -- entirely and recomputes it once per backend at index-open via
 -- `pack::repack` (the same one-time compute a pre-Phase-P index
 -- already paid on first scan; per-query cost is unchanged). This
--- roughly HALVES the per-vector on-disk footprint -- the storage
--- blocker for the large-index storage target.
+-- roughly HALVES the per-vector on-disk footprint -- clearing the
+-- storage blocker for large single-node indexes.
 --
 -- This is NOT additive. A v7 relfile has no blocked chain, so it is
 -- not byte-compatible with any prior version FOR ANY KIND

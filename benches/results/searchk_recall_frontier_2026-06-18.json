@@ -1,6 +1,6 @@
 {
   "experiment": "tier1_searchk_recall_frontier",
-  "note": "recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, an internal design note.",
+  "note": "recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, .",
   "n": 16384,
   "dim": 64,
   "lists": 128,

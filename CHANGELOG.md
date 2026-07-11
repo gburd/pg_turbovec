@@ -89,15 +89,15 @@ no-op upgrade for existing indexes; new IVF builds are just faster.
 **Phase Q-0: de-duplicate the on-disk quantized-codes storage, roughly
 halving the per-vector index footprint.** Minor bump (wire-format
 change — **REINDEX required**; additive capability, no SQL-surface
-removal). This is the storage blocker cleared for the large-index
-storage target.
+removal). This clears the storage blocker for large single-node
+indexes.
 
 **The problem.** Every prior version persisted each vector's quantized
 codes TWICE: the row-major bit-plane `packed_codes` chain AND the
 SIMD-`blocked` chain (the output of `pack::repack(packed_codes, …)`).
-That doubled the dominant O(n) storage term. At 100M vectors it was the
-difference between fitting 40 GB and not (e.g. 768d/4-bit: ~78 GB with
-double-storage vs ~39.6 GB with single).
+That doubled the dominant O(n) storage term. At 100M vectors that is
+the difference between ~78 GB and ~39.6 GB for 768d/4-bit (double-
+storage vs single).
 
 **The fix (Option A — persist only the packed codes).** The blocked
 layout is a PURE FUNCTION of the packed codes, so v7 drops the blocked
@@ -118,8 +118,7 @@ every hot path simplest.
 codes chain, i.e. persisting it doubled the code-storage term.
 Per-vector on-disk code bytes: `dim/8 * bit_width` stored ONCE (was
 twice). 100M projections: 768d/2-bit **19.8 GB** (was 39.6), 768d/4-bit
-**39.6 GB** (was 78 — now FITS 40 GB), 1536d/2-bit **39.6 GB** (was 78
-— now FITS).
+**39.6 GB** (was 78), 1536d/2-bit **39.6 GB** (was 78).
 
 **Wire format (v6 → v7), NOT additive.** Unlike the additive v4→v5→v6
 per-kind bumps, dropping a persisted chain is a real break for EVERY
@@ -155,7 +154,7 @@ CSR), no new operators/types/functions, **no REINDEX**.
 The single-pass Vamana build is serial by necessity (each insertion
 navigates the graph every prior insertion left; G-2c showed
 thread-parallelizing it doesn't amortize) and did not complete at 5M
-rows (>2h26m, an internal design note). This adds a
+rows (>2h26m). This adds a
 structurally-parallel build: **partition** the corpus into P shards
 (contiguous ranges of the deterministic shuffled insertion order —
 each shard a uniform random sample), **build each shard's sub-graph in
@@ -217,8 +216,7 @@ pipeline.
   package — published for discoverability + version-pinning. See
   `RELEASING.md` for the one-time runner + secrets setup.
 - **Qdrant + ANN-Benchmarks-protocol competitive benchmark**
-  (an internal design note +
-  `benches/results/qdrant_annbench_20260709/`): validated v1.25.0's
+  (`benches/results/qdrant_annbench_20260709/`): validated v1.25.0's
   `turbovec.hi_dim_rerank` at real scale — on GIST-960-1M, `auto`
   lifts R@10 from **0.876** (the `off` ceiling) to **0.953**, crossing
   the ≥0.90 and ≥0.95 bands the pre-fix engine never reached. vs
@@ -242,8 +240,8 @@ bump (one new GUC, additive). **No wire-format change** (stays v6,
 byte-identical to v1.24.0), no new operators/types/functions, **no
 REINDEX**.
 
-An offline investigation (an internal design note,
-using FAISS's trusted quantizers as measurement vehicles) established
+An offline investigation (using FAISS's trusted quantizers as
+measurement vehicles) established
 that the high-dim recall gap — e.g. GIST-1M/960d capping ~0.86 where
 pgvector HNSW and VectorChord reach 0.95-0.98 — is **NOT retrieval-
 bound**. The true nearest neighbours DO land in the probed IVF cells
@@ -252,8 +250,7 @@ real bottleneck is **in-cell quantized ranking**: at high dim the
 lossy 4-bit score is noisy enough that a true neighbour often sits at
 rank ~200-800 *within* the probed cells, below a small `search_k`, so
 it never enters the exact-L2 reorder recheck. This corrects the prior
-"retrieval-recall ceiling" framing in
-an internal design note (corrections noted
+"retrieval-recall ceiling" framing (corrections noted
 in-place).
 
 The cure is scan-side only: fetch a **wider candidate set** so the
@@ -366,7 +363,7 @@ parallelism), G-2d (the 5M-scale AVX2 HNSW-latency gate).
 **Phase G-2a: `WITH (graph = true)`, a new Vamana-style navigable-
 graph index kind** — the first step toward matching HNSW's query
 latency while keeping TurboQuant's storage compression, per
-an internal design note's long-standing roadmap.
+the long-standing roadmap.
 
 Builds a real single-pass Vamana graph (DiskANN's algorithm: greedy
 search + RobustPrune per node, in a deterministic randomized
@@ -393,7 +390,7 @@ are. WAL/streaming replication are unaffected either way (replicas
 replay the primary's actual page bytes, never rebuild independently).
 
 **Scope of this release (G-2a, correctness-first — see
-an internal design note for the full sub-phase
+ for the full sub-phase
 breakdown)**: build + scan work end to end with real, verified
 recall against an exact linear scan on test corpora. Explicitly NOT
 yet done, each tracked as a numbered follow-up:
@@ -407,7 +404,7 @@ yet done, each tracked as a numbered follow-up:
   correctness-first, not speed-optimized.
 - G-2d: the real 5M-scale, AVX2-hardware HNSW-latency gate
   measurement this whole feature is ultimately judged against
-  (an internal design note's gate: p50 ≤ 1.3× HNSW AND storage
+  (the gate: p50 ≤ 1.3× HNSW AND storage
   ≥ 6× smaller AND recall ≥ IVF at matched budget, at 5M rows/
   R@0.96 on AVX2). **Not run in this release** — no latency or
   recall-vs-HNSW claim is made here; that measurement is the honest
@@ -561,8 +558,8 @@ repo hygiene before a release. No wire-format change
   now wired into `.github/workflows/test.yml` and
   `.githooks/pre-push` so this can't silently reaccumulate.
 - **Literal `\uXXXX` escape-sequence artifacts** (e.g. `\u2014`
-  instead of an actual em dash) in an internal design note,
-  an internal design note,
+  instead of an actual em dash) in,
+,
   `src/extras.rs`, `src/index/cost.rs`, and the now-removed
   `.woodpecker/ci.yaml` — cosmetic (doc comments, not code
   behavior), but a real artifact of a write-tool double-escaping
@@ -618,8 +615,8 @@ removed deprecated GUC. `ALTER EXTENSION pg_turbovec UPDATE TO
 ## [1.21.0] — 2026-07-03
 
 **Phase G-1: centroid graph for sublinear IVF coarse-cell
-selection.** (an internal design note, gated in by
-an internal design note's finding that the IVF-vs-HNSW latency
+selection.** (Gated in by
+the finding that the IVF-vs-HNSW latency
 gap at SIFT-1M didn't clear the bar for a full corpus graph, so this
 release attacks the coarse-probe cost instead.) In-memory / scan-path
 only; **no wire change** (`MetaPageData::version = 5`), one new GUC,
@@ -943,7 +940,7 @@ is **deferred to a quiet AVX2 host** — both `floki` and `arnold` were
 saturated by unrelated work during this release. The **recall safety**
 of every change is host-independent and verified here; only the
 latency *number* awaits a quiet window. The projected effect
-(an internal design note § 4): ~10–13 ms at recall@10≈0.96 at
+: ~10–13 ms at recall@10≈0.96 at
 500k–1M, matching HNSW ef40–ef100.
 
 ### Migration
@@ -985,7 +982,7 @@ harness: `benches/scripts/colbert/`.
 
 ### Docs
 
-an internal design note
+ and
 updated to record index-native late interaction as **DONE** (was a
 future phase): pg_turbovec is one of two PostgreSQL extensions (with
 VectorChord) with index-native multivector/MaxSim, and the only one
@@ -1072,7 +1069,7 @@ Additive SQL function in the `turbovec` schema; **no wire change**
 (`MetaPageData::version = 4`), **no index-AM change**, **no
 REINDEX**. Closes the last acknowledged feature gap vs
 Qdrant/VectorChord at the level the analysis showed actually matters
-(stage-1 recall) — see an internal design note.
+(stage-1 recall) —.
 
 ### Added
 
@@ -1241,7 +1238,7 @@ Qdrant at the SQL layer.
   `rrf_score` CTE for both full-text and `sparsevec`), and the
   named-vector multi-column schema pattern.
 - Cross-links from `README.md`, `docs/PRODUCTION.md`,
-  `docs/PARITY_GAPS.md`, an internal design note, and
+  `docs/PARITY_GAPS.md`, and
   `docs/MIGRATING_FROM_PGVECTOR.md`; the multivector / hybrid rows
   now read "SQL surface SHIPPED; index-native late interaction is a
   future phase."
@@ -1298,7 +1295,7 @@ and documentation only.
 
 ### Fixed (docs drift)
 
-- an internal design note: refreshed v1.10.1/v1.11.0 →
+-: refreshed v1.10.1/v1.11.0 →
   v1.13.0; the **>500k IVF build ceiling** and the **>RAM** gaps are
   now marked **CLOSED** (out-of-core build v1.12.0 + out-of-core
   query v1.13.0); the metadata-filtering row reflects the three real
@@ -1327,7 +1324,7 @@ pg_turbovec UPDATE TO '1.13.1';` is sufficient. Tests unchanged (203).
 RAM can now be queried, not just built (v1.12.0). Wire format
 unchanged (`MetaPageData::version = 4`); **no REINDEX**. Completes
 the out-of-core arc for the >5M production deployment
-(an internal design note Phase B-1/B-2).
+.
 
 ### Added — cell-scoped IVF serving (Phase B-1/B-2)
 
@@ -1392,7 +1389,7 @@ pg_turbovec UPDATE TO '1.13.0';` is sufficient.
 rows on a RAM-constrained host. Wire format unchanged
 (`MetaPageData::version = 4`, byte-identical relfile); **no
 REINDEX**. Driven by the >5M production deployment
-(an internal design note Phase B-4).
+.
 
 ### Fixed — the 1M+ IVF build OOM (Phase B-4)
 
@@ -1480,19 +1477,19 @@ The **1M IVF build OOM-killed the postmaster** (~14 GiB peak on a
 permuted copy + k-means scratch — a structural peak
 `maintenance_work_mem` does not bound. Largest IVF index that built
 on arnold: **500k**. 1M/5M IVF are **blocked on Phase B-4**
-(streaming / out-of-core build, designed in an internal design note).
+(streaming / out-of-core build).
 The IVF *query* path is unaffected.
 
 Files: `benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json`,
-`docs/BENCHMARKS.md`, an internal design note,
-an internal design note.
+`docs/BENCHMARKS.md`,
+.
 
 ## [1.11.0] — 2026-06-16
 
 Production hardening for IVF: it now **survives VACUUM** instead of
 silently degrading, and builds **~7.8× faster**. Wire format stays
 `MetaPageData::version = 4` (additive); **no REINDEX**. Driven by
-the >5M production deployment + an internal design note
+the >5M production deployment +
 (Phases A-1, E-2).
 
 ### Fixed — IVF survives VACUUM (Phase E-2, the production landmine)
@@ -1585,7 +1582,7 @@ structure over the quantized codes.** First wire-format change since
 v1.4.0 (`MetaPageData::version` 3 → 4), but **existing v3 indexes
 do NOT need a `REINDEX`**: a v1.10.0 binary reads a v3 index as a
 flat (`lists = 0`) index. Only users who opt into IVF rebuild.
-See an internal design note.
+.
 
 ### Why
 
@@ -1686,7 +1683,7 @@ zero CPU steal, no contended batches, no re-runs). Cohere wikipedia
 
 ### Positioning correction
 
-`docs/PARITY_GAPS.md` and an internal design note updated to
+`docs/PARITY_GAPS.md` and updated to
 the honest scoreboard. pg_turbovec's durable wins are **storage**
 (10–15× smaller), **exact recall** (1.000 vs HNSW's ~0.96), and
 **build memory** — NOT query latency at scale. Honest positioning:
@@ -1694,14 +1691,14 @@ the honest scoreboard. pg_turbovec's durable wins are **storage**
 an O(n) scan fits the latency budget,"* NOT "beat HNSW on every
 axis." The architectural path to a latency story at scale is an IVF
 / coarse-quantizer layer (turning the O(n) scan into
-O(n/nlist + probes)) — a planned future major arc, see an internal design note.
+O(n/nlist + probes)) — a planned future major arc.
 
 ### Files
 
 - `benches/results/latency_frontier_arnold_cohere_1m_v1_9_0_2026_06_15.json`
 - `benches/scripts/vectordbbench/sweep_latency_isolated.py`
 - `docs/BENCHMARKS.md` (arnold AVX2 section)
-- `docs/PARITY_GAPS.md`, an internal design note (corrections)
+- `docs/PARITY_GAPS.md` (corrections)
 
 ## [1.9.0] — 2026-06-15
 
@@ -1792,7 +1789,7 @@ format unchanged** (`MetaPageData::version = 3`); **no `REINDEX`
 needed** — `ALTER EXTENSION pg_turbovec UPDATE TO '1.8.0';` is
 sufficient. All four additions are scan-side, build-side, or
 additive SQL surface; none touch the on-disk relfile layout.
-Driven by an internal design note.
+.
 
 ### Added — iterative index scan (parity gap #1, the correctness fix)
 
@@ -2034,7 +2031,7 @@ any of these. v1.7.1 is a behaviour-only revert.
   backend's resident set. The 7.7 GiB of "freed" heap simply
   migrated to pinned shared memory; same RSS budget, plus the
   cost of an extra `GenericXLog` flush phase. See
-  an internal design note § "Phase W-2 reverted in v1.7.1"
+  .7.1"
   for the full analysis.
 
 - **What was reverted.**
@@ -2236,7 +2233,7 @@ only: the on-disk index format is byte-identical to v1.5.x.
   the streaming path with `maintenance_work_mem = '4MB'` and a
   1000-row table. Test count 116 → 117.
 - **Docs.** `docs/UPGRADING.md` migration matrix gets a
-  `1.5.x → 1.6.0` no-op row; an internal design note records
+  `1.5.x → 1.6.0` no-op row; records
   the diagnosis, the formula, and the Phase W-2 follow-up
   parking lot.
 
@@ -2289,7 +2286,7 @@ changed.
   structured run with both configs + verdict.
 - `benches/results/u2_meh_tv_4bit_warm_mmap_{on,off}.tsv` — raw 50-
   sample TSVs.
-- an internal design note — full method + result of the cache-
+- — full method + result of the cache-
   miss tracepoint experiment.
 - `docs/RECALL.md § 2.6` extended with the meh comparison.
 - `docs/PARITY_GAPS.md` warm-scan row updated.
@@ -2405,7 +2402,7 @@ boundaries, blocked layout). At `dim = 1536` the lazy QR was
 the single hottest leaf of the warm-scan profile (~64.8% self
 time; see
 `benches/results/profile_warm_v1_3_0_2026_05_25.json` and
-an internal design note), and it ran once per fresh backend
+), and it ran once per fresh backend
 because the per-backend cache `OnceLock` was driven on first
 search instead of read off disk.
 
@@ -2616,8 +2613,7 @@ if it still exists (legacy state from a previous install).
   bumped to `default_version = '1.3.0'`.
 - `migrations/005_pg_turbovec_v1.3.0.sql` documents the
   upgrade path and is the new install reference mirror.
-- Documentation: `docs/PARITY_GAPS.md`, `an internal design note
-  .md`, an internal design note, `docs/ARCHITECTURE.md`,
+- Documentation: `docs/PARITY_GAPS.md`, `docs/ARCHITECTURE.md`,
   `docs/PG_VERSION_SUPPORT.md`, and `README.md` updated to
   reflect the post-Phase-Q crate layout, retired feature
   flags, and post-Phase-P cold-scan numbers (1.26 s p50, 21×
@@ -2651,7 +2647,7 @@ time, on-disk size, WAL volume, recall).
 The relfile-resident page format introduced as a preview in
 1.1.0 (`--features relfile_storage`) is now production-grade
 on five of the six hardening items from
-an internal design note:
+:
 
 1. **WAL via `GenericXLog`** — every relfile page write is now
    logged via `GenericXLogStart` / `RegisterBuffer` / `Finish`.
@@ -2684,7 +2680,7 @@ an internal design note:
    `ambulkdelete_relfile` reads all pages, filters dead ids,
    writes everything back — O(n) per VACUUM. Walk-and-mark would
    bring this to O(deleted_rows). Tracked for v1.3 in
-   `an internal design note § 6`.
+   ` § 6`.
 
 ### Drift cleanup
 
@@ -2694,11 +2690,11 @@ with past-tense shipped-state prose, crate-layout section
 extended with one-liners for new modules. (Phase N-A, commit
 `48faeba`)
 
-an internal design note grew a "Shipped in 1.0.x / 1.1.0"
+ grew a "Shipped in 1.0.x / 1.1.0"
 section between "Skipped" and "Where future work would pay
 off". (Phase N-A)
 
-an internal design note annotated as superseded by
+ annotated as superseded by
 1.2.0; retained for historical context. (Phase N-A)
 
 ### Tests
@@ -2753,7 +2749,7 @@ cluster-wide; cold scans across fresh backends pay only buffer-
 pool hit cost. All six AM callbacks ported. 100/100 tests pass
 with `--features "... relfile_storage pg_test"`. Hardening
 before default-on flip in 1.2 tracked in
-an internal design note.
+.
 
 ### Phase K — deferred-commit aminsert (~3000× bulk-INSERT speedup)
 

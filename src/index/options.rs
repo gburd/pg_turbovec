@@ -14,7 +14,7 @@
 //! keeps the flat layout — byte-identical to the v3 wire format
 //! modulo the version byte — so existing indexes and non-IVF users
 //! are untouched. `lists > 0` opts into the IVF build path
-//! (an internal design note). Recommended starting point: `lists ≈ √n`.
+//!. Recommended starting point: `lists ≈ √n`.
 //!
 //! `assign_dups` (IVF-4a) is the soft-assignment multiplicity `M`.
 //! `1` (the default) is single assignment (each vector in exactly one
@@ -24,7 +24,7 @@
 //! `turbovec.probes` at a bounded storage cost. Only meaningful when
 //! `lists > 0`; ignored for flat indexes.
 //!
-//! `graph` (Phase G-2a, an internal design note) opts a
+//! `graph` (Phase G-2a, ) opts a
 //! build into the Vamana-style navigable-graph index kind
 //! (`KIND_GRAPH`, wire v6) instead of the flat/IVF layout — the
 //! analogue of how `lists = N` opts into IVF. `false` (the default)

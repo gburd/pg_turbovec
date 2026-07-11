@@ -301,7 +301,7 @@ Full machine-readable run:
    which is I/O- and allocator-bound rather than kernel-bound;
    release helps less than on the warm path. Eliminating the
    tmpfile round-trip (load straight from the bytea slice) is
-   tracked for 1.1 — see an internal design note.
+   tracked for 1.1 —.
 
 6. **Build times also drop ~4×.** 4-bit `CREATE INDEX` on 1 M
    rows: 2 m 19 s → 33.5 s. The TurboQuant fit is matrix-heavy
@@ -352,7 +352,7 @@ removes a `/tmp` file dependency, but closing the cold-path gap
 requires storing the index payload as relfile pages in
 `shared_buffers` (cached cluster-wide, not per-backend) instead
 of a single bytea heap row. Tracked for 1.1; see
-an internal design note.
+.
 
 Warm-cache p50 is unchanged — the warm path was already
 bypassing `read_idmap_from` via the per-backend `Arc<IdMapIndex>`
@@ -452,7 +452,7 @@ positioning, neither of which the synthetic-only numbers in
    ANN, batch retrieval, RAG with low QPS) and a poor fit for
    high-QPS interactive search until the re-rank fan-out is made
    adaptive (a planned post-1.0 optimisation tracked in
-   an internal design note § "Where future work would pay
+   
    off"). **Update (§ 2.1.2):** the v1.0.0 release build on the
    1 M synthetic corpus brings 4-bit warm p50 to 22 ms and 2-bit
    to 12 ms, *faster than HNSW ef=200*. The 315 ms GloVe number
@@ -1001,7 +1001,7 @@ v1.4.x indexes scan under v1.5.0 with no REINDEX.
   [`u2_meh_tv_4bit_warm_mmap_on.tsv`](../benches/results/u2_meh_tv_4bit_warm_mmap_on.tsv) /
   [`u2_meh_tv_4bit_warm_mmap_off.tsv`](../benches/results/u2_meh_tv_4bit_warm_mmap_off.tsv).
 - Cache-miss diagnosis (Phase U-1, 2026-05-26):
-  an internal design note. Verdict:
+  . Verdict:
   cache works correctly (50 / 50 hits); the Phase S agent's
   hot `HashMap::insert` perf symbol was the one-shot
   `finalise_from_inner` build during warmup1, not a per-query
@@ -1310,7 +1310,7 @@ extension and the lazy allocator-side free overlap.
 
 **What this means for Phase W-3.** The `pack::repack`
 streaming refactor parked under Phase W-3 (see
-an internal design note) is no longer the obvious next
+) is no longer the obvious next
 step: with the streaming-extend hypothesis above, even a
 streaming `pack::repack` would still hit the
 allocator-deferred-free vs mmap-extend overlap. A more
@@ -1585,4 +1585,4 @@ cite the upstream paper as well:
 > (Corrected 2026-07-06: this previously attributed the paper to
 > "Codrai, R." -- that's the GitHub handle of the `turbovec`
 > Rust/Python IMPLEMENTATION's author, not a TurboQuant paper author.
-> See an internal design note.)
+>)

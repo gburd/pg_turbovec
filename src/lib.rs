@@ -5764,7 +5764,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // IVF-1 (an internal design note): build path + on-disk layout for the
+    // IVF-1: build path + on-disk layout for the
     // inverted-file layer. The scan path stays FLAT in IVF-1; these
     // tests prove the v3->v4 wire change round-trips and that flat
     // v3/lists=0 indexes need no REINDEX.
@@ -6350,7 +6350,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // IVF-2 (an internal design note §5/§7): coarse search + cell-restricted
+    // IVF-2: coarse search + cell-restricted
     // fine search in amgettuple, gated on turbovec.probes. The latency
     // win. probes >= lists reduces to the exact flat scan (the
     // correctness anchor); vacuum-degraded IVF indexes fall back to
@@ -7160,7 +7160,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Phase G-1 (an internal design note): centroid graph for
+    // Phase G-1: centroid graph for
     // sublinear IVF coarse-cell selection. The graph is computed
     // IN-MEMORY at index-open from the already-persisted coarse
     // centroids (no wire change, no REINDEX); `turbovec.coarse_graph`
@@ -8415,7 +8415,7 @@ mod tests {
             })
             .collect();
         let json = format!(
-            "{{\n  \"experiment\": \"tier1_assign_dups_probes_pareto\",\n  \"note\": \"recall is CPU-independent. Per assign_dups: min probes to reach the single-assignment baseline's best recall (recall at probes=lists). Lower min_probes = fewer cells scanned = lower latency at matched recall. Also asserts recall at fixed probes=2 is non-decreasing in assign_dups. Tier-1 item #2, an internal design note. assign_dups>1 needs a REINDEX (build-time layout).\",\n  \"n\": {n},\n  \"nclust\": {nclust},\n  \"lists\": {lists},\n  \"baseline_best_recall\": {baseline_best:.4},\n  \"fixed_probes\": 2,\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"frontier\": [\n{rows}\n  ]\n}}\n",
+            "{{\n  \"experiment\": \"tier1_assign_dups_probes_pareto\",\n  \"note\": \"recall is CPU-independent. Per assign_dups: min probes to reach the single-assignment baseline's best recall (recall at probes=lists). Lower min_probes = fewer cells scanned = lower latency at matched recall. Also asserts recall at fixed probes=2 is non-decreasing in assign_dups. Tier-1 item #2, . assign_dups>1 needs a REINDEX (build-time layout).\",\n  \"n\": {n},\n  \"nclust\": {nclust},\n  \"lists\": {lists},\n  \"baseline_best_recall\": {baseline_best:.4},\n  \"fixed_probes\": 2,\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"frontier\": [\n{rows}\n  ]\n}}\n",
             rows = rows.join(",\n"),
         );
         let path = format!(
@@ -8749,7 +8749,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // IVF-3 Part B (an internal design note §7): the recall-vs-probes
+    // IVF-3 Part B: the recall-vs-probes
     // frontier. Recall is CPU-independent (a function of which cells
     // are probed vs where true neighbours live, not of SIMD speed),
     // so this runs locally on any host and is the host-independent
@@ -9007,7 +9007,7 @@ mod tests {
 
     /// Tier-1 item #1 de-risking: the **recall-vs-`search_k`
     /// frontier**. This is the contention-IMMUNE half of the
-    /// hypothesis behind an internal design note § 1: the
+    /// hypothesis behind 
     /// IVF latency floor is dominated by the reorder-recheck of all
     /// `search_k` candidates (~`search_k` heap fetches + exact
     /// recomputes per query, to emit LIMIT 10). The plan's bet is
@@ -9156,7 +9156,7 @@ mod tests {
     /// higher-fidelity fine quantization ("#5") is NOT the high-dim
     /// recall lever; #3 (sublinear coarse -> more/finer cells + probes)
     /// is. This test remains as the monotonicity guard for oversample.
-    /// See an internal design note / FINDINGS.
+    ///
     #[pg_test]
     fn highdim_oversample_recovers_recall() {
         use_turbovec();
@@ -9255,7 +9255,7 @@ mod tests {
             .map(|(sk, r)| format!("    {{\"search_k\": {sk}, \"recall_at_10\": {r:.4}}}"))
             .collect();
         let json = format!(
-            "{{\n  \"experiment\": \"tier1_searchk_recall_frontier\",\n  \"note\": \"recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, an internal design note.\",\n  \"n\": {n},\n  \"dim\": {dim},\n  \"lists\": {lists},\n  \"probes\": {probes},\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"default_search_k\": 32,\n  \"prev_default_search_k\": 100,\n  \"curve\": [\n{rows}\n  ]\n}}\n",
+            "{{\n  \"experiment\": \"tier1_searchk_recall_frontier\",\n  \"note\": \"recall@10 is CPU-contention-independent; the latency half is deferred to a quiet AVX2 host and joined to this curve. Tier-1 item #1 de-risking, .\",\n  \"n\": {n},\n  \"dim\": {dim},\n  \"lists\": {lists},\n  \"probes\": {probes},\n  \"n_queries\": {n_queries},\n  \"bit_width\": 4,\n  \"default_search_k\": 32,\n  \"prev_default_search_k\": 100,\n  \"curve\": [\n{rows}\n  ]\n}}\n",
             rows = rows.join(",\n"),
         );
         let path = format!(
@@ -9464,7 +9464,7 @@ mod tests {
     // per token, doc-id repeated), batch-searches all query tokens for
     // stage-1 candidates, then exact-MaxSim-reranks from the heap. The
     // value over Phase D is stage-1 recall (best-single-token, not
-    // pooled-mean). See an internal design note.
+    // pooled-mean).
     // ----------------------------------------------------------------
 
     /// Build a `(id bigint, tokens turbovec.vector[])` table from a
@@ -9678,7 +9678,7 @@ mod tests {
     // builds a v5 persistent token index; turbovec.colbert_search
     // detects it and reads stage-1 from the relfile instead of
     // rebuilding the backend cache every call. See
-    // an internal design note § F-2.
+    //  § F-2.
     // ----------------------------------------------------------------
 
     /// Build a NON-temp `(id bigint, tokens turbovec.vector[])` table

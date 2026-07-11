@@ -13,7 +13,7 @@
 --
 -- What it does (build-time only): the single-pass Vamana build for
 -- WITH (graph = true) indexes is serial by necessity and did not
--- complete at 5M rows (see an internal design note). This adds
+-- complete at 5M rows. This adds
 -- a structurally-parallel build: partition the corpus into P shards
 -- (contiguous ranges of the deterministic shuffled insertion order),
 -- build each shard's sub-graph in parallel across the bounded rayon

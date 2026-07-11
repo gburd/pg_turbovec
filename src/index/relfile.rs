@@ -692,7 +692,7 @@ pub(crate) unsafe fn write_full_with_prepared_graph(
 /// the blocked + rotation byte sizes filled in.
 ///
 /// **Phase W-2 (v1.7.0) introduced this split. It was reverted in
-/// v1.7.1** — see an internal design note for the regression
+/// v1.7.1** — for the regression
 /// analysis. The struct and its two helper functions
 /// (`write_packed_phase`, `write_blocked_phase_and_meta`) are
 /// kept as parked dead-code APIs because a future Phase W-3
@@ -980,7 +980,7 @@ unsafe fn write_full_inner(
     // (the "freed" heap pages just migrated to pinned shared
     // buffers, which `ps -o rss` still counts). See
     // `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`
-    // and an internal design note for the full analysis.
+    // and  for the full analysis.
     assert_eq!(slot_to_id.len() as u64, n_vectors);
     assert_eq!(scales.len() as u64, n_vectors);
 

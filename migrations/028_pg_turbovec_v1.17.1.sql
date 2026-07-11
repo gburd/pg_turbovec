@@ -12,8 +12,8 @@
 -- The persistent index built cleanly (561k token slots, 42s/43 MB)
 -- and served from disk with the F-1 per-call leak eliminated.
 --
--- This release also refreshes an internal design note
--- to record index-native late interaction as DONE (no longer a
+-- This release also records index-native late interaction as DONE
+-- (no longer a
 -- future phase).
 --
 -- There is NO source-logic change, NO SQL surface change, and NO

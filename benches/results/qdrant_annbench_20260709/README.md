@@ -2,7 +2,7 @@
 
 a benchmark host, PG17.5-from-source, pg_turbovec v1.25.0 (commit
 `2ef2388`), pgvector 0.8.0, Qdrant 1.18.0. See
-`an internal benchmark note` for the full write-up.
+ for the full write-up.
 
 ## Layout
 

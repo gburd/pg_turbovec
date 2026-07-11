@@ -174,7 +174,7 @@ cold cache (fine for moderate corpora; the build is the same
 quantize-pack as `knn`). For very large token corpora a persistent
 token-index AM (Phase F-2) is the next step — gated on a measured
 recall/latency win over this F-1 path (see
-an internal design note).
+).
 
 **Tuning.** `per_token_k` (stage-1 hits per query token) and
 `candidate_n` (max docs into stage 2) trade recall for work; under
@@ -361,7 +361,7 @@ needing to be defined.
 
 - [`FILTERING.md`](FILTERING.md) — metadata filtering & filtered ANN.
 - [`PARITY_GAPS.md`](PARITY_GAPS.md) — full pgvector parity tracker.
-- an internal design note — vs Qdrant /
+-  — vs Qdrant /
   VectorChord, incl. the multivector / hybrid scoreboard rows.
 - [`MIGRATING_FROM_PGVECTOR.md`](MIGRATING_FROM_PGVECTOR.md) —
   coexistence & migration.

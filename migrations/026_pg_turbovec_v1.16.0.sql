@@ -32,7 +32,7 @@
 -- turbovec.knn) -- there is NO relfile, NO CREATE INDEX, and NO
 -- wire-format change. MetaPageData::version stays 4. The persistent
 -- token-index AM (Phase F-2) is gated on a measured recall/latency
--- win over this F-1 path (an internal design note).
+-- win over this F-1 path.
 --
 -- colbert_search is a new SQL function; cargo pgrx schema emits its
 -- CREATE FUNCTION into the authoritative 1.15.1--1.16.0 upgrade

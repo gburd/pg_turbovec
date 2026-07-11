@@ -1,7 +1,7 @@
 //! Vamana-style navigable graph construction (Phase G-2a).
 //!
-//! See an internal design note and
-//! an internal design note. This module is
+//! and
+//! . This module is
 //! deliberately **Postgres-free** (like `ivf.rs`) so it is
 //! unit-testable directly. It owns:
 //!
@@ -35,7 +35,7 @@
 //!
 //! ## RAM residency
 //!
-//! Per an internal design note, Phase G-2 is explicitly a
+//! Per , Phase G-2 is explicitly a
 //! **RAM-resident** design (trading pure out-of-core for
 //! HNSW-matching latency) — so [`build_vamana`] takes the whole
 //! corpus as one resident `&[f32]` slice. The build-side caller
@@ -99,7 +99,7 @@ pub const GRAPH_BUILD_L: usize = GRAPH_DEGREE_R * 2;
 /// single-pass build (the two-pass refinement that pushes `alpha`
 /// higher on a second pass is explicitly out of scope for G-2a — see
 /// the module doc comment on single-pass builds in
-/// an internal design note).
+/// ).
 pub const GRAPH_ALPHA: f32 = 1.2;
 
 /// Phase G-2d(a): corpus size at/below which the `auto`
@@ -351,7 +351,7 @@ pub fn build_vamana_with_params(
 }
 
 /// Phase G-2d(a): partitioned/merge PARALLEL Vamana build
-/// (an internal design note). Structurally different
+///. Structurally different
 /// from [`build_vamana`]'s serial single-pass loop so the graph build
 /// scales to millions of rows:
 ///

@@ -128,10 +128,10 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       Backends opening a v3 index skip the per-backend QR
 ///       decomposition (`rotation::make_rotation_matrix`), which
 ///       at `dim = 1536` is ~64% self time on the warm-scan
-///       profile (see an internal design note).
+///       profile.
 /// `4` - IVF-1: meta + (when `lists > 0`) 7 chains, adding the
 ///       coarse centroids + cell directory for the inverted-file
-///       layer (an internal design note). IVF is opt-in via
+///       layer. IVF is opt-in via
 ///       `WITH (lists = N)`; `lists = 0` (the default) is
 ///       byte-identical to v3 modulo the version byte, so the v3
 ///       flat decode path stays valid and existing v3 indexes
@@ -150,7 +150,7 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       in the ids chain) that only a v5 binary produces; there is
 ///       no in-place migration of a v4 index into a v5 ColBERT one.
 /// `6` - Phase G-2a: ADDITIVE Vamana-graph index kind
-///       (an internal design note, an internal design note).
+///       (, ).
 ///       `kind = KIND_GRAPH` (`2`) marks a `WITH (graph = true)`
 ///       build: the codes/scales/ids chains are stored exactly like
 ///       a flat single-vector index (same TurboQuant row storage),
@@ -183,7 +183,7 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       single/colbert/graph). A pre-v7 index is detected by
 ///       [`MetaPageData::is_legacy_v6`] (`version < 7`) and REINDEXed;
 ///       there is no in-place migration. The maintainer OK'd this
-///       REINDEX for the 100M-in-40GB storage win — see
+///       REINDEX for the large-index storage win — see
 ///       `docs/UPGRADING.md`.
 pub const VERSION: u8 = 7;
 

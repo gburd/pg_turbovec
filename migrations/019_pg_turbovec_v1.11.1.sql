@@ -10,9 +10,9 @@
 --
 --   benches/results/ivf_frontier_arnold_cohere-wiki_2026-06-16.json
 --   docs/BENCHMARKS.md   -- "IVF latency frontier at scale" section
---   an internal design note -- measured latency/storage rows
---   an internal design note  -- the >RAM design
---   an internal design note -- the plan vs Qdrant/VectorChord
+--    -- measured latency/storage rows
+--     -- the >RAM design
+--    -- the plan vs Qdrant/VectorChord
 --
 -- Honest headline (500k x 1024-d, AVX2, recall@10 ~= 0.96):
 --   pgvector HNSW    7.9 ms   (latency winner)

@@ -7,7 +7,7 @@ description: Audit pg_turbovec docs/ against actual implementation. Flags stale 
 
 This project ships a docs-heavy repo (`docs/ARCHITECTURE.md`, `docs/INDEXAM.md`,
 `docs/PARITY_GAPS.md`, `docs/RECALL.md`, `docs/PG_VERSION_SUPPORT.md`,
-an internal design note, plus README + CHANGELOG). They drift fast.
+, plus README + CHANGELOG). They drift fast.
 This skill is the routine to keep them honest.
 
 ## When to run
@@ -117,11 +117,11 @@ grep -E "(commit|p50|R@10|warm|cold).*[0-9]" docs/RECALL.md README.md \
 ### 7. Roadmap claims
 
 ```bash
-cat an internal design note | grep -E '^### [12]\. |^- \*\*' | head
+cat  | grep -E '^### [12]\. |^- \*\*' | head
 git log --oneline -20
 ```
 
-If a "future work" item from an internal design note has actually
+If a "future work" item from  has actually
 landed (look for matching commit messages), move it from the future
 section to the "What we shipped" section.
 

@@ -1,6 +1,6 @@
 {
   "experiment": "tier1_assign_dups_probes_pareto",
-  "note": "recall is CPU-independent. Per assign_dups: min probes to reach the single-assignment baseline's best recall (recall at probes=lists). Lower min_probes = fewer cells scanned = lower latency at matched recall. Also asserts recall at fixed probes=2 is non-decreasing in assign_dups. Tier-1 item #2, an internal design note. assign_dups>1 needs a REINDEX (build-time layout).",
+  "note": "recall is CPU-independent. Per assign_dups: min probes to reach the single-assignment baseline's best recall (recall at probes=lists). Lower min_probes = fewer cells scanned = lower latency at matched recall. Also asserts recall at fixed probes=2 is non-decreasing in assign_dups. Tier-1 item #2, . assign_dups>1 needs a REINDEX (build-time layout).",
   "n": 4000,
   "nclust": 4,
   "lists": 16,

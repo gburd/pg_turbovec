@@ -3,7 +3,7 @@
 This document records how `pg_turbovec`'s backend-local cache
 (`src/cache.rs`, a `parking_lot::Mutex<HashMap<CacheKey, Entry>>`)
 behaves under concurrent ANN queries, and answers the open question
-in an internal design note § "Where future work would pay off"
+in 
 item 2 ("Concurrent query throughput").
 
 **TL;DR.**

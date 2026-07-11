@@ -104,7 +104,7 @@ follow-ups.
 
 **v1.27.0 (Phase Q-0) de-duplicates the on-disk quantized-codes
 storage, roughly HALVING the per-vector index footprint** — the
-storage blocker cleared for the large-index storage target.
+storage blocker cleared for large single-node indexes.
 Prior
 versions persisted each vector's codes TWICE: the row-major bit-plane
 `packed_codes` chain AND the SIMD-`blocked` chain (`pack::repack`
@@ -147,7 +147,7 @@ scale (GIST-960-1M recall 0.876→0.953; vs Qdrant we lose latency
 
 **v1.25.0 adds `turbovec.hi_dim_rerank`** (enum off/auto/on, default
 auto) — the Gap-B fix. An offline investigation
-(an internal design note) established the
+ established the
 high-dim recall gap (GIST-1M/960d ~0.86) is NOT retrieval-bound (the
 true NNs DO land in the probed cells — cell recall 0.98-0.996 at
 probes 64-128) but an in-cell quantized-RANKING loss, curable
@@ -184,7 +184,7 @@ deferred: G-2c (SIMD traversal + build parallelism), G-2d (the
 **v1.23.0 adds `WITH (graph = true)`** — Phase G-2a, a new opt-in
 Vamana-style navigable-graph index kind, the first step toward
 matching HNSW's query latency while keeping TurboQuant's storage
-compression (an internal design note). Wire format v6,
+compression. Wire format v6,
 ADDITIVE per kind: existing v4/v5 indexes decode byte-identical, no
 REINDEX. Determinism is relaxed for this kind ONLY (fixed-seed/one-
 machine, not byte-identical cross-machine — an explicit, documented
@@ -194,7 +194,7 @@ verified recall against exact linear scan, but VACUUM/`aminsert`
 against a graph index raise a clear `ERROR` (not yet supported) and
 the real 5M-scale HNSW-latency gate has NOT been measured — no
 latency/recall-vs-HNSW claim is made by this release. See
-an internal design note for the sub-phase breakdown
+ for the sub-phase breakdown
 (G-2b VACUUM, G-2c SIMD/parallelism, G-2d the gate measurement, all
 follow-up work).
 
@@ -245,7 +245,7 @@ aspirational and was never actually implemented; v1.20.0 shipped
 only parallel k-means seeding/build and `turbovec.scan_parallelism`.
 `coarse_probe` stayed the plain O(lists·dim) linear scan through
 v1.20.1. v1.21.0 is the first release to ship real sublinear
-coarse-cell selection. See an internal design note and
+coarse-cell selection. and
 `CHANGELOG.md`.
 
 **v1.20.1 is a critical perf fix, not a wire/feature change** —
@@ -278,7 +278,7 @@ single runtime gate is now `is_legacy_v6`.) IVF is opt-in via `WITH
 (lists = N)`; as of v1.13.0 IVF is out-of-core end-to-end (build AND
 query), so a >RAM IVF index can be built and served on a
 RAM-constrained host. The graph kind is NOT out-of-core (RAM-resident
-by design, per an internal design note's explicit trade-off).
+by design, per 's explicit trade-off).
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.

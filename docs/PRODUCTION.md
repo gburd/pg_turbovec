@@ -261,7 +261,7 @@ SET turbovec.oversample = 1.0;  -- 1.0 .. 100.0
 -- GIST-1M/960d ~0.86 out of a 0.99+ ceiling). This is an in-cell
 -- quantized-RANKING loss, NOT a retrieval one: the true NNs ARE in
 -- the probed cells (measured cell recall 0.98-0.996 at probes
--- 64-128; see an internal design note). The cure
+-- 64-128). The cure
 -- is scan-side only -- fetch a WIDER candidate set so the always-on
 -- exact-L2 reorder recheck re-ranks enough survivors to recover the
 -- true top-k (measured: an SQ4 analog lifts R@10 0.666 -> 0.978 at

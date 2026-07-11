@@ -15,7 +15,7 @@
 --
 --   * docs/BENCHMARKS.md -- the arnold AVX2 latency section.
 --
---   * docs/PARITY_GAPS.md + an internal design note -- corrected
+--   * docs/PARITY_GAPS.md +  -- corrected
 --     positioning. The AVX2 benchmark overturned the earlier
 --     "we win warm p50" claim (which came from the pre-AVX2
 --     scalar-fallback bug fixed in v1.7.3). pg_turbovec is a flat

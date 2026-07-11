@@ -289,7 +289,7 @@ impl CoarseModel {
 ///
 /// `nprobe` is clamped to `[1, lists]`. Scalar — `lists` is small
 /// (`≈√n`), and a scalar loop avoids a second SIMD-correctness
-/// surface (per an internal design note §8). Cost `O(lists * dim)`.
+/// surface. Cost `O(lists * dim)`.
 pub fn coarse_probe(
     centroids: &[f32],
     lists: usize,
@@ -344,7 +344,7 @@ pub const GRAPH_DEGREE: usize = 16;
 
 /// A small fixed-out-degree graph over the coarse centroids
 /// themselves (Phase G-1, "SPANN-lite" / minimum-viable-graph per
-/// an internal design note). Turns coarse-cell selection from
+/// ). Turns coarse-cell selection from
 /// `O(lists*dim)` ([`coarse_probe`]) into `O(log(lists)*dim)`-ish
 /// greedy graph search ([`graph_probe`]) for large `lists`.
 ///
@@ -364,7 +364,7 @@ pub const GRAPH_DEGREE: usize = 16;
 ///
 /// **Never persisted.** Computed in-memory, once per backend, from
 /// the already-persisted coarse centroids — exactly the pattern
-/// an internal design note requires so this stays purely
+///  requires so this stays purely
 /// additive (no wire-format change, no `MetaPageData::version` bump,
 /// no REINDEX).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -666,7 +666,7 @@ pub fn rotate_query(rotation: &[f32], src: &[f32], dim: usize) -> Vec<f32> {
 
 /// Squared Euclidean distance. Scalar — the coarse step is cheap
 /// (`lists` centroids, `lists ≈ √n`) and keeping it scalar avoids a
-/// second SIMD-correctness surface (per an internal design note §8). The reduction
+/// second SIMD-correctness surface. The reduction
 /// order is fixed (ascending coordinate), so it's deterministic.
 #[inline]
 pub fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
@@ -935,7 +935,7 @@ fn gemm_lloyd_assign(
     // Lloyd loop runs this GEMM over the WHOLE sample once per
     // iteration, up to KMEANS_ITERS times, vs. the row-blocked
     // per-vector work elsewhere which is already split across chunks
-    // -- see an internal design note §12 / the v1.22.1 CHANGELOG entry for
+    // --
     // the FLOPs accounting that identified this as the real build
     // cliff, not the row-blocked stages parallelized in v1.21.0).
     //
@@ -2090,7 +2090,7 @@ mod tests {
     /// wall-clock of `train_kmeans` at a build shape where k-means is
     /// slow (lists=4096, a big sample). Ignored by default (minutes);
     /// run with `--ignored --nocapture` to read the ratio. Absolute
-    /// numbers on this box are untrustworthy (see PROFILING_
+    /// numbers on this box are untrustworthy (
     /// BUILD.md); the SAME-RUN ratio is the honest measurement. Also
     /// asserts the centroids are bit-identical between the two runs
     /// (the whole point: the speedup must not cost determinism).
@@ -2538,7 +2538,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Phase G-1 (an internal design note): the centroid graph.
+    // Phase G-1: the centroid graph.
     // ----------------------------------------------------------------
 
     /// Deterministic pseudo-random centroid generator shared by the

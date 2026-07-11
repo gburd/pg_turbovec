@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 BQ feasibility, 1536-d OpenAI text-embedding-3-large (Qdrant dbpedia HF set,
-2 parquet shards ~= 77k rows). This is the PRODUCTION distribution the 40GB/
-100M/1536d requirement targets — real cosine-metric text embeddings, the
+2 parquet shards ~= 77k rows). This is a realistic high-dim text-embedding
+distribution for the large-index storage regime — real cosine-metric text
+embeddings, the
 regime BQ is DESIGNED for (unlike GIST's non-negative L2 image descriptors).
 
 pg_turbovec unit-normalizes on insert and scores cosine/inner-product, so:

@@ -298,7 +298,7 @@ large fraction of blocks.
 Soft multi-assignment (`WITH (assign_dups = M)`, IVF-4) raises recall@10 at any
 fixed `probes` by storing boundary vectors in their top-M nearest cells, at a
 bounded storage cost — see [Migrating from pgvector](MIGRATING_FROM_PGVECTOR.md)
-and an internal design note.
+and .
 
 ## IVF warm-p50 (AVX2, `floki` — the latency win, confirmed)
 

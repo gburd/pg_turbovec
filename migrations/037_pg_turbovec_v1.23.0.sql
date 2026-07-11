@@ -24,14 +24,14 @@
 -- corpora). NOT yet done: VACUUM/tombstone integration (a graph
 -- index currently rejects ambulkdelete with a clear ERROR rather
 -- than silently corrupting the graph -- see
--- an internal design note's G-2b), aminsert (also
+-- 's G-2b), aminsert (also
 -- rejected with a clear ERROR -- rebuild the index after bulk
 -- loading, same operational model IVF's build-then-query workflow
 -- already uses), SIMD-optimized traversal (G-2c, scalar distance
 -- computation only in this release), and the real 5M-scale
 -- HNSW-latency gate measurement (G-2d, needs a cloud VM -- NOT yet run,
 -- so no latency/recall claim vs HNSW is made by this release; see
--- an internal design note for the gate this feature is ultimately
+--  for the gate this feature is ultimately
 -- measured against before it can be called production-ready).
 --
 -- turbovec.probes / turbovec.search_k / IVF's lists reloption are

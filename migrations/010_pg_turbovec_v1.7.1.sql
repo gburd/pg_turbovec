@@ -26,7 +26,7 @@
 -- colliding with the OS page cache.
 --
 -- See `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`
--- and an internal design note for the full analysis.
+-- and  for the full analysis.
 --
 -- The wire format does NOT change. The on-disk index format is
 -- byte-identical across v1.6.0, v1.7.0, and v1.7.1 (all

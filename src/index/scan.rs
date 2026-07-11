@@ -240,7 +240,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
                     PgLogLevel::ERROR,
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                     "this is a ColBERT (multivector) turbovec index; it has no ORDER BY semantics",
-                    "Query it with turbovec.colbert_search(rel, id_col, token_col, query, k), not an ORDER BY <=> scan. See an internal design note."
+                    "Query it with turbovec.colbert_search(rel, id_col, token_col, query, k), not an ORDER BY <=> scan."
                 );
             }
             _ => {}
@@ -498,7 +498,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         // cell_scoped branch below. Always installs
                         // the RAM-resident GraphIndex — G-2a is
                         // explicitly a RAM-resident design (see
-                        // an internal design note); there is no
+                        // ); there is no
                         // out-of-core graph path to fall back to.
                         install_graph_index(
                             (*scan).indexRelation,
@@ -584,7 +584,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // k_pref <= 100_000 and oversample <= 100 so the product fits
         // an f64 exactly well within u64 range.
         //
-        // Gap-B (an internal design note): at high
+        // Gap-B: at high
         // dim the quantized ranking places true neighbours at rank
         // ~200-800 within the probed cells, below a small search_k, so
         // recall caps below the retrieval ceiling. turbovec.hi_dim_rerank

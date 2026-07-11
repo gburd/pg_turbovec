@@ -12,7 +12,7 @@
 -- No new operators, types, functions, or opclasses.
 --
 -- What it does (scan-side only): the offline Gap-B investigation
--- (an internal design note) established that the
+-- established that the
 -- high-dimensional recall gap (e.g. GIST-1M/960d capping ~0.86) is
 -- NOT retrieval-bound -- the true nearest neighbours DO land in the
 -- probed cells (measured cell recall 0.98-0.996 at probes 64-128) --

@@ -739,8 +739,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // build 53% slower with no actual RSS reduction (the
     // "freed" heap pages just migrate to pinned shared
     // buffers, which `ps -o rss` still counts). Reverted to
-    // the v1.6.0 single-call path. See
-    // an internal design note and the validation JSON at
+    // the v1.6.0 single-call path. See the validation JSON at
     // `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`.
     if n_vectors > 0 {
         // Phase R-2 + parity gap #2: prepare_eager builds the
@@ -1181,8 +1180,7 @@ unsafe fn ivf_build_and_write(
 /// Phase G-2a graph build finisher (`WITH (graph = true)`). Streams
 /// the spilled corpus back into ONE resident row-major f32 buffer
 /// (Phase G-2's RAM-resident design — the graph kind explicitly
-/// trades pure out-of-core for HNSW-matching latency, per
-/// an internal design note), quantizes it via the EXISTING
+/// trades pure out-of-core for HNSW-matching latency), quantizes it via the EXISTING
 /// `IdMapIndex::add_with_ids` path (a graph node's vector storage is
 /// IDENTICAL to a flat index's row — no new encode path), builds the
 /// Vamana adjacency over the SAME resident buffer
@@ -1261,8 +1259,7 @@ unsafe fn graph_build_and_write(
     // derives P from the corpus size + build-pool budget). Both emit
     // the identical on-disk CSR shape (no wire change); the
     // partitioned build is what lets the graph kind scale to millions
-    // of rows (the single-pass build is inherently serial — see
-    // an internal design note).
+    // of rows (the single-pass build is inherently serial).
     let partitions =
         crate::guc::graph_build_partitions(n_vectors, super::build_pool::resolve_pool_size());
     let (adjacency, entry_point) = super::build_pool::install(build_pool, || {

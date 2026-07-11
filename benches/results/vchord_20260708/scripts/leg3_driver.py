@@ -152,7 +152,7 @@ def run_turbovec(corpus, lists_list, tier):
                     # The best-tuned tier means an informed operator: force
                     # out_of_core=on so the CentroidGraph actually gets built
                     # (turbovec.out_of_core=auto's size threshold is NOT
-                    # crossed at these corpus sizes -- see an internal design note
+                    # crossed at these corpus sizes --
                     # -- so leaving it on auto silently falls back to the
                     # slower whole-load path, which never builds the graph
                     # at all). This was caught mid-run: an earlier pass of

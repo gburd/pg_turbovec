@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gap B experiment 5: PQ at STORAGE-COMPETITIVE m (the an internal design note
+Gap B experiment 5: PQ at STORAGE-COMPETITIVE m (the PQ-subvector
 gate-0 question). m=32 (36 B/vec) and m=64 (68 B/vec) are the m's that would
 beat DiskANN's 585 B/vec. Does PQ at that byte budget preserve enough in-cell
 recall to be worth building? Compare vs SQ4 (480 B) and SQ8 (960 B) + rerank.

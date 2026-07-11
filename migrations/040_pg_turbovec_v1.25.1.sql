@@ -15,7 +15,7 @@
 --     META.json.in, ci/announce.sh) -- this is the release that first
 --     exercises that automation.
 --   * Added the Qdrant + ANN-Benchmarks-protocol competitive benchmark
---     (an internal benchmark note +
+--     ( +
 --     benches/results/qdrant_annbench_20260709/), which validated
 --     v1.25.0's turbovec.hi_dim_rerank at scale (GIST-960-1M recall
 --     0.876 -> 0.953) and produced the competitive-position numbers.

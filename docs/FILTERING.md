@@ -440,7 +440,7 @@ wire-format or planner-cooperation cost; neither is in scope yet.
 
 - `docs/MIGRATING_FROM_PGVECTOR.md` -- migrating filtered queries from
   pgvector's post-filter / partial-index patterns.
-- an internal design note -- positioning vs Qdrant/VectorChord
+-  -- positioning vs Qdrant/VectorChord
   filtering.
 - `docs/PRODUCTION.md` § Filtering -- operational notes.
 - `src/knn.rs` -- the allowlist function source.

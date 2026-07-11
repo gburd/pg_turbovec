@@ -149,7 +149,7 @@ unsafe fn ambulkdelete_relfile(
 
     // Phase G-2b: graph indexes tombstone exactly like IVF (see the
     // module doc's "IVF indexes tombstone instead of swap-removing"
-    // section above, and an internal design note's "VACUUM (all
+    // section above, and 's "VACUUM (all
     // graph phases)" note). Swap-remove would move the last live
     // slot into a deleted hole, silently invalidating every
     // adjacency-chain neighbor id that pointed at the moved-from or

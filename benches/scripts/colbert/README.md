@@ -4,7 +4,7 @@ Measures whether index-native ColBERT stage-1 (`turbovec.colbert_search`)
 delivers a real recall gain over the Phase-D pooled-vector + `max_sim`
 rerank baseline, on a real ColBERT corpus with ground-truth qrels. This
 is the GATE for funding Phase F-2 (the persistent token index).
-See an internal design note -> "F-1 benchmark (the gate for F-2)".
+ -> "F-1 benchmark (the gate for F-2)".
 
 ## Files
 

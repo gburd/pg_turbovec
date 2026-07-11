@@ -1,5 +1,5 @@
 //! Phase F-1 — index-native late interaction (ColBERT MaxSim), first
-//! cut. See an internal design note.
+//! cut..
 //!
 //! ColBERT scores a (query, doc) pair as
 //! `MaxSim(Q, D) = sum_{q in Q} max_{d in D} sim(q, d)` over per-token

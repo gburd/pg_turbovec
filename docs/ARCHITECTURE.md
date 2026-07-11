@@ -45,7 +45,7 @@ locally vendored under `vendor/turbovec/` with a small patch (see
    storage. (Corrected 2026-07-06: this previously said "4-bit... ≈388
    B/vector", which was the 2-bit figure mislabeled — 1536 × 4 bits / 8
    + 4B scale = 772B, not 388B. Caught during a PQ-subvector-
-   quantization feasibility review; see an internal design note-
+   quantization feasibility review-
    adjacent research notes.)
 4. **SIMD-accelerated ANN** for inner-product and cosine queries via
    the upstream `turbovec` kernels (NEON, AVX2, optional AVX-512BW).
@@ -104,7 +104,7 @@ fixtures, small tenant partitions, cold-start corpora) are exposed;
 large tables are not (the streaming flush's first chunk is almost
 always ≥ 1000 rows once the corpus itself is that big). Tracked as a
 follow-up, not fixed here — the fix belongs upstream (see
-an internal design note §1) or as a pg_turbovec-side
+) or as a pg_turbovec-side
 workaround (e.g. padding tiny first batches to the threshold with
 harmless synthetic dummy rows before calibration and correcting the
 slot count afterward) once a maintainer decides which side should own
@@ -187,7 +187,7 @@ pg_turbovec/
 and promoted to default-on in v0.9. The relfile-resident format
 (`page.rs` + `relfile.rs`) was introduced as a Phase L preview
 in v1.1.0 and made the only storage strategy in v1.3.0 (Phase Q,
-see an internal design note for the
+ for the
 historical record).
 
 ---
@@ -220,14 +220,14 @@ to/from `pgvector.vector` collapse to a single `memcpy` and let
 libpq COPY BINARY clients targeting pgvector reuse their wire
 encoders. We considered it for Phase 6 / 1.0 and explicitly
 **skipped it**; the rationale lives in
-`an internal design note § "Binary-compatible varlena layout"`.
+`.
 
 Short version: the cross-extension migration is a one-shot
 `UPDATE` through the `real[]` bridge, the storage win comes
 from 16× quantisation rather than varlena layout, and the
 implementation needs a non-trivial chunk of `unsafe` FFI bypassing
 pgrx's `PostgresType` derive. The handoff document
-an internal design note enumerates the
+ enumerates the
 work if a future session wants to pick it up.
 
 ### 3.3 Text I/O
@@ -242,7 +242,7 @@ dimension).
 The planned `tvector_send` / `tvector_recv` mirror of pgvector's
 `vector_send` / `vector_recv` is part of the binary-compatible
 varlena layout that we skipped — see § 3.2 above and
-an internal design note. Today's
+. Today's
 `vector` uses pgrx's CBOR-derived varlena and reaches pgvector
 through explicit `real[]` casts.
 
@@ -453,10 +453,11 @@ codes term only):
 | dim / bits | codes/vec | pre-v7 (×2) | v7 (×1) |
 |---|---|---|---|
 | 768 / 2-bit | 192 B | 39.6 GB | **19.8 GB** |
-| 768 / 4-bit | 384 B | 78 GB | **39.6 GB** (now fits 40 GB) |
-| 1536 / 2-bit | 384 B | 78 GB | **39.6 GB** (now fits 40 GB) |
+| 768 / 4-bit | 384 B | 78 GB | **39.6 GB** |
+| 1536 / 2-bit | 384 B | 78 GB | **39.6 GB** |
 
-This cleared the storage blocker for the large-index storage target.
+Halving the codes term is what makes large single-node indexes
+practical on bounded disk.
 See
 [`UPGRADING.md`](UPGRADING.md) — v7 is a wire bump, REINDEX required.
 
@@ -567,7 +568,7 @@ index AM is still on the roadmap:
   not yet committed will leave the index empty until rebuilt**
   — acceptable because Postgres expects that of `CREATE INDEX`.
 - Unlogged indexes ship with a populated `INIT_FORKNUM`
-  (an internal design note item 2)
+  ( item 2)
   so crash recovery copies the init fork over the main fork,
   restoring an empty queryable index.
 
@@ -658,7 +659,7 @@ short version of the path from 0.1 to 1.1:
   informed `amcostestimate`, end-to-end demo script.
 - **Phases 17–21** (v1.0.0-rc.1 → v1.0.0): release-candidate
   prep, real-embedding GloVe-100 recall sweep, the binary-compat
-  varlena handoff (deferred per an internal design note), forced-index
+  varlena handoff (deferred), forced-index
   crash root-caused and fixed, million-row arnold sweep, the
   `turbovec.search_k` GUC, AM cache wiring.
 - **v1.0.1**: pg13/pg14/pg15/pg18 build compatibility (`#[cfg]`
@@ -681,7 +682,7 @@ short version of the path from 0.1 to 1.1:
   `experimental_index_am` and `relfile_storage` Cargo features
   are gone. Hard migration boundary: `ambeginscan` raises
   `ERROR` on a v1.0.x..v1.2 index and asks the user to
-  `REINDEX`. See an internal design note
+  `REINDEX`.
   for the per-item record.
 
 ---

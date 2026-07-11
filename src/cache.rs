@@ -276,7 +276,7 @@ impl ReadOnlyIndex {
     /// costs close to `O(n/32)` block-skip checks, not a full `O(n)`
     /// scan, even though the mask itself is `O(n)` to allocate. A
     /// SIMD-aware, allocation-free per-hop scorer is exactly the kind
-    /// of optimisation an internal design note scopes
+    /// of optimisation  scopes
     /// to G-2c, not this correctness-first sub-phase.
     ///
     /// `ids` must be non-empty and every id must be `< self.len()`;
@@ -370,7 +370,7 @@ pub(crate) struct OocIvfIndex {
 /// Phase G-2c: per-query graph traversal scorer.
 ///
 /// Reuses TurboQuant's LUT-based table-lookup scoring PRIMITIVE (the
-/// one an internal design note §3 found reusable for the
+/// one 
 /// graph path because a graph node's codes are stored in the SAME
 /// per-coordinate bit-plane layout as a flat/IVF row), but restructured
 /// for graph TRAVERSAL rather than a whole-corpus scan:

@@ -42,3 +42,8 @@ __pycache__/
 # llvm-cov coverage artifacts
 *.profraw
 *.profdata
+
+# core dumps + large test fixtures (never commit)
+core
+core.*
+*.hdf5

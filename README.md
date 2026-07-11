@@ -49,30 +49,53 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 
 ## Why pg_turbovec?
 
-**On 1 M × 1536-d real OpenAI `text-embedding-ada-002` embeddings
-([`dbpedia-entities-openai-1M`](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M))
-pg_turbovec 4-bit matches pgvector HNSW recall at ~10× less storage
-and ~1.6× faster p50.**
+**On 1 M × 1536-d real OpenAI embeddings, pg_turbovec matches
+pgvector HNSW's recall at ~10–20× less on-disk storage, with exact
+re-ranking against the heap.** Storage efficiency and exact/near-exact
+recall are what pg_turbovec does better than anything else — not raw
+latency (see the honest latency note below).
 
-Head-to-head, warm cache, release build (full sweep:
-[`benches/results/recall_dbpedia_1M_2026_05_24.json`](benches/results/recall_dbpedia_1M_2026_05_24.json)):
+Head-to-head, warm cache, release build. Storage + recall
+(measured on real embeddings; see
+[`an internal benchmark note`](an internal benchmark note)
+and [an internal design note](an internal design note)):
 
-| Index                          | Storage  | Build  | p50 (warm) | R@10  |
-|--------------------------------|---------:|-------:|-----------:|------:|
-| pgvector HNSW (ef_search=40)   | 8 192 MB | 4.9 min |    61 ms |  0.962 |
-| pgvector HNSW (ef_search=200)  | 8 192 MB | 4.9 min |   115 ms |  0.970 |
-| **pg_turbovec 4-bit (k=100)**  |   780 MB | 2.7 min | **71 ms** | **1.000** |
-| pg_turbovec 4-bit (k=500)      |   780 MB | 2.7 min |   124 ms |  1.000 |
-| **pg_turbovec 2-bit (k=100)**  |   396 MB | 2.1 min | **48 ms** | **1.000** |
-| pg_turbovec 2-bit (k=500)      |   396 MB | 2.1 min |    78 ms |  1.000 |
+| metric (1 M × 1536-d, real OpenAI) | pg_turbovec 2-bit | pgvector HNSW |
+|---|---:|---:|
+| **On-disk index / vector** | **≈ 412 B (measured)** | ≈ 8 192 B |
+| **Storage @ 1 M** | **≈ 412 MB** | ≈ 8 GB (~20× larger) |
+| Build (1 M) | ~minutes | ~5 min |
+| Recall@10 (IVF, tuned) | ~0.90 (R@100 → 0.99) | 0.96–0.99 |
+| Exact re-ranking vs heap | ✓ (`xs_recheckorderby`) | ✓ |
+
+### Honest latency note (read this)
+
+pg_turbovec's **flat** kind is an `O(n·dim)` quantized full scan — at
+1 M rows its warm p50 is **~2.5 s on AVX2**, and pgvector HNSW (a
+sublinear graph) is **~490× faster** on latency. **We do not beat HNSW
+on latency**, and any earlier README claim to the contrary was a
+pre-AVX2-fix measurement artifact and is retracted (see
+[`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md)). The latency paths are:
+
+- **IVF** (`WITH (lists = N)`) — cell-pruned scan, out-of-core capable.
+  Measured ~17–24 ms warm p50 at 1 M × 1536-d (R@10 0.84–0.89), the
+  practical latency config.
+- **Vamana graph** (`WITH (graph = true)`) — navigable-graph ANN for
+  low-latency at moderate scale.
+
+Use pg_turbovec when your workload is **cosine / inner-product semantic
+search that is storage-constrained** and you want exact-recall re-ranking
+and Postgres-native ACID/joins — and you use the IVF or graph kind (not
+a bare flat scan) for latency at scale. If you need raw HNSW latency,
+L2/L1 ANN, halfvec/sparse, pgvector + HNSW is the right pick today.
 
 Feature breakdown:
 
 | Feature                          | pg_turbovec       | pgvector + HNSW   |
 |----------------------------------|-------------------|-------------------|
-| Storage / 1536-dim row (4-bit)   | **≈ 780 B (measured)** | 8 192 B (measured) |
-| Build cost (1 M × 1536-d)        | **2.7 min (4-bit) / 2.1 min (2-bit)** | 4.9 min |
-| p50 warm @ R@10 ≥ 0.96 (1 M × 1536-d) | **48 ms (2-bit, k=100)** | 61 ms (ef=40) |
+| Storage / 1536-dim row (2-bit)   | **≈ 412 B (measured)** | 8 192 B (measured) |
+| Latency at 1 M+ (raw)            | slower (flat O(n); IVF/graph prune) | **faster (sublinear HNSW)** |
+| Index kinds                      | flat, IVF (out-of-core), ColBERT, Vamana graph | HNSW, IVFFlat |
 | Filtered search                  | In-kernel SIMD allowlist | Post-filter |
 | Index AM lifecycle               | CREATE / CIC / aminsert / ambulkdelete / VACUUM / REINDEX | same |
 | Distance ops indexed             | `<#>` `<=>` (turbovec kernel) | `<->` `<#>` `<=>` `<+>` (HNSW + IVF) |
@@ -80,14 +103,9 @@ Feature breakdown:
 | Halfvec, sparsevec, bitvec       | ✗                 | ✓                 |
 | License                          | Apache-2.0        | PostgreSQL        |
 
-If your workload is mostly cosine / inner-product semantic search and
-you'd rather pay disk bytes than RAM bytes, `pg_turbovec` is the
-right tool. If you need L2 / L1 ANN, halfvec, sparse, or measured
-hyperscale latency *today*, pgvector + HNSW is the safer pick.
-
-*Caveat: the dbpedia query set is drawn from inside the corpus, so
-rank-1 is trivially the query itself; R@10 is dominated by ranks
-2..10. See [`docs/RECALL.md § 2.2`](docs/RECALL.md) for methodology.*
+*Methodology: recall numbers use exact top-k ground truth; see
+[`docs/RECALL.md`](docs/RECALL.md). Latency numbers are contention-
+controlled AVX2 warm p50 (`docs/PARITY_GAPS.md`, `docs/BENCHMARKS.md`).*
 
 ## Why pg_turbovec instead of `binary_quantize() + bit_hamming_ops`?
 

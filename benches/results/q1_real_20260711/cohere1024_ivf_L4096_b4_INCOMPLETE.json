@@ -1,0 +1,10 @@
+[
+  {
+    "kind": "ivf",
+    "lists": 4096,
+    "bit_width": 4,
+    "build_status": "DID_NOT_COMPLETE",
+    "elapsed_s": 5402.0,
+    "budget_s": 5400
+  }
+]

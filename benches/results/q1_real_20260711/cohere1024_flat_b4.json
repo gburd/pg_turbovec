@@ -1,0 +1,53 @@
+[
+  {
+    "kind": "flat",
+    "lists": 0,
+    "bit_width": 4,
+    "build_s": 474.9,
+    "idx_bytes": 5585920000,
+    "idx_total_bytes": 5585920000,
+    "n": 10000000,
+    "rerank": "off",
+    "probes": null,
+    "search_k": 100,
+    "recall10": 0.9,
+    "recall100": 0.9412,
+    "p50": 544.5,
+    "mean": 545.27,
+    "qps_1conn": 1.8
+  },
+  {
+    "kind": "flat",
+    "lists": 0,
+    "bit_width": 4,
+    "build_s": 474.9,
+    "idx_bytes": 5585920000,
+    "idx_total_bytes": 5585920000,
+    "n": 10000000,
+    "rerank": "off",
+    "probes": null,
+    "search_k": 500,
+    "recall10": 0.9,
+    "recall100": 0.99,
+    "p50": 576.64,
+    "mean": 577.26,
+    "qps_1conn": 1.7
+  },
+  {
+    "kind": "flat",
+    "lists": 0,
+    "bit_width": 4,
+    "build_s": 474.9,
+    "idx_bytes": 5585920000,
+    "idx_total_bytes": 5585920000,
+    "n": 10000000,
+    "rerank": "auto",
+    "probes": null,
+    "search_k": null,
+    "recall10": 0.9,
+    "recall100": 0.99,
+    "p50": 588.31,
+    "mean": 589.91,
+    "qps_1conn": 1.7
+  }
+]

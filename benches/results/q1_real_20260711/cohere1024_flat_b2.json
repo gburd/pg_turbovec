@@ -1,0 +1,53 @@
+[
+  {
+    "kind": "flat",
+    "lists": 0,
+    "bit_width": 2,
+    "build_s": 432.4,
+    "idx_bytes": 2767167488,
+    "idx_total_bytes": 2767167488,
+    "n": 10000000,
+    "rerank": "off",
+    "probes": null,
+    "search_k": 100,
+    "recall10": 0.9,
+    "recall100": 0.8332,
+    "p50": 286.65,
+    "mean": 287.43,
+    "qps_1conn": 3.5
+  },
+  {
+    "kind": "flat",
+    "lists": 0,
+    "bit_width": 2,
+    "build_s": 432.4,
+    "idx_bytes": 2767167488,
+    "idx_total_bytes": 2767167488,
+    "n": 10000000,
+    "rerank": "off",
+    "probes": null,
+    "search_k": 500,
+    "recall10": 0.9,
+    "recall100": 0.99,
+    "p50": 292.84,
+    "mean": 293.27,
+    "qps_1conn": 3.4
+  },
+  {
+    "kind": "flat",
+    "lists": 0,
+    "bit_width": 2,
+    "build_s": 432.4,
+    "idx_bytes": 2767167488,
+    "idx_total_bytes": 2767167488,
+    "n": 10000000,
+    "rerank": "auto",
+    "probes": null,
+    "search_k": null,
+    "recall10": 0.9,
+    "recall100": 0.99,
+    "p50": 311.8,
+    "mean": 311.94,
+    "qps_1conn": 3.2
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "lists": 1024,
+    "probes": 128,
+    "search_k": 500,
+    "recall10": 0.894,
+    "recall100": 0.9664,
+    "p50": 31.48,
+    "build_s": 2829.5,
+    "per_vec_B": 418.0
+  },
+  {
+    "lists": 1024,
+    "probes": 256,
+    "search_k": 500,
+    "recall10": 0.8986,
+    "recall100": 0.9827,
+    "p50": 38.5,
+    "build_s": 2829.5,
+    "per_vec_B": 418.0
+  },
+  {
+    "lists": 1024,
+    "probes": 512,
+    "search_k": 500,
+    "recall10": 0.8998,
+    "recall100": 0.9886,
+    "p50": 50.36,
+    "build_s": 2829.5,
+    "per_vec_B": 418.0
+  }
+]

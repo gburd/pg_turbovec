@@ -4,6 +4,48 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.27.1] — 2026-07-11
+
+**Phase Q-4a: parallelize the IVF k-means build.** Patch bump —
+build-SPEED change only. The persisted IVF centroids + assignment are
+**byte-identical to v1.27.0** for a fixed (corpus, seed, lists, dim);
+no wire-format change (stays v7), no SQL-surface change, **no REINDEX**.
+This only makes NEW `WITH (lists = N)` builds faster.
+
+Q-1 exposed the IVF build cliff as the blocker for scale: a real
+10M×1024 IVF build did not complete in a 90-min budget
+(`an internal benchmark note`). Two remaining serial hot
+loops in the k-means build are now parallelized **bit-identically**
+(the rest was already parallel from v1.20.0/v1.22.1):
+- **`gemm_lloyd_assign`'s per-row argmin + top-2 tie-break** — run
+  every Lloyd iteration over the whole sample — is now a data-parallel
+  `par_iter_mut().enumerate()` writing each `assign[i]` to a fixed
+  index, so the result is byte-identical regardless of thread count.
+- **`rotate_corpus_into`'s GEMM** — `Parallelism::None` → `Rayon(0)`,
+  on the same "gemm tiling never reduces across threads" guarantee
+  v1.22.1 established for the Lloyd cross-term GEMM.
+Left serial deliberately: the k-means++ next-seed CDF pick (sequential
+by construction) and the empty-cell reseed scan (data-dependent
+mutation, not a parallel-safe map).
+
+**Measured ~1.91× build speedup** (lists=4096, n=131072, dim=256,
+8-core, release: 418.2s → 219.4s) with bit-identical output. Sub-linear
+because Lloyd iterations are sequentially dependent (only
+within-iteration work parallelizes) — the honest ceiling for k-means,
+unlike the embarrassingly-parallel graph build (v1.26.0). Verified:
+`ivf_coarse_model_bit_identical_across_pool_sizes` +
+`rotate_corpus_bit_identical_across_pool_sizes` assert byte-identical
+centroids + assignment across pool sizes {1, 2, auto};
+`kmeans_deterministic_across_pool_sizes` stays green; full suite
+338/338.
+
+This is the first step toward the scale-and-heavy-load requirements
+(an internal design note G1); the empty-cell/reseed serial remainder and
+a larger-scale (10M→100M) build validation are the follow-ups.
+
+**Migration:** `ALTER EXTENSION pg_turbovec UPDATE TO '1.27.1';` — a
+no-op upgrade for existing indexes; new IVF builds are just faster.
+
 ## [1.27.0] — 2026-07-10
 
 **Phase Q-0: de-duplicate the on-disk quantized-codes storage, roughly

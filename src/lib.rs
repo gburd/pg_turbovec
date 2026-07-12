@@ -4187,10 +4187,18 @@ mod tests {
     ///
     /// Specifically asserts:
     ///
-    /// 1. `pg_current_wal_lsn` advances over `ambuild`.
-    /// 2. `pg_current_wal_lsn` advances over `aminsert`.
+    /// 1. `pg_current_wal_insert_lsn` advances over `ambuild`.
+    /// 2. `pg_current_wal_insert_lsn` advances over `aminsert`.
     /// 3. The relfile is at least 4 pages (meta + 3 chains).
     /// 4. Search results stay correct after both phases.
+    ///
+    /// Uses `pg_current_wal_insert_lsn()` (the WAL *insert* pointer,
+    /// which advances the moment a record is buffered) rather than
+    /// `pg_current_wal_lsn()` (the *write/flush* pointer): the flush
+    /// pointer can lag behind a just-emitted small record, which made
+    /// the aminsert assertion flake on PG13 (before==after) even
+    /// though WAL was emitted. The insert pointer is the correct probe
+    /// for "did this operation write WAL".
     #[pg_test]
     fn relfile_wal_emits_on_build_and_insert() {
         use_turbovec();
@@ -4208,14 +4216,14 @@ mod tests {
 
         // (1) ambuild path — should emit XLOG_GENERIC records.
         let lsn_before_build: Option<String> =
-            Spi::get_one("SELECT pg_current_wal_lsn()::text").unwrap();
+            Spi::get_one("SELECT pg_current_wal_insert_lsn()::text").unwrap();
         Spi::run(
             "CREATE INDEX t_wal_idx ON t_wal USING turbovec (emb vec_cosine_ops) \
              WITH (bit_width = 4)",
         )
         .unwrap();
         let lsn_after_build: Option<String> =
-            Spi::get_one("SELECT pg_current_wal_lsn()::text").unwrap();
+            Spi::get_one("SELECT pg_current_wal_insert_lsn()::text").unwrap();
         let advanced_build: Option<bool> = Spi::get_one(&format!(
             "SELECT '{}'::pg_lsn < '{}'::pg_lsn",
             lsn_before_build.as_deref().unwrap_or("0/0"),
@@ -4241,7 +4249,7 @@ mod tests {
 
         // (2) aminsert path — should also emit WAL.
         let lsn_before_insert: Option<String> =
-            Spi::get_one("SELECT pg_current_wal_lsn()::text").unwrap();
+            Spi::get_one("SELECT pg_current_wal_insert_lsn()::text").unwrap();
         Spi::run(
             "INSERT INTO t_wal \
              SELECT 9999, ('[' || string_agg( \
@@ -4251,7 +4259,7 @@ mod tests {
         )
         .unwrap();
         let lsn_after_insert: Option<String> =
-            Spi::get_one("SELECT pg_current_wal_lsn()::text").unwrap();
+            Spi::get_one("SELECT pg_current_wal_insert_lsn()::text").unwrap();
         let advanced_insert: Option<bool> = Spi::get_one(&format!(
             "SELECT '{}'::pg_lsn < '{}'::pg_lsn",
             lsn_before_insert.as_deref().unwrap_or("0/0"),

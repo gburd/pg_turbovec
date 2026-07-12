@@ -292,7 +292,7 @@ unsafe fn insert_graph_row(
         // `n_vectors` grew by one) is the safe, simple choice for a
         // whole-rewrite path — REINDEX recovers cleanly either way.
         error!(
-            "turbovec aminsert (graph): heap tid {} already present in this graph index (re-insert of an existing row is not supported for the graph kind —-2b); REINDEX INDEX to rebuild if the underlying table changed",
+            "turbovec aminsert (graph): heap tid {} already present in this graph index (re-insert of an existing row is not supported for the graph kind); REINDEX INDEX to rebuild if the underlying table changed",
             id
         );
     }

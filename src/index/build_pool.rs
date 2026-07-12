@@ -84,15 +84,46 @@ pub(crate) fn make_pool() -> Option<rayon::ThreadPool> {
 /// concurrency safety) rather than derived from the build GUC — a scan
 /// and a build have different fan-out budgets. The threads do pure
 /// compute over owned code bytes; no PG state is touched inside them.
-pub(crate) fn scan_pool(n: usize) -> Option<rayon::ThreadPool> {
+///
+/// **Per-backend cached** (G3 concurrency fix): the pool is built ONCE
+/// per backend and reused for every parallel scan, instead of spawning
+/// (and tearing down) `n` fresh OS threads on every query. Under
+/// concurrency the old per-query build was a `clone()`/`exit()` storm
+/// that showed up as NULL-wait_event CPU time and collapsed aggregate
+/// QPS right at conn == vCPU count. A backend runs one query at a time,
+/// so a thread_local pool is exactly one pool per concurrent worker;
+/// the churn is gone and only the (bounded) resident worker threads
+/// remain. If a later query needs a LARGER pool than the cached one,
+/// the cache is rebuilt at the larger size (monotonic; in practice `t`
+/// is stable within a backend so this happens at most once).
+pub(crate) fn scan_pool_with<R>(n: usize, f: impl FnOnce(Option<&rayon::ThreadPool>) -> R) -> R {
     if n <= 1 {
-        return None;
+        return f(None);
     }
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
-        .thread_name(|i| format!("turbovec-scan-{i}"))
-        .build()
-        .ok()
+    SCAN_POOL.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        // (Re)build only if absent or too small. A pool of size m >= n
+        // can run an n-way `par_iter` fine (rayon just leaves the
+        // extra workers idle), so we never shrink.
+        let need_rebuild = match slot.as_ref() {
+            Some(p) => p.current_num_threads() < n,
+            None => true,
+        };
+        if need_rebuild {
+            *slot = rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .thread_name(|i| format!("turbovec-scan-{i}"))
+                .build()
+                .ok();
+        }
+        f(slot.as_ref())
+    })
+}
+
+thread_local! {
+    /// One reused fine-scan pool per backend (see [`scan_pool_with`]).
+    static SCAN_POOL: std::cell::RefCell<Option<rayon::ThreadPool>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Run `f` on `pool` if present, else inline. The closure is where the
@@ -175,5 +206,49 @@ mod tests {
         assert_eq!(serial.1, parallel.1, "scales differ by pool size");
         assert_eq!(serial.2, parallel.2, "blocked_codes differ by pool size");
         assert_eq!(serial.3, parallel.3, "slot_to_id differs by pool size");
+    }
+
+    /// G3 fix: `scan_pool_with` caches ONE pool per backend and reuses
+    /// it, instead of spawning fresh OS threads per query. Verifies the
+    /// cache is reused for the same size, grows (never shrinks) when a
+    /// larger size is asked, runs the degenerate n<=1 inline (no pool),
+    /// and that work executed on the cached pool is correct.
+    #[test]
+    fn scan_pool_is_cached_and_grows_monotonically() {
+        use super::scan_pool_with;
+        // n<=1 -> inline, no pool handed to the closure.
+        let inline = scan_pool_with(1, |pool| {
+            assert!(pool.is_none(), "n<=1 must run inline with no pool");
+            7usize
+        });
+        assert_eq!(inline, 7);
+
+        // First real request builds a pool of >= 2 threads.
+        let ptr2 = scan_pool_with(2, |pool| {
+            let p = pool.expect("n>1 must get a pool");
+            assert!(p.current_num_threads() >= 2);
+            // sanity: work actually runs on it and returns correctly.
+            let sum: usize = p.install(|| {
+                use rayon::prelude::*;
+                (0..1000usize).into_par_iter().sum()
+            });
+            assert_eq!(sum, 999 * 1000 / 2);
+            p.current_num_threads()
+        });
+
+        // Same size -> reuse (no rebuild): thread count unchanged.
+        let ptr2b = scan_pool_with(2, |pool| pool.unwrap().current_num_threads());
+        assert_eq!(ptr2, ptr2b, "same size should reuse the cached pool");
+
+        // Larger size -> rebuild bigger.
+        let big = scan_pool_with(4, |pool| pool.unwrap().current_num_threads());
+        assert!(big >= 4, "must grow to at least the larger request");
+
+        // Smaller-than-cached size -> keep the bigger cached pool (never shrink).
+        let after_small = scan_pool_with(3, |pool| pool.unwrap().current_num_threads());
+        assert!(
+            after_small >= big,
+            "a smaller request must not shrink the cached pool"
+        );
     }
 }

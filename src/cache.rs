@@ -967,10 +967,11 @@ impl OocIvfIndex {
                 })
                 .collect()
         };
-        let locals: Vec<SearchResults> = match crate::index::build_pool::scan_pool(t) {
-            Some(pool) => pool.install(work),
-            None => work(),
-        };
+        let locals: Vec<SearchResults> =
+            crate::index::build_pool::scan_pool_with(t, |pool| match pool {
+                Some(p) => p.install(work),
+                None => work(),
+            });
 
         merge_topk(&locals, k)
     }

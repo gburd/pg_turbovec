@@ -4,6 +4,52 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.27.3] — 2026-07-12
+
+**Phase Q-4c: clear the IVF build cliff — batch the k-means reservoir
+rotation into one parallel GEMM.** Patch bump — build-SPEED change
+only. The persisted IVF centroids + codes are **byte-identical to
+v1.27.2** for a fixed (corpus, seed, lists, dim); no wire-format change
+(stays v7), no SQL-surface change, **no REINDEX**.
+
+Profiling a real 1M×1024/lists=4096 build on a 32-vCPU AVX-512 host
+showed the v1.27.2 lazy-per-row-rotation was **still ~85% of a
+~14.5-min build**: the scalar O(dim²) `rotate_unit` ran ~600k times
+(reservoir fill + replacements) single-threaded, and at dim=1024 each
+rotation is ~1M FLOPs. Reducing the call count (v1.27.2) wasn't enough
+— the per-row *scalar* rotation was the wrong primitive.
+
+The fix: the reservoir now stores **normalised-but-unrotated** rows and
+rotates the whole training sample **once at drain** via
+`ivf::rotate_corpus_into` — a parallel BLAS GEMM that already exists
+and is already gated byte-identical
+(`rotate_corpus_bit_identical_across_pool_sizes`). The per-row hot path
+is now just the O(dim) normalise; the O(dim²) work is one GEMM over the
+≤`256·lists` kept rows across all cores. Byte-identical output: same
+rows selected (RNG/seen/cap unchanged, value-independent), same
+rotation math (GEMM `corpus @ R^T` == scalar `unit @ R^T`).
+
+**Measured (real corpus, 32-vCPU AVX-512, PG17.10):**
+- 1M×1024, lists=1024: ~870s → **138s (~6.3×)**, identical 540 MB index.
+- **10M×1024, lists=4096: 1562s (~26 min), 5343 MB — previously did
+  NOT complete** (DNF, cancelled at 33.7 min / 16%). The build cliff
+  is cleared; the build now scales roughly linearly (per-stage trace
+  shows no single dominant stage).
+- Query correctness verified at both scales (self-top-1 returns the
+  query id).
+
+Also in this release (verified on the same host): **the v1.27.2 G3
+concurrency fix holds** — the 1M in-RAM kNN throughput sweep rises
+monotonically and **plateaus at ~40 TPS through 64 connections** (no
+collapse), where the pre-fix per-query-pool-churn build collapsed from
+46 TPS @16 conns to 1.7 TPS @32 conns. Latency saturates gracefully
+(797 ms @32 → 1590 ms @64) instead of thrashing.
+
+Gate: `reservoir_tests::deferred_batch_rotation_is_byte_identical_to_eager`
+(pure-Rust) proves the store-unrotated-then-batch-rotate sample matches
+the original rotate-every-row path; the IVF determinism + pool-
+invariance gates are unchanged and green.
+
 ## [1.27.2] — 2026-07-11
 
 **Phase Q-4b: kill the IVF build cliff's real bottleneck — the

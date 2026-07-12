@@ -1,0 +1,10 @@
+-- pg_turbovec 1.27.3
+--
+-- Build-time-only change: the IVF k-means reservoir now stores
+-- normalised-but-unrotated rows and rotates the whole training sample
+-- once at drain via a parallel BLAS GEMM (ivf::rotate_corpus_into),
+-- instead of a scalar O(dim^2) per-row rotation. Measured ~6.3x faster
+-- 1M/1024 builds and cleared the 10M build cliff (26 min vs prior DNF).
+-- On-disk index format is byte-identical to 1.27.2 (same trained
+-- centroids, same codes). No wire change, no SQL surface change, no
+-- REINDEX. `ALTER EXTENSION pg_turbovec UPDATE TO '1.27.3';` suffices.

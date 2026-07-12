@@ -399,71 +399,44 @@ impl BuildState {
         self.lists.saturating_mul(256)
     }
 
-    /// Rotate an L2-normalised vector into the clustering (rotated)
-    /// space, mirroring turbovec's encode: `rotated[k] = sum_j R[k*dim+j]
-    /// * unit[j]` (i.e. `unit @ R^T`). `unit` must already be
-    /// L2-normalised and `dim`-length. Returns a `dim`-length Vec.
-    fn rotate_unit(rotation: &[f32], unit: &[f32], dim: usize) -> Vec<f32> {
-        let mut out = vec![0.0f32; dim];
-        for (k, o) in out.iter_mut().enumerate() {
-            let rrow = &rotation[k * dim..(k + 1) * dim];
-            let mut s = 0.0f32;
-            for j in 0..dim {
-                s += rrow[j] * unit[j];
-            }
-            *o = s;
-        }
-        out
-    }
-
-    /// Reservoir-sample one ROTATED row for k-means training. Called
+    /// Reservoir-sample one NORMALISED row for k-means training. Called
     /// per accepted vector when `lists > 0`. `raw` is the raw (un-
-    /// normalised) input slice; we normalise + rotate before storing
-    /// so the sample lives in the clustering space.
+    /// normalised) input slice; we store the L2-normalised row and defer
+    /// the O(dim^2) rotation into clustering space to a single batched
+    /// parallel GEMM at drain time (see `ivf_build_and_write`).
     ///
-    /// The O(dim^2) `rotate_unit` is done LAZILY, only for rows that
-    /// actually land in the reservoir (<= cap = 256*lists), not for
-    /// every one of the n accepted rows. The reservoir selection is
-    /// independent of the rotated values (it depends only on the RNG,
-    /// seen-count, and cap), so deferring the rotation is
-    /// byte-identical to rotating every row: the same source rows land
-    /// in the same slots and get the same rotation. At 10M rows with
-    /// cap ~1M this drops ~9M wasted O(dim^2) rotations -- the
-    /// dominant IVF build cost at scale.
+    /// Rotating per-row here was the IVF build cliff: a scalar
+    /// O(dim^2) rotation per kept row, single-threaded, dominated the
+    /// build (~85% at 1M/1024d). The rotation is a pure per-row linear
+    /// map, so applying it once to the whole final sample via
+    /// `ivf::rotate_corpus_into` (a parallel BLAS GEMM) is
+    /// byte-identical -- and `rotate_corpus_bit_identical_across_pool_
+    /// sizes` already gates that the GEMM matches the scalar path. Only
+    /// the cheap O(dim) normalise runs on the per-row hot path now.
+    ///
+    /// Selection is unchanged (RNG + seen-count + cap only, independent
+    /// of the row values), so the same source rows land in the same
+    /// slots as before -- and thus get the same rotation at drain.
     fn ivf_reservoir_push(&mut self, raw: &[f32], dim: usize) {
         use rand::Rng;
 
         let cap = self.ivf_sample_cap();
         self.ivf_seen += 1;
         if self.ivf_sample_count < cap {
-            let rotated = self.rotate_raw(raw, dim);
-            self.ivf_sample.extend_from_slice(&rotated);
+            let unit = kernels::normalise_to_vec(raw);
+            self.ivf_sample.extend_from_slice(&unit);
             self.ivf_sample_count += 1;
         } else {
             // Classic reservoir replacement: replace a random slot
             // with probability cap / seen. Draw FIRST (unconditionally,
-            // to keep the RNG stream identical to the eager version),
-            // rotate only on a hit.
+            // to keep the RNG stream identical), normalise only on a hit.
             let j = self.ivf_rng.gen_range(0..self.ivf_seen);
             if (j as usize) < cap {
-                let rotated = self.rotate_raw(raw, dim);
+                let unit = kernels::normalise_to_vec(raw);
                 let base = (j as usize) * dim;
-                self.ivf_sample[base..base + dim].copy_from_slice(&rotated);
+                self.ivf_sample[base..base + dim].copy_from_slice(&unit);
             }
         }
-    }
-
-    /// Normalise then rotate a raw row into the clustering space,
-    /// matching turbovec's encode pipeline. Split out of
-    /// `ivf_reservoir_push` so the rotation is paid only for rows kept
-    /// in the reservoir.
-    fn rotate_raw(&self, raw: &[f32], dim: usize) -> Vec<f32> {
-        let rotation = self
-            .ivf_rotation
-            .as_ref()
-            .expect("ivf_reservoir_push before rotation built");
-        let unit = kernels::normalise_to_vec(raw);
-        Self::rotate_unit(rotation, &unit, dim)
     }
 
     /// Drain `pending_flat` / `pending_ids` into the IdMapIndex and
@@ -913,8 +886,20 @@ unsafe fn ivf_build_and_write(
 
     // 1. Train coarse centroids on the (rotated) reservoir sample.
     //    Deterministic: seeded k-means++ + Lloyd's (see ivf.rs).
-    let sample = std::mem::take(&mut state.ivf_sample);
+    let mut sample = std::mem::take(&mut state.ivf_sample);
     let sample_count = state.ivf_sample_count;
+    // The reservoir stored NORMALISED-but-unrotated rows (the per-row
+    // scalar rotation was the build cliff, ~85% of the build). Rotate
+    // the whole sample into clustering space now, in ONE parallel BLAS
+    // GEMM -- byte-identical to the old per-row scalar rotation
+    // (gated by `rotate_corpus_bit_identical_across_pool_sizes`), but
+    // O(sample_count) parallel GEMM instead of O(kept rows) scalar
+    // O(dim^2) rotations. `sample` is exactly `sample_count * dim`.
+    if sample_count > 0 {
+        let src = sample.clone();
+        let rotate = || ivf::rotate_corpus_into(&src, &rotation, sample_count, dim, &mut sample);
+        super::build_pool::install(build_pool, rotate);
+    }
     if trace {
         eprintln!(
             "[turbovec build trace]   train_kmeans: sample_count={sample_count} lists={lists} dim={dim} pool_threads={}",
@@ -1607,7 +1592,7 @@ mod reservoir_tests {
         sample
     }
 
-    // LAZY: decide first, rotate only on keep (the new code).
+    // LAZY: decide first, rotate only on keep (an intermediate design).
     fn lazy(rows: &[Vec<f32>], rotation: &[f32], dim: usize, cap: usize, seed: u64) -> Vec<f32> {
         let mut rng = <ChaCha8Rng as rand::SeedableRng>::seed_from_u64(seed);
         let mut sample: Vec<f32> = Vec::new();
@@ -1629,6 +1614,44 @@ mod reservoir_tests {
             }
         }
         sample
+    }
+
+    // DEFERRED (the v1.27.3 production path): store the UNROTATED row
+    // in the reservoir; batch-rotate the whole final sample once at
+    // drain. Byte-identical to `eager`: same rows selected (RNG
+    // unchanged), same rotation applied.
+    fn deferred(
+        rows: &[Vec<f32>],
+        rotation: &[f32],
+        dim: usize,
+        cap: usize,
+        seed: u64,
+    ) -> Vec<f32> {
+        let mut rng = <ChaCha8Rng as rand::SeedableRng>::seed_from_u64(seed);
+        let mut sample: Vec<f32> = Vec::new();
+        let mut count = 0usize;
+        let mut seen = 0u64;
+        for raw in rows {
+            seen += 1;
+            if count < cap {
+                sample.extend_from_slice(raw); // store unrotated
+                count += 1;
+            } else {
+                let j = rng.gen_range(0..seen);
+                if (j as usize) < cap {
+                    let base = (j as usize) * dim;
+                    sample[base..base + dim].copy_from_slice(raw);
+                }
+            }
+        }
+        // Batch-rotate the whole sample at drain (models the GEMM: the
+        // same per-row rotation, applied once each at the end).
+        let mut out = vec![0.0f32; count * dim];
+        for i in 0..count {
+            let r = rotate(rotation, &sample[i * dim..(i + 1) * dim], dim);
+            out[i * dim..(i + 1) * dim].copy_from_slice(&r);
+        }
+        out
     }
 
     #[test]
@@ -1661,6 +1684,40 @@ mod reservoir_tests {
                     e.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
                     l.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
                     "eager vs lazy reservoir sample differs n={n} cap={cap} seed={seed}"
+                );
+            }
+        }
+    }
+
+    /// The v1.27.3 build-cliff fix: the reservoir stores UNROTATED
+    /// rows and the whole sample is rotated once at drain via a
+    /// parallel GEMM (`ivf::rotate_corpus_into`). This gate proves the
+    /// deferred/batched rotation yields a byte-identical sample to the
+    /// original rotate-every-row-in-push path -- the rows selected are
+    /// RNG-determined (value-independent), so the same rows get the
+    /// same rotation, just applied once at the end instead of per push.
+    #[test]
+    fn deferred_batch_rotation_is_byte_identical_to_eager() {
+        let dim = 8usize;
+        let rotation: Vec<f32> = (0..dim * dim)
+            .map(|i| ((i % 7) as f32) * 0.125 - 0.5)
+            .collect();
+        for &(n, lists) in &[(50usize, 1usize), (500, 2), (5000, 4), (12345, 3)] {
+            let cap = (lists * 256 / 32).max(4);
+            let rows: Vec<Vec<f32>> = (0..n)
+                .map(|r| {
+                    (0..dim)
+                        .map(|d| (((r * 31 + d * 17) % 13) as f32) - 6.0)
+                        .collect()
+                })
+                .collect();
+            for &seed in &[1u64, 42, 999999] {
+                let e = eager(&rows, &rotation, dim, cap, seed);
+                let d = deferred(&rows, &rotation, dim, cap, seed);
+                assert_eq!(
+                    e.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                    d.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                    "eager vs deferred-batch reservoir sample differs n={n} cap={cap} seed={seed}"
                 );
             }
         }

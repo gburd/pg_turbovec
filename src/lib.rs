@@ -9007,7 +9007,7 @@ mod tests {
 
     /// Tier-1 item #1 de-risking: the **recall-vs-`search_k`
     /// frontier**. This is the contention-IMMUNE half of the
-    /// hypothesis behind 
+    /// hypothesis behind
     /// IVF latency floor is dominated by the reorder-recheck of all
     /// `search_k` candidates (~`search_k` heap fetches + exact
     /// recomputes per query, to emit LIMIT 10). The plan's bet is

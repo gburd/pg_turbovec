@@ -370,7 +370,7 @@ pub(crate) struct OocIvfIndex {
 /// Phase G-2c: per-query graph traversal scorer.
 ///
 /// Reuses TurboQuant's LUT-based table-lookup scoring PRIMITIVE (the
-/// one 
+/// one
 /// graph path because a graph node's codes are stored in the SAME
 /// per-coordinate bit-plane layout as a flat/IVF row), but restructured
 /// for graph TRAVERSAL rather than a whole-corpus scan:

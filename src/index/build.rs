@@ -1636,12 +1636,18 @@ mod reservoir_tests {
         let dim = 8usize;
         // deterministic rotation matrix + rows (unit vectors already;
         // the rotation is a pure linear map, exact-equality is fine).
-        let rotation: Vec<f32> = (0..dim * dim).map(|i| ((i % 7) as f32) * 0.125 - 0.5).collect();
+        let rotation: Vec<f32> = (0..dim * dim)
+            .map(|i| ((i % 7) as f32) * 0.125 - 0.5)
+            .collect();
         for &(n, lists) in &[(50usize, 1usize), (500, 2), (5000, 4), (12345, 3)] {
             let cap = lists * 256 / 32; // small cap so replacement path is exercised
             let cap = cap.max(4);
             let rows: Vec<Vec<f32>> = (0..n)
-                .map(|r| (0..dim).map(|d| (((r * 31 + d * 17) % 13) as f32) - 6.0).collect())
+                .map(|r| {
+                    (0..dim)
+                        .map(|d| (((r * 31 + d * 17) % 13) as f32) - 6.0)
+                        .collect()
+                })
                 .collect();
             for &seed in &[1u64, 42, 999999] {
                 let e = eager(&rows, &rotation, dim, cap, seed);

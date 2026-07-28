@@ -1,0 +1,8 @@
+-- pg_turbovec 1.28.1
+--
+-- Packaging-only release: adds a Nix flake (flake.nix + flake.lock)
+-- with one buildPgrxExtension package per supported PostgreSQL major
+-- (pg_turbovec_13 .. pg_turbovec_19) and a dev shell. No code change,
+-- no wire change, no SQL-surface change, no REINDEX.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '1.28.1';` is sufficient.

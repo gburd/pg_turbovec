@@ -179,7 +179,7 @@ reference development platform; 13/14/15/17/18/19 are tested in CI.
 
 ```bash
 # One-time setup.
-cargo install --locked cargo-pgrx --version 0.17.0
+cargo install --locked cargo-pgrx --version 0.19.1
 cargo pgrx init                # bootstraps a private PostgreSQL cluster
 
 # Build & install into the dev cluster.
@@ -190,6 +190,33 @@ cargo pgrx install --release   # default features include the index AM
 # Or build a stripped-down variant without the index AM:
 cargo pgrx install --release --no-default-features --features pg16
 ```
+
+### Nix flake
+
+The repo ships a flake with one package per supported PostgreSQL
+major (`pg_turbovec_13` … `pg_turbovec_19`; `default` = PG18):
+
+```bash
+# Build the PG18 extension:
+nix build github:gburd/pg_turbovec#pg_turbovec_18
+# result/lib/pg_turbovec.so
+# result/share/postgresql/extension/pg_turbovec--1.28.1.sql + .control
+```
+
+On PostgreSQL 18+ you can point a stock server at the store path
+without copying files (PG18 added `extension_control_path`):
+
+```
+extension_control_path = '$system:/nix/store/…-pg_turbovec-X.Y.Z/share/postgresql'
+dynamic_library_path   = '$libdir:/nix/store/…-pg_turbovec-X.Y.Z/lib'
+```
+
+For PG13–17, copy (or symlink) `lib/pg_turbovec.so` into `pg_config
+--pkglibdir` and `share/postgresql/extension/*` into `pg_config
+--sharedir`/extension, or overlay the extension into nixpkgs'
+`postgresql_NN.pkgs`. A dev shell with the full toolchain (rust,
+cargo-pgrx 0.19.1, clang/bindgen, openblas, bison/flex/readline/icu)
+is available via `nix develop`.
 
 For a Nix-based build (the dev environment for this project) see
 [`docs/BUILDING.md`](docs/BUILDING.md). For migrating from pgvector

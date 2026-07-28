@@ -4,6 +4,31 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.28.1] — 2026-07-28
+
+**Nix flake packaging.** Patch bump — packaging only; no code change,
+no wire change (stays v7), no SQL-surface change, **no REINDEX**.
+
+A customer installing on PostgreSQL 18 via Nix found the v1.28.0 tag
+had no `flake.nix` ("no Nix output"). This release adds one:
+
+- `nix build github:gburd/pg_turbovec#pg_turbovec_NN` for NN in 13–19
+  (`default` = PG18), built with nixpkgs' `buildPgrxExtension` + a
+  flake-local `cargo-pgrx` 0.19.1 (nixpkgs' pinned set stops at
+  0.18.x). The turbovec git dependency's vendor hash is pinned via
+  `cargoLock.outputHashes`.
+- Output layout: `lib/pg_turbovec.so` +
+  `share/postgresql/extension/pg_turbovec--<ver>.sql` + `.control`.
+  On PG18+ a stock server can use it in place via
+  `extension_control_path` / `dynamic_library_path` (validated:
+  CREATE EXTENSION + distance fns + a turbovec index scan against
+  nixpkgs' postgresql_18, served straight from the store path).
+- `nix develop`: dev shell with rust, cargo-pgrx 0.19.1,
+  clang/bindgen, openblas, and the PG-from-source deps
+  (bison/flex/readline/zlib/icu).
+- The `#[pg_test]` suite stays CI's job (needs a live cluster);
+  the flake package build itself runs no tests (`doCheck = false`).
+
 ## [1.28.0] — 2026-07-28
 
 **PostgreSQL 19 (beta1) support via the pgrx 0.17 → 0.19.1 upgrade.**

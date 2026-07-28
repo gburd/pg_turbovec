@@ -51,7 +51,23 @@
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
-use crate::index::page::{MetaPageData, BLCKSZ, META_BLKNO, PAGE_HEADER_BYTES};
+use crate::index::page::{BLCKSZ, META_BLKNO, MetaPageData, PAGE_HEADER_BYTES};
+
+/// `LockBuffer`'s `mode` parameter type changed across PG majors:
+/// `int` (i32) through PG18, and `BufferLockMode::Type` (u32) in PG19.
+/// The `BUFFER_LOCK_*` constants are `u32` either way; this helper
+/// coerces to whatever the current `LockBuffer` binding expects so the
+/// call sites stay version-agnostic.
+#[cfg(not(feature = "pg19"))]
+#[inline]
+pub(crate) fn lock_buffer_mode(m: u32) -> i32 {
+    m as i32
+}
+#[cfg(feature = "pg19")]
+#[inline]
+pub(crate) fn lock_buffer_mode(m: u32) -> u32 {
+    m
+}
 
 /// Maximum number of buffers we register with one `GenericXLog`
 /// state — PG hard-codes this at `XLR_NORMAL_MAX_BLOCK_ID = 4`.
@@ -116,7 +132,7 @@ unsafe fn read_block_in_fork(
     } else {
         pg_sys::BUFFER_LOCK_SHARE
     };
-    pg_sys::LockBuffer(buf, mode as i32);
+    pg_sys::LockBuffer(buf, lock_buffer_mode(mode));
     buf
 }
 
@@ -208,7 +224,7 @@ unsafe fn extend_block_in_fork(
     if buf == pg_sys::InvalidBuffer as pg_sys::Buffer {
         error!("turbovec relfile: ReadBufferExtended(P_NEW) returned InvalidBuffer");
     }
-    pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_EXCLUSIVE as i32);
+    pg_sys::LockBuffer(buf, lock_buffer_mode(pg_sys::BUFFER_LOCK_EXCLUSIVE));
     page_init(buf);
     buf
 }

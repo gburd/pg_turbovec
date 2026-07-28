@@ -33,7 +33,7 @@
 use pgrx::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::vec::{Vector, MAX_DIM};
+use crate::vec::{MAX_DIM, Vector};
 
 /// Internal state for `avg(vector)` and `sum(vector)`.
 ///

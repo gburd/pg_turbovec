@@ -4,6 +4,40 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.28.0] — 2026-07-28
+
+**PostgreSQL 19 (beta1) support via the pgrx 0.17 → 0.19.1 upgrade.**
+Minor bump — framework/platform change; no wire-format change (stays
+v7), no SQL-surface change, **no REINDEX**. Existing indexes and
+queries are unaffected; `ALTER EXTENSION pg_turbovec UPDATE` suffices.
+
+- **New:** `pg19` Cargo feature + CI matrix leg. PG19 is upstream
+  **beta** (19beta1); support is experimental until PG19 RC/GA, at
+  which point it will be re-validated.
+- **pgrx 0.19.1** (from 0.17.0, a two-major jump):
+  - The `pgrx_embed` second-compilation-pass model is gone in pgrx
+    0.18+ — deleted `src/bin/pgrx_embed.rs` and the `[[bin]]` stanza;
+    SQL entity metadata now lives in the `.so`'s own linker section.
+  - Rust **edition 2024**, MSRV **1.96** (was 2021 / 1.85). The
+    edition-2024 `unsafe_op_in_unsafe_fn` lint is allowed crate-wide:
+    the index-AM callbacks are `unsafe extern` FFI boundaries whose
+    entire bodies are unsafe by construction; the per-fn `# Safety`
+    contracts remain the audit surface.
+  - cargo-pgrx 0.19.1 required (`cargo install --locked cargo-pgrx
+    --version 0.19.1`).
+- **PG19 C-API deltas handled** (all version-gated; pg13–18 builds
+  byte-identically unaffected):
+  - `LockBuffer`'s `mode` parameter changed from `int` (i32) to
+    `BufferLockMode::Type` (u32) — new `relfile::lock_buffer_mode`
+    shim used at all 5 call sites.
+  - `relfilenode_from_relation` gained the pg19 arm (same
+    `rd_locator.relNumber` layout as pg16+; the cfg just didn't
+    cover pg19, leaving the fn body empty on pg19).
+- Verified: all 7 versions (pg13–pg19) compile with 0 errors and 0
+  warnings; pure-Rust determinism gates (reservoir, IVF k-means,
+  build-pool invariance) green on pg13 and pg19; the full `#[pg_test]`
+  suite gate runs in CI across the 7-leg matrix.
+
 ## [1.27.3] — 2026-07-12
 
 **Phase Q-4c: clear the IVF build cliff — batch the k-means reservoir

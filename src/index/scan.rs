@@ -209,7 +209,9 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
                     format!(
                         "turbovec index \"{idx_name}\" has an empty main fork (built under pg_turbovec ≤ 1.2)"
                     ),
-                    format!("Run `REINDEX INDEX {idx_name};` to migrate the index to the v1.27.0 wire format.")
+                    format!(
+                        "Run `REINDEX INDEX {idx_name};` to migrate the index to the v1.27.0 wire format."
+                    )
                 );
             }
             // Phase Q-0: any pre-v7 index (v1..v6) is unreadable. This
@@ -222,7 +224,9 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
                         "turbovec index \"{idx_name}\" uses a pre-v7 relfile layout (wire version {}); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it",
                         m.version
                     ),
-                    format!("Run `REINDEX INDEX {idx_name};` to rebuild it under the v7 wire format (this roughly halves the index's on-disk size). See docs/UPGRADING.md.")
+                    format!(
+                        "Run `REINDEX INDEX {idx_name};` to rebuild it under the v7 wire format (this roughly halves the index's on-disk size). See docs/UPGRADING.md."
+                    )
                 );
             }
             // Phase F-2: a ColBERT / multivector token index (kind = 1)
@@ -1267,11 +1271,7 @@ fn parse_allowlist() -> Option<HashSet<u64>> {
             ),
         }
     }
-    if set.is_empty() {
-        None
-    } else {
-        Some(set)
-    }
+    if set.is_empty() { None } else { Some(set) }
 }
 
 /// Encode a heap `ctid` into the bigint TID domain the

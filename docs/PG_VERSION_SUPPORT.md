@@ -1,15 +1,17 @@
 # PostgreSQL version support matrix
 
-`pg_turbovec` supports PostgreSQL **13, 14, 15, 16, 17, 18** as of v1.0.1.
+`pg_turbovec` supports PostgreSQL **13, 14, 15, 16, 17, 18** (and
+**19beta1**, experimentally) as of v1.28.0.
 
 | Version | Tested patch | Status | Tests | Notes |
 |---|---|---|---|---|
-| 13.23 | ✅ | Supported | 261/262 (1 ignored) | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.23 | ✅ | Supported | 261/262 (1 ignored) | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.18 | ✅ | Supported | 261/262 (1 ignored) | Same shape as 14. |
-| 16.14 | ✅ | Supported | 261/262 (1 ignored) | Reference platform during development. |
-| 17.10 | ✅ | Supported | 261/262 (1 ignored) | Benchmark platform (`arnold`). |
-| 18.4  | ✅ | Supported | 261/262 (1 ignored) | `relopt_parse_elt` gained `isset_offset`. |
+| 13.23 | ✅ | Supported | 341/346 (5 ignored) | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.23 | ✅ | Supported | 341/346 (5 ignored) | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.18 | ✅ | Supported | 341/346 (5 ignored) | Same shape as 14. |
+| 16.14 | ✅ | Supported | 341/346 (5 ignored) | Reference platform during development. |
+| 17.10 | ✅ | Supported | 341/346 (5 ignored) | Benchmark platform. |
+| 18.4  | ✅ | Supported | 341/346 (5 ignored) | `relopt_parse_elt` gained `isset_offset`. CI-validated every push (`.github/workflows/test.yml` matrix leg `test (18)`). |
+| 19.0beta1 | ✅ | **Experimental** (beta PG) | CI matrix leg | pgrx 0.19.1 floor. PG19 deltas handled: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. PG19 is upstream BETA — re-validate at RC/GA before production use. |
 
 > Test counts and patch versions above are the exact numbers CI
 > installs and reports as of the most recent green run

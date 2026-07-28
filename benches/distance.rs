@@ -11,7 +11,7 @@
 //! `pg_config`. The bench only touches `pg_turbovec::kernels` and
 //! does not need any Postgres infrastructure.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use pg_turbovec::kernels;
 use rand::prelude::*;
 use rand::rngs::StdRng;

@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [13, 14, 15, 16, 17, 18]
+        pg: [13, 14, 15, 16, 17, 18, 19]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,7 +62,7 @@ jobs:
               libopenblas-dev gfortran
 
       - name: install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.17.0
+        run: cargo install --locked cargo-pgrx --version 0.19.1
 
       - uses: actions/cache@v4
         with:

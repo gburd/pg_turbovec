@@ -35,7 +35,7 @@
 //! cost boundary recall for no real savings). The cluster
 //! arithmetic here is all f32.
 
-use gemm::{gemm, Parallelism};
+use gemm::{Parallelism, gemm};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;

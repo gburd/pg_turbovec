@@ -17,6 +17,19 @@
 //! See `docs/ARCHITECTURE.md` for the full design and Phase 2/3
 //! roadmap (index access method, filtered search, WAL).
 
+// Edition 2024 turns on `unsafe_op_in_unsafe_fn`, which flags every
+// raw-pointer deref / FFI call inside an `unsafe fn` unless it is
+// wrapped in a nested `unsafe {}` block. The index-AM callbacks
+// (`ambuild`, `aminsert`, `amgettuple`, `make_routine`, the relfile
+// page/buffer helpers, the xact flush) are `unsafe extern "C-unwind"`
+// FFI boundaries whose *entire body* is unsafe by construction: every
+// pointer is one PostgreSQL hands the callback and guarantees valid
+// for the call. Wrapping each line in `unsafe {}` would be pure noise
+// that obscures the actual invariants documented in each fn's
+// `# Safety` section. Allow the lint crate-wide; the `# Safety`
+// contracts remain the real audit surface.
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use pgrx::prelude::*;
 
 pub mod aggregate;
@@ -4906,7 +4919,7 @@ mod tests {
     /// fed back through `MetaPageData::decode`.
     #[pg_test]
     fn relfile_legacy_v1_detection_primitive() {
-        use crate::index::page::{MetaPageData, MAGIC, PAYLOAD_BYTES};
+        use crate::index::page::{MAGIC, MetaPageData, PAYLOAD_BYTES};
         use crate::index::relfile;
         use_turbovec();
 
@@ -5003,7 +5016,7 @@ mod tests {
     /// be fed back through `MetaPageData::decode`.
     #[pg_test]
     fn relfile_legacy_v2_detection_primitive() {
-        use crate::index::page::{MetaPageData, MAGIC, PAYLOAD_BYTES};
+        use crate::index::page::{MAGIC, MetaPageData, PAYLOAD_BYTES};
         use crate::index::relfile;
         use_turbovec();
 
@@ -5667,7 +5680,7 @@ mod tests {
             "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
-            "1.27.1", "1.27.2", "1.27.3",
+            "1.27.1", "1.27.2", "1.27.3", "1.28.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -8728,7 +8741,7 @@ mod tests {
     /// out-of-core.
     #[pg_test]
     fn ivf_ooc_auto_is_size_aware() {
-        use crate::guc::{out_of_core_decide, OutOfCoreMode};
+        use crate::guc::{OutOfCoreMode, out_of_core_decide};
         let mb = 1024u64 * 1024;
 
         // off / on ignore size.
@@ -9300,7 +9313,10 @@ mod tests {
                 pg_sys::ReadBufferMode::RBM_NORMAL,
                 std::ptr::null_mut(),
             );
-            pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+            pg_sys::LockBuffer(
+                buf,
+                crate::index::relfile::lock_buffer_mode(pg_sys::BUFFER_LOCK_SHARE),
+            );
             let page = pg_sys::BufferGetPage(buf);
             // Skip the 24-byte page header; compare only the data
             // region (LSN/checksum-free).
@@ -9911,12 +9927,18 @@ mod tests {
                         pg_sys::ReadBufferMode::RBM_NORMAL,
                         std::ptr::null_mut(),
                     );
-                    pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+                    pg_sys::LockBuffer(
+                        buf,
+                        crate::index::relfile::lock_buffer_mode(pg_sys::BUFFER_LOCK_SHARE),
+                    );
                     let page = pg_sys::BufferGetPage(buf);
                     let data =
                         std::slice::from_raw_parts(page as *const u8, crate::index::page::BLCKSZ);
                     out.extend_from_slice(data);
-                    pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_UNLOCK as i32);
+                    pg_sys::LockBuffer(
+                        buf,
+                        crate::index::relfile::lock_buffer_mode(pg_sys::BUFFER_LOCK_UNLOCK),
+                    );
                     pg_sys::ReleaseBuffer(buf);
                 }
                 pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);

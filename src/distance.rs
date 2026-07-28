@@ -20,7 +20,7 @@
 use pgrx::prelude::*;
 
 use crate::kernels;
-use crate::vec::{Vector, MAX_DIM};
+use crate::vec::{MAX_DIM, Vector};
 
 // ---------------------------------------------------------------------
 // SQL-callable distance functions (mirrors pgvector's named functions).

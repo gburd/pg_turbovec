@@ -13,9 +13,9 @@
 //!   (the IO function's output, callable as a regular function).
 
 use pgrx::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::vec::{Vector, MAX_DIM};
+use crate::vec::{MAX_DIM, Vector};
 
 /// `subvector(v, start, length)` — 1-indexed slice (matches pgvector).
 /// `start` and `length` must be positive and the resulting range must

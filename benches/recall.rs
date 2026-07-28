@@ -38,7 +38,7 @@
 //! to synthetic data — this is by design so CI doesn't fail when
 //! the fixture isn't checked in.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use turbovec::IdMapIndex;

@@ -1,0 +1,8 @@
+-- pg_turbovec 1.28.0
+--
+-- Framework + platform release: pgrx 0.17.0 -> 0.19.1, adding
+-- PostgreSQL 19 (beta1) support alongside 13-18. No wire-format
+-- change (stays v7), no SQL-surface change, no REINDEX. Build
+-- environment floor rises to Rust 1.96 / edition 2024.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '1.28.0';` is sufficient.

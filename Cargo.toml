@@ -1,9 +1,9 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "1.27.3"
-edition = "2021"
-rust-version = "1.85.0"
+version = "1.28.0"
+edition = "2024"
+rust-version = "1.96.0"
 authors = ["Greg Burd <greg@burd.me>"]
 license = "Apache-2.0"
 repository = "https://codeberg.org/gregburd/pg_turbovec"
@@ -24,10 +24,6 @@ exclude = [
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "pgrx_embed_pg_turbovec"
-path = "./src/bin/pgrx_embed.rs"
-
 [features]
 default = ["pg16"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
@@ -36,6 +32,7 @@ pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]
 pg_test = []
 # v1.3.0 (Phase Q) retired the `experimental_index_am` and
 # `relfile_storage` Cargo feature flags. The `turbovec` index
@@ -46,7 +43,7 @@ pg_test = []
 # to just `pg<N>`.
 
 [dependencies]
-pgrx = "=0.17.0"
+pgrx = "=0.19.1"
 turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "befc4cbf73ef40e440232ae597888c71fe1ba50c" }
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
@@ -75,7 +72,7 @@ rayon = "1.10"
 gemm = "0.18"
 
 [dev-dependencies]
-pgrx-tests = "=0.17.0"
+pgrx-tests = "=0.19.1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
 hegeltest = "0.25"
 

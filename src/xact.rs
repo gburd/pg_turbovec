@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 
-use pgrx::callbacks::{register_xact_callback, PgXactCallbackEvent};
+use pgrx::callbacks::{PgXactCallbackEvent, register_xact_callback};
 use pgrx::pg_sys;
 
 use crate::cache;

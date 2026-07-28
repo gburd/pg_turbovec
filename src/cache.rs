@@ -47,7 +47,7 @@ use pgrx::prelude::*;
 use turbovec::{IdMapIndex, SearchResults, TurboQuantIndex};
 
 use crate::guc;
-use crate::index::ivf::{coarse_probe_dispatch, rotate_query, CellDirectory};
+use crate::index::ivf::{CellDirectory, coarse_probe_dispatch, rotate_query};
 
 /// Read-only materialisation of a turbovec index for the index-AM
 /// scan path. Unlike [`IdMapIndex`] it stores **only** the inner
@@ -1720,7 +1720,7 @@ pub unsafe fn relfilenode_from_relation(rel: pg_sys::Relation) -> u32 {
         let oid: pg_sys::Oid = (*rel).rd_node.relNode;
         oid.to_u32()
     }
-    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18", feature = "pg19"))]
     {
         // pg16+: `rd_locator.relNumber` is a `RelFileNumber`, which
         // is a typedef for `Oid`. Use `Oid::to_u32` for the

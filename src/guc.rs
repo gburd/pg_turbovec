@@ -829,7 +829,7 @@ const fn c_str(bytes: &'static [u8]) -> &'static CStr {
 
 #[cfg(test)]
 mod scan_parallelism_tests {
-    use super::{cap_scan_chunks, MIN_ROWS_PER_SCAN_CHUNK};
+    use super::{MIN_ROWS_PER_SCAN_CHUNK, cap_scan_chunks};
 
     /// The chunk-count cap: never split below MIN_ROWS_PER_SCAN_CHUNK
     /// rows per chunk, never drop below 1, and honour the ceiling.
@@ -852,7 +852,7 @@ mod scan_parallelism_tests {
 
 #[cfg(test)]
 mod coarse_graph_tests {
-    use super::{coarse_graph_decide, CoarseGraphMode};
+    use super::{CoarseGraphMode, coarse_graph_decide};
     use crate::index::ivf::GRAPH_MIN_LISTS;
 
     /// `off` never builds the graph, `on` always does, `auto` gates
@@ -948,7 +948,7 @@ mod graph_build_partitions_tests {
 
 #[cfg(test)]
 mod hi_dim_rerank_tests {
-    use super::{hi_dim_rerank_candidate_count, HiDimRerankMode, HI_DIM_RERANK_MIN_DIM};
+    use super::{HI_DIM_RERANK_MIN_DIM, HiDimRerankMode, hi_dim_rerank_candidate_count};
 
     /// off honours the user's search_k*oversample exactly, at any dim.
     #[test]

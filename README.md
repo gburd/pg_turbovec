@@ -33,12 +33,12 @@ Plus [ACID](https://en.wikipedia.org/wiki/ACID) compliance, point-in-
 time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [other great features](https://www.postgresql.org/about/) of Postgres.
 
-[![Rust 1.89+](https://img.shields.io/badge/rust-1.89+-93450a)](https://www.rust-lang.org/)
-[![PostgreSQL 13-18](https://img.shields.io/badge/postgres-13--18-336791)](https://www.postgresql.org/)
+[![Rust 1.96+](https://img.shields.io/badge/rust-1.96+-93450a)](https://www.rust-lang.org/)
+[![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.26.0 - 221 `#[pg_test]` cases (334 total test
-> annotations) pass against PostgreSQL 13, 14, 15, 16, 17, and 18
+> **Status:** v1.28.0 - the full `#[pg_test]` suite passes against
+> PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally)
 > with the default build flags (the relfile-resident page format and
 > the `turbovec` index AM are default-on; the `experimental_index_am`
 > and `relfile_storage` Cargo features were retired in Phase Q).
@@ -172,10 +172,10 @@ For dimensions other than 1536, multiply storage through by `dim / 1536`.
 
 ## Installation
 
-`pg_turbovec` requires PostgreSQL 13–18 and a Rust toolchain ≥ 1.89
-(the `turbovec` kernel uses AVX-512 `target_feature`s that need
-≥ 1.89; the default stable toolchain works). PostgreSQL 16 is the
-reference development platform; 13/14/15/17/18 are tested in CI.
+`pg_turbovec` requires PostgreSQL 13–18 (19beta1 experimental) and a
+Rust toolchain ≥ 1.96 (pgrx 0.19's MSRV; the default stable toolchain
+works). PostgreSQL 16 is the
+reference development platform; 13/14/15/17/18/19 are tested in CI.
 
 ```bash
 # One-time setup.

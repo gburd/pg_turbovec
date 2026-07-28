@@ -67,8 +67,8 @@
 //! the SIMD distance kernel (a thread-count-independent ~2.5× on the
 //! dominant cost), not thread fan-out. See `build_row_dists`.
 
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 
 use crate::index::ivf::sq_dist;
@@ -1615,8 +1615,8 @@ mod tests {
         let n = 10;
         let offsets_bytes = vec![0u8; (n + 1) * 4];
         let bad_neighbors_bytes = vec![0u8; 4]; // claims 1 edge but offsets say 0
-                                                // offsets are all-zero so offsets[n] == 0, and neighbors_bytes
-                                                // has 1 entry -> mismatch.
+        // offsets are all-zero so offsets[n] == 0, and neighbors_bytes
+        // has 1 entry -> mismatch.
         let err = GraphAdjacency::decode(&offsets_bytes, &bad_neighbors_bytes, n);
         assert!(err.is_err());
     }

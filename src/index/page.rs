@@ -404,11 +404,7 @@ impl MetaPageData {
             std::cmp::Ordering::Less => rows_per_page,
             std::cmp::Ordering::Equal => {
                 let rem = n_vectors % rpp;
-                if rem == 0 {
-                    rows_per_page
-                } else {
-                    rem as u32
-                }
+                if rem == 0 { rows_per_page } else { rem as u32 }
             }
             std::cmp::Ordering::Greater => 0,
         }
@@ -1428,7 +1424,7 @@ mod tests {
         buf[72..80].copy_from_slice(&12_000u64.to_le_bytes()); // blocked_bytes
         buf[80..84].copy_from_slice(&5u32.to_le_bytes()); // n_blocks_blocked
         buf[84..88].copy_from_slice(&16u32.to_le_bytes()); // codebook_n_levels
-                                                           // Centroid/boundary tables stay zero — fine for the decoder.
+        // Centroid/boundary tables stay zero — fine for the decoder.
 
         let meta = MetaPageData::decode(&buf).expect("v2 decode");
         assert_eq!(meta.version, 2);

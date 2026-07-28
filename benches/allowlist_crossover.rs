@@ -28,8 +28,8 @@ use std::time::Instant;
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use turbovec::search::{blocks_skipped_by_mask, reset_blocks_skipped_by_mask};
 use turbovec::IdMapIndex;
+use turbovec::search::{blocks_skipped_by_mask, reset_blocks_skipped_by_mask};
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)

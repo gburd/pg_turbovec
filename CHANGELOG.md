@@ -4,6 +4,55 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.28.2] — 2026-07-30
+
+**Bug fix: detect duplicate-id corrupt `.tvim` relfiles and fail
+loudly with a `REINDEX` hint, instead of silently mis-serving reads
+while failing every write.** Patch bump — no wire-format change (stays
+v7), no SQL-surface change, **no REINDEX required by the upgrade
+itself** (a corrupt index does need one; see below).
+
+Reported 2026-07-30 (agora / pg.ddx.io): a 1.6M-row index on PG18.4
+rejected **100% of `INSERT`s for ~1.5 days** (~47k logged failures)
+with an opaque `aminsert: corrupt relfile pages: duplicate ids in
+.tvim file`, while `pg_index.indisvalid` stayed **true** and scans
+kept answering — so the corruption was invisible to health checks and
+a backfill retry-loop turned it into an availability incident. The
+likely origin was several crash-recovery / `pg_resetwal` cycles that
+left the on-disk id table with duplicate ids.
+
+Root cause was an asymmetry: the **write** path validated the id table
+is a bijection (turbovec's `from_id_map_parts` rejects duplicates) and
+hard-errored, but the **read** path (`ReadOnlyIndex::from_parts`, which
+only builds `slot_to_id`) never checked — so a corrupt index failed
+writes yet still served (duplicated / mis-ranked) scan results and
+looked valid.
+
+Fix:
+- The read/open path (`scan::assert_ids_unique_or_reindex`, called in
+  the whole-index, graph, and out-of-core cache-install paths) now
+  detects duplicate ids once per backend at cache-install and
+  `ERROR`s (`ERRCODE_DATA_CORRUPTED`) with `HINT: REINDEX INDEX
+  <name>;` — the same actionable shape as the pre-v7 legacy gate.
+  A corrupt index now fails loudly on **reads** too, rather than
+  silently mis-serving.
+- The insert-path error carries the same `REINDEX` hint, so a
+  backfill loop gets a clear "rebuild me" signal instead of retrying
+  an opaque error forever.
+- **Recovery:** `REINDEX INDEX <name>;` (or `... CONCURRENTLY`)
+  rebuilds a clean id bijection from the heap. There is no lighter
+  in-place dedup — a rebuild is the supported repair.
+
+Gate: `scan::duplicate_id_tests::detects_duplicate_ids` (pure-Rust)
+covers the bijection predicate incl. the exact reported id.
+
+**Still open (tracked, larger scope):** the `.tvim` id table is not
+fully crash-safe against `pg_resetwal` / unclean shutdown — WAL-logging
+it well enough to recover cleanly (or refusing to come up `valid` when
+it can't) is the deeper durability fix and is deferred to a future
+release. v1.28.2 makes the corruption **detectable and actionable**;
+it does not yet prevent it from being introduced.
+
 ## [1.28.1] — 2026-07-28
 
 **Nix flake packaging.** Patch bump — packaging only; no code change,

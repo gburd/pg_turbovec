@@ -149,6 +149,15 @@ unsafe fn aminsert_relfile(
                 match relfile::read_meta(index_relation) {
                     Some(meta) if meta.n_vectors > 0 => {
                         let (codes, scales, ids) = relfile::read_full(index_relation, &meta);
+                        // Duplicate-id corrupt relfile: fail loudly
+                        // with an actionable REINDEX hint (same as the
+                        // read path) BEFORE turbovec rejects it with
+                        // an opaque "duplicate ids in .tvim file", so a
+                        // backfill loop gets a clear signal instead of
+                        // retrying an opaque error forever. Reported
+                        // 2026-07-30 (agora). See
+                        // scan::assert_ids_unique_or_reindex.
+                        crate::index::scan::assert_ids_unique_or_reindex(index_relation, &ids);
                         let idx = IdMapIndex::from_id_map_parts(
                             meta.bit_width as usize,
                             meta.dim as usize,

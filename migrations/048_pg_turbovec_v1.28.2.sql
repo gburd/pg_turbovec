@@ -1,0 +1,13 @@
+-- pg_turbovec 1.28.2
+--
+-- Bug fix (detection + clear error): a duplicate-id corrupt .tvim
+-- relfile (which an unclean shutdown / pg_resetwal can leave behind)
+-- previously failed 100% of INSERTs with an opaque error while the
+-- read/scan path silently served mis-mapped results and the index
+-- still reported indisvalid=true. The read/open path now detects
+-- duplicate ids and ERRORs with `HINT: REINDEX INDEX <name>;`, and
+-- the insert-path error carries the same hint. No wire change, no
+-- SQL-surface change. Recovery is `REINDEX INDEX <name>;` (rebuilds
+-- a clean id bijection from the heap).
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '1.28.2';` is sufficient.

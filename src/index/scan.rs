@@ -24,6 +24,80 @@ thread_local! {
         std::cell::RefCell::new(HashSet::new());
 }
 
+/// Read an index relation's own name for use in a HINT.
+/// `RelationGetRelationName` is a C macro (`NameStr(rd_rel->relname)`)
+/// with no FFI binding, so read `rd_rel->relname` directly.
+///
+/// # Safety
+/// `rel` must be a live `Relation` for the duration of the call.
+pub(crate) unsafe fn index_relname(rel: pg_sys::Relation) -> String {
+    if rel.is_null() {
+        return "<index>".to_string();
+    }
+    let rd_rel = (*rel).rd_rel;
+    if rd_rel.is_null() {
+        return "<index>".to_string();
+    }
+    let name_ptr = std::ptr::addr_of!((*rd_rel).relname) as *const std::os::raw::c_char;
+    std::ffi::CStr::from_ptr(name_ptr)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Pure predicate: the first id that appears more than once in
+/// `ids`, or `None` if every id is unique. Factored out of
+/// [`assert_ids_unique_or_reindex`] so the bijection check is
+/// unit-testable without a live `Relation`.
+pub(crate) fn first_duplicate_id(ids: &[u64]) -> Option<u64> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    for &id in ids {
+        if !seen.insert(id) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Detect a duplicate-id corrupted `.tvim` relfile at read/open time
+/// and ERROR with a `REINDEX` HINT, instead of silently serving
+/// mis-mapped results.
+///
+/// The on-disk `slot_to_id` table must be a bijection: one id per
+/// slot, no id repeated. If a slot's id repeats, two slots map to the
+/// same logical row and the id->slot direction is ambiguous. The
+/// WRITE path already rejects this (turbovec's `from_id_map_parts`
+/// checks `id_to_slot.len() == slot_to_id.len()`), but the READ path
+/// (`ReadOnlyIndex::from_parts`, which only needs `slot_to_id`) did
+/// not — so a corrupt index could report `indisvalid = true`, fail
+/// 100% of inserts, and STILL answer scans (with duplicated / mis-
+/// ranked ids). This closes that asymmetry: a corrupt `.tvim` now
+/// fails loudly on the read path too, with the same actionable HINT
+/// the pre-v7 legacy gate gives. Reported 2026-07-30 (agora /
+/// pg.ddx.io) after crash-recovery/`pg_resetwal` cycles left an
+/// index with duplicate ids that rejected every write for ~1.5 days
+/// while still reporting valid.
+///
+/// O(n) once per (backend, am_version) at cache-install; warm scans
+/// never repay it.
+///
+/// # Safety
+/// `rel` must be a live `Relation` for the duration of the call.
+pub(crate) unsafe fn assert_ids_unique_or_reindex(rel: pg_sys::Relation, ids: &[u64]) {
+    if let Some(id) = first_duplicate_id(ids) {
+        let idx_name = index_relname(rel);
+        ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            format!(
+                "turbovec index \"{idx_name}\" has a corrupt relfile: duplicate ids in the .tvim id table (id {id} appears in more than one slot)"
+            ),
+            format!(
+                "Run `REINDEX INDEX {idx_name};` to rebuild it from the heap. Duplicate ids can be left by an unclean shutdown or `pg_resetwal`; the rebuilt index is a clean bijection. See docs/UPGRADING.md."
+            )
+        );
+    }
+}
+
 /// Emit a throttled WARNING that an IVF index has degraded to a flat
 /// O(n) scan (Phase E-2). Fires at most once per backend per index.
 ///
@@ -759,6 +833,11 @@ unsafe fn install_whole_index(
 ) -> cache::ScanHandle {
     let (codes, scales, ids) = relfile::read_full(rel, meta);
 
+    // Fail loudly on a duplicate-id corrupt relfile (see
+    // `assert_ids_unique_or_reindex`) instead of silently serving
+    // mis-mapped scan results.
+    assert_ids_unique_or_reindex(rel, &ids);
+
     // All index data is read through PostgreSQL's buffer manager
     // (`ReadBufferExtended`) — there is no direct relfile mmap. Heap
     // visibility + `xs_recheckorderby` remain the correctness
@@ -845,6 +924,7 @@ unsafe fn install_graph_index(
     bit_width_u8: u8,
 ) -> cache::ScanHandle {
     let (codes, scales, ids) = relfile::read_full(rel, meta);
+    assert_ids_unique_or_reindex(rel, &ids);
     let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
         // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
         // packed codes (no longer persisted); see install_whole_index.
@@ -977,6 +1057,10 @@ unsafe fn try_install_ooc(
     if scales.len() != n_vectors || ids.len() != n_vectors {
         return None;
     }
+    // OOC path serves scans straight from these ids too; reject a
+    // duplicate-id corrupt relfile here as well (see
+    // `assert_ids_unique_or_reindex`).
+    assert_ids_unique_or_reindex(rel, &ids);
 
     let ooc = cache::OocIvfIndex::new(
         meta.bit_width as usize,
@@ -1525,5 +1609,35 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
         // If k can still grow, signal the caller to try again with a
         // bigger k; otherwise we're done.
         new_k < k_ceiling
+    }
+}
+
+#[cfg(test)]
+mod duplicate_id_tests {
+    use super::first_duplicate_id;
+
+    // The bijection check behind assert_ids_unique_or_reindex (the
+    // 2026-07-30 duplicate-id-corrupt-.tvim fix). A clean slot_to_id
+    // table has no repeats; a corrupt one (e.g. left by pg_resetwal)
+    // repeats an id across two slots, which we must detect at open
+    // and turn into a REINDEX hint rather than silently mis-serve.
+    #[test]
+    fn detects_duplicate_ids() {
+        // Clean / bijective tables: no duplicate.
+        assert_eq!(first_duplicate_id(&[]), None);
+        assert_eq!(first_duplicate_id(&[42]), None);
+        assert_eq!(first_duplicate_id(&[1, 2, 3, 4, 5]), None);
+        // ids need not be dense or sorted, just unique.
+        assert_eq!(first_duplicate_id(&[9, 0, 100, 7, 2821253]), None);
+
+        // Corrupt tables: a repeated id is reported (the first one hit).
+        assert_eq!(first_duplicate_id(&[1, 2, 2, 3]), Some(2));
+        assert_eq!(first_duplicate_id(&[5, 5]), Some(5)); // adjacent
+        assert_eq!(first_duplicate_id(&[1, 2, 3, 1]), Some(1)); // far apart
+        // The exact id the reporter saw fail (num 2821253) duplicated.
+        assert_eq!(
+            first_duplicate_id(&[10, 2821253, 11, 2821253, 12]),
+            Some(2821253)
+        );
     }
 }

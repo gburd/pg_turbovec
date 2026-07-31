@@ -1,0 +1,18 @@
+-- pg_turbovec 1.28.3
+--
+-- Managed-PostgreSQL readiness (audit follow-up). Code + CI + docs; no
+-- wire change, no SQL-surface change, no REINDEX.
+--
+-- * Interrupt handling (P0): CHECK_FOR_INTERRUPTS at every lock-free
+--   boundary pg_turbovec controls -- each amgettuple entry, each
+--   CREATE INDEX build-stage boundary, and the top of each GenericXLog
+--   batch in the relfile write path -- so statement_timeout /
+--   pg_cancel_backend take effect promptly. (Fine-grained polling
+--   inside a single flat search() call needs a kernel block-scoring
+--   API; tracked follow-up.)
+-- * Portability gates (P2): scripts/drift-check.sh now fails the build
+--   if a raw-WAL/raw-storage primitive appears (durability must stay
+--   100% GenericXLog) or if any GUC is registered non-Userset.
+-- * Docs: docs/DEPLOYING_ON_MANAGED_POSTGRES.md.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '1.28.3';` is sufficient.

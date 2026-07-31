@@ -4,6 +4,51 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.28.3] — 2026-07-31
+
+**Managed-PostgreSQL readiness (audit follow-up): interrupt handling +
+portability gates + deployment docs.** Patch bump — no wire-format
+change (stays v7), no SQL-surface change, **no REINDEX**.
+
+Addresses a managed/hosted-PostgreSQL readiness audit of v1.28.2.
+
+- **P0 — interrupt handling.** The extension had zero
+  `CHECK_FOR_INTERRUPTS` call sites, so long scans/builds/flushes were
+  uninterruptible and `statement_timeout` / `pg_cancel_backend()` (and
+  the platform admin signals delivered by the same mechanism) were
+  ignored for seconds. Added polling at every point pg_turbovec
+  controls where **no buffer content lock is held**:
+  - each `amgettuple` entry (makes the iterative-scan refill loop
+    promptly cancellable),
+  - each `CREATE INDEX` build-stage boundary (k-means / assign-sweep /
+    quantize-encode / prepare-and-persist),
+  - the top of each `GenericXLog` batch in the relfile write path
+    (large `aminsert` PreCommit flushes).
+  **Known limitation:** a single large *flat-kind* `search()` call is
+  still internally uninterruptible (one call into the Postgres-free
+  kernel crate). Finer-grained polling there needs a kernel
+  block-scoring API and is tracked follow-up; prefer the IVF/graph
+  kinds for large corpora meanwhile.
+- **P2 — portability drift-check gates.** `scripts/drift-check.sh` now
+  **fails the build** if (11a) any raw-WAL / raw-storage primitive
+  appears at a call site (`log_newpage`, `XLogInsert`, `smgrwrite`,
+  `smgrextend`, `PageSetLSN`, `FlushRelationBuffers`, ...) — durability
+  must stay 100% `GenericXLog`; or (11b) any GUC is registered with a
+  non-`Userset` context. Both invariants hold today; the gate stops a
+  future commit from silently reintroducing a managed-adoption blocker.
+- **P2 — docs.** New `docs/DEPLOYING_ON_MANAGED_POSTGRES.md`
+  consolidating durability/replication, restricted-superuser
+  compatibility, read-replica behavior, cancellation, the memory /
+  O(n)-per-transaction insert model, build cost, and the upgrade /
+  wire-format policy.
+
+**Deferred (tracked, larger scope):** making the in-place index
+rewrite atomic (write the meta page last, as the single commit point;
+today it self-heals via the `xs_recheckorderby` heap backstop); a full
+out-of-process TAP suite (crash recovery / replication / failover /
+cancellation-latency / codec fuzz); a kernel block-scoring API for
+fine-grained flat-scan cancellation. See the audit for detail.
+
 ## [1.28.2] — 2026-07-31
 
 **Bug fix: detect duplicate-id corrupt `.tvim` relfiles and fail

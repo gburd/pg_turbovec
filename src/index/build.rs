@@ -907,6 +907,14 @@ unsafe fn ivf_build_and_write(
         );
     }
     let t0 = std::time::Instant::now();
+    // P0 (managed-PG readiness): poll at each build-stage boundary.
+    // No buffer lock is held between stages. This makes a large
+    // `CREATE INDEX` cancellable at stage granularity (k-means /
+    // assign-sweep / encode / persist). Finer-grained polling INSIDE
+    // train_kmeans's Lloyd loop needs an interrupt callback threaded
+    // into the pure-Rust ivf module (tracked follow-up); stage-
+    // boundary polling is the first, lock-free increment.
+    pg_sys::check_for_interrupts!();
     let model = super::build_pool::install(build_pool, || {
         ivf::train_kmeans(&sample, sample_count, lists, dim)
     });
@@ -931,6 +939,7 @@ unsafe fn ivf_build_and_write(
     // exactly one cell, so the downstream soft permutation reduces to
     // the single permutation bit-for-bit (verified by
     // ivf_build_permutation_soft_expands_duplicates's M=1 case).
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let t0 = std::time::Instant::now();
     let assignments: Vec<Vec<u32>> = {
         let mut assignments: Vec<Vec<u32>> = Vec::with_capacity(n_vectors);
@@ -1074,6 +1083,7 @@ unsafe fn ivf_build_and_write(
     // First buffer must hold the larger of the calibration prefix and
     // a normal stream chunk.
     let first_cap = calib_rows.max(chunk_rows);
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let t0 = std::time::Instant::now();
     {
         let mut chunk_flat = vec![0.0f32; first_cap * dim];
@@ -1118,6 +1128,7 @@ unsafe fn ivf_build_and_write(
     let built = idx.slot_to_id().len();
     debug_assert_eq!(built, n_slots);
 
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let t0 = std::time::Instant::now();
     super::build_pool::install(build_pool, || idx.prepare_eager());
     let idx_rotation = idx.rotation();

@@ -387,6 +387,15 @@ pub(crate) unsafe fn write_chain_at(
     // amortise the record-header overhead while staying under PG's
     // hard cap on registered buffers per `GenericXLog` state.
     while written < total {
+        // P0 (managed-PG readiness): a large in-place relfile rewrite
+        // (e.g. an aminsert PreCommit flush of a big index) is many
+        // GenericXLog batches of pure CPU + I/O; without polling it is
+        // uninterruptible for seconds, so statement_timeout /
+        // pg_cancel_backend / platform admin signals are ignored. Poll
+        // at the TOP of the outer batch loop, before GenericXLogStart
+        // — no buffer content lock is held here, so a cancel unwinds
+        // cleanly. (Never poll between RegisterBuffer and Finish.)
+        pg_sys::check_for_interrupts!();
         let mut bufs: [pg_sys::Buffer; GENERIC_XLOG_BATCH] =
             [pg_sys::InvalidBuffer as pg_sys::Buffer; GENERIC_XLOG_BATCH];
         let state = pg_sys::GenericXLogStart(rel);

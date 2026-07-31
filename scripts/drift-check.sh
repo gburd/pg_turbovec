@@ -276,6 +276,34 @@ if [ -f src/guc.rs ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 11. Managed-PostgreSQL portability invariants (readiness audit P2.1/P2.2).
+#     These properties are what make pg_turbovec adoptable on managed /
+#     hosted PostgreSQL; gate them so a future commit can't silently
+#     reintroduce a blocker.
+# ----------------------------------------------------------------------
+
+# 11a. Durability must stay 100% GenericXLog: no raw-WAL / raw-storage
+#      primitives at any call site. Some managed variants route custom
+#      resource-manager / raw full-page-image records differently, so any
+#      of these appearing is an immediate portability regression.
+raw_wal=$(grep -rnE '\b(log_newpage|log_newpage_buffer|XLogInsert|smgrwrite|smgrextend|PageSetLSN|FlushRelationBuffers)\b' src/ 2>/dev/null \
+            | grep -vE '^\s*//|^[^:]+:[0-9]+:\s*//' || true)
+if [ -n "$raw_wal" ]; then
+    fail "raw-WAL / raw-storage primitive at a call site (durability must stay 100% GenericXLog): $(printf '%s' "$raw_wal" | head -1)"
+fi
+
+# 11b. Every GUC must stay per-session (GucContext::Userset). A
+#      non-Userset context (PGC_SUSET / PGC_SIGHUP / PGC_POSTMASTER) is
+#      not settable per session under a restricted-superuser role model
+#      and forces parameter-group round-trips; and a crash-injection /
+#      panic GUC must never ship in a release build.
+non_userset=$(grep -nE 'GucContext::[A-Za-z]+' src/guc.rs 2>/dev/null \
+                | grep -vE 'GucContext::Userset' || true)
+if [ -n "$non_userset" ]; then
+    fail "GUC registered with a non-Userset context (must be per-session for managed-PG compatibility; allowlist in review if truly needed): $(printf '%s' "$non_userset" | head -1)"
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

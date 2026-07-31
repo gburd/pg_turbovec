@@ -464,6 +464,15 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         error!("turbovec amgettuple: opaque is null");
     }
 
+    // P0 (managed-PG readiness): poll for cancel/die on every
+    // tuple-fetch entry. No buffer lock is held here. This makes the
+    // iterative-scan refill loop (multiple search batches) promptly
+    // cancellable; the single large flat `search()` call remains
+    // internally uninterruptible pending a turbovec block-scoring API
+    // (tracked follow-up), but the executor still checks between the
+    // amgettuple calls that drain the batch.
+    pg_sys::check_for_interrupts!();
+
     if !(*opaque).fetched {
         let indexrelid = (*(*scan).indexRelation).rd_id;
 

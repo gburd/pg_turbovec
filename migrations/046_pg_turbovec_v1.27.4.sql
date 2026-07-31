@@ -1,0 +1,18 @@
+-- pg_turbovec 1.27.4
+--
+-- Backport of the v1.28.2 duplicate-id detection fix onto the 1.27.x
+-- (pgrx 0.17.0) line, so it can be built with nixpkgs' packaged
+-- cargo-pgrx (which tops out at 0.18.x) WITHOUT the pgrx 0.19.1 /
+-- Rust 1.96 jump that 1.28.x requires.
+--
+-- A duplicate-id corrupt .tvim relfile (which pg_resetwal / unclean
+-- shutdown can leave) previously failed 100% of INSERTs with an
+-- opaque error while the read path silently served mis-mapped
+-- results and the index still reported indisvalid=true. The read/open
+-- path now detects duplicate ids (flat + graph kinds; IVF soft-assign
+-- dups are exempt) and ERRORs with `HINT: REINDEX INDEX <name>;`, and
+-- the insert-path error carries the same hint. No wire change, no
+-- SQL-surface change, no REINDEX from the upgrade itself. Recovery of
+-- an ALREADY-corrupt index is `REINDEX INDEX <name>;`.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '1.27.4';` is sufficient.

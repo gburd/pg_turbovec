@@ -4,6 +4,41 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.27.4] — 2026-07-31
+
+**Backport of the duplicate-id detection fix (v1.28.2) onto the 1.27.x
+line, so it builds on packaged nixpkgs.** Patch bump — no wire-format
+change (stays v7), no SQL-surface change, **no REINDEX from the
+upgrade itself**.
+
+Why a backport: the fix first shipped in v1.28.2, but 1.28.x requires
+`cargo-pgrx` 0.19.1 + Rust 1.96, which nixpkgs does not package (it
+tops out at cargo-pgrx 0.18.1) — so a Nix-based deployment could not
+adopt the fix without hand-packaging a cargo-pgrx 0.19.1 derivation. A
+customer on 1.27.3 (agora / pg.ddx.io, the original reporter) hit
+exactly this. This release delivers the same fix on the 1.27.x line,
+which pins **pgrx 0.17.0** (nixpkgs' `cargo-pgrx_0_17_0`) — no toolchain
+jump required.
+
+The fix (identical behaviour to v1.28.2): a duplicate-id corrupt
+`.tvim` relfile (which `pg_resetwal` / an unclean shutdown can leave)
+previously failed 100% of `INSERT`s with an opaque `duplicate ids in
+.tvim file` while the read/scan path silently served mis-mapped
+results and `pg_index.indisvalid` stayed **true**. The read/open path
+now detects duplicate ids at cache-install and `ERROR`s
+(`ERRCODE_DATA_CORRUPTED`) with `HINT: REINDEX INDEX <name>;`, and the
+insert-path error carries the same hint. The check is scoped to the
+bijective kinds (flat `lists == 0` + graph); IVF (`lists > 0`)
+legitimately repeats ids across cells (soft-assignment) and is exempt.
+**Recovery of an already-corrupt index:** `REINDEX INDEX <name>;`.
+
+Gate: `scan::duplicate_id_tests::detects_duplicate_ids` (pure-Rust).
+
+**Still open (same as v1.28.2):** full crash-safe WAL of the `.tvim`
+id table (so `pg_resetwal` / unclean shutdown can't introduce dups) is
+the deeper durability fix, deferred to future work. This release makes
+the corruption detectable + actionable; it does not yet prevent it.
+
 ## [1.27.3] — 2026-07-12
 
 **Phase Q-4c: clear the IVF build cliff — batch the k-means reservoir

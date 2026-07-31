@@ -835,8 +835,15 @@ unsafe fn install_whole_index(
 
     // Fail loudly on a duplicate-id corrupt relfile (see
     // `assert_ids_unique_or_reindex`) instead of silently serving
-    // mis-mapped scan results.
-    assert_ids_unique_or_reindex(rel, &ids);
+    // mis-mapped scan results. ONLY for bijective kinds: a flat
+    // (`lists == 0`) or graph index has exactly one slot per id, so a
+    // repeat is corruption. An IVF index (`lists > 0`) LEGITIMATELY
+    // stores the same id in multiple slots (soft-assignment /
+    // `assign_dups` places a vector in several cells), so uniqueness
+    // must NOT be asserted there.
+    if meta.lists == 0 {
+        assert_ids_unique_or_reindex(rel, &ids);
+    }
 
     // All index data is read through PostgreSQL's buffer manager
     // (`ReadBufferExtended`) — there is no direct relfile mmap. Heap
@@ -924,6 +931,9 @@ unsafe fn install_graph_index(
     bit_width_u8: u8,
 ) -> cache::ScanHandle {
     let (codes, scales, ids) = relfile::read_full(rel, meta);
+    // Graph indexes are bijective (one slot per node id), so a repeat
+    // is corruption. (IVF's legitimate soft-assign dups never reach
+    // this graph path.)
     assert_ids_unique_or_reindex(rel, &ids);
     let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
         // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
@@ -1057,10 +1067,11 @@ unsafe fn try_install_ooc(
     if scales.len() != n_vectors || ids.len() != n_vectors {
         return None;
     }
-    // OOC path serves scans straight from these ids too; reject a
-    // duplicate-id corrupt relfile here as well (see
-    // `assert_ids_unique_or_reindex`).
-    assert_ids_unique_or_reindex(rel, &ids);
+    // NOTE: no duplicate-id check here — this is the out-of-core IVF
+    // path (`lists > 0`), where the same id LEGITIMATELY appears in
+    // multiple slots (soft-assignment across cells). Uniqueness is
+    // only required for the flat/graph kinds; see
+    // `scan::assert_ids_unique_or_reindex`.
 
     let ooc = cache::OocIvfIndex::new(
         meta.bit_width as usize,

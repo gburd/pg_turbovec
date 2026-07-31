@@ -155,9 +155,15 @@ unsafe fn aminsert_relfile(
                         // an opaque "duplicate ids in .tvim file", so a
                         // backfill loop gets a clear signal instead of
                         // retrying an opaque error forever. Reported
-                        // 2026-07-30 (agora). See
+                        // 2026-07-30 (agora). Only for the bijective
+                        // flat kind (`lists == 0`): an IVF index
+                        // (`lists > 0`) legitimately repeats ids across
+                        // cells (soft-assignment), so uniqueness must
+                        // NOT be asserted there. See
                         // scan::assert_ids_unique_or_reindex.
-                        crate::index::scan::assert_ids_unique_or_reindex(index_relation, &ids);
+                        if meta.lists == 0 {
+                            crate::index::scan::assert_ids_unique_or_reindex(index_relation, &ids);
+                        }
                         let idx = IdMapIndex::from_id_map_parts(
                             meta.bit_width as usize,
                             meta.dim as usize,

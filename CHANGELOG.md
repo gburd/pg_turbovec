@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.28.2] — 2026-07-30
+## [1.28.2] — 2026-07-31
 
 **Bug fix: detect duplicate-id corrupt `.tvim` relfiles and fail
 loudly with a `REINDEX` hint, instead of silently mis-serving reads

@@ -235,6 +235,14 @@ unsafe fn aminsert_relfile(
 
     let updated = cache::am_mark_dirty(key, |p| {
         if !id_already_present {
+            // Keep the `live_ids` / `n_vectors` mirror in step with the
+            // in-memory index's `slot_to_id`. As of v1.28.4 the flush
+            // path (`xact::flush_to_relfile`) DERIVES the persisted
+            // count from `idx.slot_to_id().len()`, not from
+            // `p.n_vectors` — so this mirror is now only a
+            // cross-check (hard-guarded at flush) and the scan-
+            // visibility snapshot (`am_find_dirty_by_rel`). Keeping it
+            // exact preserves that guard's usefulness.
             p.live_ids.push(id);
             p.n_vectors += 1;
         }

@@ -763,6 +763,246 @@ mod tests {
         assert_eq!(n, Some(1000));
     }
 
+    /// v1.28.4 issue B reproduction (positive): a large multi-row
+    /// batch of NEW rows persisted into a POPULATED flat index must
+    /// round-trip through the relfile with (a) NO duplicate id and
+    /// (b) `meta.n_vectors == slot_to_id.len()`. This drives the
+    /// deferred-flush path (`xact::flush_to_relfile`) directly — the
+    /// normal aminsert path can't be observed post-commit inside a
+    /// `#[pg_test]` (the outer tx rolls back before PreCommit), so we
+    /// build the exact same `(IdMapIndex, PersistState)` the flush
+    /// would see and flush it explicitly (the GenericXLog write
+    /// sticks within the tx, so we can immediately re-read it).
+    ///
+    /// Pre-fix, the flush persisted `PersistState.n_vectors` (a
+    /// separate counter) as the row count; this test guards that the
+    /// flush now derives the count from `slot_to_id.len()` (the
+    /// single source of truth) so a large batch can never leave a
+    /// meta page over-reading the ids chain into zeroed "id 0" slots.
+    #[pg_test]
+    fn persist_large_batch_no_duplicate_id_after_reload() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_batchdup (id bigint PRIMARY KEY, emb vector)").unwrap();
+        // Seed the index with 16 rows (the "clean at batch=16" state
+        // from the report), then build the index over them.
+        Spi::run(
+            "INSERT INTO t_batchdup SELECT g, \
+                ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+                FROM generate_series(1, 16) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_batchdup_idx ON t_batchdup \
+             USING turbovec (emb vec_ip_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_batchdup_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // Load the built index into a mutable IdMapIndex exactly the
+        // way the first aminsert in a tx would
+        // (`read_meta` + `read_full` + `from_id_map_parts`), then add
+        // a LARGE batch of 128 NEW rows (the report's batch=128
+        // trigger) via the same `add_with_ids` the insert path uses.
+        let (mut idx, dim, bit_width, mut state) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta after build");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let dim = meta.dim as usize;
+            let bit_width = meta.bit_width as usize;
+            let idx = IdMapIndex::from_id_map_parts(
+                bit_width,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+            )
+            .expect("from_id_map_parts on freshly built index");
+            let state = PersistState {
+                bit_width: bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+            };
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, dim, bit_width, state)
+        };
+        assert_eq!(bit_width, 4);
+
+        // Add 128 new rows with fresh, distinct ids (never 0, like
+        // real CTIDs). Track the count in the mirror exactly like the
+        // aminsert closure does.
+        for new_id in 100u64..228 {
+            let v: Vec<f32> = (0..dim).map(|k| (new_id as f32) + k as f32).collect();
+            idx.add_with_ids(&v, &[new_id]).expect("add new row");
+            state.live_ids.push(new_id);
+            state.n_vectors += 1;
+            state.version += 1;
+        }
+        assert_eq!(idx.slot_to_id().len(), 16 + 128);
+        assert_eq!(state.n_vectors as usize, 16 + 128);
+
+        // Flush (deferred-commit path) and immediately re-read the
+        // persisted relfile.
+        unsafe {
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
+        }
+        let (meta2, ids2) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta after flush");
+            let (_c, _s, i) = relfile::read_full(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (m, i)
+        };
+
+        // (a) NO duplicate id in the persisted ids chain.
+        assert_eq!(
+            crate::index::scan::first_duplicate_id(&ids2),
+            None,
+            "persisted slot_to_id must have no duplicate id (no zeroed 'id 0' slots)"
+        );
+        // (b) meta.n_vectors == slot_to_id.len().
+        assert_eq!(
+            meta2.n_vectors as usize,
+            ids2.len(),
+            "meta.n_vectors must equal the ids-chain length"
+        );
+        assert_eq!(meta2.n_vectors, 144, "all 16 + 128 rows persisted");
+        // And no zero id crept in.
+        assert!(
+            !ids2.contains(&0),
+            "no slot may hold id 0 (a real CTID never encodes to 0)"
+        );
+    }
+
+    /// v1.28.4 issue B guard (negative): if the `PersistState`
+    /// row-count mirror ever DRIFTS from the authoritative
+    /// `slot_to_id.len()`, the flush must ABORT the transaction with
+    /// a clear internal-error message rather than silently persist a
+    /// corrupt relfile. Demonstrates the hard runtime guard
+    /// (`reconciled_row_count`) catches drift on the write path.
+    #[pg_test(error = "turbovec persist: row-count drift detected")]
+    fn persist_row_count_drift_aborts() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_drift (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_drift SELECT g, \
+                ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+                FROM generate_series(1, 8) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_drift_idx ON t_drift \
+             USING turbovec (emb vec_ip_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_drift_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        let (idx, state) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta after build");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let idx = IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                meta.dim as usize,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+            )
+            .expect("from_id_map_parts");
+            // Deliberately drift the mirror: claim ONE MORE row than
+            // slot_to_id actually holds (the exact pre-fix bug
+            // signature). The guard must reject this.
+            let state = PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: meta.dim as i32,
+                n_vectors: meta.n_vectors as i64 + 1,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+            };
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state)
+        };
+
+        unsafe {
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
+        }
+    }
+
+    /// v1.28.4 issue D: `turbovec.turbovec_check(regclass)` reports
+    /// integrity for a healthy flat index (no duplicate id, counts
+    /// match, wire v7, kind = single, zero tombstones).
+    #[pg_test]
+    fn turbovec_check_reports_healthy_flat_index() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_chk (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_chk SELECT g, \
+                ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+                FROM generate_series(1, 50) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_chk_idx ON t_chk \
+             USING turbovec (emb vec_ip_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        let wire: Option<i32> =
+            Spi::get_one("SELECT wire_version FROM turbovec.turbovec_check('t_chk_idx'::regclass)")
+                .unwrap();
+        assert_eq!(wire, Some(7), "current builds emit wire v7");
+
+        let kind: Option<String> =
+            Spi::get_one("SELECT kind FROM turbovec.turbovec_check('t_chk_idx'::regclass)")
+                .unwrap();
+        assert_eq!(kind.as_deref(), Some("single"));
+
+        let (n_vectors, slot_count): (Option<i64>, Option<i64>) = Spi::get_two(
+            "SELECT n_vectors, slot_count \
+             FROM turbovec.turbovec_check('t_chk_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(n_vectors, Some(50));
+        assert_eq!(slot_count, Some(50));
+
+        let count_matches: Option<bool> = Spi::get_one(
+            "SELECT count_matches FROM turbovec.turbovec_check('t_chk_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(count_matches, Some(true));
+
+        let (dup, corrupt): (Option<i64>, Option<bool>) = Spi::get_two(
+            "SELECT duplicate_id, is_corrupt \
+             FROM turbovec.turbovec_check('t_chk_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(dup, None, "a healthy bijective index has no duplicate id");
+        assert_eq!(corrupt, Some(false), "a healthy index is not corrupt");
+
+        let density: Option<f64> = Spi::get_one(
+            "SELECT tombstone_density FROM turbovec.turbovec_check('t_chk_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(density, Some(0.0), "freshly built index has no tombstones");
+    }
+
     /// Phase W (v1.6.0): the ambuild heap-scan callback streams
     /// rows into `IdMapIndex::add_with_ids` in chunks bounded by
     /// `maintenance_work_mem` rather than accumulating the entire
@@ -5680,7 +5920,7 @@ mod tests {
             "1.11.1", "1.12.0", "1.13.0", "1.13.1", "1.14.0", "1.15.0", "1.15.1", "1.16.0",
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
-            "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3",
+            "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

@@ -228,6 +228,142 @@ fn index_is_degraded(index: pg_sys::Oid) -> bool {
     }
 }
 
+/// Ownership check portable across PG13-19: `object_ownercheck`
+/// (PG16+) vs the older `pg_class_ownercheck` (PG13-15). Superusers
+/// always pass. `pg_class`'s catalog OID is 1259
+/// (`RelationRelationId`). ERRORs (never returns `false`) when the
+/// caller doesn't own the relation, matching how PG's own
+/// maintenance functions gate access.
+unsafe fn require_index_owner(index: pg_sys::Oid) {
+    let roleid = pg_sys::GetUserId();
+    if pg_sys::superuser() {
+        return;
+    }
+    #[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15"))]
+    let owns = pg_sys::pg_class_ownercheck(index, roleid);
+    #[cfg(not(any(feature = "pg13", feature = "pg14", feature = "pg15")))]
+    let owns = pg_sys::object_ownercheck(pg_sys::RelationRelationId, index, roleid);
+    if !owns {
+        error!("turbovec_check: permission denied — must own the index");
+    }
+}
+
+/// `turbovec.turbovec_check(regclass)` — read-only integrity report
+/// for a turbovec index. Reads the meta page + ids chain and reports
+/// enough for an operator to detect the ".tvim" duplicate-id
+/// corruption WITHOUT attempting a write (which is the only signal
+/// the pre-1.28.4 detection gave, and which blocks the whole table).
+///
+/// Columns:
+/// - `wire_version` — `MetaPageData::version` (7 for current builds;
+///   `< 7` is a pre-Phase-Q-0 legacy index needing REINDEX).
+/// - `kind` — `single` / `colbert` / `graph`.
+/// - `n_vectors` — the row count the meta page claims.
+/// - `slot_count` — the number of ids actually present in the ids
+///   chain. MUST equal `n_vectors`; a mismatch means the meta
+///   over/under-counts the ids chain (the exact drift that produces
+///   "id 0 in more than one slot").
+/// - `count_matches` — `n_vectors == slot_count`.
+/// - `duplicate_id` — the first id appearing in more than one slot,
+///   or NULL when the ids form a clean bijection (via
+///   `scan::first_duplicate_id`). Only meaningful for the flat
+///   (`lists = 0`) kind; an IVF index legitimately repeats ids
+///   across cells, so this is left NULL there.
+/// - `is_corrupt` — `true` when a flat index has a duplicate id OR
+///   the counts disagree. This is the one column monitoring should
+///   alert on.
+/// - `tombstone_density` — fraction of slots tombstoned by VACUUM
+///   (0.0 for a freshly built index).
+///
+/// Ownership-checked (like PG's own maintenance functions):
+/// non-owners get a permission-denied ERROR. Takes only
+/// `AccessShareLock`, so it never blocks writers.
+///
+/// ```ignore
+/// SELECT * FROM turbovec.turbovec_check('my_idx'::regclass);
+/// ```
+#[pg_extern(stable, parallel_safe)]
+fn turbovec_check(
+    index: pg_sys::Oid,
+) -> TableIterator<
+    'static,
+    (
+        name!(wire_version, i32),
+        name!(kind, String),
+        name!(n_vectors, i64),
+        name!(slot_count, i64),
+        name!(count_matches, bool),
+        name!(duplicate_id, Option<i64>),
+        name!(is_corrupt, bool),
+        name!(tombstone_density, f64),
+    ),
+> {
+    use crate::index::page::{KIND_COLBERT, KIND_GRAPH};
+    unsafe {
+        require_index_owner(index);
+        let rel = pg_sys::index_open(index, pg_sys::AccessShareLock as i32);
+        if rel.is_null() {
+            error!("turbovec_check: could not open index {:?}", index);
+        }
+        let Some(meta) = crate::index::relfile::read_meta(rel) else {
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            error!(
+                "turbovec_check: relation {:?} has no turbovec meta page (not a turbovec index, or empty)",
+                index
+            );
+        };
+
+        let kind = match meta.kind {
+            KIND_COLBERT => "colbert",
+            KIND_GRAPH => "graph",
+            _ => "single",
+        }
+        .to_string();
+
+        // Read only the ids chain (via `read_ids_only`); we don't
+        // need the much larger codes/scales chains for an integrity
+        // report.
+        let ids = crate::index::relfile::read_ids_only(rel, &meta);
+        let slot_count = ids.len() as i64;
+        let count_matches = meta.n_vectors == ids.len() as u64;
+
+        // Duplicate-id check is only a corruption signal for the
+        // bijective flat kind. IVF (lists > 0) repeats ids across
+        // cells by design (see scan::assert_ids_unique_or_reindex).
+        let dup = if meta.lists == 0 {
+            crate::index::scan::first_duplicate_id(&ids)
+        } else {
+            None
+        };
+        let duplicate_id = dup.map(|id| id as i64);
+        let is_corrupt = dup.is_some() || !count_matches;
+
+        let tombstones = crate::index::relfile::read_tombstones(rel, &meta);
+        let dead = tombstones
+            .iter()
+            .map(|b| b.count_ones() as u64)
+            .sum::<u64>();
+        let tombstone_density = if meta.n_vectors == 0 {
+            0.0
+        } else {
+            dead as f64 / meta.n_vectors as f64
+        };
+
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+
+        TableIterator::once((
+            meta.version as i32,
+            kind,
+            meta.n_vectors as i64,
+            slot_count,
+            count_matches,
+            duplicate_id,
+            is_corrupt,
+            tombstone_density,
+        ))
+    }
+}
+
 extension_sql!(
     r"
     -- jsonb <-> vector explicit casts.

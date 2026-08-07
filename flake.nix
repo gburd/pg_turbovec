@@ -54,7 +54,7 @@
           postgresql:
           pkgs.buildPgrxExtension {
             pname = "pg_turbovec";
-            version = "1.28.3";
+            version = "1.28.4";
             src = self;
             inherit postgresql cargoLock;
             cargo-pgrx = cargo-pgrx_0_19_1;

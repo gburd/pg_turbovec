@@ -1006,8 +1006,28 @@ unsafe fn write_full_inner(
     // buffers, which `ps -o rss` still counts). See
     // `benches/results/phase_w_2_validate_meh_10m_2026_05_27.json`
     // and  for the full analysis.
-    assert_eq!(slot_to_id.len() as u64, n_vectors);
-    assert_eq!(scales.len() as u64, n_vectors);
+    // HARD PERSIST-SITE GUARD (v1.28.4): `slot_to_id` is the SINGLE
+    // SOURCE OF TRUTH for the on-disk row count. These are `assert_eq!`
+    // (NOT `debug_assert_eq!`) on purpose — they run in release builds
+    // too, so a row-count drift (`n_vectors` disagreeing with the
+    // actual ids/scales arrays) ALWAYS aborts the transaction here
+    // rather than persisting a meta page that over-reads the ids chain
+    // into zeroed trailing slots (which reloads as the reported
+    // "duplicate ids (id 0 in more than one slot)" corruption). Do NOT
+    // downgrade these to `debug_assert_eq!`. The insert-flush path
+    // (`xact::flush_to_relfile`) now derives `n_vectors` from
+    // `slot_to_id.len()` so it can't trip these; the guard stays as
+    // defense in depth for the build/IVF/graph callers.
+    assert_eq!(
+        slot_to_id.len() as u64,
+        n_vectors,
+        "turbovec relfile write: slot_to_id.len() must equal n_vectors"
+    );
+    assert_eq!(
+        scales.len() as u64,
+        n_vectors,
+        "turbovec relfile write: scales.len() must equal n_vectors"
+    );
 
     // Phase Q-0 (v7): the SIMD-blocked chain is no longer persisted
     // (it's recomputed from the packed codes at index-open), so we

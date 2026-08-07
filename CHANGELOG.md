@@ -4,6 +4,118 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.28.4] — 2026-08-07
+
+**Corruption fix: eliminate the dual row-counter drift that could
+persist a `.tvim` id table claiming more rows than it holds, plus a
+new `turbovec.turbovec_check(regclass)` integrity function.** Patch
+bump — no wire-format change (stays v7), **no REINDEX required by the
+upgrade itself** (a currently-corrupt index still needs `REINDEX` or
+`DROP` + `CREATE`; see Migration).
+
+Reported 2026-08-06 (agora / pg.ddx.io) on a 1.74M-row PG18.4 index:
+the `.tvim` id table developed "duplicate ids (id 0 appears in more
+than one slot)," write-blocking the whole indexed table, and `REINDEX`
+didn't durably repair it (only `DROP` + `CREATE` held). This release
+fixes the root cause on the write path and adds an operator-facing way
+to detect the corruption without attempting a write.
+
+### B (root cause) — single source of truth for the persisted row count
+
+The deferred `aminsert` flush (`xact::flush_to_relfile`) persisted
+`PersistState.n_vectors` — a SEPARATELY-incremented `i64` counter — as
+the on-disk row count, passed to `relfile::write_full_with_prepared`
+as an INDEPENDENT argument alongside `idx.slot_to_id()`. Those two
+counters can drift (an `IdAlreadyPresent` remove+re-add, a
+`mark_dirty` closure that didn't run, a future insert-path refactor).
+If `n_vectors` ever exceeded `slot_to_id.len()`, the meta page claimed
+more rows than the ids chain held, and reload (`read_full`) over-read
+the ids chain into zeroed trailing slots — surfacing as "id 0 appears
+in more than one slot" (a real CTID never encodes to 0, so an id-0
+slot is always zeroed bytes).
+
+- The flush now DERIVES the persisted count from
+  `idx.slot_to_id().len()` (the authoritative array whose bytes
+  actually land in the ids chain) via the new pure, unit-tested
+  `xact::reconciled_row_count`, making the drift class structurally
+  impossible on the write path.
+- A hard runtime guard aborts the transaction (the matching `Abort`
+  callback then evicts the dirty cache entry, so the next access
+  reloads clean committed state) if the mirror ever drifts —
+  belt-and-suspenders with the pre-existing `assert_eq!` in
+  `relfile::write_full_inner` (now documented as a hard
+  release-build persist-site guard that must NOT be downgraded to
+  `debug_assert!`).
+- `PersistState.n_vectors` is retained only as a mirror (and the
+  scan-visibility snapshot); the on-disk truth is `slot_to_id.len()`.
+
+### A (recovery) — REINDEX now durably repairs
+
+With B fixed, a `REINDEX` (which allocates a fresh relfilenode; the
+per-backend cache drops the stale entry on the relfilenode mismatch
+in `am_lookup_for_mutation`) produces a clean id bijection that the
+write path can no longer re-corrupt. The pre-1.28.4 "REINDEX reports
+success but the corruption returns minutes later" behavior was the
+ongoing insert workload re-corrupting the freshly rebuilt index via
+the drift above (or a crash — see C); B removes the write-path source.
+
+### C (crash-safety) — KNOWN REMAINING GAP, scoped honestly
+
+This release does NOT make the `.tvim` id table fully WAL-crash-safe.
+An unclean shutdown / `pg_resetwal` can still discard WAL that
+extended the id chain, leaving two slots claiming id 0. Full
+WAL-crash-safety of the id table is a larger durability change,
+deliberately not attempted inside a corruption patch (shipping a
+half-done risky durability change would be worse than the documented
+gap). Mitigations in place: the insert AND read paths already ERROR
+loudly on such a relfile with `HINT: REINDEX INDEX <name>;`
+(v1.28.2), and `turbovec_check()` (below) now makes it detectable
+without a write. Recovery: `REINDEX INDEX <name>;` (now durable per
+A), or `DROP` + `CREATE` for an index corrupted before 1.28.4.
+
+### D (integrity check) — `turbovec.turbovec_check(regclass)`
+
+New read-only, ownership-checked function that reads the meta + ids
+chain and reports enough for an operator to detect the corruption
+WITHOUT attempting a write (the only signal pre-1.28.4 detection
+gave, which blocks the whole table):
+
+```sql
+SELECT * FROM turbovec.turbovec_check('my_idx'::regclass);
+--  wire_version | kind   | n_vectors | slot_count | count_matches
+--  duplicate_id | is_corrupt | tombstone_density
+```
+
+`is_corrupt` (true when a flat index has a duplicate id OR the
+counts disagree) is the column monitoring should alert on. Reuses
+`scan::first_duplicate_id`. Takes only `AccessShareLock`, so it never
+blocks writers; non-owners get a permission-denied ERROR (portable
+across PG13-19 via `pg_class_ownercheck` / `object_ownercheck`).
+
+### Tests
+
+- `xact::reconcile_tests` — load-independent pure-Rust drift-guard
+  unit tests (run under `cargo test --lib`, no cluster needed): the
+  regression gate for B.
+- `persist_large_batch_no_duplicate_id_after_reload` (`#[pg_test]`) —
+  builds a populated flat index, adds a 128-row batch of new ids via
+  the same path aminsert uses, flushes, and re-reads the persisted
+  relfile asserting no duplicate id and `meta.n_vectors ==
+  slot_to_id.len()`.
+- `persist_row_count_drift_aborts` (`#[pg_test]`) — a deliberately
+  drifted `PersistState` must abort the flush, never persist a
+  corrupt relfile.
+- `turbovec_check_reports_healthy_flat_index` (`#[pg_test]`) — D.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.28.4';` is sufficient and
+cannot fail on existing indexes. No wire change (stays v7), no
+REINDEX required by the upgrade. **A currently-corrupt index still
+needs recovery**: `REINDEX INDEX <name>;` (now durable) or `DROP` +
+`CREATE`. The fix STOPS new write-path corruption; it does not repair
+an index already corrupted by a prior crash.
+
 ## [1.28.3] — 2026-07-31
 
 **Managed-PostgreSQL readiness (audit follow-up): interrupt handling +

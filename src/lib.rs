@@ -889,7 +889,9 @@ mod tests {
     /// a clear internal-error message rather than silently persist a
     /// corrupt relfile. Demonstrates the hard runtime guard
     /// (`reconciled_row_count`) catches drift on the write path.
-    #[pg_test(error = "turbovec persist: row-count drift detected")]
+    #[pg_test(
+        error = "turbovec persist: row-count drift detected (PersistState.n_vectors = 9, slot_to_id.len() = 8); aborting to avoid writing a corrupt relfile. This is an internal invariant violation; please report it."
+    )]
     fn persist_row_count_drift_aborts() {
         use crate::cache::PersistState;
         use crate::index::relfile;

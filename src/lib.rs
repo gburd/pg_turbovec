@@ -1778,6 +1778,12 @@ mod tests {
             bad.is_err(),
             "bit_width = 5 should be rejected by amoptions"
         );
+        // The caught CREATE INDEX error aborts a subtransaction, which
+        // on pg17-19 (pgrx 0.19) resets the session search_path to the
+        // default (pg_catalog first) -- re-establish it so the next
+        // unqualified CREATE TABLE doesn't try to create in pg_catalog
+        // ("permission denied to create pg_catalog.t_bad0").
+        use_turbovec();
         // bit_width = 0 is also out of the 1..=4 range.
         Spi::run("CREATE TABLE t_bad0 (id bigint, emb turbovec.vector)").unwrap();
         let bad0 = std::panic::catch_unwind(|| {

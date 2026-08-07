@@ -1771,6 +1771,52 @@ mod tests {
             bad.is_err(),
             "bit_width = 5 should be rejected by amoptions"
         );
+        // bit_width = 0 is also out of the 1..=4 range.
+        Spi::run("CREATE TABLE t_bad0 (id bigint, emb vector)").unwrap();
+        let bad0 = std::panic::catch_unwind(|| {
+            Spi::run(
+                "CREATE INDEX ON t_bad0 USING turbovec (emb vec_cosine_ops) \
+                 WITH (bit_width = 0)",
+            )
+        });
+        assert!(
+            bad0.is_err(),
+            "bit_width = 0 should be rejected by amoptions"
+        );
+    }
+
+    /// `bit_width = 1` (binary quantization) is ACCEPTED by the
+    /// reloption validator (the user-facing CREATE INDEX knob), but the
+    /// sign-BQ encode + Hamming scan path is not yet wired, so the build
+    /// must ERROR clearly -- NOT panic the backend (turbovec's
+    /// IdMapIndex::new would reject bit_width < 2 with an opaque
+    /// expect()), and NOT silently ship an all-ones landmine. This is
+    /// the footgun-safe half-state until the encode path lands: the knob
+    /// exists, the failure mode is loud and clear. See docs/ONEBIT_BQ.md.
+    #[pg_test]
+    fn index_am_onebit_errors_clearly_not_panic() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_1bit (id bigint, emb vector)").unwrap();
+        Spi::run("INSERT INTO t_1bit VALUES (1, '[1,0,0,0,0,0,0,0]')").unwrap();
+        // The reloption itself parses (bit_width = 1 is in 1..=4); the
+        // build raises a clear "not yet implemented" ERROR. We assert
+        // the index does NOT come into existence and the specific
+        // message text is present (loud, not silent).
+        let created: Option<bool> = Spi::get_one(
+            "DO $$ BEGIN \
+                CREATE INDEX t_1bit_idx ON t_1bit \
+                  USING turbovec (emb vec_cosine_ops) WITH (bit_width = 1); \
+             EXCEPTION WHEN OTHERS THEN \
+                RAISE NOTICE 'onebit build error: %', SQLERRM; \
+             END $$; \
+             SELECT to_regclass('t_1bit_idx') IS NULL",
+        )
+        .unwrap();
+        assert_eq!(
+            created,
+            Some(true),
+            "bit_width = 1 must NOT create an index yet (must error at build, not panic or succeed)"
+        );
     }
 
     #[pg_test]

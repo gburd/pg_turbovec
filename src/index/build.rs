@@ -493,6 +493,22 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
 
     let (cfg_bit_width, cfg_dim, cfg_lists, cfg_assign_dups, cfg_graph) =
         options::read(index_relation);
+    // bit_width = 1 (sign binary quantization / BQ) is accepted by the
+    // reloption validator (the user-facing CREATE INDEX knob), but the
+    // build+scan encode path for it is not yet wired: turbovec's
+    // IdMapIndex::new hard-rejects bit_width < 2, so a 1-bit build must
+    // take a distinct sign-BQ + Hamming code path (see
+    // src/index/onebit.rs and docs/ONEBIT_BQ.md). Until that lands,
+    // ERROR clearly here rather than let IdMapIndex::new panic the
+    // backend with an opaque expect() message. (Guarding at the single
+    // ambuild entry point covers every kind; aminsert re-checks below.)
+    if cfg_bit_width == 1 {
+        error!(
+            "turbovec: bit_width = 1 (binary quantization) index build is not yet implemented; \
+             use bit_width = 2, 3, or 4. (The reloption is accepted for forward compatibility; \
+             the sign-BQ encode + Hamming scan path is a follow-up -- see docs/ONEBIT_BQ.md.)"
+        );
+    }
     let indexrelid = (*index_relation).rd_id;
     let normalise = guc::NORMALIZE_ON_INSERT.get();
     let lists = cfg_lists.max(0) as usize;

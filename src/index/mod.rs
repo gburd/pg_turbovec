@@ -46,6 +46,7 @@ mod cost;
 pub(crate) mod graph;
 mod insert;
 pub(crate) mod ivf;
+pub(crate) mod onebit;
 mod options;
 pub(crate) mod page;
 pub(crate) mod relfile;

@@ -208,25 +208,38 @@ pub const HI_DIM_RERANK_MIN_DIM: usize = 256;
 pub fn hi_dim_rerank_candidate_count(
     mode: HiDimRerankMode,
     dim: usize,
+    bit_width: u8,
     user_k: usize,
     user_oversample: f64,
 ) -> usize {
     let user_count = (user_k as f64 * user_oversample).ceil() as usize;
+    // 1-bit sign-BQ is lossy at ANY dim (the coarse Hamming rank places
+    // the true NN at rank ~a few hundred, not the top-k, per the BQ
+    // feasibility study: R@10=1.0 needs a rerank window ~400 even at
+    // 1536d). Treat a 1-bit index as if it were at least the high-dim
+    // threshold so `auto` engages the wider exact-heap-rerank floor
+    // regardless of dim. 2/3/4-bit is unchanged.
+    let effective_dim = if bit_width == 1 {
+        dim.max(HI_DIM_RERANK_MIN_DIM)
+    } else {
+        dim
+    };
     let apply = match mode {
         HiDimRerankMode::Off => false,
         HiDimRerankMode::On => true,
         HiDimRerankMode::Auto => {
-            // Auto: only for high-dim, AND only if the user hasn't
-            // already asked for a wider window than the floor would
-            // give (defaults are search_k=32, oversample=1.0 =>
-            // user_count=32; any hand-raise past the floor wins).
-            dim >= HI_DIM_RERANK_MIN_DIM
+            // Auto: only for high-dim (or any 1-bit index, via
+            // effective_dim), AND only if the user hasn't already asked
+            // for a wider window than the floor would give (defaults are
+            // search_k=32, oversample=1.0 => user_count=32; any
+            // hand-raise past the floor wins).
+            effective_dim >= HI_DIM_RERANK_MIN_DIM
         }
     };
     if !apply {
         return user_count;
     }
-    let floor = dim.clamp(HI_DIM_RERANK_MIN_DIM, 1024);
+    let floor = effective_dim.clamp(HI_DIM_RERANK_MIN_DIM, 1024);
     user_count.max(floor)
 }
 
@@ -954,15 +967,20 @@ mod hi_dim_rerank_tests {
     #[test]
     fn off_never_widens() {
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 2, 32, 1.0),
             32
         );
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 960, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 960, 2, 32, 1.0),
             32
         );
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 1536, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 1536, 2, 32, 1.0),
+            32
+        );
+        // off means off even for a 1-bit index.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 1, 32, 1.0),
             32
         );
     }
@@ -976,13 +994,14 @@ mod hi_dim_rerank_tests {
             hi_dim_rerank_candidate_count(
                 HiDimRerankMode::Auto,
                 HI_DIM_RERANK_MIN_DIM - 1,
+                2,
                 32,
                 1.0
             ),
             32
         );
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 2, 32, 1.0),
             32
         );
     }
@@ -993,19 +1012,43 @@ mod hi_dim_rerank_tests {
     fn auto_floors_high_dim_at_dim_scaled_window() {
         // dim exactly at threshold -> floor = 256.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, HI_DIM_RERANK_MIN_DIM, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, HI_DIM_RERANK_MIN_DIM, 2, 32, 1.0),
             HI_DIM_RERANK_MIN_DIM
         );
         // GIST-960 -> floor 960.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 32, 1.0),
             960
         );
         // OpenAI-1536 -> capped at 1024 (past which the recheck cost
         // outweighs the marginal recall on the measured curve).
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 2, 32, 1.0),
             1024
+        );
+    }
+
+    /// A 1-bit (sign-BQ) index widens under `auto` at ANY dim: 1-bit is
+    /// lossy even below the high-dim threshold, so it gets at least the
+    /// 256 candidate floor. This is the Gap-A analog for binary
+    /// quantization -- reuse the same exact-heap-rerank lever.
+    #[test]
+    fn auto_widens_onebit_regardless_of_dim() {
+        // SIFT-128 at 1-bit: 2/4-bit would NOT widen (dim < 256), but
+        // 1-bit floors at 256.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 1, 32, 1.0),
+            256
+        );
+        // 1536-d at 1-bit still caps at 1024 like 2-bit.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 1, 32, 1.0),
+            1024
+        );
+        // Contrast: 2-bit at dim 128 does NOT widen.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 2, 32, 1.0),
+            32
         );
     }
 
@@ -1016,18 +1059,18 @@ mod hi_dim_rerank_tests {
         // user asks for 2000 via search_k on a 960-d index: floor 960
         // does not lower it.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2000, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 2000, 1.0),
             2000
         );
         // user asks for 1000 via oversample (search_k=32, os=32 ->
         // 1024) on a 960-d index: 1024 > 960, user wins.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 32, 32.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 32, 32.0),
             1024
         );
         // below the floor, the floor wins (that's the whole point).
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 10, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 10, 1.0),
             960
         );
     }
@@ -1037,7 +1080,7 @@ mod hi_dim_rerank_tests {
     fn on_floors_regardless_of_dim() {
         // low dim under `on` -> floored at 256 (the min clamp).
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::On, 64, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::On, 64, 2, 32, 1.0),
             256
         );
     }

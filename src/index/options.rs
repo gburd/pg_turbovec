@@ -4,7 +4,7 @@
 //!
 //! | Name        | Type | Default | Range  |
 //! |-------------|------|---------|--------|
-//! | `bit_width` | int  | (GUC `turbovec.bit_width_default`) | 2..=4 |
+//! | `bit_width` | int  | (GUC `turbovec.bit_width_default`) | 1..=4 |
 //! | `dim`       | int  | 0 (auto-detect from first row)     | {0} ∪ ((>0) ∧ multiple of 8) |
 //! | `lists`     | int  | 0 (flat; v3-equivalent)            | 0..=1_000_000 |
 //! | `assign_dups` | int | 1 (single assignment)             | 1..=4 |
@@ -93,9 +93,9 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
         pg_sys::add_int_reloption(
             RELOPT_KIND,
             c"bit_width".as_ptr(),
-            c"TurboQuant bit width per coordinate (2, 3, or 4)".as_ptr(),
+            c"Bits per coordinate: 1 = sign binary quantization (BQ, Hamming + exact heap rerank; ~half the 2-bit storage), 2/3/4 = TurboQuant.".as_ptr(),
             bit_width_default,
-            2,
+            1,
             4,
             pg_sys::AccessExclusiveLock as i32,
         );
@@ -189,8 +189,20 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
 
     if !opts.is_null() && validate {
         let o = &*opts;
-        if !(2..=4).contains(&o.bit_width) {
-            pgrx::error!("turbovec: bit_width must be in 2..=4 (got {})", o.bit_width);
+        if !(1..=4).contains(&o.bit_width) {
+            pgrx::error!(
+                "turbovec: bit_width must be in 1..=4 (1 = binary/sign quantization, 2/3/4 = TurboQuant) (got {})",
+                o.bit_width
+            );
+        }
+        if o.bit_width == 1 && o.graph {
+            // The 1-bit sign-BQ scan kernel (Hamming coarse + heap
+            // rerank) is a flat/IVF code path; the graph (Vamana) kind
+            // has not been wired for it yet. Reject rather than build a
+            // graph index whose scorer silently ignores the 1-bit codes.
+            pgrx::error!(
+                "turbovec: bit_width = 1 (binary quantization) is not yet supported with graph = true; use bit_width >= 2 for a graph index, or bit_width = 1 for a flat/IVF index"
+            );
         }
         if o.dim != 0 && (o.dim <= 0 || o.dim % 8 != 0) {
             pgrx::error!(

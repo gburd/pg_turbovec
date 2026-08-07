@@ -383,14 +383,20 @@ picks us up for `ORDER BY emb <=> $1 LIMIT k`.
 
 ```rust
 struct TurbovecOptions {
-    bit_width: u8,    // 2 | 3 | 4 — default from turbovec.bit_width_default
+    bit_width: u8,    // 1 | 2 | 3 | 4 — default from turbovec.bit_width_default
     dim: i32,         // 0 = auto-detect on first build, else fixed > 0
 }
 ```
 
 Validation in `amoptions`:
 
-- `bit_width ∈ {2, 3, 4}` (turbovec asserts `(2..=4).contains`).
+- `bit_width ∈ {1, 2, 3, 4}`. `2/3/4` = TurboQuant (turbovec asserts
+  `(2..=4).contains`); `1` = sign binary quantization (BQ), a distinct
+  scan path (Hamming coarse + exact heap rerank), NOT TurboQuant —
+  turbovec hard-rejects `bit_width < 2`. See `docs/ONEBIT_BQ.md`.
+  `bit_width = 1` is rejected with `graph = true` (the BQ scan kernel is
+  flat/IVF only). The GUC *default* (`turbovec.bit_width_default`) stays
+  `2..=4` — BQ is opt-in, never a default.
 - `dim == 0` or (`dim > 0` and `dim % 8 == 0`) — turbovec requires
   dim be a multiple of 8 internally.
 

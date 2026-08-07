@@ -683,6 +683,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let k_oversampled = crate::guc::hi_dim_rerank_candidate_count(
             crate::guc::HI_DIM_RERANK.get(),
             dim,
+            bit_width_u8,
             k_pref,
             oversample,
         );

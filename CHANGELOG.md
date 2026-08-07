@@ -4,6 +4,72 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.0] — 2026-08-07
+
+**Partitioned-scale support (toward 1T+ vectors) + the 1-bit
+quantization foundation.** Minor bump — purely ADDITIVE SQL surface;
+no wire-format change (`MetaPageData::version` stays 7), **no REINDEX**.
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.0';` is sufficient.
+
+### Partitioned scale (Phase S-0 / S-1)
+
+PostgreSQL caps a single heap at 32 TB (~11B rows @768d), so 1T+
+vectors must live in a partitioned table. pg_turbovec now supports
+this directly, and the surprising-but-verified core finding is that
+**PostgreSQL's native `Merge Append` over a hash-partitioned parent
+already does a correct, LAZY global top-k across per-partition
+turbovec indexes with zero new code** — the scatter→gather→merge is
+byte-identical to a single-table exact top-k (PoC: 10/10 overlap), and
+the merge pulls ~`k + probed` rows, not `k·N`.
+
+- **`docs/PARTITIONED_SCALE.md`** (S-0): a cookbook for scaling to
+  1–10B vectors *today* with no AM changes — partition sizing
+  (10M–50M/partition), embarrassingly-parallel per-partition build
+  orchestration (the key build-time lever: ~2.2 days at 800-way vs
+  ~47 days naive for 1T), native insert routing, per-partition
+  `VACUUM`/`REINDEX CONCURRENTLY`, and the query patterns (native
+  parent `ORDER BY emb <=> q LIMIT k`, plus the explicit UNION-ALL
+  fallback). PoC at `benches/poc/scatter_gather_partitioned_topk.sql`.
+- **Partition pruning** (S-1, new SQL surface): at N=100k partitions,
+  naive O(N) fan-out is seconds+. A partition-level coarse quantizer
+  lets a query probe only the Kp nearest partitions:
+  - `turbovec.partition_summary` — a catalog table of per-partition
+    summaries.
+  - `turbovec.refresh_partition_summary(parent, vec_col)` — computes
+    each partition's **mean vector in ORIGINAL (un-rotated) space**
+    (partitions train independent rotations, so persisted
+    per-partition centroids are not cross-comparable — the mean is)
+    and upserts summary rows.
+  - `turbovec.nearest_partitions(parent, query, k_partitions, metric)`
+    — returns the Kp partitions whose summary is closest to the query.
+  Turns O(N) fan-out into O(Kp). Near-lossless for content-clustered
+  partitions; hash partitioning makes every mean ≈ the global mean,
+  so hash needs a larger Kp to hold recall (documented tradeoff).
+
+### 1-bit (sign binary quantization) foundation
+
+`WITH (bit_width = 1)` is now **accepted** by the reloption (range
+`1..=4`; 1 = sign-BQ, 2/3/4 = TurboQuant; the GUC default stays
+`2..=4`, so 1-bit is opt-in and never a default). The turbovec kernel
+hard-rejects `bit_width < 2`, so 1-bit is a distinct sign-BQ scheme
+(per-coord sign bit + Hamming coarse + exact heap rerank), matching
+pgvector/DiskANN/Qdrant. The exact-heap-rerank floor auto-widens for a
+1-bit index (reusing `hi_dim_rerank`/`search_k`/`oversample` — no new
+mechanism). The sign-BQ core is implemented + unit-tested:
+**mean-centering** (the mandatory footgun fix — raw sign-at-zero
+collapses to R@10≈0 on non-zero-centered data), degenerate
+all-same-sign detection, and half-of-2-bit storage (`dim/8` codes/vec,
+no scale).
+
+**Not yet functional end-to-end:** a `CREATE INDEX ... WITH
+(bit_width = 1)` currently **ERRORs clearly** ("not yet implemented;
+use bit_width = 2, 3, or 4") — it never half-builds or ships a silent
+all-ones landmine. The end-to-end 1-bit encode/scan path requires a
+wire bump to v8 and lands in a later release **after full real-PG
+validation of the new scan kernel + wire format** (deliberately not
+rushed into this release). The reloption is accepted now for forward
+compatibility.
+
 ## [1.28.4] — 2026-08-07
 
 **Corruption fix: eliminate the dual row-counter drift that could

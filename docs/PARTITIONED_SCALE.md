@@ -210,36 +210,30 @@ they match a single-table exact top-k.
 
 ---
 
-## 6. Partition pruning at large N (Phase S-1)
+## 6. Partition pruning at large N (Phase S-1 — planned, next release)
 
 The native all-partitions `Merge Append` opens one `Index Scan` node **per
 partition**. That is fine up to ~a few thousand partitions; at N ≈ 10 000+ the
 `O(N)` open/plan cost alone is seconds, and 1T (100 000 partitions) is
-unusable. The fix is a **two-level IVF**: a per-partition *summary* so a query
-probes only the `Kp` nearest partitions instead of all N.
+unusable. The planned fix is a **two-level IVF**: a per-partition *summary* so a
+query probes only the `Kp` nearest partitions instead of all N.
 
-Phase S-1 ships this as SQL-callable helpers (additive; no wire-format or
-catalog-format change — the summary is derived data in an ordinary table):
+> **Status:** partition pruning is designed but **not yet shipped** — it lands
+> in a later release (Phase S-1), validated on real PostgreSQL. Until then, the
+> free scatter-gather in §1–§5 (native `Merge Append`, no new code) scales to
+> a few thousand partitions (comfortably 1–10B vectors). What follows is the
+> design, not a currently-callable API.
 
-```sql
--- 1. Compute + store each partition's summary (its mean vector in original
---    space). Run once after building the per-partition indexes; re-run when a
---    partition's contents change materially.
-SELECT turbovec.refresh_partition_summary('docs'::regclass, 'emb');
-
--- 2. At query time, pick the Kp nearest partitions to the query, then fan out
---    ONLY to those. The metric must match your ORDER BY operator
---    ('<=>' cosine, '<->' L2, '<#>' inner product).
-SELECT (p)::regclass::text
-FROM turbovec.nearest_partitions('docs'::regclass, $q, 8, '<=>') AS p;
---    -> docs_007, docs_003, ...  (the 8 nearest-mean partitions)
-
--- 3. Fan out to only those partitions (client builds the UNION-ALL from the
---    selector output, or restricts the parent query to the chosen children).
-```
-
-`turbovec.nearest_partitions` turns the `O(N)` executor fan-out into an
-`O(Kp)` one: query cost ≈ (flat scan over the summaries, ms) + `Kp` ×
+The design: a per-partition summary = the partition's **mean vector in original
+(un-rotated) space**. (Partitions train independent rotation matrices, so their
+persisted per-partition centroids are not cross-comparable across partitions;
+the mean is, and is scored with the same `<=>`/`<->`/`<#>` operator the user
+queries with.) A `refresh_partition_summary(parent, vec_col)` computes + stores
+them in a derived catalog table (additive; no wire-format change), and a
+`nearest_partitions(parent, query, Kp, metric)` selector returns the `Kp`
+nearest-mean partitions; the client (or, later, native runtime pruning) then
+fans out only to those. This turns the `O(N)` executor fan-out into `O(Kp)`:
+query cost ≈ (flat scan over the summaries, ms) + `Kp` ×
 per-partition IVF scan + merge. Recall depends on `Kp` exactly as IVF recall
 depends on `probes` — more probed partitions, higher recall, monotone.
 
@@ -259,9 +253,7 @@ partition:
   or hash-partitioned then re-clustered so each partition holds a coherent
   region of vector space): a partition's mean is representative of its
   contents, so the `Kp` nearest-mean partitions contain the true neighbours and
-  pruning is (near-)lossless. The `#[pg_test]`
-  (`partition_pruning_matches_full_fanout`) proves pruned == full fan-out for
-  clustered partitions.
+  pruning is (near-)lossless.
 
 **Guidance:** use hash partitioning for the free scatter-gather (§1–§5) up to a
 few thousand partitions; when you need pruning at large N, cluster your

@@ -11,10 +11,10 @@ quantization foundation.** Minor bump — purely ADDITIVE SQL surface;
 no wire-format change (`MetaPageData::version` stays 7), **no REINDEX**.
 `ALTER EXTENSION pg_turbovec UPDATE TO '1.29.0';` is sufficient.
 
-### Partitioned scale (Phase S-0 / S-1)
+### Partitioned scale (Phase S-0)
 
 PostgreSQL caps a single heap at 32 TB (~11B rows @768d), so 1T+
-vectors must live in a partitioned table. pg_turbovec now supports
+vectors must live in a partitioned table. pg_turbovec now documents
 this directly, and the surprising-but-verified core finding is that
 **PostgreSQL's native `Merge Append` over a hash-partitioned parent
 already does a correct, LAZY global top-k across per-partition
@@ -22,29 +22,21 @@ turbovec indexes with zero new code** — the scatter→gather→merge is
 byte-identical to a single-table exact top-k (PoC: 10/10 overlap), and
 the merge pulls ~`k + probed` rows, not `k·N`.
 
-- **`docs/PARTITIONED_SCALE.md`** (S-0): a cookbook for scaling to
-  1–10B vectors *today* with no AM changes — partition sizing
+- **`docs/PARTITIONED_SCALE.md`**: a cookbook for scaling to 1–10B
+  vectors *today* with no AM changes — partition sizing
   (10M–50M/partition), embarrassingly-parallel per-partition build
   orchestration (the key build-time lever: ~2.2 days at 800-way vs
   ~47 days naive for 1T), native insert routing, per-partition
   `VACUUM`/`REINDEX CONCURRENTLY`, and the query patterns (native
   parent `ORDER BY emb <=> q LIMIT k`, plus the explicit UNION-ALL
   fallback). PoC at `benches/poc/scatter_gather_partitioned_topk.sql`.
-- **Partition pruning** (S-1, new SQL surface): at N=100k partitions,
-  naive O(N) fan-out is seconds+. A partition-level coarse quantizer
-  lets a query probe only the Kp nearest partitions:
-  - `turbovec.partition_summary` — a catalog table of per-partition
-    summaries.
-  - `turbovec.refresh_partition_summary(parent, vec_col)` — computes
-    each partition's **mean vector in ORIGINAL (un-rotated) space**
-    (partitions train independent rotations, so persisted
-    per-partition centroids are not cross-comparable — the mean is)
-    and upserts summary rows.
-  - `turbovec.nearest_partitions(parent, query, k_partitions, metric)`
-    — returns the Kp partitions whose summary is closest to the query.
-  Turns O(N) fan-out into O(Kp). Near-lossless for content-clustered
-  partitions; hash partitioning makes every mean ≈ the global mean,
-  so hash needs a larger Kp to hold recall (documented tradeoff).
+- **Partition pruning for very large N** (Phase S-1, the
+  partition-level coarse quantizer) is **designed** (doc §6) but
+  **deferred** to a later release — its first cut didn't pass its own
+  correctness `#[pg_test]` when run, and this project does not ship
+  unproven partition-selection code (a silent recall bug is worse than
+  a deferral). It lands alongside the 1-bit completion, real-PG
+  validated. The free scatter-gather above covers 1–10B today.
 
 ### 1-bit (sign binary quantization) foundation
 

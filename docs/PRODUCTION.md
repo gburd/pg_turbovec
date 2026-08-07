@@ -583,8 +583,29 @@ SELECT
 FROM pg_class c
 WHERE c.relname = 'docs_emb_idx';
 -- Then read the meta page (block 0) byte 8..12 for the version
--- (currently 3, set in v1.4.0; see docs/UPGRADING.md).
+-- (currently 7 as of v1.27.0; see docs/UPGRADING.md).
 ```
+
+### Index integrity check (`turbovec.turbovec_check`)
+
+Since v1.28.4, a read-only, ownership-checked function reports the
+health of a turbovec index's on-disk relfile without attempting a
+write (it takes only `AccessShareLock`, so it never blocks writers):
+
+```sql
+SELECT * FROM turbovec.turbovec_check('docs_emb_idx'::regclass);
+--  wire_version | kind | n_vectors | slot_count | count_matches
+--  | duplicate_id | is_corrupt | tombstone_density
+```
+
+**Monitoring should alert on `is_corrupt = true`.** It surfaces the
+duplicate-id `.tvim` corruption (which an unclean shutdown /
+`pg_resetwal` can leave) that a normal health check misses —
+`pg_index.indisvalid` stays `true` on a corrupt turbovec index, and
+`pg_amcheck` inspects only the heap/TOAST, not the turbovec relfile.
+Recovery for a flagged index: `REINDEX INDEX <name>;` (durable as of
+v1.28.4), or `DROP` + `CREATE` if the corruption predates v1.28.4.
+See the "Known issues" section and `docs/UPGRADING.md`.
 
 ---
 

@@ -1,7 +1,7 @@
 # PostgreSQL version support matrix
 
 `pg_turbovec` supports PostgreSQL **13, 14, 15, 16, 17, 18** (and
-**19beta1**, experimentally) as of v1.28.0.
+**19beta1**, experimentally) as of v1.29.0.
 
 | Version | Tested patch | Status | Tests | Notes |
 |---|---|---|---|---|

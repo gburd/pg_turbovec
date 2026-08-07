@@ -37,13 +37,16 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.28.0 - the full `#[pg_test]` suite passes against
+> **Status:** v1.29.0 - the full `#[pg_test]` suite passes against
 > PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally)
 > with the default build flags (the relfile-resident page format and
 > the `turbovec` index AM are default-on; the `experimental_index_am`
 > and `relfile_storage` Cargo features were retired in Phase Q).
 > See [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
-> for the honest scoreboard of every metric vs pgvector.
+> for the honest scoreboard of every metric vs pgvector, and
+> [`docs/PARTITIONED_SCALE.md`](docs/PARTITIONED_SCALE.md) for scaling
+> past PostgreSQL's single-table ceiling to billions of vectors via
+> partitioning.
 
 ## Why pg_turbovec?
 
@@ -389,7 +392,7 @@ Reloptions:
 
 | Option      | Default        | Range  | Notes |
 |-------------|----------------|--------|-------|
-| `bit_width` | `turbovec.bit_width_default` (4) | 2, 3, 4 | Lower = smaller index, lower recall |
+| `bit_width` | `turbovec.bit_width_default` (4) | 1, 2, 3, 4 | Lower = smaller index, lower recall. `2/3/4` = TurboQuant. `1` = sign binary quantization (accepted since v1.29.0; **build path not yet implemented — errors clearly**, completed in a later release). |
 
 ### Index AM lifecycle
 
@@ -643,6 +646,15 @@ bridge is the supported interop path.
   and the latest measured numbers.
 - [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) - feature-by-feature
   comparison against pgvector.
+- [`docs/PARTITIONED_SCALE.md`](docs/PARTITIONED_SCALE.md) - scaling
+  past PostgreSQL's single-table ceiling to billions of vectors via
+  hash-partitioning + per-partition indexes + native `Merge Append`.
+- [`docs/DEPLOYING_ON_MANAGED_POSTGRES.md`](docs/DEPLOYING_ON_MANAGED_POSTGRES.md)
+  - durability/replication, restricted-superuser compatibility, read
+  replicas, cancellation, and the memory / insert-cost model for
+  managed or hosted PostgreSQL.
+- [`docs/PG_VERSION_SUPPORT.md`](docs/PG_VERSION_SUPPORT.md) - the
+  per-major support matrix (PG 13-18, 19beta1 experimental).
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) - the published
   head-to-head benchmark (Cohere-wiki 1M vs pgvector HNSW), incl.
   the AVX2 latency frontier and the honest "flat-scan loses on

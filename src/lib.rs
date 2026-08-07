@@ -1759,7 +1759,15 @@ mod tests {
     #[pg_test]
     fn index_am_rejects_bad_bit_width() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_bad (id bigint, emb vector)").unwrap();
+        // Schema-qualify `turbovec.vector` explicitly: the two bad-
+        // CREATE-INDEX attempts below are caught with catch_unwind, and
+        // a PG error inside a caught subtransaction can reset the
+        // session search_path on some majors (observed pg17-19 under
+        // pgrx 0.19), so a bare `vector` in the SECOND CREATE TABLE
+        // would fail with "type vector does not exist". Qualifying makes
+        // the test independent of search_path survival across the
+        // caught error.
+        Spi::run("CREATE TABLE t_bad (id bigint, emb turbovec.vector)").unwrap();
         let bad = std::panic::catch_unwind(|| {
             Spi::run(
                 "CREATE INDEX ON t_bad USING turbovec (emb vec_cosine_ops) \
@@ -1771,7 +1779,7 @@ mod tests {
             "bit_width = 5 should be rejected by amoptions"
         );
         // bit_width = 0 is also out of the 1..=4 range.
-        Spi::run("CREATE TABLE t_bad0 (id bigint, emb vector)").unwrap();
+        Spi::run("CREATE TABLE t_bad0 (id bigint, emb turbovec.vector)").unwrap();
         let bad0 = std::panic::catch_unwind(|| {
             Spi::run(
                 "CREATE INDEX ON t_bad0 USING turbovec (emb vec_cosine_ops) \

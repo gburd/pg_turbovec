@@ -4,6 +4,31 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.1] — 2026-08-11
+
+**Packaging fix: ship in-place `ALTER EXTENSION UPDATE` scripts.** Patch
+bump — no wire change (stays v7), no code change, no REINDEX.
+
+v1.28.4 added `turbovec.turbovec_check()` to the full-install schema
+but **not to any upgrade path**, so operators who ran `ALTER EXTENSION
+pg_turbovec UPDATE TO '1.28.4'` in place never got the function the
+changelog advertised (agora report 2026-08-11). Root cause: the repo
+shipped only full-install `pg_turbovec--<version>.sql` and no
+`pg_turbovec--<from>--<to>.sql` upgrade scripts, so PostgreSQL's
+`ALTER EXTENSION UPDATE` had no SQL delta to apply — only the `.so`
+changed.
+
+- Adds the runnable upgrade scripts under `sql/`: the `1.28.3->1.28.4`
+  edge `CREATE`s `turbovec_check`; forward edges (`1.28.4->1.29.0`,
+  `1.29.0->1.29.1`) are documented no-ops so the update chain resolves.
+- New `scripts/drift-check.sh` gate (#12) fails the build if a release
+  lacks its `sql/pg_turbovec--<prev>--<this>.sql` upgrade edge, so this
+  can never silently regress again.
+- Also codifies the **2026-08-11 hard mandate** in `AGENTS.md`: no
+  corruption ever; non-major upgrades must be zero-format-change or
+  online-upgradable in place (no REINDEX-from-corpus for a minor); even
+  major format breaks must offer an offline in-place converter tool.
+
 ## [1.29.0] — 2026-08-07
 
 **Partitioned-scale support (toward 1T+ vectors) + the 1-bit

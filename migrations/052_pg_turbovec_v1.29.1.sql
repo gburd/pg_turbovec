@@ -1,0 +1,11 @@
+-- pg_turbovec 1.29.1 -- Packaging fix: ship in-place upgrade scripts.
+--
+-- v1.28.4 added turbovec.turbovec_check() to the full-install schema
+-- but NOT to any `ALTER EXTENSION UPDATE` path, so in-place upgraders
+-- never got the function (agora report 2026-08-11). This release adds
+-- the runnable `sql/pg_turbovec--<from>--<to>.sql` upgrade scripts
+-- (the 1.28.3->1.28.4 edge CREATEs turbovec_check; forward edges are
+-- empty no-ops) so `ALTER EXTENSION pg_turbovec UPDATE` applies SQL
+-- deltas in place, and a drift-check gate (scripts/drift-check.sh #12)
+-- enforces an upgrade-script edge for every future version.
+-- No wire change (stays v7), no code change, no REINDEX.

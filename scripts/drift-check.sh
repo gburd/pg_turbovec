@@ -304,6 +304,26 @@ if [ -n "$non_userset" ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 12. Upgrade-script coverage (2026-08-11 mandate). Every version that
+#     the migration matrix documents must have a runnable
+#     `sql/pg_turbovec--<prev>--<this>.sql` upgrade script committed, so
+#     `ALTER EXTENSION pg_turbovec UPDATE` creates/alters new SQL
+#     objects IN PLACE. The v1.28.4 release shipped turbovec_check() in
+#     the full-install schema but NOT on the in-place upgrade path
+#     (there was no --from--to.sql), so in-place upgraders never got it
+#     (agora report 2026-08-11). Gate the presence of the upgrade edge
+#     for the CURRENT version.
+# ----------------------------------------------------------------------
+cur_ver=$(grep -m1 '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+if [ -n "$cur_ver" ] && [ -d sql ]; then
+    # find any upgrade script ending at the current version
+    edge=$(ls sql/pg_turbovec--*--"${cur_ver}".sql 2>/dev/null | head -1)
+    if [ -z "$edge" ]; then
+        fail "no upgrade script sql/pg_turbovec--<prev>--${cur_ver}.sql (ALTER EXTENSION UPDATE would not apply this version's SQL deltas in place; generate one, even if empty). See the 2026-08-11 upgrade-path mandate in AGENTS.md."
+    fi
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

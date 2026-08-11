@@ -12,6 +12,31 @@ the change to `docs/UPGRADING.md` (versioning policy) and the
 
 ## Versioning policy — **READ THIS BEFORE BUMPING ANY VERSION**
 
+> ### HARD MANDATE (2026-08-11, non-negotiable)
+>
+> 1. **Corruption is NOT acceptable, ever.** Any code path that writes,
+>    reads, reconstructs, or reindexes the `.tvim` relfile / `slot_to_id`
+>    id table is safety-critical. A change to format/persist/scan code
+>    ships ONLY with: a reproduction test that fails before and passes
+>    after, AND validation that it does not RE-CORRUPT under sustained
+>    insert load (the v1.28.4 fix shipped on code-reasoning alone and
+>    FAILED in production — never again). When in doubt, do not ship.
+> 2. **Every non-major upgrade MUST be either (a) zero format change, or
+>    (b) online-upgradable in place.** A minor may NOT require a
+>    `REINDEX` as its migration for the flat/IVF kinds — rebuilding from
+>    an extremely large corpus is not an option and MUST be avoided. If
+>    the wire format must change, the new binary MUST read the OLD
+>    format transparently (additive/back-compatible decode), so existing
+>    indexes keep working with no rebuild.
+> 3. **Even MAJOR upgrades must offer an OFFLINE migration TOOL when a
+>    format break is unavoidable** — an in-place converter that rewrites
+>    the relfile pages without re-embedding/re-quantizing from the heap.
+>    A full `REINDEX`/rebuild-from-corpus is a LAST resort, allowed only
+>    when an in-place converter is genuinely impossible, and must be
+>    justified in `docs/UPGRADING.md`.
+>
+> These rules override the softer language below where they conflict.
+
 `pg_turbovec` follows a **wire-format-aware** SemVer policy. The version
 number tells users what they have to do at upgrade time:
 
@@ -42,42 +67,52 @@ This is enforced mechanically by:
 
 ### Minor releases (X.Y.Z → X.Y+1.0)
 
-**Must provide a non-destructive, online, efficient upgrade path from
-ANY prior minor in the same major line.** Concretely:
+**Must provide a non-destructive, online, efficient, IN-PLACE upgrade
+path from ANY prior minor in the same major line.** Per the HARD
+MANDATE above, a `REINDEX` is NOT an acceptable minor-version migration
+for the flat/IVF kinds (rebuild-from-corpus is banned). Concretely:
 
-- Existing on-disk indexes from any earlier minor must remain readable
-  and writable, OR
-- A clear `REINDEX INDEX <name>;` migration is documented in
-  `docs/UPGRADING.md` AND the binary detects pre-format indexes via
+- Existing on-disk indexes from any earlier minor MUST remain readable
+  and writable with no rebuild — if the wire format changes, the new
+  binary reads the old format transparently (additive/back-compatible
+  decode), the way v4→v5→v6 were strictly additive per kind.
+- A `REINDEX`-only migration is a policy VIOLATION for a minor unless
+  the format is genuinely unreadable AND an in-place page converter is
+  proven impossible (document why in `docs/UPGRADING.md`) — and even
+  then prefer shipping an offline converter tool over forcing a
+  corpus rebuild.
+- If a pre-format index truly cannot be read, the binary detects it via
   an `is_legacy_v{N}()` predicate AND emits a clear `ERROR` with a
-  `HINT: REINDEX INDEX ...` from `ambeginscan` at the first scan,
-  not silent corruption at runtime.
-- The `migrations/NNN_pg_turbovec_vX.Y.0.sql` file is checked in,
-  even if empty (so `ALTER EXTENSION pg_turbovec UPDATE TO 'X.Y.0';`
-  resolves cleanly).
+  `HINT` from `ambeginscan` at first scan — NEVER silent corruption.
+- The `migrations/NNN_pg_turbovec_vX.Y.0.sql` file is checked in, AND a
+  runnable `sql/pg_turbovec--<from>--<to>.sql` upgrade script is
+  generated (`cargo pgrx schema`) and committed so `ALTER EXTENSION
+  pg_turbovec UPDATE` actually creates/alters new SQL objects in place
+  (the v1.28.4 release FAILED to ship this — `turbovec_check()` was
+  never created on in-place upgrade; see the 2026-08-11 report).
 - The migration matrix in `docs/UPGRADING.md` gets a new row spelling
-  out the upgrade action.
+  out the (in-place, no-rebuild) upgrade action.
 
-Minor bumps may change the wire format, the SQL surface (additively),
-or runtime behaviour. They may NOT remove SQL objects without a
-two-release deprecation window (one minor adds the deprecation
-warning; the next minor removes it).
+Minor bumps may change the wire format additively (old indexes still
+decode), the SQL surface (additively), or runtime behaviour. They may
+NOT remove SQL objects without a two-release deprecation window.
 
 ### Major releases (X.Y.Z → X+1.0.0)
 
-**May break backwards compatibility, but it is preferable to provide
-an online upgrade path from earlier versions if at all possible.**
-The bar:
+**May break backwards compatibility ONLY as a last resort, and MUST
+provide an OFFLINE in-place migration tool when a format break is
+unavoidable** (per the HARD MANDATE). The bar:
 
-- A `REINDEX INDEX` migration is acceptable; a full `pg_dump | pg_restore`
-  is acceptable as a last resort.
-- If the upgrade is destructive (e.g. SQL surface removed), the
-  migration matrix must explicitly say so AND `docs/UPGRADING.md` must
-  describe the cleanup steps.
+- Prefer a transparent back-compatible decode (no migration at all).
+- If the on-disk format truly must change incompatibly, ship an
+  **offline converter that rewrites the relfile pages in place**
+  (meta + chains) WITHOUT re-embedding/re-quantizing from the heap.
+  Rebuilding from an extremely large corpus is banned except where an
+  in-place converter is provably impossible.
+- A full `REINDEX` / `pg_dump | pg_restore` is the ABSOLUTE last
+  resort, justified explicitly in `docs/UPGRADING.md`.
 - Pre-major indexes that can't be migrated must `ERROR` clearly at
   `ambeginscan`, not silently misbehave.
-- A release note in `docs/UPGRADING.md` summarises why the break was
-  necessary.
 
 The current major (1.x) line held `MetaPageData::version = 3` from
 v1.4.0 through v1.9.x; v1.10.0 bumped it to **4** for the IVF layer,

@@ -1,0 +1,10 @@
+-- pg_turbovec 1.29.1 -> 1.29.2
+--
+-- v1.29.2 is a CODE-ONLY concurrency data-corruption fix (deferred-flush
+-- lost-update + VACUUM stale-snapshot + read_rotation/read_ids_only
+-- stale-meta races). No wire-format change (stays v7), no SQL surface
+-- change, no REINDEX. The fix lives entirely in the extension binary; the
+-- new .so reads and writes existing indexes correctly in place. This
+-- upgrade script is intentionally empty (no SQL objects added or altered)
+-- but MUST exist so `ALTER EXTENSION pg_turbovec UPDATE TO '1.29.2'`
+-- succeeds and the version is recorded.

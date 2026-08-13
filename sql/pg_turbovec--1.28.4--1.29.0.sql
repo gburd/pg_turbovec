@@ -1,0 +1,1 @@
+-- pg_turbovec upgrade 1.28.4 -> 1.29.0 (no SQL-surface change: partitioned-scale docs + 1-bit reloption foundation only).

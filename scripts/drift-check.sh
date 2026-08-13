@@ -320,6 +320,10 @@ if [ -n "$cur_ver" ] && [ -d sql ]; then
     edge=$(ls sql/pg_turbovec--*--"${cur_ver}".sql 2>/dev/null | head -1)
     if [ -z "$edge" ]; then
         fail "no upgrade script sql/pg_turbovec--<prev>--${cur_ver}.sql (ALTER EXTENSION UPDATE would not apply this version's SQL deltas in place; generate one, even if empty). See the 2026-08-11 upgrade-path mandate in AGENTS.md."
+    elif ! git ls-files --error-unmatch "$edge" >/dev/null 2>&1; then
+        # The exact v1.28.4 bug: the upgrade script existed on disk but
+        # was .gitignore'd, so it never shipped. It MUST be git-tracked.
+        fail "upgrade script $edge exists but is NOT git-tracked (likely .gitignore'd) -- it will not ship, so ALTER EXTENSION UPDATE won't create new SQL objects in place. git add it and check the /sql/ ignore rules."
     fi
 fi
 

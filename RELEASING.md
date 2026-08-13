@@ -79,7 +79,20 @@ Before tagging:
 
    Commit the regenerated `.sql` file.
 
-3. **Append the migration script** if this release changes the SQL
+3. **Ship the upgrade scripts.** The hand-written
+   `sql/pg_turbovec--<from>--<to>.sql` upgrade scripts MUST be
+   git-tracked (a stale `/sql/` .gitignore rule once excluded them,
+   so `ALTER EXTENSION UPDATE` shipped no SQL deltas -- the v1.28.4
+   turbovec_check regression). After `cargo pgrx install` (which only
+   writes the full-install `pg_turbovec--<version>.sql`), run
+   `bash scripts/install-upgrade-scripts.sh <pg_config>` to copy the
+   `--<from>--<to>.sql` scripts into the extension sharedir. Verify
+   in-place upgrade works: `CREATE EXTENSION ... VERSION '<prev>'` then
+   `ALTER EXTENSION pg_turbovec UPDATE TO '<new>'` creates the new SQL
+   objects. drift-check gate #12 fails the build if the current
+   version's upgrade edge is missing or untracked.
+
+4. **Append the migration script** if this release changes the SQL
    surface. Naming is `migrations/pg_turbovec--<from>--<to>.sql`.
 
 4. **Update `CHANGELOG.md`**:

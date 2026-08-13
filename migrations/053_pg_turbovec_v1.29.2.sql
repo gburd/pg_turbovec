@@ -1,0 +1,6 @@
+-- 1.29.2 — concurrency data-corruption fix (deferred-flush lost-update +
+-- VACUUM stale-snapshot + read_rotation/read_ids_only stale-meta races).
+-- Code-only fix: no wire-format change (stays v7), no SQL surface change,
+-- no REINDEX to upgrade. Existing indexes are read + written correctly in
+-- place by the new .so. This migration is intentionally empty (no SQL
+-- objects added/changed); the fix lives entirely in the extension binary.

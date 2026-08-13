@@ -841,7 +841,27 @@ unsafe fn install_whole_index(
     dim_u32: u32,
     bit_width_u8: u8,
 ) -> cache::ScanHandle {
-    let (codes, scales, ids) = relfile::read_full(rel, meta);
+    // v1.29.1 corruption fix #1 (read_rotation-window race): take the
+    // shared relfile-rewrite lock ONCE around the WHOLE install —
+    // read_full_consistent (meta + codes/scales/ids chains) AND the
+    // read_rotation below. `read_full_consistent`'s own ShareLock is
+    // re-entrant (same-xact ShareLock never self-conflicts), so
+    // nesting is safe; the point is that the rotation chain is read
+    // under the SAME held lock, so a concurrent insert-flush /
+    // vacuum-shrink can't move or truncate the rotation chain in the
+    // gap between read_full_consistent releasing its lock and
+    // read_rotation running. Before this outer bracket, that gap let
+    // read_rotation walk a truncated tail block. Released on every
+    // return path (success below; auto-released on any `error!`
+    // longjmp / abort, since the lock manager frees page locks at
+    // xact end).
+    relfile::lock_relfile_read(rel);
+    // Size the index from the RETURNED (freshly re-read) meta — NOT
+    // the caller's `meta` snapshot, which may pre-date a concurrent
+    // insert-flush / vacuum-shrink that completed between
+    // `ambeginscan`'s `read_meta` and here.
+    let (meta, codes, scales, ids) = relfile::read_full_consistent(rel, meta);
+    let meta = &meta;
 
     // Fail loudly on a duplicate-id corrupt relfile (see
     // `assert_ids_unique_or_reindex`) instead of silently serving
@@ -915,6 +935,11 @@ unsafe fn install_whole_index(
     };
     let bytes_per_vec = (dim_u32 as usize * bit_width_u8 as usize) / 8 + 4 + 64;
     let total_bytes = bytes_per_vec * (n_in_index.max(1));
+    // v1.29.1 corruption fix #1: release the outer shared rewrite
+    // lock now that meta + all chains + rotation have been read
+    // atomically. The `stored_index` above already owns copies of
+    // every byte, so nothing below still reads the relfile.
+    relfile::unlock_relfile_read(rel);
     cache::scan_install(key, stored_index, total_bytes, relfile_node, version_as_i64)
 }
 
@@ -940,7 +965,13 @@ unsafe fn install_graph_index(
     dim_u32: u32,
     bit_width_u8: u8,
 ) -> cache::ScanHandle {
-    let (codes, scales, ids) = relfile::read_full(rel, meta);
+    // v1.29.1 corruption fix #1: bracket the WHOLE graph install
+    // (read_full_consistent + read_rotation + read_graph_adjacency +
+    // read_tombstones) under ONE outer shared rewrite lock, same as
+    // install_whole_index. Released just before scan_install_graph.
+    relfile::lock_relfile_read(rel);
+    let (meta, codes, scales, ids) = relfile::read_full_consistent(rel, meta);
+    let meta = &meta;
     // Graph indexes are bijective (one slot per node id), so a repeat
     // is corruption. (IVF's legitimate soft-assign dups never reach
     // this graph path.)
@@ -1004,6 +1035,9 @@ unsafe fn install_graph_index(
     let adjacency_bytes =
         (meta.graph_offsets_bytes + meta.graph_neighbors_bytes) as usize / n_in_index.max(1);
     let total_bytes = (bytes_per_vec + adjacency_bytes) * (n_in_index.max(1));
+    // v1.29.1 corruption fix #1: release the outer shared rewrite
+    // lock; graph_index owns copies of every byte read above.
+    relfile::unlock_relfile_read(rel);
     cache::scan_install_graph(key, graph_index, total_bytes, relfile_node, version_as_i64)
 }
 

@@ -96,8 +96,36 @@ unsafe fn ambulkdelete_relfile(
         return stats;
     };
 
+    // v1.29.1 corruption fix #3 (VACUUM stale-snapshot race): take
+    // the EXCLUSIVE relfile-rewrite lock BEFORE reading the ids chain
+    // and hold it across the ENTIRE bulkdelete (read ids -> compute
+    // dead slots -> swap-remove -> shrink -> truncate). Previously
+    // VACUUM read the ids (releasing its ShareLock), computed dead
+    // slots, and only THEN took the write lock for the swap — using
+    // the `meta`/`dead_slots` captured before the lock. A concurrent
+    // insert-flush completing in that unlocked window rewrote the
+    // relfile (new n_vectors / new ids order / new offsets), leaving
+    // VACUUM's swap-remove operating on stale slot indices against
+    // the just-rewritten chains — the true id-0 / duplicate-id
+    // WRITE (not just a torn read). Now every read below uses the
+    // meta RE-READ under the held lock, and no rewrite can interleave.
+    // Released on every return path; auto-released on any error/abort.
+    relfile::lock_relfile_write(index);
+    let meta = match relfile::read_meta(index) {
+        Some(m) if m.n_vectors > 0 => m,
+        _ => {
+            relfile::unlock_relfile_write(index);
+            (*stats).num_index_tuples = 0.0;
+            return stats;
+        }
+    };
+
     // Pass 1: read the ids chain only (cheap — 8 bytes per row
     // vs. stride_bytes for codes) and collect dead slot indices.
+    // `read_ids_only` takes the ShareLock again; same-xact ShareLock
+    // nested under our held ExclusiveLock does not self-conflict, and
+    // it re-reads meta under that lock so it sees exactly the meta we
+    // just read.
     let ids = relfile::read_ids_only(index, &meta);
     debug_assert_eq!(ids.len() as u64, meta.n_vectors);
 
@@ -116,6 +144,7 @@ unsafe fn ambulkdelete_relfile(
         // Nothing to remove. Don't bump am_version (no on-disk
         // change) and don't rewrite the meta page — we want a
         // pure read-only VACUUM pass to avoid emitting WAL.
+        relfile::unlock_relfile_write(index);
         (*stats).num_index_tuples = meta.n_vectors as f64;
         return stats;
     }
@@ -142,6 +171,7 @@ unsafe fn ambulkdelete_relfile(
         // n_vectors is unchanged (dead rows stay on disk as
         // tombstones); report the live count for the planner.
         let live = meta.n_vectors.saturating_sub(total_dead);
+        relfile::unlock_relfile_write(index);
         (*stats).num_index_tuples = live as f64;
         (*stats).tuples_removed += dead_count as f64;
         return stats;
@@ -164,6 +194,7 @@ unsafe fn ambulkdelete_relfile(
         let next_version = meta.am_version.saturating_add(1);
         let total_dead = graph_tombstone_dead(index, &meta, &dead_slots, next_version);
         let live = meta.n_vectors.saturating_sub(total_dead);
+        relfile::unlock_relfile_write(index);
         (*stats).num_index_tuples = live as f64;
         (*stats).tuples_removed += dead_count as f64;
         return stats;
@@ -176,6 +207,15 @@ unsafe fn ambulkdelete_relfile(
     // original live row, or a row that was moved into a position
     // still > current dead slot — either way the data is the
     // canonical live data we want to preserve).
+    //
+    // v1.29.1 corruption fix #3: the write lock is already held from
+    // the top of this function (across the ids read + dead-slot
+    // computation), so the in-place swap-remove below runs on a
+    // snapshot no concurrent flush could have moved out from under
+    // us. (Previously the lock was taken only HERE, after an
+    // unlocked ids read.) The in-place swap-remove overwrites
+    // codes/scales/ids pages and then shrinks + truncates the meta,
+    // all across many separate GenericXLog records.
     let mut alive: u64 = meta.n_vectors;
     for &dead_slot in dead_slots.iter().rev() {
         let s = dead_slot as u64;
@@ -234,6 +274,10 @@ unsafe fn ambulkdelete_relfile(
         ..meta
     };
     relfile::truncate_ids_tail(index, &shrunk_meta);
+
+    // v1.29.1 corruption fix: shrink complete + internally
+    // consistent; release the exclusive rewrite lock.
+    relfile::unlock_relfile_write(index);
 
     (*stats).num_index_tuples = new_n as f64;
     (*stats).tuples_removed += dead_count as f64;

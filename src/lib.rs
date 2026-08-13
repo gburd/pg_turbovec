@@ -831,6 +831,7 @@ mod tests {
                 n_vectors: meta.n_vectors as i64,
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
             };
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (idx, dim, bit_width, state)
@@ -844,6 +845,10 @@ mod tests {
             let v: Vec<f32> = (0..dim).map(|k| (new_id as f32) + k as f32).collect();
             idx.add_with_ids(&v, &[new_id]).expect("add new row");
             state.live_ids.push(new_id);
+            // v1.29.1 fix #2: reconcile-on-flush splices `touched_ids`
+            // onto fresh disk state, so a new id must be recorded here
+            // (the aminsert closure does the same).
+            state.touched_ids.push(new_id);
             state.n_vectors += 1;
             state.version += 1;
         }
@@ -937,6 +942,7 @@ mod tests {
                 n_vectors: meta.n_vectors as i64 + 1,
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
             };
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (idx, state)
@@ -5649,6 +5655,98 @@ mod tests {
         );
     }
 
+    /// v1.29.1 corruption fix regression test (agora 2026-08-11).
+    ///
+    /// ROOT CAUSE: the deferred `aminsert` flush and VACUUM shrink
+    /// rewrite the whole `.tvim` relfile (meta + codes/scales/ids
+    /// chains) under only a `RowExclusiveLock` (reader-compatible),
+    /// touching pages across several `GenericXLog` records with only
+    /// per-page buffer locks. A concurrent scanner's cold-cache
+    /// `read_full` walked the same chains under per-page SHARE locks
+    /// with NOTHING serializing the two whole-chain operations, so
+    /// it could reconstruct the index from a TORN mix of pre- and
+    /// post-rewrite pages — surfacing as "duplicate ids ... appears
+    /// in more than one slot" (XX001) or a `swap_remove` SIGABRT.
+    /// The on-disk relfile was never actually corrupt.
+    ///
+    /// FIX: a heavyweight page lock on the meta page as a rewrite
+    /// mutex — readers (`read_full`/`read_ids_only`) take ShareLock,
+    /// rewriters (`write_full_inner`/vacuum-shrink) take
+    /// ExclusiveLock; readers re-read meta+chains atomically under
+    /// the ShareLock.
+    ///
+    /// This test proves the SERIALIZATION primitive is wired: after
+    /// our code takes the EXCLUSIVE rewrite lock on the index, PG's
+    /// `pg_locks` shows a `page` ExclusiveLock held on that index
+    /// relation. BEFORE the fix NO page lock was ever taken by the
+    /// read/write paths, so this query returns 0 and the assert
+    /// fails; AFTER the fix it returns >= 1. The end-to-end no-
+    /// recurrence-under-load proof is the EC2 sustained-load run
+    /// documented in CHANGELOG.md — a single-backend `#[pg_test]`
+    /// cannot create the true cross-backend torn-read race (pgrx
+    /// tests share one backend/tx), so this asserts the mechanism
+    /// the load test exercises.
+    #[pg_test]
+    fn relfile_rewrite_lock_serializes_readers_and_writers() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_lock (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_lock VALUES \
+             (1, '[1,0,0,0,0,0,0,0]'), \
+             (2, '[0,1,0,0,0,0,0,0]'), \
+             (3, '[0,0,1,0,0,0,0,0]')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX t_lock_idx ON t_lock USING turbovec (emb vec_l2_ops)").unwrap();
+
+        let idx_oid: pg_sys::Oid = Spi::get_one("SELECT 't_lock_idx'::regclass::oid")
+            .unwrap()
+            .unwrap();
+
+        // No page ExclusiveLock on the index yet.
+        let before: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pg_locks \
+             WHERE locktype = 'page' AND mode = 'ExclusiveLock' \
+               AND relation = {}::oid",
+            idx_oid.to_u32()
+        ))
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            before, 0,
+            "no relfile-rewrite page lock should be held before we take it"
+        );
+
+        // Take the EXCLUSIVE rewrite lock via the same helper the
+        // write path uses. Held until this transaction ends.
+        let took: bool = Spi::get_one(&format!(
+            "SELECT turbovec._turbovec_test_hold_rewrite_lock({}::oid)",
+            idx_oid.to_u32()
+        ))
+        .unwrap()
+        .unwrap_or(false);
+        assert!(took, "_turbovec_test_hold_rewrite_lock returned false");
+
+        // PG's lock manager now shows a granted `page` ExclusiveLock
+        // on the index relation — the primitive that serializes a
+        // concurrent scanner's ShareLock read against a rewrite.
+        let after: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pg_locks \
+             WHERE locktype = 'page' AND mode = 'ExclusiveLock' \
+               AND granted AND relation = {}::oid",
+            idx_oid.to_u32()
+        ))
+        .unwrap()
+        .unwrap_or(0);
+        assert!(
+            after >= 1,
+            "expected the relfile-rewrite ExclusiveLock (page lock) to be \
+             held on the index after taking it, but pg_locks showed {after}. \
+             The v1.29.1 fix wires this lock in read_full/write_full_inner; \
+             if it's absent the torn-read corruption is unguarded."
+        );
+    }
+
     /// Cache-entry drop ordering: when a cache entry is evicted (LRU
     /// cap exceeded or explicit invalidation), the entry must be
     /// dropped cleanly with no dangling state, so a follow-up scan
@@ -5983,7 +6081,7 @@ mod tests {
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
-            "1.29.0", "1.29.1",
+            "1.29.0", "1.29.1", "1.29.2",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

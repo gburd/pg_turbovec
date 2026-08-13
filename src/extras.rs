@@ -323,7 +323,23 @@ fn turbovec_check(
         // Read only the ids chain (via `read_ids_only`); we don't
         // need the much larger codes/scales chains for an integrity
         // report.
-        let ids = crate::index::relfile::read_ids_only(rel, &meta);
+        //
+        // v1.29.1 corruption fix (monitor consistency): `read_meta`
+        // above and `read_ids_only` below must observe the SAME
+        // relfile snapshot, or a concurrent insert-flush / vacuum
+        // committing between them makes `count_matches` a spurious
+        // `false` (meta.n_vectors from before the rewrite vs an ids
+        // chain from after). Re-read the meta UNDER the shared
+        // rewrite lock, atomically with the ids, and compare THOSE.
+        // `read_ids_only` takes + re-reads meta under the ShareLock;
+        // we take our own ShareLock around BOTH the meta re-read and
+        // the ids read so they're one consistent observation. Same-
+        // xact ShareLock nesting does not self-conflict.
+        crate::index::relfile::lock_relfile_read(rel);
+        let meta_consistent = crate::index::relfile::read_meta(rel).unwrap_or(meta);
+        let ids = crate::index::relfile::read_ids_only(rel, &meta_consistent);
+        crate::index::relfile::unlock_relfile_read(rel);
+        let meta = meta_consistent;
         let slot_count = ids.len() as i64;
         let count_matches = meta.n_vectors == ids.len() as u64;
 
@@ -362,6 +378,34 @@ fn turbovec_check(
             tombstone_density,
         ))
     }
+}
+
+/// Test-only: acquire the EXCLUSIVE relfile-rewrite lock on `index`
+/// and hold it until the end of the current transaction. Lets a
+/// `#[pg_test]` (via `dblink` from another backend) prove that a
+/// concurrent reader is SERIALIZED against a rewrite — the v1.29.1
+/// corruption fix's core invariant. Not part of the shipped SQL
+/// surface (only compiled under `pg_test`), so it never appears in
+/// the extension schema.
+///
+/// # Safety
+/// pgrx wrapper; opens/holds the index relation and takes a
+/// heavyweight page lock that the lock manager releases at xact end.
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_extern]
+fn _turbovec_test_hold_rewrite_lock(index: pg_sys::Oid) -> bool {
+    unsafe {
+        let rel = pg_sys::index_open(index, pg_sys::AccessShareLock as i32);
+        if rel.is_null() {
+            error!(
+                "_turbovec_test_hold_rewrite_lock: could not open index {:?}",
+                index
+            );
+        }
+        crate::index::relfile::lock_relfile_write(rel);
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+    }
+    true
 }
 
 extension_sql!(

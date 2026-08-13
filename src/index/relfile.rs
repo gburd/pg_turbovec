@@ -73,6 +73,103 @@ pub(crate) fn lock_buffer_mode(m: u32) -> u32 {
 /// state — PG hard-codes this at `XLR_NORMAL_MAX_BLOCK_ID = 4`.
 const GENERIC_XLOG_BATCH: usize = pg_sys::MAX_GENERIC_XLOG_PAGES as usize;
 
+/// # Relfile-rewrite serialization (v1.29.1 corruption fix)
+///
+/// The deferred-commit `aminsert` flush ([`crate::xact::flush_to_relfile`])
+/// and VACUUM's in-place shrink both REWRITE the whole relfile (meta
+/// page + codes/scales/ids/rotation chains) under only a
+/// `RowExclusiveLock` / `ShareUpdateExclusiveLock` heap lock — locks
+/// deliberately chosen so writers don't block scanning readers
+/// (who hold `AccessShareLock`). But the rewrite touches many pages
+/// across several `GenericXLog` records, holding only a *per-page*
+/// buffer content lock at a time; a concurrent [`read_full`] walks
+/// the same chains page-by-page under per-page SHARE locks. With
+/// nothing serializing the two *whole-chain* operations, a reader
+/// could observe a TORN ids chain — some pages already rewritten,
+/// some still old, some `PageInit`'d-to-zero mid-write — surfacing
+/// as "duplicate ids (id N appears in more than one slot)" (XX001)
+/// or, on the writer's own racing cold read, a `swap_remove`
+/// `assert!` SIGABRT. The on-disk relfile was never corrupt (a
+/// serialized `turbovec_check` always read it clean); the fault was
+/// purely a read/write interleaving, which is why REINDEX "didn't
+/// hold" and only quiescing the workload appeared to fix it.
+///
+/// We serialize the two whole-chain operations with a heavyweight
+/// page lock on the META page (block 0), used purely as a rewrite
+/// mutex, NOT via buffer content locks (which would deadlock against
+/// the per-page locks `write_meta` / `write_chain_at` take, and
+/// aren't held across the whole multi-page op). `ShareLock` (many
+/// concurrent readers) conflicts with `ExclusiveLock` (one
+/// rewriter) in PG's lock matrix, and same-transaction locks never
+/// self-conflict — so a writer's own cold [`read_full`] (ShareLock)
+/// followed by its rewrite (ExclusiveLock) in the same xact is
+/// fine. The lock is heap-independent, deadlock-detected, and
+/// released explicitly at the end of each operation.
+///
+/// This changes NO on-disk bytes (no wire-format change, no
+/// REINDEX): it only adds an in-memory lock around existing reads
+/// and writes.
+const RELFILE_REWRITE_LOCK_BLK: pg_sys::BlockNumber = META_BLKNO;
+
+/// Take the shared side of the relfile-rewrite lock (a reader
+/// reconstructing the in-memory index from the chains). Released
+/// by [`unlock_relfile_read`].
+///
+/// # Safety
+/// Caller must hold a relation reference and MUST pair this with
+/// exactly one [`unlock_relfile_read`] on all paths (including
+/// error unwinds — see [`read_full`], which brackets its body).
+#[inline]
+pub(crate) unsafe fn lock_relfile_read(rel: pg_sys::Relation) {
+    pg_sys::LockPage(
+        rel,
+        RELFILE_REWRITE_LOCK_BLK,
+        pg_sys::ShareLock as pg_sys::LOCKMODE,
+    );
+}
+
+/// Release the shared side taken by [`lock_relfile_read`].
+#[inline]
+pub(crate) unsafe fn unlock_relfile_read(rel: pg_sys::Relation) {
+    pg_sys::UnlockPage(
+        rel,
+        RELFILE_REWRITE_LOCK_BLK,
+        pg_sys::ShareLock as pg_sys::LOCKMODE,
+    );
+}
+
+/// Take the exclusive side of the relfile-rewrite lock (a whole-
+/// relfile rewrite: build / insert-flush / vacuum-shrink). Blocks
+/// until every in-flight reader has finished its [`read_full`], and
+/// blocks new readers until [`unlock_relfile_write`]. Idempotent-
+/// safe within one transaction (same-xact locks don't self-
+/// conflict), so a caller that already holds it (nested rewrite in
+/// one tx) does not deadlock.
+///
+/// # Safety
+/// Caller must hold the appropriate heap lock (RowExclusive for the
+/// insert flush, ShareUpdateExclusive for VACUUM, AccessExclusive
+/// for build/REINDEX) and MUST pair this with exactly one
+/// [`unlock_relfile_write`].
+#[inline]
+pub(crate) unsafe fn lock_relfile_write(rel: pg_sys::Relation) {
+    pg_sys::LockPage(
+        rel,
+        RELFILE_REWRITE_LOCK_BLK,
+        pg_sys::ExclusiveLock as pg_sys::LOCKMODE,
+    );
+}
+
+/// Release the exclusive side taken by [`lock_relfile_write`].
+#[inline]
+pub(crate) unsafe fn unlock_relfile_write(rel: pg_sys::Relation) {
+    pg_sys::UnlockPage(
+        rel,
+        RELFILE_REWRITE_LOCK_BLK,
+        pg_sys::ExclusiveLock as pg_sys::LOCKMODE,
+    );
+}
+
 /// True when the relation's persistence is `'p'` (PERMANENT). For
 /// unlogged / temp indexes `GenericXLogFinish` skips the WAL
 /// record but still writes the modified page back — we don't need
@@ -560,6 +657,234 @@ pub(crate) struct PreparedParts<'a> {
     pub rotation: &'a [f32],
 }
 
+/// v1.29.1 corruption fix #2 (deferred-flush lost-update): compute
+/// the reconciled flush image — the CURRENT on-disk state with this
+/// transaction's upserts (`touched_ids`) spliced in — as owned
+/// `(codes, scales, ids)` byte/f32/u64 arrays.
+///
+/// This is the pure core of `reconcile_and_write_flush`, factored out
+/// so it is unit-testable without a live cluster. It does NOT touch
+/// the relation; the caller reads `disk_*` under the exclusive rewrite
+/// lock, calls this, then writes the result back under the same lock.
+///
+/// ## Why this exists
+///
+/// The pre-fix flush blindly rewrote the WHOLE relfile from the
+/// mutating backend's in-memory `IdMapIndex`, which is a snapshot of
+/// the on-disk state *at first-mutation time* plus this backend's
+/// adds. If a concurrent VACUUM shrank the relfile (deleted dead
+/// rows) between that snapshot and this commit, the blind rewrite
+/// RESURRECTED the deleted rows (lost update) — the true source of
+/// the "id 0 / duplicate id appears in more than one slot"
+/// corruption. Reconciling against the CURRENT disk state at flush
+/// preserves VACUUM's deletes AND other committed writers' adds,
+/// while still landing this txn's upserts.
+///
+/// ## Algorithm
+///
+/// Start from the fresh on-disk arrays. For each `id` in
+/// `touched_ids` (deduplicated, last-write-wins) look up its codes /
+/// scale in the committing backend's snapshot (`snap_*`, indexed by
+/// `snap_id_to_slot`):
+/// * if the id is already present on disk (`disk_id_to_slot`),
+///   overwrite that slot's codes + scale in place (an UPDATE);
+/// * otherwise append a new slot (an INSERT).
+///
+/// The quantized codes are byte-identical whether encoded against the
+/// disk index or the snapshot, because the Lloyd-Max codebook +
+/// rotation are a deterministic pure function of `(bit_width, dim)`
+/// (and the fixed `ROTATION_SEED`) — both indexes share them — so
+/// splicing the snapshot's stored code bytes needs no re-encode.
+///
+/// `stride` is bytes-per-vector (`dim * bit_width / 8`). Returns
+/// `(codes, scales, ids)` sized to the reconciled row count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconcile_flush_image(
+    stride: usize,
+    disk_codes: &[u8],
+    disk_scales: &[f32],
+    disk_ids: &[u64],
+    snap_codes: &[u8],
+    snap_scales: &[f32],
+    snap_ids: &[u64],
+    touched_ids: &[u64],
+) -> (Vec<u8>, Vec<f32>, Vec<u64>) {
+    use std::collections::HashMap;
+
+    let mut out_codes = disk_codes.to_vec();
+    let mut out_scales = disk_scales.to_vec();
+    let mut out_ids = disk_ids.to_vec();
+
+    // disk id -> slot (position in out_*). Mutated as we append.
+    let mut disk_id_to_slot: HashMap<u64, usize> = HashMap::with_capacity(disk_ids.len());
+    for (slot, &id) in disk_ids.iter().enumerate() {
+        disk_id_to_slot.insert(id, slot);
+    }
+    // snapshot id -> slot (source of the code bytes to splice).
+    let mut snap_id_to_slot: HashMap<u64, usize> = HashMap::with_capacity(snap_ids.len());
+    for (slot, &id) in snap_ids.iter().enumerate() {
+        snap_id_to_slot.insert(id, slot);
+    }
+
+    // Dedup touched ids, last occurrence wins (matches the in-memory
+    // index's final state for a re-touched id).
+    let mut seen: HashMap<u64, ()> = HashMap::with_capacity(touched_ids.len());
+    // Iterate in reverse so the FIRST time we see an id is its LAST
+    // upsert; skip earlier duplicates.
+    let mut ordered: Vec<u64> = Vec::with_capacity(touched_ids.len());
+    for &id in touched_ids.iter().rev() {
+        if seen.insert(id, ()).is_none() {
+            ordered.push(id);
+        }
+    }
+
+    for &id in &ordered {
+        let Some(&snap_slot) = snap_id_to_slot.get(&id) else {
+            // The id was touched but is no longer in the snapshot
+            // (e.g. removed later in the same txn). Nothing to splice.
+            continue;
+        };
+        let src_codes = &snap_codes[snap_slot * stride..(snap_slot + 1) * stride];
+        let src_scale = snap_scales[snap_slot];
+        match disk_id_to_slot.get(&id).copied() {
+            Some(dst) => {
+                // UPDATE in place.
+                out_codes[dst * stride..(dst + 1) * stride].copy_from_slice(src_codes);
+                out_scales[dst] = src_scale;
+                // out_ids[dst] already == id.
+            }
+            None => {
+                // INSERT: append a new slot.
+                let dst = out_ids.len();
+                out_codes.extend_from_slice(src_codes);
+                out_scales.push(src_scale);
+                out_ids.push(id);
+                disk_id_to_slot.insert(id, dst);
+            }
+        }
+    }
+
+    (out_codes, out_scales, out_ids)
+}
+
+/// v1.29.1 corruption fix #2: the reconcile-on-flush write path used
+/// by the deferred-commit `aminsert` PreCommit callback
+/// (`xact::flush_to_relfile`). Takes the EXCLUSIVE relfile-rewrite
+/// lock, RE-READS the current on-disk `(codes, scales, ids)` under
+/// it, splices this transaction's upserts (`touched_ids`, sourced
+/// from the committing backend's snapshot arrays) onto that fresh
+/// state via [`reconcile_flush_image`], and writes the reconciled
+/// image back — all under the one held lock so no concurrent VACUUM
+/// / flush can slip a change between the re-read and the write.
+///
+/// This replaces the pre-fix blind whole-relfile overwrite from the
+/// backend's stale snapshot, which lost concurrent VACUUM deletes.
+///
+/// Falls back to a plain full write (from the snapshot) ONLY when the
+/// index has NO existing on-disk rows to reconcile against (first
+/// build from empty / `n_vectors == 0`) or when the on-disk meta is
+/// missing — there is nothing to lose in those cases.
+///
+/// # Safety
+/// Caller holds `RowExclusiveLock` on the heap-side relation (the
+/// PreCommit path does). Takes + releases the page-level exclusive
+/// rewrite lock internally.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn reconcile_and_write_flush(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    snap_codes: &[u8],
+    snap_scales: &[f32],
+    snap_ids: &[u64],
+    touched_ids: &[u64],
+    am_version: u32,
+    prepared: PreparedParts<'_>,
+) {
+    // Take the exclusive rewrite lock for the WHOLE reconcile (read
+    // current disk state -> splice -> write). Same-xact re-entry
+    // (write_full_inner takes it again) does not self-conflict. The
+    // lock manager auto-releases at xact end if anything below
+    // longjmps.
+    lock_relfile_write(rel);
+
+    let disk_meta = read_meta(rel);
+    let stride = (dim as usize) * (bit_width as usize) / 8;
+
+    let (n_vectors, out_codes, out_scales, out_ids) = match disk_meta {
+        Some(m) if m.n_vectors > 0 => {
+            // Re-read current on-disk chains under the held lock.
+            let codes = read_chain(
+                rel,
+                m.codes_first,
+                m.stride_bytes,
+                m.rows_per_codes_page,
+                m.n_vectors,
+            );
+            let scales_bytes = read_chain(
+                rel,
+                m.scales_first,
+                std::mem::size_of::<f32>() as u32,
+                m.rows_per_scales_page,
+                m.n_vectors,
+            );
+            let ids_bytes = read_chain(
+                rel,
+                m.ids_first,
+                std::mem::size_of::<u64>() as u32,
+                m.rows_per_ids_page,
+                m.n_vectors,
+            );
+            let disk_scales: Vec<f32> = scales_bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let disk_ids: Vec<u64> = ids_bytes
+                .chunks_exact(8)
+                .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                .collect();
+            let (oc, os, oi) = reconcile_flush_image(
+                stride,
+                &codes,
+                &disk_scales,
+                &disk_ids,
+                snap_codes,
+                snap_scales,
+                snap_ids,
+                touched_ids,
+            );
+            let n = oi.len() as u64;
+            (n, oc, os, oi)
+        }
+        _ => {
+            // No existing on-disk rows (fresh index) or no meta:
+            // nothing to reconcile against, write the snapshot as-is.
+            (
+                snap_ids.len() as u64,
+                snap_codes.to_vec(),
+                snap_scales.to_vec(),
+                snap_ids.to_vec(),
+            )
+        }
+    };
+
+    write_full_inner(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        &out_codes,
+        &out_scales,
+        &out_ids,
+        am_version,
+        Some(prepared),
+        None,
+        None,
+    );
+
+    unlock_relfile_write(rel);
+}
+
 /// IVF coarse-quantizer parts persisted in v4 (IVF-1). Written by
 /// [`write_full_with_prepared_ivf`] when an index is built
 /// `WITH (lists > 0)`.
@@ -1029,6 +1354,53 @@ unsafe fn write_full_inner(
         "turbovec relfile write: scales.len() must equal n_vectors"
     );
 
+    // v1.29.1 corruption fix #4 (LAST-LINE-OF-DEFENSE persist guard):
+    // for the bijective flat/single kind (NOT IVF, whose soft-assign
+    // legitimately repeats ids across cells; NOT graph, whose
+    // slot_to_id is 0..n synthetic slot ids), a duplicate external id
+    // OR an id-0 slot is exactly the reported corruption signature
+    // ("id N appears in more than one slot"; a real CTID never encodes
+    // to 0, so an id-0 slot is always zeroed trailing bytes). If any
+    // upstream race were EVER to hand a bad slot_to_id to the persist
+    // path, abort the transaction HERE rather than write it to disk
+    // and serve it. This is a `error!` (release-active) not a
+    // `debug_assert!` on purpose — it must hold in production. It is
+    // O(n) over the ids (a HashSet build) and runs once per whole-
+    // relfile rewrite, dwarfed by the page I/O it guards.
+    // ponytail: O(n) HashSet per flush; acceptable next to the ~200MB
+    // rewrite it guards. Skip for IVF/graph where dups/synthetic ids
+    // are legal.
+    if ivf.is_none() && graph.is_none() && n_vectors > 0 {
+        use std::collections::HashSet;
+        let mut seen: HashSet<u64> = HashSet::with_capacity(slot_to_id.len());
+        for (slot, &id) in slot_to_id.iter().enumerate() {
+            if id == 0 {
+                error!(
+                    "turbovec relfile write: refusing to persist id 0 at slot {slot} \
+                     (a real CTID never encodes to 0 — this is the zeroed-trailing-slot \
+                     corruption signature). Aborting the transaction to protect the index."
+                );
+            }
+            if !seen.insert(id) {
+                error!(
+                    "turbovec relfile write: refusing to persist DUPLICATE id {id} \
+                     (appears in more than one slot; slot {slot}) for a bijective \
+                     flat/single index. Aborting the transaction to protect the index."
+                );
+            }
+        }
+    }
+    // v1.29.1 corruption fix: take the EXCLUSIVE side of the relfile-
+    // rewrite lock for the ENTIRE multi-page rewrite below. This
+    // blocks any concurrent reader ([`read_full`] / [`read_ids_only`],
+    // which take the ShareLock) from observing the meta page + chains
+    // in a half-rewritten (torn) state. Released at the bottom of
+    // this function on success, and auto-released by the lock manager
+    // if anything below `error!`s (longjmp) or the tx aborts. Same-
+    // xact re-entry (e.g. VACUUM already holds it, or a build) does
+    // not self-conflict. See `lock_relfile_write`.
+    lock_relfile_write(rel);
+
     // Phase Q-0 (v7): the SIMD-blocked chain is no longer persisted
     // (it's recomputed from the packed codes at index-open), so we
     // always plan a ZERO-length blocked chain regardless of
@@ -1231,6 +1603,11 @@ unsafe fn write_full_inner(
     if existing_after > new_total {
         pg_sys::RelationTruncate(rel, new_total);
     }
+
+    // v1.29.1 corruption fix: the whole-relfile rewrite is complete
+    // and internally consistent; release the exclusive rewrite lock
+    // so waiting readers proceed against the fully-written chains.
+    unlock_relfile_write(rel);
 }
 
 /// In-place swap-remove on a single chain: copy the row at slot
@@ -1333,13 +1710,36 @@ pub(crate) unsafe fn read_ids_only(rel: pg_sys::Relation, meta: &MetaPageData) -
     if meta.n_vectors == 0 {
         return Vec::new();
     }
+    // v1.29.1 corruption fix: same whole-chain read/rewrite
+    // serialization as `read_full`. `read_ids_only` is a reader too
+    // (turbovec_check, scan-path visibility). VACUUM's call already
+    // holds the exclusive side (same xact => no self-conflict). The
+    // ShareLock auto-releases if `read_chain` `error!`s or the tx
+    // aborts, and is released explicitly below on success.
+    lock_relfile_read(rel);
+    // v1.29.1 corruption fix (stale-meta race): RE-READ the meta page
+    // UNDER the lock so the ids-chain offsets / n_vectors we read
+    // with are the CURRENT relfile's, not the caller's pre-lock
+    // snapshot. A concurrent flush/vacuum completing between the
+    // caller's `read_meta` and this lock left `turbovec_check`
+    // (and any other read_ids_only caller) reading the NEW chain
+    // with STALE offsets/count — an over-read into zeroed trailing
+    // slots that surfaced as a transient "id 0 appears in more than
+    // one slot" false positive. Fall back to the caller's meta only
+    // if the meta page vanished (relation being dropped).
+    let cur = read_meta(rel).unwrap_or(*meta);
+    if cur.n_vectors == 0 {
+        unlock_relfile_read(rel);
+        return Vec::new();
+    }
     let ids_bytes = read_chain(
         rel,
-        meta.ids_first,
+        cur.ids_first,
         std::mem::size_of::<u64>() as u32,
-        meta.rows_per_ids_page,
-        meta.n_vectors,
+        cur.rows_per_ids_page,
+        cur.n_vectors,
     );
+    unlock_relfile_read(rel);
     ids_bytes
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
@@ -1541,17 +1941,53 @@ pub(crate) unsafe fn truncate_ids_tail(rel: pg_sys::Relation, meta: &MetaPageDat
 }
 
 /// Read every chain back into Rust-owned buffers. Returns
-/// `(packed_codes, scales, slot_to_id)`.
+/// `(meta, packed_codes, scales, slot_to_id)` where `meta` is a
+/// snapshot of the meta page RE-READ atomically under the shared
+/// relfile-rewrite lock alongside the chains.
+///
+/// v1.29.1 corruption fix: the passed-in `meta_hint` is used ONLY
+/// for the `n_vectors == 0` fast path. All chain reads — AND the
+/// `meta` returned to the caller — come from a snapshot re-read
+/// under the lock. This closes the stale-meta race: a caller reads
+/// the meta page separately (in `ambeginscan` / `aminsert`) and
+/// then calls `read_full`; without re-reading under the lock, a
+/// concurrent rewrite completing in that window would leave the
+/// caller reading the NEW chains with STALE offsets / `n_vectors`,
+/// over-reading into zeroed or adjacent-chain pages (surfacing as
+/// the reported "duplicate ids ... id 0 appears in more than one
+/// slot"). Callers MUST size the reconstructed index from the
+/// RETURNED `meta`, not their pre-read hint.
 ///
 /// # Safety
 ///
 /// Caller must hold a relation reference.
-pub(crate) unsafe fn read_full(
+pub(crate) unsafe fn read_full_consistent(
     rel: pg_sys::Relation,
-    meta: &MetaPageData,
-) -> (Vec<u8>, Vec<f32>, Vec<u64>) {
+    meta_hint: &MetaPageData,
+) -> (MetaPageData, Vec<u8>, Vec<f32>, Vec<u64>) {
+    if meta_hint.n_vectors == 0 {
+        return (*meta_hint, Vec::new(), Vec::new(), Vec::new());
+    }
+    // v1.29.1 corruption fix: serialize the whole (meta + chains)
+    // read against a concurrent whole-relfile rewrite (insert-flush
+    // / vacuum-shrink). The heavyweight ShareLock is released
+    // explicitly on every return path below, and auto-released by
+    // the lock manager if any read `error!`s (longjmp) or the tx
+    // aborts — so a longjmp cannot leak it. See `lock_relfile_read`.
+    lock_relfile_read(rel);
+    // Re-read the meta page UNDER the lock so offsets + n_vectors we
+    // read the chains with are the CURRENT relfile's, not the
+    // caller's pre-lock snapshot.
+    let meta = match read_meta(rel) {
+        Some(m) => m,
+        None => {
+            unlock_relfile_read(rel);
+            return (*meta_hint, Vec::new(), Vec::new(), Vec::new());
+        }
+    };
     if meta.n_vectors == 0 {
-        return (Vec::new(), Vec::new(), Vec::new());
+        unlock_relfile_read(rel);
+        return (meta, Vec::new(), Vec::new(), Vec::new());
     }
     let codes = read_chain(
         rel,
@@ -1574,6 +2010,7 @@ pub(crate) unsafe fn read_full(
         meta.rows_per_ids_page,
         meta.n_vectors,
     );
+    unlock_relfile_read(rel);
     let scales: Vec<f32> = scales_bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1582,6 +2019,24 @@ pub(crate) unsafe fn read_full(
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect();
+    (meta, codes, scales, ids)
+}
+
+/// Back-compat wrapper: [`read_full_consistent`] but dropping the
+/// returned meta, for the handful of callers (tests, colbert,
+/// ambulkdelete bookkeeping) that only need the buffers and whose
+/// own `meta` snapshot is already taken under a lock that excludes
+/// a concurrent rewrite (AccessExclusive/ShareUpdateExclusive). New
+/// scan/insert code should prefer `read_full_consistent` and size
+/// the index from the RETURNED meta.
+///
+/// # Safety
+/// Caller must hold a relation reference.
+pub(crate) unsafe fn read_full(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> (Vec<u8>, Vec<f32>, Vec<u64>) {
+    let (_m, codes, scales, ids) = read_full_consistent(rel, meta);
     (codes, scales, ids)
 }
 
@@ -1951,4 +2406,148 @@ pub(crate) unsafe fn force_meta_set_degraded(rel: pg_sys::Relation) {
     *degraded_byte = 1u8;
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::reconcile_flush_image;
+
+    // v1.29.1 corruption fix #2 (deferred-flush lost-update) gate.
+    // These run under plain `cargo test --lib` (no PostgreSQL cluster).
+    // They assert the pure reconcile core preserves a concurrent
+    // VACUUM's deletes while landing this txn's upserts. A blind
+    // whole-snapshot overwrite (the pre-fix behaviour) fails
+    // `vacuum_delete_is_not_resurrected`.
+
+    // 1 byte/vec stride for these tiny fixtures (codes are opaque here).
+    fn v(id: u64) -> u8 {
+        // deterministic "code" for an id, so we can assert which slot
+        // holds which id's data.
+        (id & 0xff) as u8
+    }
+
+    #[test]
+    fn upsert_new_id_appends_onto_current_disk() {
+        // Disk currently has ids [10, 11]. Txn inserted id 12.
+        let disk_codes = vec![v(10), v(11)];
+        let disk_scales = vec![10.0f32, 11.0];
+        let disk_ids = vec![10u64, 11];
+        // Snapshot (this backend's index) has [10, 11, 12].
+        let snap_codes = vec![v(10), v(11), v(12)];
+        let snap_scales = vec![10.0f32, 11.0, 12.0];
+        let snap_ids = vec![10u64, 11, 12];
+        let touched = vec![12u64];
+        let (c, s, i) = reconcile_flush_image(
+            1,
+            &disk_codes,
+            &disk_scales,
+            &disk_ids,
+            &snap_codes,
+            &snap_scales,
+            &snap_ids,
+            &touched,
+        );
+        assert_eq!(i, vec![10, 11, 12]);
+        assert_eq!(c, vec![v(10), v(11), v(12)]);
+        assert_eq!(s, vec![10.0, 11.0, 12.0]);
+    }
+
+    #[test]
+    fn vacuum_delete_is_not_resurrected() {
+        // THE regression. This backend loaded disk when it had
+        // [10, 11, 12, 13] (its snapshot), then inserted 99. Meanwhile
+        // a concurrent VACUUM deleted 11 and 12, so CURRENT disk is
+        // [10, 13]. Reconcile must produce [10, 13, 99] — NOT resurrect
+        // 11/12. A blind snapshot overwrite would write
+        // [10, 11, 12, 13, 99], resurrecting the deleted rows.
+        let disk_codes = vec![v(10), v(13)];
+        let disk_scales = vec![10.0f32, 13.0];
+        let disk_ids = vec![10u64, 13];
+        let snap_codes = vec![v(10), v(11), v(12), v(13), v(99)];
+        let snap_scales = vec![10.0f32, 11.0, 12.0, 13.0, 99.0];
+        let snap_ids = vec![10u64, 11, 12, 13, 99];
+        let touched = vec![99u64];
+        let (c, s, i) = reconcile_flush_image(
+            1,
+            &disk_codes,
+            &disk_scales,
+            &disk_ids,
+            &snap_codes,
+            &snap_scales,
+            &snap_ids,
+            &touched,
+        );
+        assert_eq!(
+            i,
+            vec![10, 13, 99],
+            "vacuum-deleted 11 and 12 must stay deleted"
+        );
+        assert_eq!(c, vec![v(10), v(13), v(99)]);
+        assert_eq!(s, vec![10.0, 13.0, 99.0]);
+        // No duplicate ids, no resurrection.
+        assert!(!i.contains(&11));
+        assert!(!i.contains(&12));
+    }
+
+    #[test]
+    fn on_conflict_update_overwrites_in_place_no_dup() {
+        // Disk has [10, 11]. Txn ON-CONFLICT-updated id 11 (new codes)
+        // and inserted id 12. Reconcile: 11 updated in place (no dup),
+        // 12 appended.
+        let disk_codes = vec![v(10), v(11)];
+        let disk_scales = vec![10.0f32, 11.0];
+        let disk_ids = vec![10u64, 11];
+        // Snapshot's slot for 11 carries NEW code 0xAB, scale 111.0.
+        let snap_codes = vec![v(10), 0xAB, v(12)];
+        let snap_scales = vec![10.0f32, 111.0, 12.0];
+        let snap_ids = vec![10u64, 11, 12];
+        let touched = vec![11u64, 12u64];
+        let (c, s, i) = reconcile_flush_image(
+            1,
+            &disk_codes,
+            &disk_scales,
+            &disk_ids,
+            &snap_codes,
+            &snap_scales,
+            &snap_ids,
+            &touched,
+        );
+        assert_eq!(i, vec![10, 11, 12]);
+        assert_eq!(
+            c,
+            vec![v(10), 0xAB, v(12)],
+            "id 11's codes updated in place"
+        );
+        assert_eq!(s, vec![10.0, 111.0, 12.0]);
+        // exactly one slot for id 11 (no duplicate).
+        assert_eq!(i.iter().filter(|&&x| x == 11).count(), 1);
+    }
+
+    #[test]
+    fn duplicate_touched_id_last_write_wins() {
+        // id 12 touched twice in the txn (insert then re-add). The
+        // snapshot holds its final state; reconcile must land exactly
+        // one slot for it.
+        let disk_codes: Vec<u8> = vec![v(10)];
+        let disk_scales = vec![10.0f32];
+        let disk_ids = vec![10u64];
+        let snap_codes = vec![v(10), 0xCD];
+        let snap_scales = vec![10.0f32, 12.5];
+        let snap_ids = vec![10u64, 12];
+        let touched = vec![12u64, 12u64, 12u64];
+        let (c, s, i) = reconcile_flush_image(
+            1,
+            &disk_codes,
+            &disk_scales,
+            &disk_ids,
+            &snap_codes,
+            &snap_scales,
+            &snap_ids,
+            &touched,
+        );
+        assert_eq!(i, vec![10, 12]);
+        assert_eq!(c, vec![v(10), 0xCD]);
+        assert_eq!(s, vec![10.0, 12.5]);
+        assert_eq!(i.iter().filter(|&&x| x == 12).count(), 1);
+    }
 }

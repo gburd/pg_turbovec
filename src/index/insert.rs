@@ -148,7 +148,13 @@ unsafe fn aminsert_relfile(
             let (idx_index, n_vectors_existing, version_existing) =
                 match relfile::read_meta(index_relation) {
                     Some(meta) if meta.n_vectors > 0 => {
-                        let (codes, scales, ids) = relfile::read_full(index_relation, &meta);
+                        // v1.29.1 corruption fix: read meta + chains
+                        // atomically under the shared rewrite lock and
+                        // build the index from the RETURNED fresh meta
+                        // (a concurrent flush/vacuum may have rewritten
+                        // the relfile since our `read_meta` above).
+                        let (meta, codes, scales, ids) =
+                            relfile::read_full_consistent(index_relation, &meta);
                         // Duplicate-id corrupt relfile: fail loudly
                         // with an actionable REINDEX hint (same as the
                         // read path) BEFORE turbovec rejects it with
@@ -194,6 +200,7 @@ unsafe fn aminsert_relfile(
                 n_vectors: n_vectors_existing,
                 version: version_existing,
                 live_ids,
+                touched_ids: Vec::new(),
             };
             cache::am_install(
                 key,
@@ -234,6 +241,14 @@ unsafe fn aminsert_relfile(
     }
 
     let updated = cache::am_mark_dirty(key, |p| {
+        // v1.29.1 corruption fix #2: record EVERY upserted id (new or
+        // ON-CONFLICT re-add) so the PreCommit flush can splice just
+        // these onto fresh on-disk state instead of blind-overwriting
+        // from this backend's stale snapshot. Both the fresh-insert
+        // and the IdAlreadyPresent remove+re-add branch above land
+        // the id in this backend's in-memory index, so both must be
+        // reconciled.
+        p.touched_ids.push(id);
         if !id_already_present {
             // Keep the `live_ids` / `n_vectors` mirror in step with the
             // in-memory index's `slot_to_id`. As of v1.28.4 the flush

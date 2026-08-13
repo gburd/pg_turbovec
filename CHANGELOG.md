@@ -4,6 +4,76 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.2] — 2026-08-13
+
+**Data-corruption fix: concurrent VACUUM + deferred-flush lost-update
+in the flat/single relfile.** Patch bump — **no wire change (stays
+v7), no SQL surface change, no REINDEX to upgrade** (existing indexes
+are read + written correctly in place by the new binary). A running
+index that already corrupted needs a one-time `REINDEX` to clear the
+bad state, but the *upgrade itself* is `ALTER EXTENSION` + restart.
+
+Continuous concurrent inserts + autovacuum into a large flat
+`turbovec.vector` index corrupted the `.tvim` id table ("duplicate ids
+… id 0 appears in more than one slot", XX001) and SIGABRT-crashed
+backends. Root cause was a set of concurrency races between the
+whole-relfile operations, NOT on-disk-format corruption:
+
+1. **Deferred-flush lost-update (the load-bearing bug).** Each writer
+   loads the whole index into a per-backend in-memory snapshot on its
+   first mutation and, at `PreCommit`, rewrote the ENTIRE relfile from
+   that snapshot. A concurrent VACUUM that shrank the relfile (deleted
+   dead rows) in between was **clobbered** — the committing writer
+   resurrected the deleted rows from its stale pre-VACUUM snapshot,
+   reintroducing dead/duplicate ids. Fixed with **reconcile-on-flush**:
+   under the exclusive rewrite lock at `PreCommit`, re-read the CURRENT
+   on-disk `(codes, scales, ids)` and splice ONLY this transaction's
+   upserted ids onto it (`relfile::reconcile_flush_image` /
+   `reconcile_and_write_flush`), never a blind whole-snapshot
+   overwrite. VACUUM's deletes and other backends' committed inserts
+   survive.
+2. **VACUUM stale-snapshot write.** `ambulkdelete` read the ids chain,
+   computed dead slots, and only THEN took the write lock for the
+   swap-remove — using the pre-lock `meta`/`dead_slots`. A flush
+   completing in that window left VACUUM swap-removing against a
+   just-rewritten chain. Fixed by taking the exclusive rewrite lock
+   for the WHOLE bulkdelete (ids read → dead-slot compute → swap →
+   shrink → truncate) on a snapshot re-read under the lock.
+3. **`read_rotation` unlocked window.** `install_whole_index` /
+   `install_graph_index` read the chains under the shared lock, then
+   read the rotation chain UNLOCKED; a concurrent rewrite could move
+   or truncate it. Fixed by bracketing the whole install (chains +
+   rotation + adjacency + tombstones) under one outer shared lock.
+4. **Stale-meta torn reads in `read_ids_only`** (used by
+   `turbovec.turbovec_check` and the scan visibility path): it read
+   the ids chain with the caller's pre-lock `meta`. Fixed by
+   re-reading meta under the shared lock, atomically with the ids.
+5. **Hardening (last line of defense):** the persist path now refuses
+   to write an id-0 or a duplicate id for the bijective flat/single
+   kind, aborting the transaction rather than persisting the
+   corruption signature.
+
+Proven on an i4i.8xlarge (PG18) against a 1.76M-row 768d flat index: a
+comprehensive sustained-load run (VACUUM every 3s + 4 writers doing
+batch-16/128 `ON CONFLICT DO UPDATE` with fresh-backend-first-insert
+churn + 3 scanners) that **corrupts the pre-fix binary in 60 s** (id-0
+duplicate, 35 SIGABRT/recovery events) ran **70.5 minutes on the fixed
+binary with ZERO corruption**: 46/46 in-flight `turbovec_check` reads
+clean, 0 dup-id, 0 SIGABRT, 0 recovery, ~19,470 write transactions
+concurrent with VACUUM. Insert throughput regresses ~13% (15→13
+rows/s on a 1M-row flat index, single writer) — the reconcile adds a
+full ids+scales re-read at flush; the dominant per-flush whole-relfile
+rewrite is unchanged. Warm kNN and build time unaffected (1M build
+72 s, warm kNN ~112 ms/query server-side). Repro harness in
+`benches/corruption-repro/`.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE` + restart the backend to pick up
+the new `.so`. No wire change, no REINDEX for the upgrade. An index
+that has *already* corrupted under the old binary should be
+`REINDEX`ed once to clear the bad on-disk state.
+
 ## [1.29.1] — 2026-08-11
 
 **Packaging fix: ship in-place `ALTER EXTENSION UPDATE` scripts.** Patch

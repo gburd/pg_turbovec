@@ -110,14 +110,22 @@ unsafe fn flush_to_relfile(
         // already the user's stated intent.
         return;
     }
-    // SINGLE SOURCE OF TRUTH for the persisted row count: the
-    // in-memory `IdMapIndex`'s own `slot_to_id` length, NOT the
-    // separately-incremented `PersistState.n_vectors`. See
-    // [`reconciled_row_count`] for the full rationale. This aborts
-    // the transaction (the matching Abort callback then evicts the
-    // dirty cache entry) rather than silently persisting a
-    // mismatched meta page.
-    let n_vectors = reconciled_row_count(state.n_vectors, idx.slot_to_id().len()).unwrap_or_else(
+    // v1.29.1 corruption fix #2 (deferred-flush lost-update):
+    // RECONCILE this transaction's upserts onto the CURRENT on-disk
+    // state instead of blindly rewriting the whole relfile from this
+    // backend's stale in-memory snapshot. `write_full_with_prepared`
+    // used to overwrite from `idx` wholesale; if a concurrent VACUUM
+    // shrank the relfile since `idx` was loaded, that overwrite
+    // resurrected the deleted rows (the id-0 / duplicate-id source).
+    //
+    // `reconcile_and_write_flush` takes the exclusive rewrite lock,
+    // re-reads the current on-disk (codes, scales, ids), splices in
+    // ONLY the ids this txn touched (`state.touched_ids`, sourced
+    // from `idx`'s own code/scale/id arrays), and writes the merged
+    // image — preserving VACUUM's deletes and other backends'
+    // committed inserts. The drift guard is retained purely as a
+    // cross-check that `idx`'s own arrays are internally consistent.
+    let _n_vectors = reconciled_row_count(state.n_vectors, idx.slot_to_id().len()).unwrap_or_else(
         |(mirror, authoritative)| {
             pgrx::error!(
                 "turbovec persist: row-count drift detected \
@@ -127,29 +135,21 @@ unsafe fn flush_to_relfile(
             )
         },
     );
-    crate::index::relfile::write_full_with_prepared(
+    idx.prepare_eager();
+    let rotation = idx.rotation();
+    crate::index::relfile::reconcile_and_write_flush(
         rel,
         state.bit_width as u8,
         state.dim as u32,
-        n_vectors,
         idx.packed_codes(),
         idx.scales(),
         idx.slot_to_id(),
+        &state.touched_ids,
         state.version as u32,
-        {
-            // Pre-bake the codebook + rotation so backends opening
-            // the post-commit relfile don't pay the per-backend
-            // ~5–8 s Lloyd-Max compute / QR. Phase P; mirrors the
-            // ambuild path. Phase Q-0 (v7) no longer persists the
-            // SIMD-blocked chain — it's recomputed from the packed
-            // codes at index-open — so we don't hand it over here.
-            idx.prepare_eager();
-            let rotation = idx.rotation();
-            crate::index::relfile::PreparedParts {
-                centroids: idx.centroids(),
-                boundaries: idx.boundaries(),
-                rotation,
-            }
+        crate::index::relfile::PreparedParts {
+            centroids: idx.centroids(),
+            boundaries: idx.boundaries(),
+            rotation,
         },
     );
     pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);

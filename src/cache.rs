@@ -1140,6 +1140,18 @@ pub struct PersistState {
     pub n_vectors: i64,
     pub version: i32,
     pub live_ids: Vec<u64>,
+    /// v1.29.1 corruption fix #2 (deferred-flush lost-update): the
+    /// SET of external ids this transaction upserted (inserted or
+    /// ON-CONFLICT re-added) into the in-memory `IdMapIndex`. At
+    /// PreCommit the flush path re-reads the CURRENT on-disk state
+    /// under the exclusive rewrite lock and splices ONLY these ids'
+    /// codes onto it — rather than blindly overwriting the whole
+    /// relfile from this backend's stale pre-VACUUM snapshot (which
+    /// resurrected rows a concurrent VACUUM had deleted, the true
+    /// id-0 / duplicate-id source). Deduplicated (a Vec kept in
+    /// insertion order; the flush dedups). Bounded by this txn's own
+    /// insert count, not the corpus size.
+    pub touched_ids: Vec<u64>,
 }
 
 /// What a cache entry actually holds. The index-AM scan path

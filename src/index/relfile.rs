@@ -111,20 +111,11 @@ const GENERIC_XLOG_BATCH: usize = pg_sys::MAX_GENERIC_XLOG_PAGES as usize;
 /// and writes.
 const RELFILE_REWRITE_LOCK_BLK: pg_sys::BlockNumber = META_BLKNO;
 
-/// Take the shared side of the relfile-rewrite lock (a reader
-/// reconstructing the in-memory index from the chains). Released
-/// by [`unlock_relfile_read`].
-///
-/// # Safety
-/// Caller must hold a relation reference and MUST pair this with
-/// exactly one [`unlock_relfile_read`] on all paths (including
-/// error unwinds — see [`read_full`], which brackets its body).
-#[inline]
 // v1.29.4 corruption-fix regression harness (test-only). Two knobs let a
 // single-backend `#[pg_test]` prove the meta-LAST write ordering:
 //   * WRITE_META_FIRST_FOR_TEST: restore the PRE-FIX order (meta written
 //     BEFORE the chains) so the test can demonstrate the fail-before.
-//   * INJECT_TEAR_BEFORE_META: simulate a `pg_terminate_backend`/cancel
+//   * INJECT_TEAR_BEFORE_IDS: simulate a `pg_terminate_backend`/cancel
 //     longjmp mid-rewrite by returning from write_full_inner right after
 //     the codes/scales chains but BEFORE the ids chain + final meta write
 //     (the exact window the real interrupt hits).
@@ -135,6 +126,16 @@ thread_local! {
     pub(crate) static INJECT_TEAR_BEFORE_IDS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
+
+/// Take the shared side of the relfile-rewrite lock (a reader
+/// reconstructing the in-memory index from the chains). Released
+/// by [`unlock_relfile_read`].
+///
+/// # Safety
+/// Caller must hold a relation reference and MUST pair this with
+/// exactly one [`unlock_relfile_read`] on all paths (including
+/// error unwinds — see [`read_full`], which brackets its body).
+#[inline]
 
 pub(crate) unsafe fn lock_relfile_read(rel: pg_sys::Relation) {
     pg_sys::LockPage(

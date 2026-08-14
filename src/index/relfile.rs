@@ -120,6 +120,22 @@ const RELFILE_REWRITE_LOCK_BLK: pg_sys::BlockNumber = META_BLKNO;
 /// exactly one [`unlock_relfile_read`] on all paths (including
 /// error unwinds — see [`read_full`], which brackets its body).
 #[inline]
+// v1.29.4 corruption-fix regression harness (test-only). Two knobs let a
+// single-backend `#[pg_test]` prove the meta-LAST write ordering:
+//   * WRITE_META_FIRST_FOR_TEST: restore the PRE-FIX order (meta written
+//     BEFORE the chains) so the test can demonstrate the fail-before.
+//   * INJECT_TEAR_BEFORE_META: simulate a `pg_terminate_backend`/cancel
+//     longjmp mid-rewrite by returning from write_full_inner right after
+//     the codes/scales chains but BEFORE the ids chain + final meta write
+//     (the exact window the real interrupt hits).
+#[cfg(any(test, feature = "pg_test"))]
+thread_local! {
+    pub(crate) static WRITE_META_FIRST_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    pub(crate) static INJECT_TEAR_BEFORE_IDS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 pub(crate) unsafe fn lock_relfile_read(rel: pg_sys::Relation) {
     pg_sys::LockPage(
         rel,
@@ -843,6 +859,31 @@ pub(crate) unsafe fn reconcile_and_write_flush(
                 .chunks_exact(8)
                 .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect();
+            // v1.29.4 corruption fix (deferred-flush GUARD, belt-and-
+            // suspenders): before we splice this txn's upserts onto the
+            // CURRENT on-disk ids and re-persist them, verify the on-disk
+            // ids we just read are a clean bijection. If a PRE-FIX binary
+            // (or any other cause) already left an id-0 / duplicate slot on
+            // disk, reconciling onto it would ENTRENCH the corruption
+            // (re-persist the bad slots as "real" data). Aborting the flush
+            // here with an actionable REINDEX hint is retryable; silently
+            // re-persisting on-disk corruption is not. The meta-LAST
+            // ordering above prevents this binary from CREATING the hole;
+            // this guard stops it from PROPAGATING a pre-existing one.
+            if let Some(bad) = crate::index::scan::first_duplicate_id(&disk_ids) {
+                unlock_relfile_write(rel);
+                let idx_name = crate::index::scan::index_relname(rel);
+                pgrx::ereport!(
+                    pgrx::PgLogLevel::ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+                    format!(
+                        "turbovec deferred-flush: refusing to reconcile onto a corrupt .tvim id table in index \"{idx_name}\" (id {bad} appears in more than one slot on disk); aborting this transaction to avoid entrenching the corruption"
+                    ),
+                    format!(
+                        "Run `REINDEX INDEX {idx_name};` to rebuild it from the heap. This on-disk state was left by an older binary (pre-v1.29.4) whose in-place relfile rewrite could tear on `pg_terminate_backend`/cancel; v1.29.4 writes the meta page LAST so new flushes can no longer create it."
+                    )
+                );
+            }
             let (oc, os, oi) = reconcile_flush_image(
                 stride,
                 &codes,
@@ -1471,8 +1512,44 @@ unsafe fn write_full_inner(
         extend_to(rel, new_total);
     }
 
-    write_meta(rel, &meta);
+    // TEST-ONLY: reproduce the PRE-FIX meta-first ordering on demand so a
+    // #[pg_test] can show the fail-before (see WRITE_META_FIRST_FOR_TEST).
+    #[cfg(any(test, feature = "pg_test"))]
+    let _meta_first_for_test = WRITE_META_FIRST_FOR_TEST.with(|c| c.get());
+    #[cfg(any(test, feature = "pg_test"))]
+    if _meta_first_for_test {
+        write_meta(rel, &meta);
+    }
 
+    // v1.29.4 corruption fix (VACUUM-INDEPENDENT torn-write on interrupt):
+    // Write the row chains FIRST and the meta page LAST. This mirrors the
+    // build path's `write_blocked_phase_and_meta` crash-safety invariant.
+    //
+    // The bug this fixes: `write_chain_at` polls `check_for_interrupts!()`
+    // at the top of every GenericXLog batch, so a `pg_terminate_backend`
+    // (SIGTERM -> ProcDiePending) or a query-cancel during a deferred
+    // PreCommit flush can longjmp (FATAL) out of the chain write. The
+    // per-batch `GenericXLogFinish` page changes are PHYSICAL (WAL-logged,
+    // NOT rolled back on the transaction abort). With the OLD order
+    // (write_meta first, then chains), an interrupt after the meta commit
+    // but before the ids chain finished left `meta.n_vectors = N` pointing
+    // at an ids chain whose appended (or in-place) region was still the
+    // zero-initialised page bytes -> "id 0 appears in more than one slot"
+    // (a contiguous zeroed run in the middle/tail of the ids chain, with
+    // `count_matches` still true because the chain is physically N slots
+    // long). No VACUUM required. Evidence: a 730-slot zeroed run == the
+    // tail of one ids page, appearing immediately after the first
+    // writer-restart (`pg_terminate_backend`) in a 1.84M-row upsert repro.
+    //
+    // By writing every chain first and the meta LAST, an interrupt during
+    // the chain writes leaves block 0 (the meta) UNCHANGED, so readers /
+    // the next reconcile-flush still observe the previous, fully-valid
+    // `n_vectors` + chains. Any pages we extended/partially wrote past the
+    // old count are simply unreferenced until the next full rewrite (or
+    // the `RelationTruncate` below). The meta write itself is a single
+    // GenericXLog page op with no interrupt poll, so it cannot tear.
+    // Truncate stays AFTER the meta so a shrink never leaves the meta
+    // referencing a page past EOF.
     if n_vectors > 0 {
         write_chain_at(
             rel,
@@ -1494,6 +1571,17 @@ unsafe fn write_full_inner(
             meta.rows_per_scales_page,
             n_vectors,
         );
+
+        // TEST-ONLY: simulate a pg_terminate_backend/cancel longjmp landing
+        // AFTER codes+scales but BEFORE the ids chain (the real interrupt
+        // window). With meta-LAST the meta page is still the pre-flush one,
+        // so a reload observes the previous valid n_vectors + ids; with the
+        // pre-fix meta-FIRST order the meta already advanced -> torn ids.
+        #[cfg(any(test, feature = "pg_test"))]
+        if INJECT_TEAR_BEFORE_IDS.with(|c| c.get()) {
+            unlock_relfile_write(rel);
+            return;
+        }
 
         // Ids chain.
         let ids_bytes: &[u8] = std::slice::from_raw_parts(
@@ -1599,6 +1687,11 @@ unsafe fn write_full_inner(
     // orphan pages until the next REINDEX. `RelationTruncate`
     // emits its own WAL record (`XLOG_SMGR_TRUNCATE`) and is
     // crash-safe.
+    // v1.29.4 corruption fix (meta-LAST): the row chains are fully
+    // written; commit the meta page NOW so `n_vectors` only ever advances
+    // to N once the chain bytes backing all N slots are durably in place.
+    write_meta(rel, &meta);
+
     let existing_after = nblocks(rel);
     if existing_after > new_total {
         pg_sys::RelationTruncate(rel, new_total);

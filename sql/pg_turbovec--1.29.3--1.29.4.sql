@@ -1,0 +1,5 @@
+-- pg_turbovec 1.29.3 -> 1.29.4
+-- VACUUM-independent torn-write corruption fix (meta-page written LAST).
+-- No SQL surface change; no new/altered objects. ALTER EXTENSION UPDATE is
+-- sufficient; no REINDEX to upgrade (a pre-1.29.4-corrupted index needs a
+-- one-time REINDEX to clear the bad state).

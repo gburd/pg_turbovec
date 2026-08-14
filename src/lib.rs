@@ -917,6 +917,163 @@ mod tests {
         );
     }
 
+    /// v1.29.4 regression: VACUUM-INDEPENDENT torn-write on interrupt.
+    ///
+    /// ROOT CAUSE (proven on EC2, 1.84M-row 768d bit_width=4 partial flat
+    /// index, NO vacuum): the deferred PreCommit flush rewrites the whole
+    /// relfile via `write_full_inner`, which polls `check_for_interrupts!()`
+    /// inside `write_chain_at`. A `pg_terminate_backend`/cancel during the
+    /// flush longjmps (FATAL) out mid-rewrite; the per-batch GenericXLog
+    /// page writes are physical (WAL-logged, NOT rolled back on abort). With
+    /// the PRE-FIX order (meta written FIRST, then chains), an interrupt
+    /// after the meta commit but before the ids chain left meta.n_vectors=N
+    /// pointing at an ids chain whose appended region was still zero-init
+    /// page bytes -> a contiguous zeroed run read back as "id 0 in more than
+    /// one slot" (count_matches still true). Observed on-disk: a 730-slot
+    /// (and, at batch=16, a 16-slot) zeroed run == the tail of one ids page,
+    /// appearing right after the first writer restart.
+    ///
+    /// FIX: `write_full_inner` writes the row CHAINS FIRST and the META
+    /// PAGE LAST. An interrupt during the chain writes leaves block 0 (the
+    /// meta) UNCHANGED, so a reload observes the previous, fully-valid
+    /// n_vectors + ids.
+    ///
+    /// This test injects the exact interrupt window
+    /// (`INJECT_TEAR_BEFORE_IDS`) and toggles the ordering
+    /// (`WRITE_META_FIRST_FOR_TEST`) to show BOTH sides:
+    ///   * meta-FIRST + tear  => corrupt on reload (the pre-fix bug), and
+    ///   * meta-LAST (fixed) + tear => clean on reload (the ids never
+    ///     appear because the meta stayed at the pre-flush count).
+    #[pg_test]
+    fn torn_flush_on_interrupt_meta_last_stays_clean() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_torn (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_torn SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+             FROM generate_series(1, 16) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_torn_idx ON t_torn USING turbovec (emb vec_ip_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_torn_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // Helper: load the on-disk index into a mutable IdMapIndex + a
+        // PersistState with `n_new` fresh appended rows staged as upserts
+        // (exactly what the aminsert closure + reconcile flush would see).
+        let build_flush_state = |n_new: u64| unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let dim = meta.dim as usize;
+            let bit_width = meta.bit_width as usize;
+            let mut idx = IdMapIndex::from_id_map_parts(
+                bit_width,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+            )
+            .expect("from_id_map_parts");
+            let mut state = PersistState {
+                bit_width: bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            // Fresh distinct ids well above the seeded 1..16 (never 0).
+            for k in 0..n_new {
+                let new_id = 1000 + k;
+                let v: Vec<f32> = (0..dim).map(|j| (new_id as f32) + j as f32).collect();
+                idx.add_with_ids(&v, &[new_id]).expect("add");
+                state.live_ids.push(new_id);
+                state.touched_ids.push(new_id);
+                state.n_vectors += 1;
+                state.version += 1;
+            }
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state)
+        };
+
+        let reload = || unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta after flush");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (m.n_vectors, ids)
+        };
+
+        // ---- (A) FAIL-BEFORE: pre-fix meta-FIRST order + tear => corrupt.
+        let (idx_a, state_a) = build_flush_state(16);
+        relfile::WRITE_META_FIRST_FOR_TEST.with(|c| c.set(true));
+        relfile::INJECT_TEAR_BEFORE_IDS.with(|c| c.set(true));
+        unsafe {
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx_a, &state_a);
+        }
+        relfile::WRITE_META_FIRST_FOR_TEST.with(|c| c.set(false));
+        relfile::INJECT_TEAR_BEFORE_IDS.with(|c| c.set(false));
+        let (nv_a, ids_a) = reload();
+        // meta advanced to 32 but the 16 appended ids were never written ->
+        // zeroed trailing slots read as id 0 (the reported corruption).
+        assert_eq!(
+            nv_a, 32,
+            "meta-first flush advanced n_vectors before the tear"
+        );
+        assert!(
+            ids_a.contains(&0) || crate::index::scan::first_duplicate_id(&ids_a).is_some(),
+            "PRE-FIX (meta-first) torn flush MUST leave id 0 / duplicate on disk \
+             (this is the corruption the fix prevents); got ids len {}",
+            ids_a.len()
+        );
+
+        // Repair to a known-clean state before testing the fixed path.
+        Spi::run("REINDEX INDEX t_torn_idx").unwrap();
+        let (nv_clean, ids_clean) = reload();
+        assert_eq!(nv_clean, 16, "reindex restored the 16-row clean index");
+        assert_eq!(crate::index::scan::first_duplicate_id(&ids_clean), None);
+
+        // ---- (B) PASS-AFTER: meta-LAST (fixed) + same tear => clean.
+        let (idx_b, state_b) = build_flush_state(16);
+        relfile::INJECT_TEAR_BEFORE_IDS.with(|c| c.set(true)); // meta-first knob OFF
+        unsafe {
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx_b, &state_b);
+        }
+        relfile::INJECT_TEAR_BEFORE_IDS.with(|c| c.set(false));
+        let (nv_b, ids_b) = reload();
+        // The meta was NOT written (it is last, after the ids chain the tear
+        // skipped), so n_vectors stays at the pre-flush 16 and every id is a
+        // real, valid id. No id 0, no duplicate, no count mismatch.
+        assert_eq!(
+            nv_b, 16,
+            "meta-LAST: a torn flush must leave n_vectors at the pre-flush count"
+        );
+        assert_eq!(
+            ids_b.len(),
+            16,
+            "ids chain length matches the preserved meta"
+        );
+        assert!(
+            !ids_b.contains(&0),
+            "meta-LAST torn flush must NOT leave an id-0 slot on disk"
+        );
+        assert_eq!(
+            crate::index::scan::first_duplicate_id(&ids_b),
+            None,
+            "meta-LAST torn flush must leave a clean bijection (no duplicate ids)"
+        );
+    }
+
     /// v1.28.4 issue B guard (negative): if the `PersistState`
     /// row-count mirror ever DRIFTS from the authoritative
     /// `slot_to_id.len()`, the flush must ABORT the transaction with
@@ -6110,7 +6267,7 @@ mod tests {
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
-            "1.29.0", "1.29.1", "1.29.2", "1.29.3",
+            "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

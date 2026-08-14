@@ -1,0 +1,4 @@
+-- v1.29.4: no schema/format change. VACUUM-independent torn-write
+-- corruption fix (meta-page written LAST in write_full_inner) + a
+-- reconcile-flush dup-id guard. No wire change (v7), no REINDEX to
+-- upgrade; a pre-1.29.4-corrupted index needs a one-time REINDEX.

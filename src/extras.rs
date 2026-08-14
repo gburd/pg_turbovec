@@ -408,6 +408,47 @@ fn _turbovec_test_hold_rewrite_lock(index: pg_sys::Oid) -> bool {
     true
 }
 
+/// DIAGNOSTIC (temporary, corruption investigation): return every
+/// slot whose external id is 0 in the flat ids chain, with its
+/// neighbours, plus the total id-0 count. Read-only, AccessShareLock.
+#[pg_extern]
+fn turbovec_dump_id0(
+    index: pg_sys::Oid,
+) -> TableIterator<
+    'static,
+    (
+        name!(slot, i64),
+        name!(id, i64),
+        name!(prev_id, i64),
+        name!(next_id, i64),
+    ),
+> {
+    unsafe {
+        let rel = pg_sys::index_open(index, pg_sys::AccessShareLock as i32);
+        if rel.is_null() {
+            error!("turbovec_dump_id0: could not open index {:?}", index);
+        }
+        let meta = crate::index::relfile::read_meta(rel)
+            .unwrap_or_else(|| error!("turbovec_dump_id0: no meta page"));
+        let ids = crate::index::relfile::read_ids_only(rel, &meta);
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        let n = ids.len();
+        let mut rows: Vec<(i64, i64, i64, i64)> = Vec::new();
+        for (slot, &id) in ids.iter().enumerate() {
+            if id == 0 {
+                let prev = if slot > 0 { ids[slot - 1] as i64 } else { -1 };
+                let next = if slot + 1 < n {
+                    ids[slot + 1] as i64
+                } else {
+                    -1
+                };
+                rows.push((slot as i64, id as i64, prev, next));
+            }
+        }
+        TableIterator::new(rows.into_iter())
+    }
+}
+
 extension_sql!(
     r"
     -- jsonb <-> vector explicit casts.

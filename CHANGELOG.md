@@ -4,6 +4,88 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.4] — 2026-08-14
+
+**Data-corruption fix: VACUUM-INDEPENDENT torn-write of the `.tvim`
+relfile on writer interrupt/restart.** Patch bump — **no wire change
+(stays v7), no SQL surface change, no REINDEX to upgrade** (existing
+indexes are read + written correctly in place by the new binary). A
+running index that already corrupted needs a one-time `REINDEX` to
+clear the bad state, but the *upgrade itself* is `ALTER EXTENSION` +
+restart.
+
+v1.29.2/1.29.3 fixed the concurrent-VACUUM lost-update races. A
+deployment (pg.ddx.io/agora) that runs **no VACUUM at all**
+(`autovacuum_count = 0`, no DELETE) still corrupted continuously —
+signature always `id 0` in more than one slot, ~every 30 min, on a
+1.84M-row 768d `bit_width=4` partial flat index driven by a
+continuous `INSERT … ON CONFLICT DO UPDATE` upsert writer that the
+orchestrator **restarts every ~15 min**.
+
+Root cause (reproduced + dumped on EC2, unpatched corrupts in ~40 s):
+the deferred `aminsert` PreCommit flush rewrites the whole relfile via
+`write_full_inner`, which polls `check_for_interrupts!()` inside
+`write_chain_at` and commits each `GenericXLog` batch as a **physical,
+WAL-logged page change that is NOT rolled back on transaction abort**.
+The writer-restart is a `pg_terminate_backend` (SIGTERM →
+`ProcDiePending`); when it lands mid-flush it longjmps (`FATAL`) out of
+the chain write. With the pre-fix ordering — **meta page written
+FIRST, then the codes/scales/ids chains** — an interrupt after the
+meta commit but before the ids chain finished left
+`meta.n_vectors = N` pointing at an ids chain whose newly-appended (or
+in-place) region was still the zero-initialised page bytes. On reload
+that reads back as a contiguous run of `id 0` slots — `duplicate ids
+… id 0 appears in more than one slot` (XX001) + SIGABRT — with
+`count_matches` still TRUE (the chain is physically N slots long). On
+disk we dumped the exact fingerprint: a contiguous zeroed run equal to
+one batch's append count (16 slots at n=1,840,016; 730 slots ==
+the tail of a single ids page at n=1,840,149), never scattered
+garbage. VACUUM is not involved.
+
+Fixed by making `write_full_inner` write the row **CHAINS FIRST and
+the META PAGE LAST** (the same crash-safety invariant the build path's
+`write_blocked_phase_and_meta` already documents). An interrupt during
+the chain writes now leaves block 0 (the meta) UNCHANGED, so readers
+and the next reconcile-flush observe the previous, fully-valid
+`n_vectors` + chains; any pages written past the old count are simply
+unreferenced until the next full rewrite / `RelationTruncate` (which
+stays after the meta write, so a shrink never leaves the meta
+referencing a page past EOF). The meta write is a single `GenericXLog`
+page op with no interrupt poll, so it cannot tear.
+
+Also added a **belt-and-suspenders guard on the deferred-flush
+/reconcile path** (`reconcile_and_write_flush`): before splicing this
+transaction's upserts onto the current on-disk ids and re-persisting,
+it runs `first_duplicate_id` over the ids it just re-read and, if the
+on-disk state is ALREADY corrupt (e.g. a hole left by an older
+binary), ABORTS the transaction with a `REINDEX INDEX` hint instead of
+entrenching it — a retryable abort beats propagating on-disk
+corruption.
+
+A NON-restarting, long-lived single writer (no `statement_timeout`, no
+cancels, never `pg_terminate_backend`'d) never hits the interrupt
+window and does not trigger this bug — a valid immediate operational
+workaround.
+
+### Validation
+
+- Fail-before/pass-after unit test
+  `torn_flush_on_interrupt_meta_last_stays_clean`: injects the exact
+  interrupt window and shows meta-FIRST + tear → id-0/duplicate on
+  reload, meta-LAST (fixed) + tear → clean bijection.
+- Sustained no-VACUUM A/B on the reproduction (1.84M-row 768d
+  bit_width=4 partial flat index, upsert writer, writer restarted via
+  `pg_terminate_backend`): unpatched corrupts in ~40 s at the first
+  restart; patched runs 2 h+ across dozens of restart cycles with
+  `turbovec_check` `is_corrupt = false` throughout AND real forward
+  progress (n_vectors climbs cleanly).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.4';` — no REINDEX, no
+downtime beyond the `.so` swap + reconnect. An index already corrupted
+by a pre-1.29.4 binary needs a one-time `REINDEX INDEX <name>;`.
+
 ## [1.29.3] — 2026-08-14
 
 **Runtime-hardening patch from a full code audit.** Patch bump — **no

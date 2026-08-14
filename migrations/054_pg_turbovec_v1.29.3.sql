@@ -1,0 +1,7 @@
+-- 1.29.3 — runtime hardening patch (no wire-format change, no SQL surface
+-- change, no REINDEX). Adversarial-input OOM guards on the sparsevec
+-- densify paths (::vector cast + sum(sparsevec) reject dim > 16000 before
+-- allocating), clean ERROR (not a Rust panic across FFI) on a torn/corrupt
+-- scan slot lookup, and an interrupt poll in the VACUUM swap-remove loop so
+-- a large VACUUM stays cancellable. Fixes live entirely in the binary; this
+-- migration is intentionally empty.

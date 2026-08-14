@@ -215,7 +215,7 @@ impl ReadOnlyIndex {
         let res: SearchResults = self.inner.search(queries, k);
         let mut ids = Vec::with_capacity(res.indices.len());
         for &slot in &res.indices {
-            ids.push(self.slot_to_id[slot as usize]);
+            ids.push(self.id_at_slot_checked(slot as usize));
         }
         (res.scores, ids)
     }
@@ -234,7 +234,7 @@ impl ReadOnlyIndex {
         let res: SearchResults = self.inner.search_with_mask(queries, k, Some(mask));
         let mut ids = Vec::with_capacity(res.indices.len());
         for &slot in &res.indices {
-            ids.push(self.slot_to_id[slot as usize]);
+            ids.push(self.id_at_slot_checked(slot as usize));
         }
         (res.scores, ids)
     }
@@ -259,7 +259,24 @@ impl ReadOnlyIndex {
     /// (Phase G-2a) to translate the entry point / adjacency's slot
     /// ids to CTIDs.
     pub fn id_at_slot(&self, slot: usize) -> u64 {
-        self.slot_to_id[slot]
+        self.id_at_slot_checked(slot)
+    }
+
+    /// Bounds-checked `slot_to_id[slot]`: a slot past the id table
+    /// means a torn/corrupt read (see relfile chain over-read), so
+    /// turn it into a clean PG ERROR with a REINDEX hint instead of a
+    /// Rust panic across the FFI boundary (which risks a backend
+    /// abort under load rather than a recoverable ERROR).
+    #[inline]
+    fn id_at_slot_checked(&self, slot: usize) -> u64 {
+        match self.slot_to_id.get(slot) {
+            Some(&id) => id,
+            None => error!(
+                "turbovec: scan returned slot {} but the index has only {} rows — the index appears corrupt; REINDEX INDEX to rebuild",
+                slot,
+                self.slot_to_id.len()
+            ),
+        }
     }
 
     /// Score exactly the slots in `ids` against `query`, returning
@@ -831,7 +848,7 @@ impl OocIvfIndex {
         let allow_compact: Option<Vec<bool>> = allow.map(|set| {
             global_slots
                 .iter()
-                .map(|&gs| set.contains(&self.slot_to_id[gs as usize]))
+                .map(|&gs| set.contains(&self.id_at_global_checked(gs as usize)))
                 .collect()
         });
 
@@ -863,9 +880,24 @@ impl OocIvfIndex {
         let mut ids = Vec::with_capacity(cslots.len());
         for &cslot in &cslots {
             let global = global_slots[cslot as usize] as usize;
-            ids.push(self.slot_to_id[global]);
+            ids.push(self.id_at_global_checked(global));
         }
         Some((cscores, ids))
+    }
+
+    /// Bounds-checked `slot_to_id[global]` for the OOC path: a global
+    /// slot past the id table means a torn/corrupt cell layout, so
+    /// ERROR cleanly (REINDEX hint) rather than panic across FFI.
+    #[inline]
+    fn id_at_global_checked(&self, global: usize) -> u64 {
+        match self.slot_to_id.get(global) {
+            Some(&id) => id,
+            None => error!(
+                "turbovec (out-of-core IVF): cell layout referenced slot {} but the index has only {} rows — the index appears corrupt; REINDEX INDEX to rebuild",
+                global,
+                self.slot_to_id.len()
+            ),
+        }
     }
 
     /// Fine-scan a contiguous chunk `[row_start, row_end)` of the

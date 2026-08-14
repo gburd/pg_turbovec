@@ -143,10 +143,20 @@ fn vector_to_sparsevec(v: Vector) -> Sparsevec {
     Sparsevec::new(dim, indices, values)
 }
 
-/// `sparsevec::vector` — materialise the dense form. Allocates
-/// `dim * 4` bytes; beware on million-dim sparsevecs.
+/// `sparsevec::vector` — materialise the dense form. A dense `vector`
+/// caps at `vec::MAX_DIM` (16000), so reject an oversized sparse dim
+/// BEFORE `to_dense` allocates `dim * 4` bytes — otherwise a single
+/// `'{}/1000000000'::sparsevec::vector` allocates ~4 GB and OOMs the
+/// backend before the constructor's dim check ever runs.
 #[pg_extern(immutable, parallel_safe)]
 fn sparsevec_to_vector(v: Sparsevec) -> Vector {
+    if v.dim as usize > crate::vec::MAX_DIM {
+        error!(
+            "sparsevec dim {} too large to densify into a vector (max {})",
+            v.dim,
+            crate::vec::MAX_DIM
+        );
+    }
     Vector::from_vec(v.to_dense())
 }
 
@@ -165,6 +175,16 @@ pub struct SparsevecAccum {
 impl SparsevecAccum {
     fn ensure_dim(&mut self, dim: i32) {
         if self.dim == 0 {
+            // The dense f64 running sum is bounded by the same ceiling a
+            // densified vector would be: reject a billion-dim sparsevec
+            // before allocating ~8 GB and OOMing the backend.
+            if dim as usize > crate::vec::MAX_DIM {
+                error!(
+                    "sum(sparsevec): dim {} too large to accumulate densely (max {})",
+                    dim,
+                    crate::vec::MAX_DIM
+                );
+            }
             self.dim = dim;
             self.sum = vec![0.0_f64; dim as usize];
         } else if self.dim != dim {

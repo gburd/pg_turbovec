@@ -226,6 +226,35 @@ mod tests {
     }
 
     #[pg_test]
+    fn sparsevec_oversized_dim_densify_errors_not_ooms() {
+        // A billion-dim sparsevec must ERROR cleanly on densify rather
+        // than allocate ~4-8 GB and OOM the backend (adversarial-input
+        // guard). Both the ::vector cast and sum(sparsevec) densify.
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let cast = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT ('{}/1000000000'::turbovec.sparsevec::turbovec.vector)::text",
+            )
+        });
+        assert!(
+            cast.is_err(),
+            "oversized sparsevec::vector cast should ERROR, not OOM"
+        );
+
+        Spi::run("SET search_path = turbovec, public").unwrap();
+        let agg = std::panic::catch_unwind(|| {
+            Spi::get_one::<String>(
+                "SELECT (turbovec.sum(x))::text FROM (VALUES ('{}/1000000000'::turbovec.sparsevec)) t(x)",
+            )
+        });
+        assert!(
+            agg.is_err(),
+            "oversized sum(sparsevec) should ERROR, not OOM"
+        );
+        Spi::run("SET search_path = turbovec, public").unwrap();
+    }
+
+    #[pg_test]
     fn sparsevec_vector_round_trip() {
         Spi::run("SET search_path = turbovec, public").unwrap();
         let txt: Option<String> =
@@ -6081,7 +6110,7 @@ mod tests {
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
-            "1.29.0", "1.29.1", "1.29.2",
+            "1.29.0", "1.29.1", "1.29.2", "1.29.3",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

@@ -1,0 +1,8 @@
+-- pg_turbovec 1.29.2 -> 1.29.3
+--
+-- Runtime-hardening patch: no wire-format change (stays v7), no SQL surface
+-- change, no REINDEX. sparsevec densify OOM guards + scan-path corrupt-slot
+-- ERROR (not panic) + VACUUM interrupt poll. The fix lives entirely in the
+-- extension binary; this upgrade script is intentionally empty but MUST
+-- exist so `ALTER EXTENSION pg_turbovec UPDATE TO '1.29.3'` succeeds and the
+-- version is recorded.

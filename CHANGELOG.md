@@ -4,6 +4,50 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.3] — 2026-08-14
+
+**Runtime-hardening patch from a full code audit.** Patch bump — **no
+wire change (stays v7), no SQL surface change, no REINDEX** (`ALTER
+EXTENSION pg_turbovec UPDATE` is sufficient; existing indexes are read
+and written unchanged). All fixes are defensive guards that turn a
+crash/OOM into a clean `ERROR`; none change results on valid input.
+
+- **Adversarial-input OOM guard on the `sparsevec` densify paths.**
+  `sparsevec` permits a dimension up to 1e9, but the `::vector` cast
+  (`sparsevec_to_vector`) and `sum(sparsevec)` (`SparsevecAccum::
+  ensure_dim`) densified into `vec![0.0; dim]` (up to 4–8 GB) BEFORE
+  the 16000-element vector cap was checked — so one unprivileged
+  `SELECT '{}/1000000000'::sparsevec::vector` (or `sum()` over such a
+  row) could OOM a backend. Both paths now reject `dim > 16000` before
+  allocating. Test: `sparsevec_oversized_dim_densify_errors_not_ooms`.
+- **Clean `ERROR` (not a Rust panic across the FFI boundary) on a
+  torn/corrupt scan slot lookup.** `ReadOnlyIndex::search` /
+  `search_masked` / `id_at_slot` and the out-of-core IVF id remap
+  indexed `slot_to_id[slot]` directly; a corrupt/torn read yielding a
+  slot past the id table panicked (a backend-abort risk under load).
+  Now `id_at_slot_checked` / `id_at_global_checked` raise a PG `ERROR`
+  with a `REINDEX INDEX` hint.
+- **VACUUM stays cancellable.** The flat swap-remove loop
+  (`vacuum.rs`) holds the exclusive relfile-rewrite lock across every
+  dead slot; added `check_for_interrupts!()` at the loop top so a
+  VACUUM deleting millions of rows can be cancelled (and doesn't hold
+  the lock uncancellably against readers) between slots.
+
+The audit also confirmed the v1.29.2 flat/IVF corruption fixes,
+determinism gates, dup-id guards, GUC safety, and 1-bit build fencing
+are solid. It surfaced one CRITICAL follow-up NOT fixed here: the
+**graph-kind incremental `INSERT`** still has the pre-v1.29.2
+lost-update window (a non-atomic read-then-rewrite) that reconcile-on-
+flush closed for the flat/IVF kinds — tracked for a dedicated fix
+release with a concurrent-inserter reproduction test + sustained-load
+validation per the corruption HARD MANDATE. Graph inserts should stay
+serial/one-writer until then (the documented build-then-serve model).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.3';` — no REINDEX, no
+downtime beyond the `.so` swap + reconnect.
+
 ## [1.29.2] — 2026-08-13
 
 **Data-corruption fix: concurrent VACUUM + deferred-flush lost-update

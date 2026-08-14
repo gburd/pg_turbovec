@@ -218,6 +218,14 @@ unsafe fn ambulkdelete_relfile(
     // all across many separate GenericXLog records.
     let mut alive: u64 = meta.n_vectors;
     for &dead_slot in dead_slots.iter().rev() {
+        // A VACUUM deleting millions of rows holds the exclusive
+        // relfile-rewrite lock across this whole loop (blocking all
+        // readers); without an interrupt poll here the loop is
+        // uncancellable. `copy_slot_in_chain` holds only page-level
+        // heavyweight locks it takes+releases internally, so a cancel
+        // between slots unwinds cleanly and the lock manager releases
+        // everything at abort.
+        pg_sys::check_for_interrupts!();
         let s = dead_slot as u64;
         let last = alive - 1;
         if s != last {

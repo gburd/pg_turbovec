@@ -4,6 +4,71 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.5] — 2026-08-15
+
+**Production-hardening patch from a deep code re-audit + an at-scale
+feature stress test.** Patch bump — **no wire change (stays v7), no SQL
+surface change, no REINDEX** (`ALTER EXTENSION pg_turbovec UPDATE` is
+sufficient). Every fix is a guard or ordering correction; none change
+results on valid input.
+
+- **IVF incremental `INSERT` regression fix (introduced in v1.29.4).**
+  v1.29.4 added an on-disk duplicate-id guard to the deferred-flush
+  reconcile path, but it ran **ungated** — and an IVF index legitimately
+  stores the same external id in multiple cells (soft-assignment to the
+  2nd..Mth nearest cell). So the **first `INSERT` into any soft-assigned
+  IVF index** tripped `refusing to reconcile onto a corrupt .tvim id
+  table (id N appears in more than one slot on disk)` and aborted —
+  breaking IVF incremental insert. The guard is now gated to the
+  bijective flat/single kind (`lists == 0`), matching the insert/read
+  paths. Regression test `ivf_insert_after_soft_assign_does_not_falsely_abort`.
+- **Multi-index partial-flush corruption-spreader (C-NEW-1).** On a
+  table with 2+ turbovec indexes, if the PreCommit flush of the second
+  index tripped a persist guard (`ERROR`/longjmp), the first index's
+  relfile pages were already physically written (GenericXLog is not
+  rolled back on abort) — leaving one index with phantom CTIDs and a
+  sibling missing rows. The PreCommit flush now does a **pure
+  validate-all pass (no I/O) before writing any index**, so a guard trip
+  aborts with zero physical writes.
+- **Corrupt/torn-meta unbounded read + palloc guard (H-NEW-2/3).**
+  `read_chain` now bounds the chain against the physical relation length
+  (`RelationGetNumberOfBlocksInFork`) and rejects `rows_per_page == 0`
+  before allocating or walking blocks — a bit-flipped/truncated meta no
+  longer over-reads past EOF or allocates a `Vec` sized by a corrupt
+  `n_vectors`; it raises `ERRCODE_DATA_CORRUPTED` + a REINDEX hint.
+- **`SAVEPOINT` / subtransaction rollback (M-NEW-4).** Registered a
+  `SubXactCallback`; a `ROLLBACK TO SAVEPOINT` now conservatively
+  invalidates the dirty cache set, so a rolled-back insert is no longer
+  persisted onto disk at top-level commit (was index bloat + silent
+  recall loss, masked by recheck).
+- **VACUUM shrink guard gap (M-NEW-5).** The flat swap-remove VACUUM path
+  — the one whole-relfile mutation that bypassed `write_full_inner`'s
+  id-0/dup guard — now re-checks the surviving ids' bijection before
+  committing the shrink (flat kind only).
+- **Empty-index KNN query fix (NEW BUG #1).** `ORDER BY emb <-> q LIMIT k`
+  on a freshly-created, not-yet-populated index returned 0 rows instead
+  of `ERROR: query dim N != index dim 0` (the dim check now runs after
+  the empty-index early return) — fixes the "create index, backfill
+  later" pattern.
+- **Overflow hardening (L-NEW-7):** `MetaPageData::total_blocks()` uses
+  `saturating_add` so a corrupt meta can't wrap a large block count to a
+  small total.
+
+The re-audit also VERIFIED (independently, at production scale on EC2):
+v1.29.4's field-report torn-write fix holds clean for **95 min / 85
+mid-flush writer restarts** (v1.29.3 corrupts after 2), and the whole
+flat/IVF feature matrix + the sparsevec OOM guard are solid. Known
+issues still tracked for a dedicated release (graph-kind only): graph
+concurrent-insert lost-update, graph wrong-results at dim>=512, graph
+under-return at 128d, graph build un-cancellable, `turbovec_check`
+graph-adjacency-blind, and the scan sentinel-ctid projection. The graph
+kind (`WITH (graph = true)`) should be treated as experimental.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.5';` — no REINDEX, no
+downtime beyond the `.so` swap + reconnect.
+
 ## [1.29.4] — 2026-08-14
 
 **Data-corruption fix: VACUUM-INDEPENDENT torn-write of the `.tvim`

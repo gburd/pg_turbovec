@@ -594,6 +594,36 @@ pub(crate) unsafe fn read_chain(
         return out;
     }
     let bytes_per_full_page = (rows_per_page as usize) * (stride as usize);
+    // H-NEW-2/H-NEW-3 guard: a corrupt/torn/bit-flipped meta page (bad
+    // n_vectors, first_blkno, or rows_per_page) would otherwise walk
+    // blkno past EOF (ReadBufferExtended(RBM_NORMAL) extends the
+    // relation or errors deep in the buffer manager) AND over-allocate
+    // `total_bytes` (a palloc bomb sized by the corrupt n_vectors).
+    // Bound the chain against the physical relation length up front and
+    // raise a clean, actionable ERROR instead. `rows_per_page == 0`
+    // would divide-by-zero below, so treat it as corrupt too.
+    if rows_per_page == 0 {
+        pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            "turbovec: relfile chain has rows_per_page=0 (corrupt meta page)",
+            "REINDEX INDEX to rebuild from the heap."
+        );
+    }
+    let pages_needed = (n_vectors as usize).div_ceil(rows_per_page as usize);
+    let nblk =
+        pg_sys::RelationGetNumberOfBlocksInFork(rel, pg_sys::ForkNumber::MAIN_FORKNUM) as u64;
+    let last_needed = first_blkno as u64 + pages_needed as u64;
+    if last_needed > nblk {
+        pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            format!(
+                "turbovec: relfile chain [blk {first_blkno}, +{pages_needed} pages] runs past the relation end ({nblk} blocks) — the meta page's n_vectors/offsets are inconsistent with the physical file (corrupt or truncated index)"
+            ),
+            "REINDEX INDEX to rebuild from the heap."
+        );
+    }
     let mut remaining = total_bytes;
     let mut blkno = first_blkno;
 
@@ -871,19 +901,30 @@ pub(crate) unsafe fn reconcile_and_write_flush(
             // re-persisting on-disk corruption is not. The meta-LAST
             // ordering above prevents this binary from CREATING the hole;
             // this guard stops it from PROPAGATING a pre-existing one.
-            if let Some(bad) = crate::index::scan::first_duplicate_id(&disk_ids) {
-                unlock_relfile_write(rel);
-                let idx_name = crate::index::scan::index_relname(rel);
-                pgrx::ereport!(
-                    pgrx::PgLogLevel::ERROR,
-                    pgrx::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
-                    format!(
-                        "turbovec deferred-flush: refusing to reconcile onto a corrupt .tvim id table in index \"{idx_name}\" (id {bad} appears in more than one slot on disk); aborting this transaction to avoid entrenching the corruption"
-                    ),
-                    format!(
-                        "Run `REINDEX INDEX {idx_name};` to rebuild it from the heap. This on-disk state was left by an older binary (pre-v1.29.4) whose in-place relfile rewrite could tear on `pg_terminate_backend`/cancel; v1.29.4 writes the meta page LAST so new flushes can no longer create it."
-                    )
-                );
+            // GATED to the bijective flat/single kind (`lists == 0`):
+            // an IVF index (`lists > 0`) legitimately repeats an external
+            // id across cells (soft-assignment to the 2nd..Mth nearest
+            // cell), so `first_duplicate_id` would FALSE-POSITIVE on
+            // every real IVF index and reject the first INSERT into it.
+            // (The in-memory reload degrades IVF->flat on insert, but the
+            // on-disk `disk_ids` we read here is still the soft-assigned
+            // IVF image, so it must NOT be dup-checked.) Matches the
+            // `meta.lists == 0` gate on the insert/read paths.
+            if m.lists == 0 {
+                if let Some(bad) = crate::index::scan::first_duplicate_id(&disk_ids) {
+                    unlock_relfile_write(rel);
+                    let idx_name = crate::index::scan::index_relname(rel);
+                    pgrx::ereport!(
+                        pgrx::PgLogLevel::ERROR,
+                        pgrx::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+                        format!(
+                            "turbovec deferred-flush: refusing to reconcile onto a corrupt .tvim id table in index \"{idx_name}\" (id {bad} appears in more than one slot on disk); aborting this transaction to avoid entrenching the corruption"
+                        ),
+                        format!(
+                            "Run `REINDEX INDEX {idx_name};` to rebuild it from the heap. This on-disk state was left by an older binary (pre-v1.29.4) whose in-place relfile rewrite could tear on `pg_terminate_backend`/cancel; v1.29.4 writes the meta page LAST so new flushes can no longer create it."
+                        )
+                    );
+                }
             }
             let (oc, os, oi) = reconcile_flush_image(
                 stride,

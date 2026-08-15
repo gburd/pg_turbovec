@@ -6267,7 +6267,7 @@ mod tests {
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
-            "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4",
+            "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -6606,6 +6606,48 @@ mod tests {
         });
         assert_eq!(ids.len(), 20, "top-20 over a 3000-row IVF index");
         assert_distinct_ids(&ids);
+    }
+
+    /// REGRESSION (v1.29.5): INSERT into an existing IVF index must NOT
+    /// falsely abort. v1.29.4 added an on-disk duplicate-id guard to the
+    /// deferred-flush reconcile path, but it ran UNGATED — and an IVF
+    /// index legitimately stores the same external id in multiple cells
+    /// (soft-assignment), so the first INSERT into any soft-assigned IVF
+    /// index tripped "refusing to reconcile onto a corrupt .tvim id
+    /// table" and broke IVF incremental insert entirely. The guard is
+    /// now gated to the bijective flat kind (`lists == 0`). This test
+    /// builds an IVF index whose clustered rows produce cross-cell
+    /// soft-assign duplicates, then INSERTs a new row and asserts it
+    /// succeeds and the row is findable.
+    #[pg_test]
+    fn ivf_insert_after_soft_assign_does_not_falsely_abort() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_ins (id bigint, emb vector)").unwrap();
+        // Tight clusters (few distinct directions) so many vectors land
+        // near a cell boundary and get soft-assigned to 2+ cells ->
+        // duplicate external ids on disk.
+        Spi::run(
+            "INSERT INTO ivf_ins \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT (((g % 8) * 30 + s)::float8 / 256.0) \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 4000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_ins_idx ON ivf_ins \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+        // The INSERT that used to falsely abort with XX001 on v1.29.4.
+        Spi::run(
+            "INSERT INTO ivf_ins VALUES (99999, \
+             ('[' || array_to_string(array(SELECT 0.5 FROM generate_series(1,16)), ',') || ']')::vector)",
+        )
+        .expect("INSERT into a soft-assigned IVF index must not abort");
+        // The just-inserted row must be present (count reflects it).
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ivf_ins").unwrap();
+        assert_eq!(n, Some(4001), "the new row must be inserted");
     }
 
     /// Phase B-4 temp-file hygiene: a SUCCESSFUL out-of-core IVF

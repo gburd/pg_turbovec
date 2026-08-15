@@ -1,0 +1,8 @@
+-- 1.29.5 — production-hardening patch from a deep code re-audit + at-scale
+-- stress test. Fixes an IVF-incremental-INSERT regression introduced in
+-- v1.29.4 (an ungated on-disk dup-id guard rejected soft-assigned IVF
+-- inserts), a multi-index partial-flush corruption-spreader, a corrupt-meta
+-- unbounded-read/palloc guard, SAVEPOINT-rollback persistence, a VACUUM
+-- shrink guard gap, and an empty-index KNN query error. No wire-format
+-- change (stays v7), no SQL surface change, no REINDEX. Fixes live in the
+-- binary; this migration is intentionally empty.

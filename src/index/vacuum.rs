@@ -264,6 +264,40 @@ unsafe fn ambulkdelete_relfile(
     }
     debug_assert_eq!(alive, meta.n_vectors - dead_count as u64);
 
+    // M-NEW-5: the flat swap-remove path is the one whole-relfile
+    // mutation that does NOT route through `write_full_inner`, so the
+    // id-0/duplicate persist guard never ran on its output. Re-read the
+    // surviving ids under the still-held exclusive lock and assert the
+    // bijection before committing the shrink — so VACUUM aborts loudly
+    // (like every write path) instead of silently preserving/moving a
+    // pre-existing dup/id-0. Flat kind only (`lists == 0`); IVF uses
+    // the tombstone path below and legitimately repeats ids.
+    if meta.lists == 0 && alive > 0 {
+        let ids_bytes = relfile::read_chain(
+            index,
+            meta.ids_first,
+            std::mem::size_of::<u64>() as u32,
+            meta.rows_per_ids_page,
+            alive,
+        );
+        let surviving: Vec<u64> = ids_bytes
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect();
+        if let Some(bad) = crate::index::scan::first_duplicate_id(&surviving) {
+            relfile::unlock_relfile_write(index);
+            let idx_name = crate::index::scan::index_relname(index);
+            pgrx::ereport!(
+                pgrx::PgLogLevel::ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+                format!(
+                    "turbovec VACUUM: refusing to shrink a corrupt .tvim id table in index \"{idx_name}\" (id {bad} appears in more than one slot after swap-remove)"
+                ),
+                format!("Run `REINDEX INDEX {idx_name};` to rebuild it from the heap.")
+            );
+        }
+    }
+
     // Pass 3: persist the new n_vectors via the meta page. The
     // chain layout (codes_first / scales_first / ids_first /
     // rows_per_*_page / stride_bytes) is preserved so the swap-

@@ -8,7 +8,9 @@
 
 use std::cell::Cell;
 
-use pgrx::callbacks::{PgXactCallbackEvent, register_xact_callback};
+use pgrx::callbacks::{
+    PgSubXactCallbackEvent, PgXactCallbackEvent, register_subxact_callback, register_xact_callback,
+};
 use pgrx::pg_sys;
 
 use crate::cache;
@@ -94,6 +96,48 @@ mod reconcile_tests {
 /// executor's tuple loop), writes the cached `IdMapIndex` out as
 /// relfile pages, then closes. WAL-logged via the `GenericXLog`
 /// path inside `relfile::write_full_with_prepared`.
+/// C-NEW-1: pure (no-I/O) validation of one dirty entry's in-memory
+/// snapshot, run over EVERY dirty index in the PreCommit loop BEFORE
+/// any relfile is physically written. Trips exactly the conditions a
+/// well-formed transaction could hit (row-count drift; an id-0 or
+/// duplicate external id in the in-memory `slot_to_id` for the
+/// bijective flat/single kind). Raising here aborts the whole txn
+/// with zero page writes, so a multi-index commit can never leave one
+/// index physically flushed while a sibling's flush fails. The
+/// on-disk-dup guard inside `reconcile_and_write_flush` is retained
+/// separately (it detects pre-existing on-disk corruption, which this
+/// pure pass cannot see).
+fn validate_flush_snapshot(
+    _indexrelid: pg_sys::Oid,
+    idx: &turbovec::IdMapIndex,
+    state: &cache::PersistState,
+) {
+    reconciled_row_count(state.n_vectors, idx.slot_to_id().len()).unwrap_or_else(
+        |(mirror, authoritative)| {
+            pgrx::error!(
+                "turbovec persist (pre-flush validation): row-count drift \
+                 (PersistState.n_vectors = {mirror}, slot_to_id.len() = {authoritative}); \
+                 aborting BEFORE any index is written to avoid a corrupt relfile."
+            )
+        },
+    );
+    // In-memory bijection check. The deferred-flush path (flat AND
+    // IVF `aminsert`) reloads the whole index into a FLAT `IdMapIndex`
+    // in memory (an IVF insert degrades the index to flat — see
+    // `index_is_degraded`), so the in-memory `slot_to_id` is bijective
+    // for every kind that reaches here (graph uses a separate
+    // `insert_graph_row` path that never marks this cache dirty). A
+    // duplicate or id-0 in this in-memory table is therefore always a
+    // real invariant violation, safe to check unconditionally.
+    if let Some(dup) = crate::index::scan::first_duplicate_id(idx.slot_to_id()) {
+        pgrx::error!(
+            "turbovec persist (pre-flush validation): in-memory id table has id {dup} \
+             in more than one slot (id 0 = a zeroed/uninitialised slot); aborting BEFORE \
+             any index is written. This is an internal invariant violation."
+        );
+    }
+}
+
 unsafe fn flush_to_relfile(
     indexrelid: pg_sys::Oid,
     idx: &turbovec::IdMapIndex,
@@ -218,6 +262,25 @@ pub(crate) fn ensure_xact_callbacks_registered() {
             unsafe {
                 pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
             }
+            // C-NEW-1 fix (multi-index partial-flush corruption): a
+            // guard `ereport(ERROR)` while flushing the SECOND dirty
+            // index would longjmp AFTER the FIRST index's relfile pages
+            // were already physically written (GenericXLog is not rolled
+            // back on abort), leaving index A with phantom CTIDs for
+            // never-committed rows and index B missing rows. So do a
+            // PURE validation pass over ALL dirty snapshots FIRST (no
+            // I/O, no page writes): the row-count drift + in-memory
+            // id-0/duplicate bijection are exactly the conditions a
+            // well-formed transaction could trip. If any entry is bad,
+            // abort here with ZERO physical writes done, so no index is
+            // left half-flushed. (The on-disk-dup guard inside
+            // reconcile_and_write_flush stays too, but it fires on
+            // pre-existing corruption, not on this txn's snapshot.)
+            for d in &dirty {
+                let guard = d.index.read();
+                validate_flush_snapshot(d.key.rel_oid, &guard, &d.persist);
+                drop(guard);
+            }
             for d in &dirty {
                 let guard = d.index.read();
                 unsafe {
@@ -239,6 +302,23 @@ pub(crate) fn ensure_xact_callbacks_registered() {
         // post-rollback reload for a fast hot path.
         register_xact_callback(PgXactCallbackEvent::Abort, || {
             XACT_CB_REGISTERED.with(|r| r.set(false));
+            cache::invalidate_dirty();
+        });
+
+        // M-NEW-4: SAVEPOINT / subtransaction rollback. aminsert mutates
+        // the cached in-memory IdMapIndex + touched_ids + dirty flag
+        // eagerly; a `ROLLBACK TO SAVEPOINT` undoes the heap rows but
+        // nothing here, so without this the rolled-back rows would be
+        // spliced onto disk at top-level PreCommit (index bloat + silent
+        // recall loss). We don't journal per-subxact undo (the
+        // per-insert clone cost is unacceptable, same rationale as the
+        // Abort path), so on ANY subxact abort we conservatively
+        // invalidate the whole dirty set — the next access in this
+        // backend reloads committed state from the relfile. Correct
+        // (never persists a rolled-back row) at the cost of re-reading
+        // the index after a savepoint rollback, which is rare on the
+        // bulk-insert hot path.
+        register_subxact_callback(PgSubXactCallbackEvent::AbortSub, |_my, _parent| {
             cache::invalidate_dirty();
         });
 

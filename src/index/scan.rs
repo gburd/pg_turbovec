@@ -515,16 +515,22 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             .flatten();
 
         if dirty_fallback.is_none() {
+            // NEW BUG #1 fix: an EMPTY index (meta.dim == 0, n_in_index
+            // == 0) can answer ANY query with the empty set, so the
+            // n==0 early-return must come BEFORE the dim check — the
+            // "create index, backfill later" pattern otherwise ERRORs
+            // "query dim N != index dim 0" on every query until the
+            // first row lands.
+            if n_in_index == 0 {
+                (*opaque).fetched = true;
+                return false;
+            }
             if (*opaque).query.len() != dim {
                 error!(
                     "turbovec amgettuple: query dim {} != index dim {}",
                     (*opaque).query.len(),
                     dim
                 );
-            }
-            if n_in_index == 0 {
-                (*opaque).fetched = true;
-                return false;
             }
         }
 

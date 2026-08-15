@@ -1,0 +1,6 @@
+-- pg_turbovec 1.29.4 -> 1.29.5
+-- Production-hardening patch (code-only): IVF-insert regression fix,
+-- multi-index partial-flush guard, corrupt-meta bounds guard, SAVEPOINT
+-- rollback handling, VACUUM shrink guard, empty-index KNN fix. No wire
+-- change (v7), no SQL surface change, no REINDEX. Intentionally empty but
+-- MUST exist so ALTER EXTENSION pg_turbovec UPDATE TO '1.29.5' succeeds.

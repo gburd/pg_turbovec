@@ -665,15 +665,17 @@ impl MetaPageData {
     /// layout.
     #[allow(dead_code)] // exercised by tests; not yet read by relfile.rs
     pub fn total_blocks(&self) -> u32 {
-        1 + self.codes_count
-            + self.scales_count
-            + self.ids_count
-            + self.blocked_count
-            + self.rotation_count
-            + self.coarse_count
-            + self.cell_dir_count
-            + self.tombstone_count
-            + self.graph_count
+        // L-NEW-7: saturating so a corrupt meta with huge counts can't
+        // wrap to a small total (which a caller might trust as a size).
+        1u32.saturating_add(self.codes_count)
+            .saturating_add(self.scales_count)
+            .saturating_add(self.ids_count)
+            .saturating_add(self.blocked_count)
+            .saturating_add(self.rotation_count)
+            .saturating_add(self.coarse_count)
+            .saturating_add(self.cell_dir_count)
+            .saturating_add(self.tombstone_count)
+            .saturating_add(self.graph_count)
     }
 
     /// Serialise the meta header (no PG page header) to a

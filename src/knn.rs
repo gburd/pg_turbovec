@@ -162,7 +162,13 @@ fn run_search(
                 return Vec::new();
             }
             let take = k.min(buf.len());
-            let (scores, hit_ids) = idx.search_with_allowlist(query, take, Some(&buf));
+            // wire v8 / turbovec 1.0.0: search_with_allowlist now returns
+            // Result (AllowlistEmpty / UnknownId). buf is non-empty
+            // (guarded above) and its ids come from the caller's allow
+            // set; an unknown id is a caller error, surfaced clearly.
+            let (scores, hit_ids) = idx
+                .search_with_allowlist(query, take, Some(&buf))
+                .unwrap_or_else(|e| error!("turbovec.knn: allowlist search failed: {:?}", e));
             hit_ids
                 .iter()
                 .zip(scores.iter())

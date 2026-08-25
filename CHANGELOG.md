@@ -4,6 +4,49 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.6] — 2026-08-15
+
+**Dependency-hygiene patch — clears all outstanding RustSec advisories
+in the transitive tree.** Patch bump, **`Cargo.lock`-only** (no source
+change, no wire change (stays v7), no SQL surface change, no REINDEX,
+byte-identical build output — the `gemm`, `turbovec`, and `pgrx = 0.19.1`
+pins are unchanged, so IVF build determinism is preserved).
+
+`cargo update` pulled semver-compatible upstream fixes:
+
+- **`crossbeam-epoch` 0.9.18 → 0.9.20** (RUSTSEC-2026-0204, invalid
+  pointer dereference in the `fmt::Pointer` impl) — reached via `rayon`,
+  which pg_turbovec uses for build/scan parallelism. This is the one
+  advisory in a shipped runtime path; pg_turbovec never formats those
+  pointers, so exposure was nil, but the dependency is now patched.
+- **`tokio-postgres` 0.7.17 → ≥ 0.7.18** (RUSTSEC-2026-0178),
+  **`postgres-protocol` 0.6.11 → ≥ 0.6.12** (RUSTSEC-2026-0179 /
+  0180) — these reach the tree ONLY through `pgrx-tests`, a
+  **dev-dependency** (the test harness's PostgreSQL client). They are
+  **not present in the shipped `pg_turbovec.so`** and were never a
+  production exposure; patched for a clean `cargo audit`.
+
+Remaining `cargo audit` output is two "unmaintained" *warnings*
+(`serde_cbor` via `pgrx`, `paste` via `turbovec`/`statrs` and
+`hegeltest`) — not vulnerabilities, and both are upstream-controlled
+(pgrx's `PostgresType` serialization and a transitive math dep), not
+fixable from this crate.
+
+**Upstream `turbovec`:** intentionally NOT advanced. Our pinned rev
+(`befc4cbf`, the tip of the `feat/unblock-inverse-repack` branch,
+2026-07-06) carries the `pub from_parts` + `pack::unblock` surface
+pg_turbovec depends on and is NEWER than upstream `main`'s last release
+(0.6.0, 2026-05-25). `main` diverged in a slim-down direction that
+removes that surface, so advancing the pin would break the build;
+rebasing our branch onto main's encode-vectorization / codebook-caching
+improvements is a deliberate, separately-validated kernel change (wire
+/ determinism-sensitive), not a routine bump.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.6';` — no REINDEX, no
+behavior change (dependency hygiene only).
+
 ## [1.29.5] — 2026-08-15
 
 **Production-hardening patch from a deep code re-audit + an at-scale

@@ -1,0 +1,5 @@
+-- pg_turbovec 1.29.5 -> 1.29.6
+-- Dependency-hygiene patch (Cargo.lock only): clears the crossbeam-epoch
+-- RustSec advisory (via rayon) + patches the postgres-client dev-deps.
+-- No source/wire/SQL change, no REINDEX, byte-identical build output.
+-- Intentionally empty but MUST exist so ALTER EXTENSION UPDATE succeeds.

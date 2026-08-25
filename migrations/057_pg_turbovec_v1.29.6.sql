@@ -1,0 +1,8 @@
+-- 1.29.6 — dependency-hygiene patch. Refreshes Cargo.lock to pull
+-- semver-compatible upstream fixes, clearing the RustSec advisories in
+-- the transitive tree: crossbeam-epoch 0.9.18->0.9.20 (RUSTSEC-2026-0204,
+-- reached via rayon) and the postgres-client dev-dependencies
+-- (RUSTSEC-2026-0178/0179/0180, via pgrx-tests only — never in the shipped
+-- .so). No source change, no wire-format change (stays v7), no SQL surface
+-- change, no REINDEX, byte-identical build output (gemm/turbovec/pgrx pins
+-- unchanged). This migration is intentionally empty.

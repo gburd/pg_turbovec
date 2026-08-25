@@ -170,6 +170,10 @@ unsafe fn aminsert_relfile(
                         if meta.lists == 0 {
                             crate::index::scan::assert_ids_unique_or_reindex(index_relation, &ids);
                         }
+                        // wire v8: per-index TQ+ (empty = identity; a
+                        // pg_turbovec index never calibrates today).
+                        let (tqplus_shift, tqplus_scale) =
+                            relfile::read_tqplus(index_relation, &meta);
                         let idx = IdMapIndex::from_id_map_parts(
                             meta.bit_width as usize,
                             meta.dim as usize,
@@ -177,6 +181,8 @@ unsafe fn aminsert_relfile(
                             codes,
                             scales,
                             ids,
+                            tqplus_shift,
+                            tqplus_scale,
                         )
                         .unwrap_or_else(|e| {
                             error!("turbovec aminsert: corrupt relfile pages: {}", e)
@@ -335,22 +341,11 @@ unsafe fn insert_graph_row(
         );
     }
     let stored_index: ReadOnlyIndex = if meta.has_prepared_layout() {
-        // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
-        // packed codes (no longer persisted on disk).
-        let (blocked, n_blocks) = turbovec::pack::repack(
-            &codes,
-            meta.n_vectors as usize,
-            meta.bit_width as usize,
-            dim,
-        );
-        let centroids = meta.centroids_slice().to_vec();
-        let boundaries = meta.boundaries_slice().to_vec();
-        let rotation = relfile::read_rotation(index_relation, meta);
-        let rotation_opt = if rotation.is_empty() {
-            None
-        } else {
-            Some(rotation)
-        };
+        // wire v8 / turbovec 1.0.0: codebook + rotation derived from
+        // (bit_width, dim); the SIMD-blocked layout is recomputed
+        // inside `from_prepared_parts`. Only the per-index TQ+ pair is
+        // read back (empty = identity today).
+        let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, meta);
         ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             dim,
@@ -358,11 +353,8 @@ unsafe fn insert_graph_row(
             codes.clone(),
             scales.clone(),
             ids.clone(),
-            blocked,
-            n_blocks,
-            centroids,
-            boundaries,
-            rotation_opt,
+            tqplus_shift,
+            tqplus_scale,
         )
     } else {
         ReadOnlyIndex::from_parts(
@@ -424,6 +416,8 @@ unsafe fn insert_graph_row(
     // Synthetic slot id = the new last index (matches
     // `graph_build_and_write`'s "slot ids == 0..n_vectors, real
     // external ids kept in a parallel array" convention).
+    // wire v8: per-index TQ+ (empty = identity; never calibrated today).
+    let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, meta);
     let mut idx = IdMapIndex::from_id_map_parts(
         meta.bit_width as usize,
         dim,
@@ -431,6 +425,8 @@ unsafe fn insert_graph_row(
         codes,
         scales,
         (0..meta.n_vectors).collect(),
+        tqplus_shift,
+        tqplus_scale,
     )
     .unwrap_or_else(|e| error!("turbovec aminsert (graph): corrupt relfile pages: {}", e));
     let new_slot = meta.n_vectors;
@@ -439,12 +435,10 @@ unsafe fn insert_graph_row(
     let mut real_ids = ids;
     real_ids.push(id);
 
-    idx.prepare_eager();
-    let rotation = idx.rotation();
+    idx.prepare();
     let prepared = relfile::PreparedParts {
-        centroids: idx.centroids(),
-        boundaries: idx.boundaries(),
-        rotation,
+        tqplus_shift: idx.tqplus_shift(),
+        tqplus_scale: idx.tqplus_scale(),
     };
     let offsets_bytes = new_adjacency.encode_offsets();
     let neighbors_bytes = new_adjacency.encode_neighbors();

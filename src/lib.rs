@@ -845,6 +845,8 @@ mod tests {
             let (codes, scales, ids) = relfile::read_full(rel, &meta);
             let dim = meta.dim as usize;
             let bit_width = meta.bit_width as usize;
+            // wire v8: per-index TQ+ (empty = identity today).
+            let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, &meta);
             let idx = IdMapIndex::from_id_map_parts(
                 bit_width,
                 dim,
@@ -852,6 +854,8 @@ mod tests {
                 codes,
                 scales,
                 ids,
+                tqplus_shift,
+                tqplus_scale,
             )
             .expect("from_id_map_parts on freshly built index");
             let state = PersistState {
@@ -975,6 +979,7 @@ mod tests {
             let (codes, scales, ids) = relfile::read_full(rel, &meta);
             let dim = meta.dim as usize;
             let bit_width = meta.bit_width as usize;
+            let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, &meta);
             let mut idx = IdMapIndex::from_id_map_parts(
                 bit_width,
                 dim,
@@ -982,6 +987,8 @@ mod tests {
                 codes,
                 scales,
                 ids,
+                tqplus_shift,
+                tqplus_scale,
             )
             .expect("from_id_map_parts");
             let mut state = PersistState {
@@ -1110,6 +1117,7 @@ mod tests {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let meta = relfile::read_meta(rel).expect("meta after build");
             let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, &meta);
             let idx = IdMapIndex::from_id_map_parts(
                 meta.bit_width as usize,
                 meta.dim as usize,
@@ -1117,6 +1125,8 @@ mod tests {
                 codes,
                 scales,
                 ids,
+                tqplus_shift,
+                tqplus_scale,
             )
             .expect("from_id_map_parts");
             // Deliberately drift the mirror: claim ONE MORE row than
@@ -1387,7 +1397,7 @@ mod tests {
         // single wire version the binary writes. Bump this only as
         // part of a deliberate minor/major release with a migration
         // story (this one requires REINDEX; see docs/UPGRADING.md).
-        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 7;
+        const EXPECTED_WIRE_FORMAT_VERSION: u8 = 8;
         assert_eq!(
             crate::index::page::VERSION,
             EXPECTED_WIRE_FORMAT_VERSION,
@@ -5285,56 +5295,42 @@ mod tests {
         assert_eq!(meta.blocked_count, 0);
 
         // (2) Read the prepared chain and assert it round-trips
-        // through `from_id_map_parts_with_prepared` to a working
-        // index. The construction must NOT call `pack::repack`
-        // — we proxy that by timing it: a 100-row index built
-        // from prepared parts is microseconds, while the
-        // un-prepared `from_id_map_parts` followed by
-        // `prepare_eager` pays the codebook compute (which on a
-        // debug build is still ~milliseconds even at dim=16).
-        let (codes, scales, ids, blocked, n_blocks, centroids, boundaries, rotation) = unsafe {
+        // through `from_id_map_parts` to a working index.
+        //
+        // wire v8 / turbovec 1.0.0: there is no separate
+        // `from_id_map_parts_with_prepared` ctor and no persisted
+        // blocked/rotation/centroids anymore — the codebook + rotation
+        // are derived from `(bit_width, dim)` and the blocked layout is
+        // recomputed at open. The "prepared" vs "plain" distinction
+        // collapses to: build once (from_id_map_parts) then optionally
+        // `prepare()` eagerly vs let the first search build the caches.
+        // We still assert both agree on top-1 and the eager path's
+        // first search is fast.
+        let (codes, scales, ids, tqplus_shift, tqplus_scale) = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             let (c, s, i) = relfile::read_full(rel, &m);
-            // Phase Q-0 (v7): recompute the blocked layout (not on disk).
-            let (b, nb) = turbovec::pack::repack(
-                &c,
-                m.n_vectors as usize,
-                m.bit_width as usize,
-                m.dim as usize,
-            );
-            let cents = m.centroids_slice().to_vec();
-            let bnds = m.boundaries_slice().to_vec();
-            let rot = relfile::read_rotation(rel, &m);
+            let (ts, tc) = relfile::read_tqplus(rel, &m);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
-            (c, s, i, b, nb, cents, bnds, rot)
+            (c, s, i, ts, tc)
         };
-        assert!(
-            !blocked.is_empty(),
-            "recomputed blocked layout is non-empty"
-        );
-        // Phase R-2: rotation chain must be a `dim*dim` `f32`
-        // matrix (`16*16 = 256` elements at this corpus).
-        assert_eq!(rotation.len(), (meta.dim as usize) * (meta.dim as usize));
 
-        // Construct two indexes from the same parts: one with
-        // prepared, one without. Both must agree on top-1 for a
+        // Construct two indexes from the same parts: one prepared
+        // eagerly, one left lazy. Both must agree on top-1 for a
         // synthetic query.
         let t0 = Instant::now();
-        let idx_prep = turbovec::IdMapIndex::from_id_map_parts_with_prepared(
+        let idx_prep = turbovec::IdMapIndex::from_id_map_parts(
             meta.bit_width as usize,
             meta.dim as usize,
             meta.n_vectors as usize,
             codes.clone(),
             scales.clone(),
             ids.clone(),
-            blocked,
-            n_blocks,
-            centroids,
-            boundaries,
-            Some(rotation),
+            tqplus_shift.clone(),
+            tqplus_scale.clone(),
         )
         .expect("prepared parts");
+        idx_prep.prepare();
         let prep_ctor_us = t0.elapsed().as_micros();
 
         let t1 = Instant::now();
@@ -5345,6 +5341,8 @@ mod tests {
             codes,
             scales,
             ids,
+            tqplus_shift,
+            tqplus_scale,
         )
         .expect("plain parts");
         let plain_ctor_us = t1.elapsed().as_micros();
@@ -5648,91 +5646,54 @@ mod tests {
             Spi::get_one("SELECT 't_rot_idx'::regclass::oid::int8").unwrap();
         let indexrelid = pg_sys::Oid::from(indexrelid_u32.unwrap() as u32);
 
-        // (1) Meta page must be v3 with a populated rotation
-        // chain: rotation_first > meta.blocked_first,
-        // rotation_count >= 1, rotation_dim == meta.dim.
-        let (meta, codes, scales, ids, blocked, centroids, boundaries, rotation): (
+        // wire v8 / turbovec 1.0.0: the rotation is derived from `dim`
+        // (block-Hadamard `Rotation::new(dim)`) and NOT persisted; the
+        // (repurposed v3) chain now carries per-index TQ+ calibration.
+        // A pg_turbovec index never calibrates today, so its TQ+ pair is
+        // identity, `normalize_calibration` collapses it to EMPTY, and
+        // the chain is absent (`rotation_count == 0`). The reconstruction
+        // path therefore derives the codebook + rotation at open. This
+        // test now asserts: version 8, an EMPTY TQ+ chain, and that the
+        // reconstructed index searches correctly and fast (the derived
+        // block-Hadamard rotation is O(dim) per row, not the old QR).
+        let (meta, codes, scales, ids, tqplus_shift, tqplus_scale): (
             MetaPageData,
             Vec<u8>,
             Vec<f32>,
             Vec<u64>,
-            Vec<u8>,
-            Vec<f32>,
             Vec<f32>,
             Vec<f32>,
         ) = unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let m = relfile::read_meta(rel).expect("meta");
             let (c, s, i) = relfile::read_full(rel, &m);
-            // Phase Q-0 (v7): recompute the blocked layout (not on disk).
-            let (b, _nb) = turbovec::pack::repack(
-                &c,
-                m.n_vectors as usize,
-                m.bit_width as usize,
-                m.dim as usize,
-            );
-            let cents = m.centroids_slice().to_vec();
-            let bnds = m.boundaries_slice().to_vec();
-            let rot = relfile::read_rotation(rel, &m);
+            let (ts, tc) = relfile::read_tqplus(rel, &m);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
-            (m, c, s, i, b, cents, bnds, rot)
+            (m, c, s, i, ts, tc)
         };
-        assert_eq!(meta.version, 7);
-        assert!(meta.has_prepared_layout());
+        assert_eq!(meta.version, 8);
         assert_eq!(meta.rotation_dim, meta.dim);
-        assert!(meta.rotation_count >= 1);
-        // Phase Q-0 (v7): no blocked chain, so the rotation chain
-        // follows the ids chain directly.
-        assert!(
-            meta.rotation_first > meta.ids_first,
-            "rotation chain must follow the ids chain on disk",
-        );
+        // Identity TQ+ index => empty TQ+ chain.
+        assert_eq!(meta.rotation_count, 0, "identity TQ+ persists no chain");
+        assert!(tqplus_shift.is_empty() && tqplus_scale.is_empty());
 
-        // (2) Rotation buffer is the right shape (`dim*dim`
-        // f32s) and is a plausible orthogonal matrix — each
-        // column has unit L2 norm to within float roundoff.
         let dim = meta.dim as usize;
-        assert_eq!(rotation.len(), dim * dim);
-        for j in 0..dim {
-            let mut sumsq = 0.0f64;
-            for i in 0..dim {
-                let v = f64::from(rotation[i * dim + j]);
-                sumsq += v * v;
-            }
-            assert!(
-                (sumsq - 1.0).abs() < 1e-3,
-                "column {} has |.|^2 = {} (expected ~1)",
-                j,
-                sumsq,
-            );
-        }
 
-        // (3) Build an IdMapIndex from prepared parts including
-        // the persisted rotation. A top-1 query on a 100-row
-        // corpus must finish well under 100 ms; pre-Phase-R-2
-        // the lazy QR alone exceeded that budget on debug.
-        // Phase Q-0 (v7): recompute n_blocks alongside the blocked
-        // layout above (both are no longer persisted).
-        let (_reblocked, n_blocks) = turbovec::pack::repack(
-            &codes,
-            meta.n_vectors as usize,
-            meta.bit_width as usize,
-            dim,
-        );
-        let idx_with_rot = turbovec::IdMapIndex::from_id_map_parts_with_prepared(
+        // Reconstruct via from_id_map_parts (the wire-v8 shape). The
+        // derived block-Hadamard rotation + codebook are built lazily on
+        // the first search; a top-1 query on a 100-row corpus must finish
+        // well under 100 ms (the old QR could blow that budget on debug).
+        let idx_with_rot = turbovec::IdMapIndex::from_id_map_parts(
             meta.bit_width as usize,
             dim,
             meta.n_vectors as usize,
             codes,
             scales,
             ids,
-            blocked,
-            n_blocks,
-            centroids,
-            boundaries,
-            Some(rotation),
+            tqplus_shift,
+            tqplus_scale,
         )
-        .expect("prepared+rotation parts");
+        .expect("wire-v8 parts");
 
         let query_vec: Vec<f32> = (0..16)
             .map(|k| ((u32::wrapping_mul(7, k as u32 + 13)) % 2000) as f32 / 1000.0 - 1.0)
@@ -5743,12 +5704,11 @@ mod tests {
         assert_eq!(ids_top.len(), 1);
         assert!(
             elapsed_us < 100_000,
-            "prepared+rotation first-search took {} us, expected < 100_000 us (100 ms); \
-             rotation OnceLock probably ran QR on the search path",
+            "wire-v8 first-search took {} us, expected < 100_000 us (100 ms)",
             elapsed_us,
         );
         eprintln!(
-            "phase-r2 first-search with persisted rotation (debug, 100x16 4-bit): {} us",
+            "wire-v8 first-search with derived rotation (debug, 100x16 4-bit): {} us",
             elapsed_us,
         );
     }

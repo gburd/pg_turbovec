@@ -290,16 +290,20 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
             }
             // Phase Q-0: any pre-v7 index (v1..v6) is unreadable. This
             // subsumes the old is_legacy_v1 / is_legacy_v2 gates.
-            Some(m) if m.is_legacy_v6() && m.n_vectors > 0 => {
+            // pg_turbovec 2.0.0: any pre-v8 index (v1..v7) is
+            // unreadable (turbovec 1.0.0 changed the codebook/rotation
+            // representation). This subsumes the old is_legacy_v1 /
+            // is_legacy_v2 / is_legacy_v6 gates.
+            Some(m) if m.is_legacy_v7() && m.n_vectors > 0 => {
                 ereport!(
                     PgLogLevel::ERROR,
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                     format!(
-                        "turbovec index \"{idx_name}\" uses a pre-v7 relfile layout (wire version {}); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it",
+                        "turbovec index \"{idx_name}\" uses a pre-v8 relfile layout (wire version {}); pg_turbovec 2.0.0 adopted turbovec 1.0.0's block-Hadamard rotation + TQ+ codebook and cannot read it",
                         m.version
                     ),
                     format!(
-                        "Run `REINDEX INDEX {idx_name};` to rebuild it under the v7 wire format (this roughly halves the index's on-disk size). See docs/UPGRADING.md."
+                        "Run `REINDEX INDEX {idx_name};` to rebuild it under the v8 wire format (rebuilt from the heap; there is no in-place migration). See docs/UPGRADING.md."
                     )
                 );
             }
@@ -898,20 +902,13 @@ unsafe fn install_whole_index(
         // (backend, am_version) at cache-install, and the result is
         // cached in this per-backend `ReadOnlyIndex`, so warm
         // queries never repay it.
-        let (blocked, n_blocks) = turbovec::pack::repack(
-            &codes,
-            meta.n_vectors as usize,
-            meta.bit_width as usize,
-            meta.dim as usize,
-        );
-        let centroids = meta.centroids_slice().to_vec();
-        let boundaries = meta.boundaries_slice().to_vec();
-        let rotation = relfile::read_rotation(rel, meta);
-        let rotation_opt = if rotation.is_empty() {
-            None
-        } else {
-            Some(rotation)
-        };
+        // wire v8 / turbovec 1.0.0: the codebook + rotation are derived
+        // from (bit_width, dim) at index-open, and the SIMD-blocked
+        // layout is recomputed from the packed codes inside
+        // `from_prepared_parts`' `prepare()` (no longer persisted). Only
+        // the per-index TQ+ calibration is read back (empty = identity
+        // for a pg_turbovec index, which never calibrates today).
+        let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, meta);
         cache::ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             meta.dim as usize,
@@ -919,11 +916,8 @@ unsafe fn install_whole_index(
             codes,
             scales,
             ids,
-            blocked,
-            n_blocks,
-            centroids,
-            boundaries,
-            rotation_opt,
+            tqplus_shift,
+            tqplus_scale,
         )
     } else {
         // No prepared layout (legacy path; should be unreachable
@@ -985,20 +979,13 @@ unsafe fn install_graph_index(
     let stored_index: cache::ReadOnlyIndex = if meta.has_prepared_layout() {
         // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
         // packed codes (no longer persisted); see install_whole_index.
-        let (blocked, n_blocks) = turbovec::pack::repack(
-            &codes,
-            meta.n_vectors as usize,
-            meta.bit_width as usize,
-            meta.dim as usize,
-        );
-        let centroids = meta.centroids_slice().to_vec();
-        let boundaries = meta.boundaries_slice().to_vec();
-        let rotation = relfile::read_rotation(rel, meta);
-        let rotation_opt = if rotation.is_empty() {
-            None
-        } else {
-            Some(rotation)
-        };
+        // wire v8 / turbovec 1.0.0: the codebook + rotation are derived
+        // from (bit_width, dim) at index-open, and the SIMD-blocked
+        // layout is recomputed from the packed codes inside
+        // `from_prepared_parts`' `prepare()` (no longer persisted). Only
+        // the per-index TQ+ calibration is read back (empty = identity
+        // for a pg_turbovec index, which never calibrates today).
+        let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, meta);
         cache::ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             meta.dim as usize,
@@ -1006,11 +993,8 @@ unsafe fn install_graph_index(
             codes,
             scales,
             ids,
-            blocked,
-            n_blocks,
-            centroids,
-            boundaries,
-            rotation_opt,
+            tqplus_shift,
+            tqplus_scale,
         )
     } else {
         cache::ReadOnlyIndex::from_parts(
@@ -1089,12 +1073,18 @@ unsafe fn try_install_ooc(
     // cell-contiguous layout + range-scoped reads, NOT mmap. See
     // docs/BUFFER_CACHE_ONLY_DESIGN.md.
 
-    // Bounded regions: coarse centroids + rotation + cell directory.
+    // Bounded regions: coarse centroids + cell directory. wire v8:
+    // the rotation is NOT read from disk anymore (turbovec 1.0.0
+    // derives it from `dim`); we materialize the block-Hadamard
+    // `Rotation::new(dim)` as a dense `dim*dim` matrix so the coarse
+    // GEMM probe (`rotate_query`) stays in the SAME rotated space the
+    // per-vector codes were encoded in. See P1_PROGRESS.md
+    // D-ivf-rotation.
     let coarse_centroids = relfile::read_coarse_centroids(rel, meta);
     if coarse_centroids.len() != lists * dim {
         return None;
     }
-    let rotation = relfile::read_rotation(rel, meta);
+    let rotation = crate::index::ivf::materialize_rotation_matrix(dim);
     if rotation.len() != dim * dim {
         return None;
     }
@@ -1103,9 +1093,10 @@ unsafe fn try_install_ooc(
         return None;
     }
 
-    // Codebook (inline in the meta page).
-    let codebook_centroids = meta.centroids_slice().to_vec();
-    let codebook_boundaries = meta.boundaries_slice().to_vec();
+    // TQ+ calibration for the compact sub-index searches (empty =
+    // identity; the inline codebook is no longer read — turbovec 1.0.0
+    // derives it from (bit_width, dim)).
+    let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, meta);
 
     // Small per-slot tables (scales 4 B/vec, ids 8 B/vec). These are
     // O(n) but tiny next to the codes (e.g. 768 B/vec at 1536-d
@@ -1134,8 +1125,8 @@ unsafe fn try_install_ooc(
         lists,
         rotation,
         directory,
-        codebook_centroids,
-        codebook_boundaries,
+        tqplus_shift,
+        tqplus_scale,
         scales,
         ids,
     );
@@ -1201,13 +1192,14 @@ unsafe fn ivf_setup_and_search(
     let dim = meta.dim as usize;
     let lists = meta.lists as usize;
 
-    // Coarse centroids (f32, rotated space) + rotation matrix + cell
-    // directory. Any missing piece ⇒ flat fallback (defensive).
+    // Coarse centroids (f32, rotated space) + cell directory. wire v8:
+    // materialize the rotation from `dim` (not read from disk); see
+    // the OOC path + P1_PROGRESS.md D-ivf-rotation.
     let centroids = relfile::read_coarse_centroids((*scan).indexRelation, &meta);
     if centroids.len() != lists * dim {
         return None;
     }
-    let rotation = relfile::read_rotation((*scan).indexRelation, &meta);
+    let rotation = crate::index::ivf::materialize_rotation_matrix(dim);
     if rotation.len() != dim * dim {
         return None;
     }

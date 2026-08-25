@@ -642,6 +642,45 @@ pub fn coarse_probe_dispatch(
     }
 }
 
+/// Materialize turbovec 1.0.0's block-Hadamard rotation
+/// (`rotation::Rotation::new(dim)`) as a dense row-major `dim * dim`
+/// matrix `R` such that `R @ src == Rotation::new(dim).apply(src)` for
+/// any `src` (i.e. exactly what [`rotate_query`] and
+/// [`rotate_corpus_into`] consume as `R`).
+///
+/// wire v8 background: 1.0.0 REMOVED the dense-matrix
+/// `rotation::make_rotation_matrix(dim)` the old fork exposed; the
+/// rotation is now a block-Hadamard OPERATOR (signs + permutations +
+/// WHT), applied per-row via `Rotation::apply`. pg_turbovec's IVF
+/// builds coarse centroids in ROTATED space via a batched GEMM
+/// (`corpus @ R^T`) and probes with `rotate_query` (`R @ q`), so it
+/// needs `R` as a dense matrix. Because the rotation is a LINEAR
+/// operator, materializing it column-by-column (`R[:,j] =
+/// apply(e_j)`) yields a matrix whose GEMM is bit-identical to a
+/// per-row `apply`, and it is the SAME operator turbovec's encoder
+/// applies to every vector — so the coarse space and the per-vector
+/// code space coincide (no space mismatch / corruption). Deterministic
+/// (fixed ROTATION_SEED). Cost is O(dim^2) applies, negligible vs the
+/// corpus GEMM. See P1_PROGRESS.md D-ivf-rotation.
+pub fn materialize_rotation_matrix(dim: usize) -> Vec<f32> {
+    // R is column-major-defined but stored row-major: R[k*dim + j] is
+    // the k-th coordinate of `apply(e_j)`. Build e_j, apply, scatter
+    // the resulting column into R's j-th column.
+    let rot = turbovec::rotation::Rotation::new(dim);
+    let mut r = vec![0.0f32; dim * dim];
+    let mut col = vec![0.0f32; dim];
+    for j in 0..dim {
+        for (i, c) in col.iter_mut().enumerate() {
+            *c = if i == j { 1.0 } else { 0.0 };
+        }
+        rot.apply(&mut col);
+        for k in 0..dim {
+            r[k * dim + j] = col[k];
+        }
+    }
+    r
+}
+
 /// Rotate a `dim`-length query into the clustering (rotated) space,
 /// mirroring the build's `BuildState::rotate_unit` (and turbovec's
 /// encode): `rotated[k] = sum_j R[k*dim+j] * src[j]`, i.e. `src @

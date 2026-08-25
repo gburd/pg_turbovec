@@ -1,17 +1,10 @@
 fn main() {
-    // turbovec depends on `openblas-src` for SIMD-accelerated routines.
-    // Because our crate is a `cdylib`, rustc does not automatically
-    // propagate link directives from indirect dependencies into the
-    // shared object's `DT_NEEDED` list. Re-emit them here so the
-    // resulting `pg_turbovec.so` carries an explicit dependency on
-    // OpenBLAS — without this, `LOAD 'pg_turbovec'` fails with
-    // "undefined symbol: cblas_sgemm".
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        println!("cargo:rustc-link-lib=openblas");
-    }
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        // On macOS turbovec uses Apple Accelerate via the
-        // `accelerate` blas-src feature.
-        println!("cargo:rustc-link-lib=framework=Accelerate");
-    }
+    // turbovec 1.0.0's v5 block-Hadamard rotation is pure Rust and
+    // drops the OpenBLAS dependency (upstream #, "drops the 42 MB
+    // OpenBLAS dependency"). pg_turbovec's own IVF k-means uses the
+    // pure-Rust `gemm` crate (no external BLAS), so nothing in the
+    // shared object references `cblas_sgemm` anymore. The old
+    // `cargo:rustc-link-lib=openblas` / Accelerate re-emit is dead and
+    // would add a spurious DT_NEEDED (a hard `LOAD` failure on a host
+    // without libopenblas). Removed for the 2.0.0 port.
 }

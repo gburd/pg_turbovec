@@ -440,22 +440,11 @@ unsafe fn load_persistent_colbert_inner(
     // simplest correct reuse and the cache keeps it warm across calls.
     let (codes, scales, ids) = relfile::read_full(index_rel, &meta);
     let stored = if meta.has_prepared_layout() {
-        // Phase Q-0 (v7): recompute the SIMD-blocked layout from the
-        // packed codes (no longer persisted on disk).
-        let (blocked, n_blocks) = turbovec::pack::repack(
-            &codes,
-            meta.n_vectors as usize,
-            meta.bit_width as usize,
-            meta.dim as usize,
-        );
-        let centroids = meta.centroids_slice().to_vec();
-        let boundaries = meta.boundaries_slice().to_vec();
-        let rotation = relfile::read_rotation(index_rel, &meta);
-        let rotation_opt = if rotation.is_empty() {
-            None
-        } else {
-            Some(rotation)
-        };
+        // wire v8 / turbovec 1.0.0: codebook + rotation derived from
+        // (bit_width, dim); the SIMD-blocked layout is recomputed inside
+        // `from_prepared_parts`. Only the per-index TQ+ pair is read
+        // back (empty = identity today).
+        let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_rel, &meta);
         cache::ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             meta.dim as usize,
@@ -463,11 +452,8 @@ unsafe fn load_persistent_colbert_inner(
             codes,
             scales,
             ids,
-            blocked,
-            n_blocks,
-            centroids,
-            boundaries,
-            rotation_opt,
+            tqplus_shift,
+            tqplus_scale,
         )
     } else {
         cache::ReadOnlyIndex::from_parts(

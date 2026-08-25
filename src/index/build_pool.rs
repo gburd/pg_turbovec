@@ -162,11 +162,22 @@ mod tests {
         pool.install(|| {
             let mut idx = IdMapIndex::new(dim, bit_width).unwrap();
             idx.add_with_ids(vectors, ids).unwrap();
-            idx.prepare_eager();
+            idx.prepare();
+            // wire v8: the blocked layout is no longer persisted (it's
+            // recomputed at index-open from the packed codes). For the
+            // pool-size-invariance check we recompute it the same way
+            // the reader does (`pack::repack`), so the test still proves
+            // the parts that DO hit the relfile are deterministic.
+            let (blocked, _n_blocks) = turbovec::pack::repack(
+                idx.packed_codes(),
+                idx.slot_to_id().len(),
+                bit_width,
+                dim,
+            );
             (
                 idx.packed_codes().to_vec(),
                 idx.scales().to_vec(),
-                idx.blocked_codes().to_vec(),
+                blocked,
                 idx.slot_to_id().to_vec(),
             )
         })

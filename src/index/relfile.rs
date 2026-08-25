@@ -692,16 +692,49 @@ pub(crate) unsafe fn write_full(
 /// — it's a pure function of the packed codes (`pack::repack`) and is
 /// recomputed once per backend at index-open (see
 /// `scan::install_whole_index`). So this struct no longer carries
-/// `blocked_codes` / `n_blocks`. `centroids` / `boundaries` are the
-/// Lloyd-Max codebook for `(bit_width, dim)`, and `rotation` the
-/// row-major `dim * dim` `f32` orthogonal rotation matrix produced by
-/// `turbovec::rotation::make_rotation_matrix(dim)`. All three come
-/// straight off `IdMapIndex` after a `prepare_eager()` + `rotation()`
-/// call.
+/// `blocked_codes` / `n_blocks`.
+///
+/// wire v8 (turbovec 1.0.0): the Lloyd-Max codebook AND the rotation
+/// are now deterministic functions of `(bit_width, dim)` and no longer
+/// persisted — turbovec 1.0.0 derives them at index-open. The only
+/// per-index codebook state that must round-trip is the TQ+ calibration
+/// pair (`tqplus_shift`, `tqplus_scale`, each `dim` f32), persisted in
+/// the repurposed v3 "rotation" chain as `shift ++ scale`. Both come
+/// straight off `IdMapIndex` after `prepare()` via the TQ+ getters.
+/// (The meta page's inline codebook slot is still stamped with the
+/// DERIVED codebook — see `write_full_inner` — for forward-compat /
+/// debugging, but is NOT read back.)
 pub(crate) struct PreparedParts<'a> {
-    pub centroids: &'a [f32],
-    pub boundaries: &'a [f32],
-    pub rotation: &'a [f32],
+    /// TQ+ per-coordinate shift (`dim` f32, or empty = identity).
+    pub tqplus_shift: &'a [f32],
+    /// TQ+ per-coordinate scale (`dim` f32, or empty = identity).
+    pub tqplus_scale: &'a [f32],
+}
+
+impl PreparedParts<'_> {
+    /// Byte length of the TQ+ chain this will persist (`shift ++
+    /// scale`, `2*dim*4`), or 0 when TQ+ is identity/absent (either
+    /// array empty). Drives `plan_with_blocked`'s chain-sizing arg.
+    pub(crate) fn tqplus_chain_len(&self) -> u64 {
+        if self.tqplus_shift.is_empty() || self.tqplus_scale.is_empty() {
+            return 0;
+        }
+        (std::mem::size_of_val(self.tqplus_shift) + std::mem::size_of_val(self.tqplus_scale)) as u64
+    }
+
+    /// Concatenated little-endian TQ+ chain bytes (`shift ++ scale`),
+    /// or empty when identity/absent. Matches [`read_tqplus`]'s layout.
+    pub(crate) fn tqplus_chain_bytes(&self) -> Vec<u8> {
+        if self.tqplus_shift.is_empty() || self.tqplus_scale.is_empty() {
+            return Vec::new();
+        }
+        let mut out =
+            Vec::with_capacity(self.tqplus_chain_len() as usize);
+        for &v in self.tqplus_shift.iter().chain(self.tqplus_scale.iter()) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
 }
 
 /// v1.29.1 corruption fix #2 (deferred-flush lost-update): compute
@@ -1316,7 +1349,7 @@ pub(crate) unsafe fn write_blocked_phase_and_meta(
     prepared: Option<PreparedParts<'_>>,
 ) {
     let (_n_blocks_blocked, rotation_bytes) = match &prepared {
-        Some(p) => (0u32, std::mem::size_of_val(p.rotation) as u64),
+        Some(p) => (0u32, p.tqplus_chain_len()),
         None => (0, 0),
     };
     let mut meta = MetaPageData::plan_with_blocked(
@@ -1329,7 +1362,13 @@ pub(crate) unsafe fn write_blocked_phase_and_meta(
         rotation_bytes,
     );
     if let Some(p) = &prepared {
-        meta.set_codebook(p.centroids, p.boundaries);
+        // wire v8: the inline codebook slot is stamped with the DERIVED
+        // codebook (a pure fn of (bit_width, dim)); it is forward-compat
+        // /debug only and is NOT read back (the reader derives it too).
+        let _ = &p; // p carries only TQ+ now
+        let (deriv_boundaries, deriv_centroids) =
+            turbovec::expected_codebook(layout.bit_width as usize, layout.dim as usize);
+        meta.set_codebook(&deriv_centroids, &deriv_boundaries);
     }
 
     if layout.n_vectors > 0 {
@@ -1356,19 +1395,17 @@ pub(crate) unsafe fn write_blocked_phase_and_meta(
     if layout.n_vectors > 0 {
         if let Some(p) = &prepared {
             // Phase Q-0 (v7): the SIMD-blocked chain is no longer
-            // persisted; only the rotation chain is written here.
-            if !p.rotation.is_empty() {
-                let rotation_bytes_buf: &[u8] = std::slice::from_raw_parts(
-                    p.rotation.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(p.rotation),
-                );
+            // persisted. wire v8: the (repurposed) chain now carries
+            // the TQ+ arrays (shift ++ scale), not a rotation matrix.
+            let tqplus_buf = p.tqplus_chain_bytes();
+            if !tqplus_buf.is_empty() {
                 write_chain_at(
                     rel,
                     meta.rotation_first,
-                    rotation_bytes_buf,
+                    &tqplus_buf,
                     1,
                     crate::index::page::PAYLOAD_BYTES as u32,
-                    rotation_bytes_buf.len() as u64,
+                    tqplus_buf.len() as u64,
                 );
             }
         }
@@ -1487,9 +1524,11 @@ unsafe fn write_full_inner(
     // Phase Q-0 (v7): the SIMD-blocked chain is no longer persisted
     // (it's recomputed from the packed codes at index-open), so we
     // always plan a ZERO-length blocked chain regardless of
-    // `prepared`. The rotation chain IS still persisted.
+    // `prepared`. wire v8: the (repurposed v3) chain now carries the
+    // TQ+ arrays (shift ++ scale), NOT a rotation matrix — the
+    // rotation is derived from (bit_width, dim) by turbovec 1.0.0.
     let rotation_bytes = match &prepared {
-        Some(p) => std::mem::size_of_val(p.rotation) as u64,
+        Some(p) => p.tqplus_chain_len(),
         None => 0,
     };
     let mut meta = MetaPageData::plan_with_blocked(
@@ -1502,7 +1541,13 @@ unsafe fn write_full_inner(
         rotation_bytes,
     );
     if let Some(p) = &prepared {
-        meta.set_codebook(p.centroids, p.boundaries);
+        // wire v8: the inline codebook slot is stamped with the DERIVED
+        // codebook (a pure fn of (bit_width, dim)); it is forward-compat
+        // /debug only and is NOT read back (the reader derives it too).
+        let _ = &p; // p carries only TQ+ now
+        let (deriv_boundaries, deriv_centroids) =
+            turbovec::expected_codebook(bit_width as usize, dim as usize);
+        meta.set_codebook(&deriv_centroids, &deriv_boundaries);
     }
     // v4 IVF: lay the coarse-centroid + cell-directory chains out
     // after the rotation chain and stamp `lists`. Must happen before
@@ -1650,21 +1695,21 @@ unsafe fn write_full_inner(
         // Phase Q-0 (v7): the SIMD-blocked chain is NO LONGER
         // written here — it's recomputed from the packed codes at
         // index-open via `pack::repack` (halving the on-disk
-        // footprint). Only the rotation + inline codebook are
-        // persisted alongside the row-major codes/scales/ids.
+        // footprint). wire v8: the (repurposed v3) chain now carries
+        // the TQ+ arrays (shift ++ scale), NOT a rotation matrix; the
+        // codebook + rotation are derived from (bit_width, dim) at
+        // index-open by turbovec 1.0.0. The inline codebook slot is
+        // still stamped (set_codebook above) for forward-compat.
         if let Some(p) = &prepared {
-            if !p.rotation.is_empty() {
-                let rotation_bytes_buf: &[u8] = std::slice::from_raw_parts(
-                    p.rotation.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(p.rotation),
-                );
+            let tqplus_buf = p.tqplus_chain_bytes();
+            if !tqplus_buf.is_empty() {
                 write_chain_at(
                     rel,
                     meta.rotation_first,
-                    rotation_bytes_buf,
+                    &tqplus_buf,
                     1,
                     crate::index::page::PAYLOAD_BYTES as u32,
-                    rotation_bytes_buf.len() as u64,
+                    tqplus_buf.len() as u64,
                 );
             }
         }
@@ -2203,24 +2248,34 @@ pub(crate) unsafe fn read_blocked(rel: pg_sys::Relation, meta: &MetaPageData) ->
     )
 }
 
-/// Read the persisted rotation matrix from the v3 chain.
-/// Returns a row-major `dim * dim` `Vec<f32>` ready to feed
-/// straight into
-/// `turbovec::IdMapIndex::from_id_map_parts_with_prepared`.
+/// Read the persisted TQ+ calibration arrays from the (repurposed
+/// v3 "rotation") chain. Returns `(tqplus_shift, tqplus_scale)`, each
+/// a `dim`-length `Vec<f32>`, ready to feed straight into
+/// `turbovec::TurboQuantIndex::from_parts` (or the IdMapIndex twin).
 ///
-/// Returns an empty vector for v1 / v2 indexes or empty v3
-/// indexes (signalled by `meta.rotation_count == 0`); in those
-/// cases the scan path lets the rotation `OnceLock` initialise
-/// itself lazily on first search.
+/// wire v8 (turbovec 1.0.0): the codebook + rotation are derived from
+/// `(bit_width, dim)` and no longer persisted; the only per-index
+/// codebook state that must round-trip is the TQ+ pair, laid out in
+/// this chain as `tqplus_shift (dim f32) ++ tqplus_scale (dim f32)`
+/// = `2*dim*4` bytes. `meta.rotation_dim` is the `dim` the pair was
+/// built for (`rotation_count`/`rotation_first` locate the chain).
+///
+/// Returns `(empty, empty)` for an empty index or one persisted with
+/// identity/absent TQ+ (`meta.rotation_count == 0`); in that case the
+/// index behaves as un-calibrated TQ (from_parts fills identity TQ+).
 ///
 /// # Safety
 ///
 /// Caller must hold a relation reference.
-pub(crate) unsafe fn read_rotation(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<f32> {
+pub(crate) unsafe fn read_tqplus(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> (Vec<f32>, Vec<f32>) {
     if meta.rotation_count == 0 || meta.rotation_first == 0 || meta.rotation_dim == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    let n_elems = (meta.rotation_dim as usize) * (meta.rotation_dim as usize);
+    let dim = meta.rotation_dim as usize;
+    let n_elems = 2 * dim; // shift ++ scale
     let n_bytes = (n_elems * std::mem::size_of::<f32>()) as u64;
     let bytes = read_chain(
         rel,
@@ -2230,10 +2285,12 @@ pub(crate) unsafe fn read_rotation(rel: pg_sys::Relation, meta: &MetaPageData) -
         n_bytes,
     );
     debug_assert_eq!(bytes.len(), n_bytes as usize);
-    bytes
+    let all: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+        .collect();
+    let (shift, scale) = all.split_at(dim);
+    (shift.to_vec(), scale.to_vec())
 }
 
 /// Read the v4 coarse-centroid chain into a row-major `lists * dim`

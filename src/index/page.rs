@@ -185,7 +185,22 @@ pub const MAGIC: [u8; 4] = *b"TVRM";
 ///       there is no in-place migration. The maintainer OK'd this
 ///       REINDEX for the large-index storage win — see
 ///       `docs/UPGRADING.md`.
-pub const VERSION: u8 = 7;
+///     - `8` = pg_turbovec 2.0.0 (turbovec 1.0.0 adoption). The
+///       codebook representation CHANGED: turbovec 1.0.0 derives the
+///       Lloyd-Max codebook AND the (block-Hadamard v5) rotation from
+///       `(bit_width, dim)` deterministically — neither is persisted —
+///       and adds per-index TQ+ calibration (`tqplus_shift[dim]`,
+///       `tqplus_scale[dim]`) that IS per-index and MUST be persisted.
+///       The v3 "rotation chain" slot is repurposed to carry the TQ+
+///       arrays (`tqplus_shift ++ tqplus_scale`, `2*dim` f32); the
+///       `rotation_first/count/dim` fields now locate the TQ+ chain
+///       (`rotation_dim` == dim, chain length `2*dim*4` bytes). This is
+///       a wire-incompatible break (old codes were encoded under the
+///       QR rotation; a v8 binary scores under v5 block-Hadamard), so a
+///       pre-v8 index is detected by [`MetaPageData::is_legacy_v7`]
+///       (`version < 8`) and REINDEXed from the heap (the P0 D3
+///       migration; an in-place converter was measured too lossy).
+pub const VERSION: u8 = 8;
 
 /// Wire version a ColBERT (`KIND_COLBERT`) index emits. As of Phase
 /// Q-0 (v7) this equals [`VERSION`]: the codes-dedup change is not
@@ -1071,19 +1086,38 @@ impl MetaPageData {
     }
 
     /// Returns `true` when the meta page is in a wire format the
-    /// Phase Q-0 (v7) binary cannot read — i.e. ANY pre-v7 index
-    /// (v1..v6).
+    /// Phase Q-0 (v7) binary introduced as unreadable — i.e. ANY
+    /// pre-v7 index (v1..v6). Frozen at `version < 7`: the v8 bump
+    /// (turbovec 1.0.0) added [`Self::is_legacy_v7`] as the live gate,
+    /// so this keeps its original v7 meaning rather than drifting to
+    /// `< VERSION`.
     ///
-    /// **Unlike the deliberately-always-`false` v3/v4/v5 predicates,
-    /// this one genuinely trips.** Phase Q-0 de-duplicated the on-disk
-    /// codes storage by dropping the persisted SIMD-blocked chain,
-    /// which every prior version (v4 single-vector, v5 ColBERT, v6
-    /// graph) DID persist. A v7 relfile is therefore NOT
-    /// byte-compatible with any pre-v7 index for any kind, so a pre-v7
-    /// index must be REINDEXed. `ambeginscan` (and `amgettuple`'s
-    /// first fetch) uses this to emit a clear `ERROR` naming the index
-    /// with a `HINT: REINDEX INDEX <name>;`. See `docs/UPGRADING.md`.
+    /// Phase Q-0 de-duplicated the on-disk codes storage by dropping
+    /// the persisted SIMD-blocked chain, which every prior version (v4
+    /// single-vector, v5 ColBERT, v6 graph) DID persist. A v7 relfile
+    /// is therefore NOT byte-compatible with any pre-v7 index for any
+    /// kind, so a pre-v7 index must be REINDEXed. See
+    /// `docs/UPGRADING.md`.
     pub fn is_legacy_v6(&self) -> bool {
+        self.version < 7
+    }
+
+    /// Returns `true` when the meta page is in a wire format the
+    /// pg_turbovec 2.0.0 (v8) binary cannot read — i.e. ANY pre-v8
+    /// index (v1..v7).
+    ///
+    /// **This is the LIVE runtime migration gate** (like v6 was under
+    /// the 1.29.x line). turbovec 1.0.0 changed the codebook
+    /// representation: the Lloyd-Max codebook and the (v5 block-
+    /// Hadamard) rotation are now derived from `(bit_width, dim)` and
+    /// NOT persisted, while per-index TQ+ calibration IS persisted (in
+    /// the repurposed v3 rotation-chain slot). A v7 index's codes were
+    /// encoded under the OLD QR rotation, so scoring them with a v8
+    /// binary's v5-block-Hadamard-rotated query is WRONG. `ambeginscan`
+    /// (and `amgettuple`'s first fetch) uses this to emit a clear
+    /// `ERROR` naming the index with a `HINT: REINDEX INDEX <name>;`
+    /// (the P0 D3 REINDEX-from-heap migration). See `docs/UPGRADING.md`.
+    pub fn is_legacy_v7(&self) -> bool {
         self.version < VERSION
     }
 

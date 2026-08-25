@@ -82,12 +82,20 @@ pub struct ReadOnlyIndex {
 }
 
 impl ReadOnlyIndex {
-    /// Build a read-only index from owned parts + the prepared
-    /// SIMD-blocked layout / Lloyd-Max codebook / rotation. This is
-    /// the buffer-manager fall-back twin of
-    /// [`IdMapIndex::from_id_map_parts_with_prepared`], minus the
-    /// `id_to_slot` `HashMap` build.
-    #[allow(clippy::too_many_arguments)]
+    /// Build a read-only index from owned parts + the persisted TQ+
+    /// calibration arrays. wire v8 twin of the old
+    /// `from_id_map_parts_with_prepared`, minus the `id_to_slot`
+    /// `HashMap` build.
+    ///
+    /// turbovec 1.0.0 derives the Lloyd-Max codebook AND the (v5
+    /// block-Hadamard) rotation from `(bit_width, dim)` at index-open,
+    /// and recomputes the SIMD-blocked layout from the packed codes via
+    /// `pack::repack` — so none of `blocked_codes` / `n_blocks` /
+    /// `centroids` / `boundaries` / `rotation` are inputs anymore. The
+    /// only per-index codebook state is the TQ+ pair. We call the owned
+    /// `from_parts` (identity TQ+ = empty arrays behaves as
+    /// un-calibrated TQ) then `prepare()` so the first search doesn't
+    /// pay the codebook/rotation/repack build.
     pub fn from_prepared_parts(
         bit_width: usize,
         dim: usize,
@@ -95,53 +103,55 @@ impl ReadOnlyIndex {
         packed_codes: Vec<u8>,
         scales: Vec<f32>,
         slot_to_id: Vec<u64>,
-        blocked_codes: Vec<u8>,
-        n_blocks: usize,
-        centroids: Vec<f32>,
-        boundaries: Vec<f32>,
-        rotation: Option<Vec<f32>>,
+        tqplus_shift: Vec<f32>,
+        tqplus_scale: Vec<f32>,
     ) -> Self {
         let dim_opt = if dim == 0 { None } else { Some(dim) };
-        let inner = TurboQuantIndex::from_parts_with_prepared(
+        let inner = TurboQuantIndex::from_parts(
             dim_opt,
             bit_width,
             n_vectors,
             packed_codes,
             scales,
-            blocked_codes,
-            n_blocks,
-            centroids,
-            boundaries,
-            rotation,
-        );
+            tqplus_shift,
+            tqplus_scale,
+        )
+        .expect("ReadOnlyIndex::from_prepared_parts: from_parts rejected persisted parts");
+        // Eagerly build the codebook / rotation / blocked caches so the
+        // first search on this per-backend index doesn't pay the cold
+        // compute (the same amortization the old prepared path bought).
+        inner.prepare();
         Self { inner, slot_to_id }
     }
 
-    /// Borrowed-cache twin of [`Self::from_prepared_parts`] for the
-    /// mmap fast path. Accepts `Cow` for the heavy buffers so the
-    /// caller can hand off owned `Vec`s (today) or zero-copy
-    /// borrowed slices into a `memmap2::Mmap` (a future follow-up).
-    /// `slot_to_id` stays owned because we keep it as the
-    /// translation table.
-    pub fn from_prepared_parts_borrowed<'a>(
+    /// Owned-parts twin retained for the OOC/mmap cache-fill path.
+    ///
+    /// wire v8 / turbovec 1.0.0 removed `from_parts_with_prepared_borrowed`
+    /// and `PreparedCachesBorrowed` (the zero-copy variant). For P1 this
+    /// takes OWNED buffers and clones as needed via the owned
+    /// `from_parts` + `prepare()`. The zero-copy cache-fill is a P3 perf
+    /// item (see P1_PROGRESS.md D-zerocopy). `slot_to_id` stays owned
+    /// (the translation table).
+    pub fn from_prepared_parts_borrowed(
         bit_width: usize,
         dim: usize,
         n_vectors: usize,
-        packed_codes: std::borrow::Cow<'a, [u8]>,
-        scales: std::borrow::Cow<'a, [f32]>,
+        packed_codes: std::borrow::Cow<'_, [u8]>,
+        scales: std::borrow::Cow<'_, [f32]>,
         slot_to_id: Vec<u64>,
-        prepared: turbovec::PreparedCachesBorrowed<'a>,
+        tqplus_shift: Vec<f32>,
+        tqplus_scale: Vec<f32>,
     ) -> Self {
-        let dim_opt = if dim == 0 { None } else { Some(dim) };
-        let inner = TurboQuantIndex::from_parts_with_prepared_borrowed(
-            dim_opt,
+        Self::from_prepared_parts(
             bit_width,
+            dim,
             n_vectors,
-            packed_codes,
-            scales,
-            prepared,
-        );
-        Self { inner, slot_to_id }
+            packed_codes.into_owned(),
+            scales.into_owned(),
+            slot_to_id,
+            tqplus_shift,
+            tqplus_scale,
+        )
     }
 
     /// Build a read-only index from raw parts with no prepared
@@ -165,7 +175,8 @@ impl ReadOnlyIndex {
             scales,
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("ReadOnlyIndex::from_parts: from_parts rejected raw parts");
         Self { inner, slot_to_id }
     }
 
@@ -193,8 +204,6 @@ impl ReadOnlyIndex {
             query,
             self.inner.dim(),
             self.inner.bit_width(),
-            self.inner.rotation(),
-            self.inner.centroids(),
             self.inner.packed_codes(),
             self.inner.scales(),
         )
@@ -370,12 +379,20 @@ pub(crate) struct OocIvfIndex {
     /// back to the exact linear scan via `coarse_probe_dispatch`.
     graph: Option<crate::index::ivf::CentroidGraph>,
     /// Rotation matrix (row-major `dim * dim`) for the coarse probe.
+    /// wire v8: turbovec 1.0.0's rotation is the block-Hadamard
+    /// `Rotation::new(dim)`; this is that operator MATERIALIZED as a
+    /// dense matrix (via `ivf::materialize_rotation_matrix`) so the
+    /// coarse-probe GEMM (`rotate_query`, `corpus @ R^T`) still works
+    /// and stays in the SAME rotated space the per-vector codes were
+    /// encoded in. See P1_PROGRESS.md D-ivf-rotation.
     rotation: Vec<f32>,
     /// Cell directory: each cell's `[code_offset, +n_vectors)` range.
     directory: CellDirectory,
-    /// Lloyd-Max codebook for the compact sub-index search caches.
-    codebook_centroids: Vec<f32>,
-    codebook_boundaries: Vec<f32>,
+    /// TQ+ calibration for the compact sub-index searches (empty =
+    /// identity; a pg_turbovec index never calibrates today, so these
+    /// are empty — kept so a future calibrated build round-trips).
+    tqplus_shift: Vec<f32>,
+    tqplus_scale: Vec<f32>,
     /// Per-slot scale (4 B/vec; small, kept resident — gathered per
     /// query into the compact sub-index).
     scales: Vec<f32>,
@@ -456,29 +473,23 @@ impl GraphScorer {
         query: &[f32],
         dim: usize,
         bit_width: usize,
-        rotation: &[f32],
-        centroids: &[f32],
         packed_codes: &[u8],
         scales: &[f32],
     ) -> Self {
         let n_levels = 1usize << bit_width;
-        // q_rot[d] = Σ_j query[j] * rotation[d*dim + j]  (== query @ R^T,
-        // matching turbovec search.rs's batched GEMM). If rotation is
-        // empty (a lazy/degenerate index), fall back to identity so the
-        // scorer still produces a consistent ranking.
+        // wire v8 / turbovec 1.0.0: the rotation is the deterministic v5
+        // block-Hadamard operator `Rotation::new(dim)` (no dense matrix),
+        // and the codebook centroids are the deterministic Lloyd-Max
+        // codebook for `(bit_width, dim)`. Derive both here and rotate
+        // the query with `Rotation::apply` (q_rot = R(query)), matching
+        // turbovec's own encode/search rotation of every row.
         let mut q_rot = vec![0.0f32; dim];
-        if rotation.len() == dim * dim {
-            for (d, qr) in q_rot.iter_mut().enumerate() {
-                let rrow = &rotation[d * dim..(d + 1) * dim];
-                let mut acc = 0.0f32;
-                for (j, &qv) in query.iter().enumerate().take(dim) {
-                    acc += qv * rrow[j];
-                }
-                *qr = acc;
-            }
-        } else {
-            q_rot[..dim.min(query.len())].copy_from_slice(&query[..dim.min(query.len())]);
+        let n = dim.min(query.len());
+        q_rot[..n].copy_from_slice(&query[..n]);
+        if dim > 0 && dim % 8 == 0 {
+            turbovec::rotation::Rotation::new(dim).apply(&mut q_rot);
         }
+        let (_boundaries, centroids) = turbovec::expected_codebook(bit_width, dim);
         // Per-coordinate LUT: qlut[d][c] = q_rot[d] * centroids[c].
         let mut qlut = vec![0.0f32; dim * n_levels];
         for d in 0..dim {
@@ -648,8 +659,8 @@ impl OocIvfIndex {
         lists: usize,
         rotation: Vec<f32>,
         directory: CellDirectory,
-        codebook_centroids: Vec<f32>,
-        codebook_boundaries: Vec<f32>,
+        tqplus_shift: Vec<f32>,
+        tqplus_scale: Vec<f32>,
         scales: Vec<f32>,
         slot_to_id: Vec<u64>,
     ) -> Self {
@@ -679,8 +690,8 @@ impl OocIvfIndex {
             graph,
             rotation,
             directory,
-            codebook_centroids,
-            codebook_boundaries,
+            tqplus_shift,
+            tqplus_scale,
             scales,
             slot_to_id,
         }
@@ -926,21 +937,24 @@ impl OocIvfIndex {
         let codes = &compact_codes[row_start * stride..row_end * stride];
         let scales = &compact_scales[row_start..row_end];
         let dim_opt = if self.dim == 0 { None } else { Some(self.dim) };
-        let prepared = turbovec::PreparedCachesBorrowed {
-            blocked_codes: None,
-            n_blocks: 0,
-            centroids: Some(std::borrow::Cow::Borrowed(&self.codebook_centroids)),
-            boundaries: Some(std::borrow::Cow::Borrowed(&self.codebook_boundaries)),
-            rotation: Some(std::borrow::Cow::Borrowed(&self.rotation)),
-        };
-        let sub = TurboQuantIndex::from_parts_with_prepared_borrowed(
+        // wire v8 / turbovec 1.0.0: no `from_parts_with_prepared_borrowed`
+        // (zero-copy variant removed). Build the throwaway chunk index
+        // via owned `from_parts` (clones the chunk slices) with the
+        // parent's TQ+ calibration (empty = identity for a pg_turbovec
+        // index, which never calibrates today — see P1_PROGRESS.md), then
+        // `prepare()` so the codebook/rotation/blocked caches are built
+        // once for the chunk. Zero-copy is a P3 perf item (D-zerocopy).
+        let sub = TurboQuantIndex::from_parts(
             dim_opt,
             self.bit_width,
             n_rows,
-            std::borrow::Cow::Borrowed(codes),
-            std::borrow::Cow::Borrowed(scales),
-            prepared,
-        );
+            codes.to_vec(),
+            scales.to_vec(),
+            self.tqplus_shift.clone(),
+            self.tqplus_scale.clone(),
+        )
+        .expect("search_compact_chunk: from_parts rejected the gathered chunk");
+        sub.prepare();
         let mut res = match allow_compact {
             None => sub.search(query, k),
             Some(all) => sub.search_with_mask(query, k, Some(&all[row_start..row_end])),
@@ -1809,7 +1823,7 @@ mod graph_scorer_tests {
         let mut idx = IdMapIndex::new(dim, bit_width).unwrap();
         let ids: Vec<u64> = (0..n as u64).collect();
         idx.add_with_ids(flat, &ids).unwrap();
-        idx.prepare_eager();
+        idx.prepare();
         ReadOnlyIndex::from_prepared_parts(
             bit_width,
             dim,
@@ -1817,11 +1831,8 @@ mod graph_scorer_tests {
             idx.packed_codes().to_vec(),
             idx.scales().to_vec(),
             idx.slot_to_id().to_vec(),
-            idx.blocked_codes().to_vec(),
-            idx.n_blocks(),
-            idx.centroids().to_vec(),
-            idx.boundaries().to_vec(),
-            Some(idx.rotation().to_vec()),
+            idx.tqplus_shift().to_vec(),
+            idx.tqplus_scale().to_vec(),
         )
     }
 

@@ -44,7 +44,11 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.1"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "befc4cbf73ef40e440232ae597888c71fe1ba50c" }
+turbovec = { path = "/mnt/nvme/tv100/turbovec" }
+# ^ P1: turbovec 1.0.0 (upstream ccab9f3) + fork carries repack-pub (537a289)
+#   and parts-API (eb4c0b8). Logical pin = gburd/turbovec@eb4c0b8 (branch
+#   pgtv-2.0.0-port). Local path for the iterative compile-fix phase; a
+#   pushed git rev pin lands at P7 release-engineering.
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

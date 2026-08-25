@@ -600,7 +600,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // L2-normalised vector space, not the IVF clustering space
         // (see the module doc on `graph.rs`).
         if state.lists > 0 {
-            state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(d));
+            state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(d));
             // Phase B-4: open the disk spill now that the record
             // stride (8 + d*4) is known. The heap scan streams every
             // accepted vector into it instead of `ivf_flat`.
@@ -742,7 +742,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // function of the (already-deterministic) row-major codes, so
         // this stays byte-identical to a serial build regardless of
         // pool size.
-        super::build_pool::install(build_pool.as_ref(), || idx.prepare_eager());
+        super::build_pool::install(build_pool.as_ref(), || idx.prepare());
         // also drive the rotation `OnceLock` so we
         // can persist the matrix alongside the codes. The
         // rotation is a deterministic function of `(dim,
@@ -752,11 +752,11 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // QR on the first search of every backend in the
         // pre-Phase-R-2 path — lets every backend reading the
         // index skip it forever.
-        let rotation = idx.rotation();
+        // wire v8: persist only the per-index TQ+ pair (empty =
+        // identity today); codebook + rotation are derived at open.
         let prepared = relfile::PreparedParts {
-            centroids: idx.centroids(),
-            boundaries: idx.boundaries(),
-            rotation,
+            tqplus_shift: idx.tqplus_shift(),
+            tqplus_scale: idx.tqplus_scale(),
         };
         relfile::write_full_with_prepared(
             index_relation,
@@ -1146,12 +1146,12 @@ unsafe fn ivf_build_and_write(
 
     pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let t0 = std::time::Instant::now();
-    super::build_pool::install(build_pool, || idx.prepare_eager());
-    let idx_rotation = idx.rotation();
+    super::build_pool::install(build_pool, || idx.prepare());
+
     let prepared = relfile::PreparedParts {
-        centroids: idx.centroids(),
-        boundaries: idx.boundaries(),
-        rotation: idx_rotation,
+        // wire v8: persist only the per-index TQ+ pair.
+        tqplus_shift: idx.tqplus_shift(),
+        tqplus_scale: idx.tqplus_scale(),
     };
     // Coarse centroids are already in the rotated space (trained on
     // rotated samples); persist as-is. The cell directory packs the
@@ -1283,12 +1283,12 @@ unsafe fn graph_build_and_write(
     });
     drop(flat);
 
-    super::build_pool::install(build_pool, || idx.prepare_eager());
-    let idx_rotation = idx.rotation();
+    super::build_pool::install(build_pool, || idx.prepare());
+
     let prepared = relfile::PreparedParts {
-        centroids: idx.centroids(),
-        boundaries: idx.boundaries(),
-        rotation: idx_rotation,
+        // wire v8: persist only the per-index TQ+ pair.
+        tqplus_shift: idx.tqplus_shift(),
+        tqplus_scale: idx.tqplus_scale(),
     };
     let offsets_bytes = adjacency.encode_offsets();
     let neighbors_bytes = adjacency.encode_neighbors();
@@ -1368,7 +1368,7 @@ unsafe fn colbert_build_callback(
                 // the rotation matrix + disk spill on the first token,
                 // exactly as the single-vector IVF path does.
                 if state.ivf_rotation.is_none() {
-                    state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(row_dim));
+                    state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
                     state.ivf_spill = Some(CorpusSpill::new(row_dim));
                 }
             }
@@ -1462,7 +1462,7 @@ unsafe extern "C-unwind" fn build_callback(
             // IVF: build the rotation matrix now that dim is pinned,
             // so reservoir samples land in the clustering space.
             if state.lists > 0 && state.ivf_rotation.is_none() {
-                state.ivf_rotation = Some(turbovec::rotation::make_rotation_matrix(row_dim));
+                state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
                 // Phase B-4: open the disk spill (stride needs dim).
                 state.ivf_spill = Some(CorpusSpill::new(row_dim));
             } else if state.graph && state.ivf_spill.is_none() {

@@ -179,8 +179,7 @@ unsafe fn flush_to_relfile(
             )
         },
     );
-    idx.prepare_eager();
-    let rotation = idx.rotation();
+    idx.prepare();
     crate::index::relfile::reconcile_and_write_flush(
         rel,
         state.bit_width as u8,
@@ -191,9 +190,10 @@ unsafe fn flush_to_relfile(
         &state.touched_ids,
         state.version as u32,
         crate::index::relfile::PreparedParts {
-            centroids: idx.centroids(),
-            boundaries: idx.boundaries(),
-            rotation,
+            // wire v8: persist only the per-index TQ+ pair (empty =
+            // identity today); codebook + rotation derived at open.
+            tqplus_shift: idx.tqplus_shift(),
+            tqplus_scale: idx.tqplus_scale(),
         },
     );
     pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);

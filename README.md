@@ -716,7 +716,17 @@ asked about:
 [`turbovec`](https://crates.io/crates/turbovec) is the upstream
 TurboQuant implementation in pure Rust by Ryan Codrai. `pg_turbovec`
 is the PostgreSQL extension built with [pgrx](https://github.com/pgcentralfoundation/pgrx)
-on top of it. We track upstream releases.
+on top of it. pg_turbovec currently pins a small
+[fork](https://github.com/gburd/turbovec) at the upstream **0.9.0** line
+plus an additive integration layer (a borrowed/skip-prepare
+reconstruction path used to rebuild a search-ready index from
+PostgreSQL's own relation pages without a turbovec file). Upstream has
+since released **1.0.0**, which stabilises the on-disk format and
+reorganises the encode/rotation API (the v5 block-Hadamard rotation
+changed every encoded byte); adopting it is a planned, wire-format-aware
+major migration on the pg_turbovec side rather than a routine bump. The
+additive pieces we carry are tracked for upstreaming (turbovec issue
+#70's `from_parts` + in-memory I/O asks have already landed upstream).
 
 ## Ecosystem
 

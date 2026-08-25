@@ -1209,7 +1209,7 @@ mod tests {
         let buf = meta.encode();
         let back = MetaPageData::decode(&buf).expect("decode");
         assert_eq!(meta, back);
-        assert_eq!(back.version, 7);
+        assert_eq!(back.version, 8);
         assert!(back.has_prepared_layout());
         assert_eq!(back.centroids_slice(), centroids.as_slice());
         assert_eq!(back.boundaries_slice(), boundaries.as_slice());
@@ -1242,7 +1242,7 @@ mod tests {
         let buf = meta.encode();
         let back = MetaPageData::decode(&buf).expect("decode");
         assert_eq!(meta, back);
-        assert_eq!(back.version, 7);
+        assert_eq!(back.version, 8);
         assert!(back.has_ivf());
         assert_eq!(back.lists, lists);
         // Coarse + cell-dir chains laid out after rotation, no overlap.
@@ -1543,13 +1543,14 @@ mod tests {
         meta.set_codebook(&centroids, &boundaries);
         assert_eq!(meta.kind, KIND_SINGLE);
         let buf = meta.encode();
-        assert_eq!(buf[4], 7, "single-vector index must emit wire version 7");
+        assert_eq!(buf[4], 8, "single-vector index must emit wire version 8");
         assert_eq!(buf[6], 0, "single-vector kind byte must be zero");
         let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 7);
+        assert_eq!(back.version, 8);
         assert_eq!(back.kind, KIND_SINGLE);
         assert!(!back.is_colbert());
         assert!(!back.is_legacy_v6());
+        assert!(!back.is_legacy_v7());
         // v7 no longer persists a blocked chain.
         assert_eq!(back.blocked_bytes, 0);
         assert_eq!(back.blocked_first, 0);
@@ -1578,13 +1579,14 @@ mod tests {
         // A colbert build flips kind AFTER planning.
         meta.mark_colbert();
         let buf = meta.encode();
-        assert_eq!(buf[4], 7, "colbert index must emit wire version 7");
+        assert_eq!(buf[4], 8, "colbert index must emit wire version 8");
         assert_eq!(buf[6], KIND_COLBERT);
         let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 7);
+        assert_eq!(back.version, 8);
         assert!(back.is_colbert());
         assert!(back.has_ivf(), "colbert index is IVF-backed");
         assert!(!back.is_legacy_v6());
+        assert!(!back.is_legacy_v7());
         assert_eq!(meta, back);
     }
 
@@ -1624,15 +1626,16 @@ mod tests {
         let neighbors_bytes = n * 16 * 4; // pretend degree ~16
         meta.set_graph_chain(offsets_bytes, neighbors_bytes, 42);
         let buf = meta.encode();
-        assert_eq!(buf[4], 7, "graph index must emit wire version 7");
+        assert_eq!(buf[4], 8, "graph index must emit wire version 8");
         assert_eq!(buf[6], KIND_GRAPH);
         let back = MetaPageData::decode(&buf).expect("decode");
-        assert_eq!(back.version, 7);
+        assert_eq!(back.version, 8);
         assert!(back.is_graph());
         assert!(back.has_graph());
         assert!(!back.is_colbert());
         assert!(!back.has_ivf(), "a graph index is not IVF");
         assert!(!back.is_legacy_v6());
+        assert!(!back.is_legacy_v7());
         assert_eq!(back.graph_entry_point, 42);
         assert_eq!(back.graph_offsets_bytes, offsets_bytes);
         assert_eq!(back.graph_neighbors_bytes, neighbors_bytes);

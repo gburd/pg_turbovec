@@ -4,13 +4,13 @@
   "n": 4000,
   "nclust": 4,
   "lists": 16,
-  "baseline_best_recall": 0.1733,
+  "baseline_best_recall": 0.7233,
   "fixed_probes": 2,
   "n_queries": 30,
   "bit_width": 4,
   "frontier": [
-    {"assign_dups": 1, "min_probes_to_baseline_best": 1, "best_recall_at_10": 0.1733},
-    {"assign_dups": 2, "min_probes_to_baseline_best": 1, "best_recall_at_10": 0.2067},
-    {"assign_dups": 4, "min_probes_to_baseline_best": 1, "best_recall_at_10": 0.2400}
+    {"assign_dups": 1, "min_probes_to_baseline_best": 5, "best_recall_at_10": 0.7233},
+    {"assign_dups": 2, "min_probes_to_baseline_best": 2, "best_recall_at_10": 0.7800},
+    {"assign_dups": 4, "min_probes_to_baseline_best": 2, "best_recall_at_10": 0.7633}
   ]
 }

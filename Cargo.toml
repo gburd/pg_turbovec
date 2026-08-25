@@ -44,7 +44,7 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.1"
-turbovec = { path = "/mnt/nvme/tv100/turbovec" }
+turbovec = { path = "/mnt/nvme/tv100/turbovec", features = ["mask-skip-counter"] }
 # ^ P1: turbovec 1.0.0 (upstream ccab9f3) + fork carries repack-pub (537a289)
 #   and parts-API (eb4c0b8). Logical pin = gburd/turbovec@eb4c0b8 (branch
 #   pgtv-2.0.0-port). Local path for the iterative compile-fix phase; a

@@ -1171,7 +1171,7 @@ mod tests {
         let wire: Option<i32> =
             Spi::get_one("SELECT wire_version FROM turbovec.turbovec_check('t_chk_idx'::regclass)")
                 .unwrap();
-        assert_eq!(wire, Some(7), "current builds emit wire v7");
+        assert_eq!(wire, Some(8), "current builds emit wire v8");
 
         let kind: Option<String> =
             Spi::get_one("SELECT kind FROM turbovec.turbovec_check('t_chk_idx'::regclass)")
@@ -1324,7 +1324,7 @@ mod tests {
             // Phase Q-0 (v7): the blocked chain is NO LONGER persisted
             // (recomputed from packed codes at index-open). The
             // rotation + codebook ARE still persisted.
-            assert_eq!(m.version, 7, "build must emit wire version 7");
+            assert_eq!(m.version, 8, "build must emit wire version 8");
             assert_eq!(m.blocked_bytes, 0, "v7 must not persist a blocked chain");
             assert!(m.rotation_count > 0, "rotation chain must be non-empty");
             assert!(m.codebook_n_levels > 0, "codebook must be persisted");
@@ -3230,7 +3230,7 @@ mod tests {
                 let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
                 let m = relfile::read_meta(rel).expect("meta must exist after build");
                 pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
-                assert_eq!(m.version, 7, "graph index must be wire version 7");
+                assert_eq!(m.version, 8, "graph index must be wire version 8");
                 assert!(m.is_graph(), "graph index must have kind = KIND_GRAPH");
                 assert!(
                     m.has_graph(),
@@ -3351,8 +3351,8 @@ mod tests {
                 let m = relfile::read_meta(rel).expect("meta must exist after build");
                 pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
                 assert_eq!(
-                    m.version, 7,
-                    "partitioned graph index must be wire version 7"
+                    m.version, 8,
+                    "partitioned graph index must be wire version 8"
                 );
                 assert!(
                     m.is_graph(),
@@ -5164,7 +5164,7 @@ mod tests {
         };
 
         // v7: blocked chain is NOT persisted.
-        assert_eq!(meta.version, 7);
+        assert_eq!(meta.version, 8);
         assert_eq!(meta.blocked_bytes, 0, "v7 must not persist a blocked chain");
         assert_eq!(meta.blocked_count, 0);
         assert_eq!(meta.blocked_first, 0);
@@ -5268,7 +5268,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(meta.version, 7, "new index must use the v7 wire format");
+        assert_eq!(meta.version, 8, "new index must use the v8 wire format");
         assert!(
             meta.has_prepared_layout(),
             "meta must record codebook + rotation: cb_levels={} rotation_count={}",
@@ -5443,7 +5443,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v_current_meta.version, 7);
+        assert_eq!(v_current_meta.version, 8);
         assert!(!v_current_meta.is_legacy_v1());
         assert!(!v_current_meta.is_legacy_v2());
         assert!(v_current_meta.has_prepared_layout());
@@ -5539,7 +5539,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             m
         };
-        assert_eq!(v3_meta.version, 7);
+        assert_eq!(v3_meta.version, 8);
         assert!(!v3_meta.is_legacy_v1());
         assert!(!v3_meta.is_legacy_v2());
 
@@ -6523,7 +6523,7 @@ mod tests {
         unsafe {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let meta = crate::index::relfile::read_meta(rel).expect("ivf index has a meta page");
-            assert_eq!(meta.version, 7, "IVF index must be wire v7");
+            assert_eq!(meta.version, 8, "IVF index must be wire v8");
             assert!(meta.has_ivf(), "meta.has_ivf() must be true for lists=16");
             assert_eq!(meta.lists, 16);
             assert_eq!(meta.n_vectors, 3000);
@@ -6843,7 +6843,7 @@ mod tests {
             let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
             let meta =
                 crate::index::relfile::read_meta(rel).expect("streamed ivf index has a meta page");
-            assert_eq!(meta.version, 7);
+            assert_eq!(meta.version, 8);
             assert!(meta.has_ivf());
             assert_eq!(meta.lists, 32);
             assert_eq!(meta.n_vectors, 15000);
@@ -8113,7 +8113,11 @@ mod tests {
                     .map(|row| row.get::<i64>(1).unwrap().unwrap())
                     .collect()
             });
-            let skipped = turbovec::search::blocks_skipped_by_mask();
+            // wire v8 / turbovec 1.0.0: blocks_skipped_by_mask() -> Option<u64>
+            // (None if built without the mask-skip-counter feature; we
+            // enable it in Cargo.toml, so the counter is live here).
+            let skipped = turbovec::search::blocks_skipped_by_mask()
+                .expect("mask-skip-counter feature must be enabled for this telemetry test");
             (ids, skipped)
         };
 
@@ -8366,7 +8370,11 @@ mod tests {
                     .map(|row| row.get::<i64>(1).unwrap().unwrap())
                     .collect()
             });
-            (ids, turbovec::search::blocks_skipped_by_mask())
+            (
+                ids,
+                turbovec::search::blocks_skipped_by_mask()
+                    .expect("mask-skip-counter feature must be enabled for this telemetry test"),
+            )
         };
         let (ids_low, skipped_low) = run_and_count(2);
         let (_ids_all, skipped_all) = run_and_count(32);
@@ -9509,7 +9517,8 @@ mod tests {
                     "SELECT id FROM ivf_frontier \
                      ORDER BY emb <=> '{emb}'::vector LIMIT 10"
                 ));
-                let skipped = turbovec::search::blocks_skipped_by_mask();
+                let skipped = turbovec::search::blocks_skipped_by_mask()
+                    .expect("mask-skip-counter feature must be enabled for this telemetry test");
                 blocks_skipped_sum += skipped;
                 // Total blocks scanned per query = ceil(n_live / 32).
                 // n_live is the corpus minus the held-out queries.
@@ -10586,7 +10595,7 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (meta.version, meta.kind)
         };
-        assert_eq!(ver, 7, "single-vector index must emit wire version 7");
+        assert_eq!(ver, 8, "single-vector index must emit wire version 8");
         assert_eq!(kind, crate::index::page::KIND_SINGLE);
         Spi::run("DROP TABLE cb_sv CASCADE").unwrap();
     }

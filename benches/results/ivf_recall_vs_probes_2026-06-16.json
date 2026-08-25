@@ -8,12 +8,12 @@
   "queries": 50,
   "ground_truth": "brute-force exact top-10 by cosine (seqscan, enable_indexscan=off)",
   "curve": [
-    { "probes": 1, "recall_at_10": 0.078000, "blocks_skipped_fraction": 0.990098 },
-    { "probes": 2, "recall_at_10": 0.124000, "blocks_skipped_fraction": 0.980313 },
-    { "probes": 4, "recall_at_10": 0.200000, "blocks_skipped_fraction": 0.961096 },
-    { "probes": 8, "recall_at_10": 0.340000, "blocks_skipped_fraction": 0.922740 },
-    { "probes": 16, "recall_at_10": 0.528000, "blocks_skipped_fraction": 0.847789 },
-    { "probes": 32, "recall_at_10": 0.722000, "blocks_skipped_fraction": 0.704853 },
+    { "probes": 1, "recall_at_10": 0.080000, "blocks_skipped_fraction": 0.990333 },
+    { "probes": 2, "recall_at_10": 0.148000, "blocks_skipped_fraction": 0.980744 },
+    { "probes": 4, "recall_at_10": 0.226000, "blocks_skipped_fraction": 0.960978 },
+    { "probes": 8, "recall_at_10": 0.364000, "blocks_skipped_fraction": 0.922583 },
+    { "probes": 16, "recall_at_10": 0.528000, "blocks_skipped_fraction": 0.846693 },
+    { "probes": 32, "recall_at_10": 0.710000, "blocks_skipped_fraction": 0.700861 },
     { "probes": 128, "recall_at_10": 1.000000, "blocks_skipped_fraction": 0.000000 }
   ]
 }

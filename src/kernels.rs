@@ -76,11 +76,18 @@ pub fn normalise_into(dst: &mut [f32], src: &[f32]) -> f64 {
         dst.copy_from_slice(src);
         return 0.0;
     }
-    let inv = (1.0_f64 / n2.sqrt()) as f32;
+    let norm = n2.sqrt();
+    // Divide in f64 and cast each RESULT to f32. Casting the reciprocal
+    // `(1.0/norm) as f32` first overflows to +inf when `norm` is a tiny
+    // (but nonzero) f64 — a vector of near-underflow elements — which
+    // then poisons every element with inf (norm2 == inf). Per-element
+    // f64 division keeps each `src/norm` finite (|src/norm| <= |src|
+    // since norm >= |src_max| for a real vector), so the f32 cast is
+    // always in range. `normalise_on_insert` runs this on every row.
     for (d, s) in dst.iter_mut().zip(src.iter()) {
-        *d = *s * inv;
+        *d = (f64::from(*s) / norm) as f32;
     }
-    n2.sqrt()
+    norm
 }
 
 /// Allocate a unit-normalised copy of `src`.
@@ -127,6 +134,46 @@ mod tests {
     fn norm2_basic() {
         assert!(approx(norm2(&[3.0, 4.0]), 25.0));
         assert!(approx(norm2(&[]), 0.0));
+    }
+
+    /// Regression: a tiny-but-nonzero-norm vector must normalise to a
+    /// FINITE unit vector, not +inf. The old `(1.0/norm) as f32`
+    /// overflowed to +inf when `norm` was a tiny f64 (elements near f32
+    /// underflow), poisoning every element; per-element f64 division
+    /// fixes it. `normalise_on_insert` runs on every indexed row, so an
+    /// inf here would corrupt the codes.
+    #[test]
+    fn normalise_tiny_norm_stays_finite() {
+        // 8 elements each ~1e-22: norm ~ 2.8e-22 (nonzero, doesn't
+        // underflow n2 to 0), reciprocal ~3.5e21 which is FINITE as f32
+        // only if we divide in f64 (1/2.8e-22 = 3.5e21 < f32::MAX 3.4e38,
+        // actually fine here) — use a smaller value to force the old
+        // overflow: 1e-30 elements -> norm ~2.8e-30 -> 1/norm ~3.5e29
+        // (still < f32 max)… the true overflow is a LARGE-dim tiny-elem
+        // vector. Construct 256 elements of 1e-20: n2 = 256*1e-40 = 2.56e-38
+        // -> norm = 1.6e-19 -> 1/norm = 6.25e18 (finite). The genuine
+        // reciprocal-overflow case the property test hit: a vector whose
+        // norm sqrt is < ~2.9e-39 so 1/norm > f32::MAX. Build it directly:
+        let v = vec![1.0e-23_f32; 4]; // n2 = 4e-46, norm = 2e-23, 1/norm = 5e22 (finite f32)
+        let out = normalise_to_vec(&v);
+        let n = norm2(&out).sqrt();
+        assert!(
+            out.iter().all(|x| x.is_finite()),
+            "normalised elements must be finite, got {out:?}"
+        );
+        assert!(
+            (n - 1.0).abs() < 1e-3 || n == 0.0,
+            "tiny-norm vector must normalise to unit or zero, got norm {n}"
+        );
+        // The actual f32-reciprocal-overflow trigger: norm so small that
+        // 1.0/norm > f32::MAX (3.4e38), i.e. norm < 2.94e-39. A single
+        // element of 2e-39 gives norm 2e-39 -> old (1/norm)as f32 = +inf.
+        let tiny = vec![2.0e-39_f32, 0.0, 0.0, 0.0];
+        let ot = normalise_to_vec(&tiny);
+        assert!(
+            ot.iter().all(|x| x.is_finite()),
+            "reciprocal-overflow input must not produce inf, got {ot:?}"
+        );
     }
 
     #[test]

@@ -2073,11 +2073,17 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
         codebook_n_levels: 0,
         centroids: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS],
         boundaries: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS - 1],
-        // Phase R-2: the rotation chain is a deterministic
-        // function of `(dim, ROTATION_SEED)` and survives row
-        // shuffles, so we keep the existing rotation_first /
-        // rotation_count / rotation_dim intact. Readers still
-        // get the persisted rotation back even after a vacuum.
+        // wire v8: the (repurposed v3 rotation) chain now carries the
+        // per-index TQ+ calibration (`tqplus_shift ++ tqplus_scale`),
+        // which is NOT derivable from (bit_width, dim) and MUST survive
+        // a shrink for search to stay correct. We keep the existing
+        // rotation_first / rotation_count / rotation_dim (now the TQ+
+        // chain locator) intact via `..*old` — the TQ+ arrays are
+        // per-index, not per-row, so a row-count shrink does not touch
+        // them. `read_tqplus` reads this chain back after a vacuum.
+        // (The rotation itself IS a deterministic fn of dim and is
+        // derived at index-open, never persisted.) Do NOT zero these
+        // fields on shrink: it would drop TQ+ and corrupt decode.
         //
         // IVF (Phase E-2): the swap-remove path only runs for FLAT
         // indexes now (`lists == 0`); the IVF path tombstones instead

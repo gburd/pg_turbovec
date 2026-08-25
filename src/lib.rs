@@ -1314,20 +1314,23 @@ mod tests {
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             assert_eq!(m.n_vectors, 100);
             assert!(
-                m.has_prepared_layout(),
-                "build must persist prepared layout: \
+                m.codebook_n_levels > 0,
+                "build must record the codebook level count: \
                  codebook_n_levels={}, rotation_count={}, version={}",
                 m.codebook_n_levels,
                 m.rotation_count,
                 m.version,
             );
-            // Phase Q-0 (v7): the blocked chain is NO LONGER persisted
-            // (recomputed from packed codes at index-open). The
-            // rotation + codebook ARE still persisted.
+            // wire v8 / turbovec 1.0.0: the blocked chain is NOT persisted
+            // (recomputed from packed codes at index-open), and the codebook
+            // + block-Hadamard rotation are DERIVED from (bit_width, dim) at
+            // open rather than persisted. Only non-identity TQ+ calibration
+            // persists a chain; a pg_turbovec index is identity TQ+ today, so
+            // rotation_count == 0 is the healthy state.
             assert_eq!(m.version, 8, "build must emit wire version 8");
-            assert_eq!(m.blocked_bytes, 0, "v7 must not persist a blocked chain");
-            assert!(m.rotation_count > 0, "rotation chain must be non-empty");
-            assert!(m.codebook_n_levels > 0, "codebook must be persisted");
+            assert_eq!(m.blocked_bytes, 0, "v8 must not persist a blocked chain");
+            assert_eq!(m.rotation_count, 0, "identity TQ+ persists no chain");
+            assert!(m.codebook_n_levels > 0, "codebook level count must be recorded");
         }
     }
 
@@ -5269,11 +5272,20 @@ mod tests {
             m
         };
         assert_eq!(meta.version, 8, "new index must use the v8 wire format");
+        // wire v8: the codebook + block-Hadamard rotation are DERIVED
+        // from (bit_width, dim) at open, not persisted; only non-identity
+        // TQ+ calibration persists a chain. A pg_turbovec index is always
+        // identity TQ+ today, so the healthy state is a recorded codebook
+        // level count and NO rotation chain (rotation_count == 0).
         assert!(
-            meta.has_prepared_layout(),
-            "meta must record codebook + rotation: cb_levels={} rotation_count={}",
+            meta.codebook_n_levels > 0,
+            "meta must record the codebook level count: cb_levels={} rotation_count={}",
             meta.codebook_n_levels,
             meta.rotation_count,
+        );
+        assert_eq!(
+            meta.rotation_count, 0,
+            "wire v8 derives the rotation; identity TQ+ persists no chain",
         );
         assert_eq!(
             meta.codebook_n_levels, 16,
@@ -5446,7 +5458,10 @@ mod tests {
         assert_eq!(v_current_meta.version, 8);
         assert!(!v_current_meta.is_legacy_v1());
         assert!(!v_current_meta.is_legacy_v2());
-        assert!(v_current_meta.has_prepared_layout());
+        // wire v8: rotation is derived (not persisted), so a healthy
+        // current index records only the codebook level count; identity
+        // TQ+ persists no chain (rotation_count == 0).
+        assert!(v_current_meta.codebook_n_levels > 0);
 
         // Manufacture a v1 meta-page byte buffer with the same
         // codes/scales/ids chain pointers but no prepared layout.
@@ -5672,8 +5687,12 @@ mod tests {
             (m, c, s, i, ts, tc)
         };
         assert_eq!(meta.version, 8);
-        assert_eq!(meta.rotation_dim, meta.dim);
-        // Identity TQ+ index => empty TQ+ chain.
+        // Identity TQ+ index => empty TQ+ chain, so the (repurposed v3
+        // rotation-slot) chain fields are all zero: `plan_with_blocked`
+        // sets rotation_dim/first/count = 0 when the chain is absent.
+        // The block-Hadamard rotation itself is DERIVED from `dim` at
+        // open, never persisted.
+        assert_eq!(meta.rotation_dim, 0, "identity TQ+ persists no chain (rotation_dim == 0)");
         assert_eq!(meta.rotation_count, 0, "identity TQ+ persists no chain");
         assert!(tqplus_shift.is_empty() && tqplus_scale.is_empty());
 
@@ -6010,7 +6029,7 @@ mod tests {
     /// wording in `scan.rs`, update both the v1 and v2 strings
     /// here.
     #[pg_test(
-        error = "turbovec index \"legacy_v1_idx\" uses a pre-v7 relfile layout (wire version 1); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
+        error = "turbovec index \"legacy_v1_idx\" uses a pre-v8 relfile layout (wire version 1); pg_turbovec 2.0.0 adopted turbovec 1.0.0's block-Hadamard rotation + TQ+ codebook and cannot read it"
     )]
     fn ambeginscan_errors_on_legacy_v1_meta() {
         use_turbovec();
@@ -6062,7 +6081,7 @@ mod tests {
     /// but for the v2 (Phase P, v1.3.x) wire format. Under v7 every
     /// pre-v7 version hits the same unified REINDEX error.
     #[pg_test(
-        error = "turbovec index \"legacy_v2_idx\" uses a pre-v7 relfile layout (wire version 2); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
+        error = "turbovec index \"legacy_v2_idx\" uses a pre-v8 relfile layout (wire version 2); pg_turbovec 2.0.0 adopted turbovec 1.0.0's block-Hadamard rotation + TQ+ codebook and cannot read it"
     )]
     fn ambeginscan_errors_on_legacy_v2_meta() {
         use_turbovec();
@@ -6106,7 +6125,7 @@ mod tests {
     /// The error names the index and tells the user exactly what to
     /// REINDEX.
     #[pg_test(
-        error = "turbovec index \"legacy_v6_idx\" uses a pre-v7 relfile layout (wire version 6); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
+        error = "turbovec index \"legacy_v6_idx\" uses a pre-v8 relfile layout (wire version 6); pg_turbovec 2.0.0 adopted turbovec 1.0.0's block-Hadamard rotation + TQ+ codebook and cannot read it"
     )]
     fn ambeginscan_errors_on_legacy_v6_meta() {
         use_turbovec();
@@ -6450,7 +6469,7 @@ mod tests {
     /// unified REINDEX hint, NOT silently scan. (Before Q-0 a v3 flat
     /// index scanned unchanged under the v4 binary.)
     #[pg_test(
-        error = "turbovec index \"ivf_v3_idx\" uses a pre-v7 relfile layout (wire version 3); pg_turbovec 1.27.0 de-duplicated the on-disk codes storage and cannot read it"
+        error = "turbovec index \"ivf_v3_idx\" uses a pre-v8 relfile layout (wire version 3); pg_turbovec 2.0.0 adopted turbovec 1.0.0's block-Hadamard rotation + TQ+ codebook and cannot read it"
     )]
     fn ivf_v3_index_is_legacy_under_v7_binary() {
         use_turbovec();

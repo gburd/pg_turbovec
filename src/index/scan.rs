@@ -609,7 +609,14 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                         )
                     } else if guc::out_of_core_cell_scoped(codes_bytes)
                         && meta.has_ivf()
-                        && meta.has_prepared_layout()
+                        // wire v8: the OOC path needs a recorded codebook to
+                        // reconstruct the compact per-cell sub-indexes; the
+                        // rotation is DERIVED from dim (not persisted) so the
+                        // old `has_prepared_layout()` gate (which required a
+                        // persisted rotation chain, absent under v8's identity
+                        // TQ+) wrongly disabled OOC for every v8 index. Gate on
+                        // the codebook presence instead.
+                        && meta.codebook_n_levels > 0
                     {
                         if let Some(handle) = try_install_ooc(
                             (*scan).indexRelation,

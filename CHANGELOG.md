@@ -4,6 +4,34 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.29.7] — 2026-08-25
+
+**Numerical-robustness patch** — `normalise_into` (run on every indexed
+row via `normalize_on_insert`) computed the reciprocal norm as
+`(1.0_f64 / norm) as f32`, which **overflows to `+inf`** when `norm` is
+a tiny-but-nonzero f64 (a vector whose elements are near f32 underflow,
+e.g. a single `~2e-39` coordinate). The `+inf` reciprocal then poisoned
+every element (`x * inf = inf`), so the "normalised" vector had `inf`
+coordinates and infinite norm — feeding garbage into the quantizer for
+that row. Now divides **per-element in f64** and casts each result to
+f32 (`(f64::from(x) / norm) as f32`), which stays finite because
+`|x/norm| <= |x|` for a real vector. Patch bump — **no wire change
+(v7), no SQL surface change, no REINDEX.**
+
+Found during the pg_turbovec 2.0.0 (turbovec 1.0.0) port's full test
+re-run: the pre-existing Hegel property test
+`prop_normalise_is_unit_norm_and_idempotent` flaked (~1 in N seeds) on
+the `norm inf` assertion. Added a deterministic regression test
+`normalise_tiny_norm_stays_finite` (fail-before/pass-after proven).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.7';` — no REINDEX. A row
+inserted under an older binary whose vector hit this edge would have
+stored a garbage (inf) code; such a row (if any) is corrected by
+re-inserting it. In practice the trigger requires near-underflow input
+magnitudes, which real embeddings do not produce.
+
 ## [1.29.6] — 2026-08-15
 
 **Dependency-hygiene patch — clears all outstanding RustSec advisories

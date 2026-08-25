@@ -1,0 +1,7 @@
+-- 1.29.7 — numerical-robustness patch (found during the 2.0.0 port's test
+-- re-run). normalise_into computed the reciprocal norm `(1.0/norm) as f32`,
+-- which overflowed to +inf for a tiny-but-nonzero-norm vector (elements near
+-- f32 underflow) and poisoned every element with inf — corrupting the codes
+-- of any such row on insert (normalise_on_insert runs on every indexed row).
+-- Now divides per-element in f64 and casts each result. No wire-format change
+-- (v7), no SQL surface change, no REINDEX. This migration is intentionally empty.

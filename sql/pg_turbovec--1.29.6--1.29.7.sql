@@ -1,0 +1,5 @@
+-- pg_turbovec 1.29.6 -> 1.29.7
+-- Numerical-robustness patch (code-only): normalise_into no longer produces
+-- +inf for a tiny-nonzero-norm vector (f32 reciprocal overflow). No wire
+-- change (v7), no SQL surface change, no REINDEX. Intentionally empty but
+-- MUST exist so ALTER EXTENSION pg_turbovec UPDATE TO '1.29.7' succeeds.

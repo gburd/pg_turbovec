@@ -8105,7 +8105,17 @@ mod tests {
         use_turbovec();
         ivf2_make_corpus("ivf_lp", 4000);
         Spi::run("SET enable_seqscan = off").unwrap();
-        Spi::run("SET turbovec.search_k = 100").unwrap();
+        // search_k is the recall window (candidates the executor
+        // exact-rechecks); block-skip telemetry is driven by the probe
+        // MASK, independent of search_k. 100 was calibrated for the
+        // pre-2.0.0 quantizer; turbovec 1.0.0 classic (non-avx512vnni)
+        // scoring is lossy enough at 16-dim/4-bit that the query own row
+        // can rank past 100 among its ~250 cell-mates and be dropped
+        // before recheck (only on hosts that pick the classic layout,
+        // e.g. GitHub CI runners). Widen to cover the probed cells so
+        // the own-row recall assertion holds on every layout; the
+        // block-skip assertions below are unaffected.
+        Spi::run("SET turbovec.search_k = 300").unwrap();
         Spi::run("SET turbovec.iterative_scan = off").unwrap();
         // This test asserts the WHOLE-INDEX masked-search
         // block-skip mechanism (turbovec's blocks_skipped_by_mask

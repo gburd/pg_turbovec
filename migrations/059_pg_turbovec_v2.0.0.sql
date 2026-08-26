@@ -1,0 +1,11 @@
+-- 2.0.0 — MAJOR: adopt upstream turbovec 1.0.0. Wire format v7 -> v8
+-- (turbovec 1.0.0's TQ+ per-coordinate calibration + v5 block-Hadamard
+-- rotation changed the encoded bytes; the QR rotation is gone). This is a
+-- BREAKING on-disk change: a pre-v8 (v1..v7) index is detected by
+-- MetaPageData::is_legacy_v7() and ambeginscan ERRORs with a
+-- `REINDEX INDEX <name>;` hint at first scan (never silent misread). The
+-- migration is REINDEX-from-heap: an in-place converter was measured too
+-- lossy (double-quantization -20pp R@10 at 4-bit, catastrophic at 2-bit),
+-- so the index is rebuilt from the heap's source vectors (full recall).
+-- No SQL surface change. This migration is intentionally empty; the format
+-- change lives entirely in the extension binary + is handled by REINDEX.

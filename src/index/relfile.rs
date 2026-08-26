@@ -728,8 +728,7 @@ impl PreparedParts<'_> {
         if self.tqplus_shift.is_empty() || self.tqplus_scale.is_empty() {
             return Vec::new();
         }
-        let mut out =
-            Vec::with_capacity(self.tqplus_chain_len() as usize);
+        let mut out = Vec::with_capacity(self.tqplus_chain_len() as usize);
         for &v in self.tqplus_shift.iter().chain(self.tqplus_scale.iter()) {
             out.extend_from_slice(&v.to_le_bytes());
         }

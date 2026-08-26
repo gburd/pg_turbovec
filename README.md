@@ -37,16 +37,16 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v1.29.0 - the full `#[pg_test]` suite passes against
-> PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally)
-> with the default build flags (the relfile-resident page format and
-> the `turbovec` index AM are default-on; the `experimental_index_am`
-> and `relfile_storage` Cargo features were retired in Phase Q).
-> See [`docs/PARITY_GAPS.md` § "Performance gaps"](docs/PARITY_GAPS.md)
-> for the honest scoreboard of every metric vs pgvector, and
-> [`docs/PARTITIONED_SCALE.md`](docs/PARTITIONED_SCALE.md) for scaling
-> past PostgreSQL's single-table ceiling to billions of vectors via
-> partitioning.
+> **Status:** v2.0.0 - now built on upstream **turbovec 1.0.0** (wire
+> format v8). The full `#[pg_test]` suite passes against
+> PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally).
+> **v2.0.0 is a MAJOR wire-format break (v7 → v8): upgrading from any
+> 1.x requires `ALTER EXTENSION ... UPDATE` then a one-time `REINDEX
+> INDEX` per turbovec index** (a pre-v8 index ERRORs at first scan with
+> a REINDEX hint — never silent). It is materially faster than the 1.29
+> line at the same storage. See [`docs/UPGRADING.md`](docs/UPGRADING.md)
+> for the migration and [`docs/PARITY_GAPS.md`](docs/PARITY_GAPS.md) for
+> the honest scoreboard vs pgvector.
 
 ## Why pg_turbovec?
 

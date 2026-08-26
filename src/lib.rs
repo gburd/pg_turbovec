@@ -1330,7 +1330,10 @@ mod tests {
             assert_eq!(m.version, 8, "build must emit wire version 8");
             assert_eq!(m.blocked_bytes, 0, "v8 must not persist a blocked chain");
             assert_eq!(m.rotation_count, 0, "identity TQ+ persists no chain");
-            assert!(m.codebook_n_levels > 0, "codebook level count must be recorded");
+            assert!(
+                m.codebook_n_levels > 0,
+                "codebook level count must be recorded"
+            );
         }
     }
 
@@ -5692,7 +5695,10 @@ mod tests {
         // sets rotation_dim/first/count = 0 when the chain is absent.
         // The block-Hadamard rotation itself is DERIVED from `dim` at
         // open, never persisted.
-        assert_eq!(meta.rotation_dim, 0, "identity TQ+ persists no chain (rotation_dim == 0)");
+        assert_eq!(
+            meta.rotation_dim, 0,
+            "identity TQ+ persists no chain (rotation_dim == 0)"
+        );
         assert_eq!(meta.rotation_count, 0, "identity TQ+ persists no chain");
         assert!(tqplus_shift.is_empty() && tqplus_scale.is_empty());
 
@@ -6246,7 +6252,8 @@ mod tests {
             "1.17.0", "1.17.1", "1.18.0", "1.19.0", "1.20.0", "1.20.1", "1.21.0", "1.22.0",
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
-            "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6",
+            "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
+            "2.0.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

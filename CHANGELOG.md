@@ -4,6 +4,85 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] — 2026-08-26
+
+**MAJOR: pg_turbovec now runs on upstream turbovec 1.0.0.** This adopts
+the stable turbovec 1.0.0 crate (Ryan Codrai's TurboQuant
+implementation, first stable release) in place of the long-lived 0.9.0
+fork. **On-disk wire format v7 → v8** — a breaking change, with a
+documented REINDEX-from-heap migration (below).
+
+### What changed
+- **turbovec 0.9.0 → 1.0.0.** The fork's hand-rolled centroids/boundaries
+  codebook + QR rotation are replaced by turbovec 1.0.0's **TQ+
+  per-coordinate calibration** and **v5 block-Hadamard rotation** (which
+  also drops the OpenBLAS build dependency). Every encoded byte differs
+  from v7, hence the wire bump. pg_turbovec carries two small additive
+  fork patches on top of stock 1.0.0 (`pub fn repack` and a re-exposed
+  `IdMapIndex` parts API used by the buffer-manager cache-fill path),
+  both tracked to be offered upstream.
+- **Wire format v7 → v8.** `MetaPageData::version = 8`,
+  `EXPECTED_WIRE_FORMAT_VERSION = 8`.
+- **Materially faster, same storage.** On EC2 i4i.8xlarge (AVX-512),
+  head-to-head vs v1.29.7: SIFT-1M flat p50 **12.9 ms → 1.3 ms (9.6×)**;
+  GIST-1M IVF p50 @ R@10 0.95 **512 ms → 92 ms (5.6×)**; cold-scan (SIFT
+  IVF) **3139 ms → 399 ms (7.9×)**; build 1.2–2.1× faster. **Index size
+  byte-for-byte unchanged** (77 MB SIFT-1M, ~4.96 GB @ 10M). Recall
+  matched-or-better at matched config. Determinism intact (the
+  build-parallelism byte-identity gates all pass; v5 rotation removed the
+  old OpenBLAS nondeterminism). Two minor warm-flat regressions (~11–15%
+  at already-saturated recall), no correctness impact.
+- All v1.29.x corruption fixes (meta-LAST torn-write ordering,
+  reconcile-on-flush, pre-flush validate-all, IVF `lists==0` dup-gate,
+  VACUUM shrink guard, read_chain bounds, SubXact rollback) are re-proven
+  to fire on the v8 persist path. The 90-minute no-VACUUM
+  upsert+writer-restart corruption A/B ran clean on v8 (92 checks
+  `is_corrupt=f`, 0 dup-id, 0 SIGABRT, 26 restarts).
+
+### Migration — REQUIRES a one-time REINDEX per index (wire v7 → v8)
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.0.0';` + restart the backend,
+**then `REINDEX INDEX <name>;` once per turbovec index.** A pre-v8 index
+opened under 2.0.0 is detected (`MetaPageData::is_legacy_v7()`) and
+`ambeginscan` ERRORs at first scan with a `REINDEX INDEX <name>;` hint —
+never a silent misread (validated end-to-end on EC2: build v7 → open on
+2.0.0 → ERROR+hint → REINDEX → serves correctly on v8, same neighbors).
+
+An in-place page converter was investigated and **rejected**: measured
+recall loss of −20.7 pp @ R@10 (SIFT-1M 4-bit) and catastrophic at 2-bit,
+from double quantization at re-encode. REINDEX-from-heap re-encodes the
+heap's source vectors directly (full recall) — the heap is the corpus,
+so this is not a rebuild-from-external-corpus. See
+[`docs/UPGRADING.md`](docs/UPGRADING.md).
+
+## [1.29.7] — 2026-08-25
+
+**Numerical-robustness patch** — `normalise_into` (run on every indexed
+row via `normalize_on_insert`) computed the reciprocal norm as
+`(1.0_f64 / norm) as f32`, which **overflows to `+inf`** when `norm` is
+a tiny-but-nonzero f64 (a vector whose elements are near f32 underflow,
+e.g. a single `~2e-39` coordinate). The `+inf` reciprocal then poisoned
+every element (`x * inf = inf`), so the "normalised" vector had `inf`
+coordinates and infinite norm — feeding garbage into the quantizer for
+that row. Now divides **per-element in f64** and casts each result to
+f32 (`(f64::from(x) / norm) as f32`), which stays finite because
+`|x/norm| <= |x|` for a real vector. Patch bump — **no wire change
+(v7), no SQL surface change, no REINDEX.**
+
+Found during the pg_turbovec 2.0.0 (turbovec 1.0.0) port's full test
+re-run: the pre-existing Hegel property test
+`prop_normalise_is_unit_norm_and_idempotent` flaked (~1 in N seeds) on
+the `norm inf` assertion. Added a deterministic regression test
+`normalise_tiny_norm_stays_finite` (fail-before/pass-after proven).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '1.29.7';` — no REINDEX. A row
+inserted under an older binary whose vector hit this edge would have
+stored a garbage (inf) code; such a row (if any) is corrected by
+re-inserting it. In practice the trigger requires near-underflow input
+magnitudes, which real embeddings do not produce.
+
 ## [1.29.6] — 2026-08-15
 
 **Dependency-hygiene patch — clears all outstanding RustSec advisories

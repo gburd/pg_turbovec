@@ -168,12 +168,8 @@ mod tests {
             // pool-size-invariance check we recompute it the same way
             // the reader does (`pack::repack`), so the test still proves
             // the parts that DO hit the relfile are deterministic.
-            let (blocked, _n_blocks) = turbovec::pack::repack(
-                idx.packed_codes(),
-                idx.slot_to_id().len(),
-                bit_width,
-                dim,
-            );
+            let (blocked, _n_blocks) =
+                turbovec::pack::repack(idx.packed_codes(), idx.slot_to_id().len(), bit_width, dim);
             (
                 idx.packed_codes().to_vec(),
                 idx.scales().to_vec(),

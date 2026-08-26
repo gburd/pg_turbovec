@@ -1,0 +1,7 @@
+-- pg_turbovec 1.29.7 -> 2.0.0 (MAJOR: turbovec 1.0.0, wire v7 -> v8)
+-- No SQL surface change. The .so swap makes ambeginscan detect any pre-v8
+-- index and ERROR with a `REINDEX INDEX <name>;` hint (REINDEX-from-heap is
+-- the migration — no in-place converter). Intentionally empty (no SQL
+-- objects added/changed) but MUST exist so
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '2.0.0'` succeeds; the operator
+-- then REINDEXes each turbovec index once.

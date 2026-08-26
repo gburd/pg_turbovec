@@ -1368,7 +1368,8 @@ unsafe fn colbert_build_callback(
                 // the rotation matrix + disk spill on the first token,
                 // exactly as the single-vector IVF path does.
                 if state.ivf_rotation.is_none() {
-                    state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
+                    state.ivf_rotation =
+                        Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
                     state.ivf_spill = Some(CorpusSpill::new(row_dim));
                 }
             }

@@ -1323,7 +1323,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rand_distr",
  "simba",
  "typenum",
@@ -1575,7 +1575,7 @@ dependencies = [
  "parking_lot",
  "pgrx",
  "pgrx-tests",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rand_chacha",
  "rayon",
  "serde",
@@ -1869,9 +1869,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha",
@@ -1921,7 +1921,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
 dependencies = [
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2221,7 +2221,7 @@ dependencies = [
  "approx",
  "nalgebra",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2526,9 +2526,10 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 [[package]]
 name = "turbovec"
 version = "1.0.0"
+source = "git+https://github.com/gburd/turbovec.git?rev=f29a2f25aae962fb9e8bc97076f0dd8a8bd6abe1#f29a2f25aae962fb9e8bc97076f0dd8a8bd6abe1"
 dependencies = [
  "ordered-float",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rand_chacha",
  "rayon",
  "statrs",

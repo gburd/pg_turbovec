@@ -44,11 +44,12 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.1"
-turbovec = { path = "/mnt/nvme/tv100/turbovec", features = ["mask-skip-counter"] }
-# ^ P1: turbovec 1.0.0 (upstream ccab9f3) + fork carries repack-pub (537a289)
-#   and parts-API (eb4c0b8). Logical pin = gburd/turbovec@eb4c0b8 (branch
-#   pgtv-2.0.0-port). Local path for the iterative compile-fix phase; a
-#   pushed git rev pin lands at P7 release-engineering.
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "f29a2f25aae962fb9e8bc97076f0dd8a8bd6abe1", features = ["mask-skip-counter"] }
+# ^ pg_turbovec 2.0.0 port: turbovec 1.0.0 (upstream ccab9f3) + two additive
+#   fork carries on branch gburd/turbovec@pgtv-2.0.0-port: `pub fn repack`
+#   (537a289) and the re-exposed IdMapIndex parts API (from_id_map_parts*,
+#   slot_to_id) the cache-fill/reconstruct path uses. Both tracked to be
+#   offered upstream. Pinned by git rev so the port builds anywhere.
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

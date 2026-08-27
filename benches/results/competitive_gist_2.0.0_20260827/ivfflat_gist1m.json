@@ -1,0 +1,58 @@
+[
+  {
+    "engine": "ivfflat",
+    "lists": 1000,
+    "probes": 16,
+    "build_s": 170.33,
+    "idx_bytes": 4102258688,
+    "idx_total_bytes": 4102258688,
+    "p50": 36.052,
+    "p95": 70.589,
+    "mean": 38.277,
+    "qps_1conn": 26.125,
+    "recall": 0.836,
+    "qps_8conn": 178.7
+  },
+  {
+    "engine": "ivfflat",
+    "lists": 1000,
+    "probes": 32,
+    "build_s": 170.33,
+    "idx_bytes": 4102258688,
+    "idx_total_bytes": 4102258688,
+    "p50": 69.973,
+    "p95": 118.588,
+    "mean": 71.72,
+    "qps_1conn": 13.943,
+    "recall": 0.9364,
+    "qps_8conn": 93.1
+  },
+  {
+    "engine": "ivfflat",
+    "lists": 1000,
+    "probes": 64,
+    "build_s": 170.33,
+    "idx_bytes": 4102258688,
+    "idx_total_bytes": 4102258688,
+    "p50": 143.139,
+    "p95": 205.115,
+    "mean": 140.495,
+    "qps_1conn": 7.118,
+    "recall": 0.9806,
+    "qps_8conn": 48.7
+  },
+  {
+    "engine": "ivfflat",
+    "lists": 1000,
+    "probes": 128,
+    "build_s": 170.33,
+    "idx_bytes": 4102258688,
+    "idx_total_bytes": 4102258688,
+    "p50": 268.657,
+    "p95": 337.652,
+    "mean": 259.549,
+    "qps_1conn": 3.853,
+    "recall": 0.9967,
+    "qps_8conn": 27.3
+  }
+]

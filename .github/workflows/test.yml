@@ -35,6 +35,25 @@ jobs:
       fail-fast: false
       matrix:
         pg: [13, 14, 15, 16, 17, 18, 19]
+        # `layout` selects turbovec 1.0.0's blocked-codes scoring kernel.
+        # turbovec picks it at runtime by CPU feature
+        # (avx512vnni && avx512vbmi -> the vector-major permute-dot
+        # kernel; otherwise the classic LUT kernel). The two kernels'
+        # 4-bit quantized scores differ enough to flip a near-tie, so a
+        # host that only ever runs ONE kernel can pass while the other
+        # returns a different top-k (this shipped as 3 CI failures the
+        # VNNI-only EC2 qual missed; fixed by knn()'s exact-cosine
+        # rerank). We now exercise BOTH kernels deterministically via
+        # turbovec's `TURBOVEC_NO_VECTOR_MAJOR` env var so the coverage
+        # does not depend on the runner's CPU. `classic` forces the LUT
+        # kernel; `native` uses whatever the runner supports. The full
+        # pg matrix runs `native`; `classic` runs on the reference
+        # pg16 only (the divergence is kernel-specific, not pg-specific)
+        # to keep CI cost bounded. See docs/CI.md and docs/TESTING.md.
+        layout: [native]
+        include:
+          - pg: 16
+            layout: classic
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,7 +113,18 @@ jobs:
       # The `index_am_recall_floor_{2,3,4}bit` tests run inside the
       # matrix below and guard the scale + distinct-ids gaps that let
       # that bug ship.
-      - run: |
+      # `layout` (matrix): `classic` forces turbovec's classic-LUT
+      # scoring kernel via TURBOVEC_NO_VECTOR_MAJOR=1; `native` leaves
+      # it at "0" (turbovec treats any value != "0" as "force classic",
+      # so "0" == use whatever the runner's CPU supports). This runs the
+      # #[pg_test] suite under BOTH kernels so a near-tie flip between
+      # them can't pass on one host and fail on another (the v2.0.0 KNN
+      # regression). `cargo pgrx test` inherits this env into the
+      # postgres backend it spawns, so the kernel selection propagates.
+      - name: cargo pgrx test (${{ matrix.layout }} kernel)
+        env:
+          TURBOVEC_NO_VECTOR_MAJOR: ${{ matrix.layout == 'classic' && '1' || '0' }}
+        run: |
           cargo pgrx test pg${{ matrix.pg }} \
               --no-default-features \
               --features "pg${{ matrix.pg }} pg_test"

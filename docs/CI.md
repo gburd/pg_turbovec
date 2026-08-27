@@ -86,15 +86,34 @@ Both run the same two-stage pipeline:
    references, and markdown links are consistent across the
    tree. Fails fast on any drift.
 2. **`test` matrix** — `cargo pgrx test pg<N>` for N in
-   `[13, 14, 15, 16, 17, 18]`. The `cargo pgrx init --pgN
-   download` step builds PostgreSQL N from source the first
+   `[13, 14, 15, 16, 17, 18, 19]`, each under the `native` scoring
+   kernel, plus one `classic`-kernel job on pg16. The `cargo pgrx init
+   --pgN download` step builds PostgreSQL N from source the first
    time the workflow runs in a given runner image, then caches
    it across runs.
 
 Cache keys include `Cargo.lock` so a dependency bump invalidates
 both the pgrx install and the cargo target dir.
 
-## CI hardware is AVX2-only — a deliberate, documented gap
+## Both turbovec scoring kernels are exercised (the `layout` axis)
+
+turbovec 1.0.0 picks its blocked-codes scoring kernel at **runtime** by
+CPU feature: `avx512vnni && avx512vbmi` selects the **vector-major**
+permute-dot kernel, otherwise the **classic LUT** kernel. Their 4-bit
+quantized scores differ enough to flip a near-tie, so a host that only
+ever runs one kernel can pass while the other returns a different top-k.
+This actually shipped: the v2.0.0 port's EC2 qualification ran only on
+an AVX-512-VNNI host (vector-major) and reported green, but three KNN
+tests then failed on the non-VNNI GitHub runners (classic). It was fixed
+by making `knn()` exact-cosine-rerank the true f32 vectors
+(layout-independent), but the coverage gap is now closed structurally:
+the `test` job carries a `layout` matrix axis (`native` for the full pg
+range; `classic` on pg16) that sets turbovec's `TURBOVEC_NO_VECTOR_MAJOR`
+env (`1` forces classic, `0` = whatever the runner supports), so **both
+kernels are tested deterministically regardless of the runner's CPU**.
+`cargo pgrx test` inherits the env into the postgres backend it spawns.
+
+## CI hardware is AVX2-only for the *native* kernel selection
 
 The GitHub `ubuntu-latest` runners are AVX2-capable, and turbovec
 selects its SIMD kernel with a **runtime** `is_x86_feature_detected!`

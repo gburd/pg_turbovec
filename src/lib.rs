@@ -3996,8 +3996,8 @@ mod tests {
         // `check_for_interrupts!()` poll, so the assertion below is a
         // direct test of "does the graph build poll".
         unsafe {
-            pg_sys::InterruptPending = true;
-            pg_sys::QueryCancelPending = true;
+            pg_sys::InterruptPending = 1;
+            pg_sys::QueryCancelPending = 1;
         }
         let res = std::panic::catch_unwind(|| {
             Spi::run(
@@ -4015,8 +4015,8 @@ mod tests {
         // Clear the flags whatever happened, so a failure here cannot
         // poison the rest of the suite running in this backend.
         unsafe {
-            pg_sys::InterruptPending = false;
-            pg_sys::QueryCancelPending = false;
+            pg_sys::InterruptPending = 0;
+            pg_sys::QueryCancelPending = 0;
         }
         assert!(
             raised,

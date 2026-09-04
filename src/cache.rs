@@ -2088,6 +2088,145 @@ mod graph_scorer_tests {
         }
     }
 
+    /// DIAGNOSTIC: is the graph recall gap the SCORER or the GRAPH?
+    /// Scale n at fixed dim, scoring the SAME graph three ways, and
+    /// also sweep ef via k. If graph[exact] tracks graph[scorer], the
+    /// scorer is exonerated and the graph structure / beam is the cause.
+    #[test]
+    #[ignore]
+    fn diag_graph_structure_vs_scorer() {
+        let dim = 128usize;
+        let bw = 4usize;
+        for &n in &[2000usize, 20000] {
+            let flat = corpus(n, dim, 0x5CA1E + n as u64);
+            let roi = read_only_index(&flat, n, dim, bw);
+            let (adj, entry) = graph::build_vamana(&flat, n, dim);
+            // degree histogram
+            let degs: Vec<usize> = (0..n).map(|i| adj.neighbors_of(i).len()).collect();
+            let zero = degs.iter().filter(|&&d| d == 0).count();
+            let mean = degs.iter().sum::<usize>() as f64 / n as f64;
+            let nq = 20usize;
+            for &k in &[10usize, 32, 128, 512] {
+                let (mut r_exact, mut r_scorer, mut r_flat) = (0usize, 0usize, 0usize);
+                let mut visited_frac = 0.0f64;
+                for s in 0..nq {
+                    let q = corpus(1, dim, 70000 + s as u64);
+                    let mut d: Vec<(f32, u32)> = (0..n)
+                        .map(|i| {
+                            let ip: f32 = (0..dim).map(|j| flat[i * dim + j] * q[j]).sum();
+                            (ip, i as u32)
+                        })
+                        .collect();
+                    d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                    let truth: std::collections::HashSet<u32> =
+                        d.iter().take(10).map(|x| x.1).collect();
+                    let mut nscored = 0usize;
+                    let hits_exact = graph::graph_search(&adj, entry, k, &[], |ids| {
+                        nscored += ids.len();
+                        ids.iter()
+                            .map(|&i| {
+                                let i = i as usize;
+                                (0..dim).map(|j| flat[i * dim + j] * q[j]).sum::<f32>()
+                            })
+                            .collect()
+                    });
+                    visited_frac += nscored as f64 / n as f64;
+                    let scorer = roi.graph_scorer(&q);
+                    let hits_scorer =
+                        graph::graph_search(&adj, entry, k, &[], |ids| scorer.score_batch(ids));
+                    // flat kernel top-k, then how many of truth@10 in it
+                    let all: Vec<u32> = (0..n as u32).collect();
+                    let ks = roi.score_slots(&q, &all);
+                    let mut fi: Vec<u32> = all.clone();
+                    fi.sort_by(|&i, &j| ks[j as usize].partial_cmp(&ks[i as usize]).unwrap());
+                    r_flat += fi.iter().take(k).filter(|id| truth.contains(id)).count();
+                    r_exact += hits_exact.iter().filter(|x| truth.contains(&x.1)).count();
+                    r_scorer += hits_scorer.iter().filter(|x| truth.contains(&x.1)).count();
+                }
+                let den = (nq * 10) as f64;
+                eprintln!(
+                    "n={n:6} k={k:4} R@10-in-topk: flat={:.3} graph[exact]={:.3} graph[scorer]={:.3}  visited={:.1}% deg(mean={mean:.1} zero={zero})",
+                    r_flat as f64 / den,
+                    r_exact as f64 / den,
+                    r_scorer as f64 / den,
+                    100.0 * visited_frac / nq as f64,
+                );
+            }
+        }
+    }
+
+    /// DIAGNOSTIC (BUG#2): can graph_search return FEWER than k?
+    /// Probe the two structural ways it could: (a) heavy tombstoning
+    /// shrinking the reachable LIVE set, (b) an under-connected graph
+    /// (small n / low-diversity corpus) where the beam exhausts.
+    #[test]
+    #[ignore]
+    fn diag_graph_under_returns() {
+        let dim = 128usize;
+        // (a) tombstones.
+        for &n in &[200usize, 2000] {
+            let flat = corpus(n, dim, 0x7031 + n as u64);
+            let (adj, entry) = graph::build_vamana(&flat, n, dim);
+            for &dead_pct in &[0usize, 50, 80, 90, 95, 99] {
+                let n_bytes = n.div_ceil(8);
+                let mut tomb = vec![0u8; n_bytes];
+                let n_dead = n * dead_pct / 100;
+                for slot in 0..n_dead {
+                    tomb[slot / 8] |= 1 << (slot % 8);
+                }
+                let live = n - n_dead;
+                let mut worst = usize::MAX;
+                for s in 0..10 {
+                    let q = corpus(1, dim, 4000 + s as u64);
+                    let hits = graph::graph_search(&adj, entry, 10, &tomb, |ids| {
+                        ids.iter()
+                            .map(|&i| {
+                                let i = i as usize;
+                                (0..dim).map(|j| flat[i * dim + j] * q[j]).sum::<f32>()
+                            })
+                            .collect()
+                    });
+                    worst = worst.min(hits.len());
+                }
+                let want = 10usize.min(live);
+                eprintln!(
+                    "tomb n={n:5} dead={dead_pct:3}% live={live:5} k=10 -> worst_returned={worst} want={want} {}",
+                    if worst < want { "UNDER-RETURNS" } else { "ok" }
+                );
+            }
+        }
+        // (b) low-diversity corpus: many identical/near-identical rows.
+        for &distinct in &[1usize, 2, 5, 50] {
+            let n = 500usize;
+            let base = corpus(distinct, dim, 0xDEAD);
+            let mut flat = vec![0.0f32; n * dim];
+            for i in 0..n {
+                let src = (i % distinct) * dim;
+                flat[i * dim..(i + 1) * dim].copy_from_slice(&base[src..src + dim]);
+            }
+            let (adj, entry) = graph::build_vamana(&flat, n, dim);
+            let degs: Vec<usize> = (0..n).map(|i| adj.neighbors_of(i).len()).collect();
+            let zero = degs.iter().filter(|&&d| d == 0).count();
+            let mut worst = usize::MAX;
+            for s in 0..10 {
+                let q = corpus(1, dim, 8000 + s as u64);
+                let hits = graph::graph_search(&adj, entry, 10, &[], |ids| {
+                    ids.iter()
+                        .map(|&i| {
+                            let i = i as usize;
+                            (0..dim).map(|j| flat[i * dim + j] * q[j]).sum::<f32>()
+                        })
+                        .collect()
+                });
+                worst = worst.min(hits.len());
+            }
+            eprintln!(
+                "lowdiv n={n} distinct={distinct:3} k=10 -> worst_returned={worst} zero_deg={zero} {}",
+                if worst < 10 { "UNDER-RETURNS" } else { "ok" }
+            );
+        }
+    }
+
     /// G-2c local RELATIVE scan timing: the SIMD LUT `GraphScorer`
     /// per-hop path vs the G-2a scalar `score_slots` path, same
     /// graph, same queries. This box's absolute latency is

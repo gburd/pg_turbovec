@@ -1527,6 +1527,58 @@ where
     }
 
     let mut out: Vec<(f32, u32)> = results.into_iter().map(|Reverse(c)| (c.0, c.1)).collect();
+
+    // BUG#2: the beam can only ever reach nodes connected to the entry
+    // point through a chain of LIVE nodes. That is normally the whole
+    // corpus, but two situations strand live nodes outside it and made
+    // this function return FEWER than `k` results even though `k` live
+    // rows exist — which breaks the index-AM contract (`amgettuple`
+    // must be able to produce every matching row) and shows up as
+    // "LIMIT 10 returned 3":
+    //
+    //   * Heavy tombstoning. A tombstoned neighbor is marked `visited`
+    //     and its out-edges are deliberately never walked (a dead node
+    //     must not be a routing hop), so once the dead set disconnects
+    //     the graph the live remnant is unreachable. Measured: n=2000,
+    //     99% tombstoned (20 live), k=10 -> 2 results. n=200, 95%
+    //     tombstoned (10 live) -> 3 results.
+    //   * A degenerate corpus. With 500 rows that are all the SAME
+    //     vector, every distance ties, RobustPrune's diversity test
+    //     (`alpha * d(p*, p') <= d(p, p')` with all distances 0) prunes
+    //     every candidate after the first, so nodes end up with tiny
+    //     out-lists and the reachable component is a handful of nodes.
+    //     Measured: k=10 -> 8 results.
+    //
+    // Both are recall-irrelevant edge cases (a disconnected remnant has
+    // no good answer to give) but NOT contract-irrelevant. So: if the
+    // beam came up short of `k` and live rows remain unvisited, backfill
+    // from them, scored with the SAME oracle, and merge. Ordering is
+    // unchanged — the backfilled candidates go through the same sort —
+    // so a query that was already returning `k` gets byte-identical
+    // results and pays nothing (the `out.len() >= k` guard exits before
+    // any work). Deterministic: the scan order is ascending slot id.
+    //
+    // The backfill is bounded to what is actually needed (`k - out.len()`
+    // rows, scored in one batch) rather than a full rescan, so the worst
+    // case is one extra `O(k * dim)` scoring call — not an O(n) scan of
+    // the corpus.
+    if out.len() < k {
+        let mut extra: Vec<u32> = Vec::new();
+        for id in 0..n as u32 {
+            if extra.len() + out.len() >= k {
+                break;
+            }
+            if !visited[id as usize] && !is_dead(id) {
+                extra.push(id);
+            }
+        }
+        if !extra.is_empty() {
+            let scores = score_batch(&extra);
+            debug_assert_eq!(scores.len(), extra.len());
+            out.extend(extra.into_iter().zip(scores).map(|(id, s)| (s, id)));
+        }
+    }
+
     // Descending score (closest/most-similar first), ties -> ascending id.
     out.sort_unstable_by(|a, b| {
         b.0.partial_cmp(&a.0)
@@ -2715,6 +2767,116 @@ mod tests {
                 "neighbors re-encode mismatch"
             );
             assert_eq!(g.n(), n, "decoded node count disagrees with requested n");
+        }
+    }
+    /// BUG#2 regression: `graph_search` must return exactly
+    /// `min(k, live_rows)` results, even when the LIVE set is
+    /// disconnected from the entry point in the graph.
+    ///
+    /// The beam can only reach nodes connected to the entry through a
+    /// chain of LIVE nodes, and a tombstoned node is deliberately never
+    /// used as a routing hop (marked `visited`, out-edges not walked).
+    /// Once the dead set disconnects the graph the live remnant became
+    /// UNREACHABLE and the search returned fewer than `k` even though
+    /// `k` live rows existed -- the "LIMIT 10 returned 3" report.
+    ///
+    /// Fail-before, measured with the `#[ignore]`d
+    /// `cache::graph_scorer_tests::diag_graph_under_returns` probe:
+    ///   n=2000, 99% tombstoned (20 live), k=10 -> 2 results
+    ///   n= 200, 95% tombstoned (10 live), k=10 -> 3 results
+    /// Pass-after: exactly `min(k, live)` at every density below.
+    #[test]
+    fn graph_search_returns_k_under_heavy_tombstoning() {
+        let dim = 32usize;
+        for &n in &[200usize, 2000] {
+            let corpus = synth_corpus(n, dim, 0x70_3175 + n as u64);
+            let (g, entry) = build_vamana(&corpus, n, dim);
+            let q = synth_corpus(1, dim, 0xBEE5);
+            // Sweep the tombstone density THROUGH the disconnection
+            // point (95-99% is where it bit).
+            for &dead_pct in &[0usize, 50, 80, 90, 95, 98, 99] {
+                let n_dead = n * dead_pct / 100;
+                let mut tombstones = vec![0u8; n.div_ceil(8)];
+                for slot in 0..n_dead {
+                    tombstones[slot / 8] |= 1 << (slot % 8);
+                }
+                let live = n - n_dead;
+                for &k in &[1usize, 10, 25] {
+                    let out = graph_search(&g, entry, k, &tombstones, |ids| {
+                        neg_sq_dist_batch(&corpus, dim, &q, ids)
+                    });
+                    assert_eq!(
+                        out.len(),
+                        k.min(live),
+                        "n={n} dead={dead_pct}% live={live} k={k}: graph_search \
+                         returned {} results, want min(k, live) = {}",
+                        out.len(),
+                        k.min(live)
+                    );
+                    // Every returned id must be LIVE and distinct -- the
+                    // backfill must not resurrect a tombstoned slot.
+                    let ids: std::collections::HashSet<u32> =
+                        out.iter().map(|&(_, id)| id).collect();
+                    assert_eq!(ids.len(), out.len(), "duplicate ids in result");
+                    for &(_, id) in &out {
+                        let dead = (tombstones[id as usize / 8] >> (id as usize % 8)) & 1 != 0;
+                        assert!(
+                            !dead,
+                            "n={n} dead={dead_pct}% k={k}: returned TOMBSTONED slot {id}"
+                        );
+                    }
+                    // Scores must still be descending.
+                    for w in out.windows(2) {
+                        assert!(w[0].0 >= w[1].0, "results not score-descending: {:?}", out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// BUG#2 regression, second cause: a DEGENERATE corpus.
+    ///
+    /// With many identical vectors every distance ties, so
+    /// `RobustPrune`'s diversity test (`alpha * d(p*, p') <= d(p, p')`,
+    /// all distances 0) prunes every candidate after the first. Nodes
+    /// get tiny out-lists, the reachable component collapses to a
+    /// handful of nodes, and the beam ran out of graph before it filled
+    /// `k`. Fail-before (500 rows all the same vector, k=10): 8 results.
+    ///
+    /// AGENTS.md records a real incident where a test-harness
+    /// data-generation bug (an uncorrelated `random()` subquery the
+    /// planner hoisted) made every row identical -- so this shape is not
+    /// hypothetical, it is exactly what a corpus-generation mistake
+    /// produces, and the AM must still honour `LIMIT k` on it.
+    #[test]
+    fn graph_search_returns_k_on_degenerate_corpus() {
+        let dim = 32usize;
+        let n = 500usize;
+        for &distinct in &[1usize, 2, 5] {
+            // `distinct` unique vectors, repeated to fill n rows.
+            let base = synth_corpus(distinct, dim, 0xDEAD_BEEF);
+            let mut corpus = vec![0.0f32; n * dim];
+            for i in 0..n {
+                let src = (i % distinct) * dim;
+                corpus[i * dim..(i + 1) * dim].copy_from_slice(&base[src..src + dim]);
+            }
+            let (g, entry) = build_vamana(&corpus, n, dim);
+            let q = synth_corpus(1, dim, 0xF00D);
+            for &k in &[1usize, 10, 50] {
+                let out = graph_search(&g, entry, k, &[], |ids| {
+                    neg_sq_dist_batch(&corpus, dim, &q, ids)
+                });
+                assert_eq!(
+                    out.len(),
+                    k.min(n),
+                    "distinct={distinct} k={k}: graph_search returned {} results, \
+                     want {}",
+                    out.len(),
+                    k.min(n)
+                );
+                let ids: std::collections::HashSet<u32> = out.iter().map(|&(_, id)| id).collect();
+                assert_eq!(ids.len(), out.len(), "duplicate ids in result");
+            }
         }
     }
 

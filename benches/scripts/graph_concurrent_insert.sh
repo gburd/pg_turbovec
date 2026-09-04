@@ -116,7 +116,8 @@ wait
 
 after="$(check)"
 heap_after="$(q 'SELECT count(*) FROM g_conc')"
-n_err="$(grep -c ERROR "$ERRLOG" 2>/dev/null || echo 0)"
+n_err="$(grep -c ERROR "$ERRLOG" 2>/dev/null | head -1)"
+n_err="${n_err:-0}"
 
 echo "after:  n|slots|corrupt|dup = $after"
 echo "heap:   $heap_before -> $heap_after"
@@ -129,6 +130,10 @@ IFS='|' read -r a_n a_slots a_corrupt a_dup <<<"$after"
 [ "$a_dup" != "none" ]     && { echo "FAIL: duplicate id $a_dup on disk"; fail=1; }
 [ "$a_n" != "$a_slots" ]   && { echo "FAIL: meta n_vectors=$a_n != ids-chain slots=$a_slots"; fail=1; }
 [ "$n_err" -gt 0 ]         && { echo "FAIL: $n_err inserter error(s)"; fail=1; }
+# With SUSTAIN_SECS the VACUUM loop DELETEs rows, so the index legitimately
+# carries more slots than the heap has live rows (a tombstoned slot stays in
+# the relfile until the next REINDEX). Only the deterministic no-VACUUM leg
+# can assert exact row counts.
 if [ "$SUSTAIN_SECS" -eq 0 ]; then
   want=$(( heap_before + W * ROWS ))
   [ "$heap_after" != "$want" ] && { echo "FAIL: heap has $heap_after rows, expected $want (lost rows)"; fail=1; }

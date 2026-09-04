@@ -73,6 +73,68 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::index::ivf::sq_dist;
 
+// FINDING#2: driver-thread interrupt hook for the graph build.
+//
+// This module is deliberately Postgres-free (see the module doc), so it
+// cannot call `pg_sys::check_for_interrupts!()` itself. Instead the PG
+// caller (`build.rs::graph_build_and_write`) installs a callback here
+// for the duration of the build, and the build calls it at every
+// INTERNAL stage boundary — between the shard fan-out, the cross-shard
+// refinement and the reverse-edge pass of the partitioned build, and
+// every `INTERRUPT_CHECK_NODES` nodes of the serial single-pass build.
+// Without it, cancellation granularity was the WHOLE build: a
+// `CREATE INDEX ... WITH (graph = true)` over millions of rows could
+// not be cancelled at all, and `pg_ctl stop -m fast` hung behind it.
+//
+// Safety of the longjmp: the callback is `check_for_interrupts!()`,
+// which longjmps out on a pending cancel/die. It is therefore ONLY
+// safe to invoke from the thread that owns the PG error stack — the
+// backend's own thread. The hook lives in THREAD-LOCAL storage set by
+// the driver, so a rayon worker simply cannot see it: the same call
+// site is a live poll on the driver and a silent no-op in a worker.
+// That is the enforcement mechanism, and it means the poll is safe to
+// place anywhere, including inside code a worker may also run.
+thread_local! {
+    static INTERRUPT_HOOK: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+/// Nodes between interrupt polls in the serial single-pass build. A
+/// per-node poll would be pure overhead (the poll is a couple of atomic
+/// reads, the node step is a full greedy search + prune); 256 keeps the
+/// worst-case cancel latency at well under a second at any realistic
+/// per-node cost while being invisible in the build time.
+const INTERRUPT_CHECK_NODES: usize = 256;
+
+/// Install `hook` as the build interrupt callback for the lifetime of
+/// the returned guard, on THIS thread only. Restores the previous hook
+/// on drop (so nesting is safe).
+pub struct InterruptHookGuard(Option<fn()>);
+
+impl Drop for InterruptHookGuard {
+    fn drop(&mut self) {
+        INTERRUPT_HOOK.with(|h| h.set(self.0));
+    }
+}
+
+/// Install a driver-thread interrupt hook. See [`INTERRUPT_HOOK`].
+pub fn install_interrupt_hook(hook: fn()) -> InterruptHookGuard {
+    let prev = INTERRUPT_HOOK.with(|h| h.replace(Some(hook)));
+    InterruptHookGuard(prev)
+}
+
+/// Poll the installed interrupt hook, if any. A no-op on any thread
+/// that has no hook installed — which, because the hook lives in
+/// thread-local storage set by the driver, is exactly every rayon
+/// worker thread. That is the enforcement mechanism for "driver thread
+/// only": a worker cannot see the driver's TLS slot, so it cannot
+/// longjmp out of the pool even if it reaches this call.
+#[inline]
+pub fn check_interrupts() {
+    if let Some(hook) = INTERRUPT_HOOK.with(|h| h.get()) {
+        hook();
+    }
+}
+
 /// Fixed seed for the randomized insertion-order RNG. Distinct from
 /// `ivf::IVF_SEED` and turbovec's `ROTATION_SEED` so the three
 /// deterministic subsystems don't share an RNG stream by accident.
@@ -340,7 +402,15 @@ pub fn build_vamana_with_params(
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     order.shuffle(&mut rng);
 
-    for &p in &order {
+    for (i, &p) in order.iter().enumerate() {
+        // FINDING#2: the single-pass build is a long serial loop with no
+        // other yield point; poll every INTERRUPT_CHECK_NODES nodes so a
+        // cancel takes effect mid-build. A no-op unless this is the
+        // driver thread (see `check_interrupts`), so the per-shard builds
+        // the partitioned path runs inside rayon workers pay nothing.
+        if i % INTERRUPT_CHECK_NODES == 0 {
+            check_interrupts();
+        }
         insert_node_into_graph(&mut adj, entry, p, vectors, dim, l, alpha, r);
     }
 
@@ -457,6 +527,8 @@ pub fn build_vamana_partitioned_with_params(
     //    + shard index so shards don't share an RNG stream but the
     //    whole thing stays a pure function of `seed`.
     use rayon::prelude::*;
+    // FINDING#2: stage boundary before the shard fan-out.
+    check_interrupts();
     let shard_graphs: Vec<(Vec<Vec<u32>>, Vec<u32>)> = shard_ranges
         .par_iter()
         .enumerate()
@@ -502,6 +574,8 @@ pub fn build_vamana_partitioned_with_params(
 
     // 3b. Global entry point = approx medoid over ALL vectors (same
     //     primitive the single-pass build uses).
+    // FINDING#2: stage boundary after the shard fan-out joined.
+    check_interrupts();
     let entry = approx_medoid(vectors, n, dim);
 
     // 3c. Cross-shard refinement pass. For each node, greedy-search
@@ -544,6 +618,8 @@ pub fn build_vamana_partitioned_with_params(
         })
         .collect();
     adj = refined;
+    // FINDING#2: stage boundary after the cross-shard refinement pass.
+    check_interrupts();
 
     // 3d. Reverse-edge pass. For each node's selected out-edge q, the
     //     single-pass build adds a reverse edge q -> node (re-pruning
@@ -599,6 +675,8 @@ pub fn build_vamana_partitioned_with_params(
         })
         .collect();
     adj = updated;
+    // FINDING#2: last stage boundary, before the CSR flatten.
+    check_interrupts();
 
     (GraphAdjacency::from_lists(adj), entry)
 }

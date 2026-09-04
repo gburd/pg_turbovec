@@ -1974,6 +1974,120 @@ mod graph_scorer_tests {
         );
     }
 
+    /// BUG#1 repro: the scorer must match the kernel's RANKING at
+    /// every dim the extension supports, not just the small ones the
+    /// original test covered. The graph traversal navigates by these
+    /// scores, so a rank disagreement at dim>=512 destroys recall.
+    #[test]
+    fn graph_scorer_ranking_matches_kernel_at_high_dim() {
+        for &dim in &[128usize, 384, 512, 768, 1024, 1536] {
+            for &bw in &[2usize, 4] {
+                let n = 256usize;
+                let flat = corpus(n, dim, 0xBEEF + dim as u64 + bw as u64);
+                let roi = read_only_index(&flat, n, dim, bw);
+                let ids: Vec<u32> = (0..n as u32).collect();
+                let mut agree = 0usize;
+                let nq = 10usize;
+                for s in 0..nq {
+                    let q = corpus(1, dim, 500 + s as u64);
+                    let a = roi.graph_scorer(&q).score_batch(&ids);
+                    let b = roi.score_slots(&q, &ids);
+                    // Top-10 set overlap under each ranking.
+                    let top = |v: &[f32]| -> std::collections::HashSet<u32> {
+                        let mut idx: Vec<u32> = (0..n as u32).collect();
+                        idx.sort_by(|&i, &j| v[j as usize].partial_cmp(&v[i as usize]).unwrap());
+                        idx.into_iter().take(10).collect()
+                    };
+                    agree += top(&a).intersection(&top(&b)).count();
+                }
+                let frac = agree as f64 / (nq * 10) as f64;
+                assert!(
+                    frac >= 0.9,
+                    "scorer/kernel top-10 rank overlap {frac:.3} at dim={dim} bw={bw} \
+                     — the traversal scorer diverges from the kernel"
+                );
+            }
+        }
+    }
+
+    /// DIAGNOSTIC (BUG#1/#2): end-to-end graph recall vs exact, with
+    /// three scoring oracles, to localize the fault:
+    ///   exact  = f32 sq_dist on the raw corpus (graph structure only)
+    ///   kernel = score_slots (turbovec masked search)
+    ///   scorer = GraphScorer (the traversal scorer)
+    /// plus the flat kernel top-k as the quantizer's own ceiling.
+    #[test]
+    #[ignore]
+    fn diag_graph_recall_by_dim() {
+        let n = 2000usize;
+        let k = 10usize;
+        for &dim in &[128usize, 256, 384, 512, 768] {
+            let bw = 4usize;
+            let flat = corpus(n, dim, 0xD1A6 + dim as u64);
+            let roi = read_only_index(&flat, n, dim, bw);
+            let (adj, entry) = graph::build_vamana(&flat, n, dim);
+            let nq = 30usize;
+            let (mut r_exact, mut r_kernel, mut r_scorer, mut r_flat) =
+                (0usize, 0usize, 0usize, 0usize);
+            let (mut c_exact, mut c_kernel, mut c_scorer) = (0usize, 0usize, 0usize);
+            for s in 0..nq {
+                let q = corpus(1, dim, 90000 + s as u64);
+                // Ground truth: exact top-k by cosine (unit rows).
+                let mut d: Vec<(f32, u32)> = (0..n)
+                    .map(|i| {
+                        let ip: f32 = (0..dim).map(|j| flat[i * dim + j] * q[j]).sum();
+                        (ip, i as u32)
+                    })
+                    .collect();
+                d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                let truth: std::collections::HashSet<u32> = d.iter().take(k).map(|x| x.1).collect();
+
+                let hits_exact = graph::graph_search(&adj, entry, k, &[], |ids| {
+                    ids.iter()
+                        .map(|&i| {
+                            let i = i as usize;
+                            (0..dim).map(|j| flat[i * dim + j] * q[j]).sum::<f32>()
+                        })
+                        .collect()
+                });
+                let hits_kernel =
+                    graph::graph_search(&adj, entry, k, &[], |ids| roi.score_slots(&q, ids));
+                let scorer = roi.graph_scorer(&q);
+                let hits_scorer =
+                    graph::graph_search(&adj, entry, k, &[], |ids| scorer.score_batch(ids));
+                // Flat kernel ceiling without `search` (which calls
+                // `error!` and needs PG symbols): rank all slots by
+                // the kernel's own score.
+                let all: Vec<u32> = (0..n as u32).collect();
+                let ks = roi.score_slots(&q, &all);
+                let mut fidx: Vec<u32> = all.clone();
+                fidx.sort_by(|&i, &j| ks[j as usize].partial_cmp(&ks[i as usize]).unwrap());
+                let fids: Vec<u32> = fidx.into_iter().take(k).collect();
+
+                c_exact += hits_exact.len();
+                c_kernel += hits_kernel.len();
+                c_scorer += hits_scorer.len();
+                r_exact += hits_exact.iter().filter(|x| truth.contains(&x.1)).count();
+                r_kernel += hits_kernel.iter().filter(|x| truth.contains(&x.1)).count();
+                r_scorer += hits_scorer.iter().filter(|x| truth.contains(&x.1)).count();
+                r_flat += fids.iter().filter(|id| truth.contains(id)).count();
+            }
+            let den = (nq * k) as f64;
+            eprintln!(
+                "dim={dim:5} R@{k}: flat={:.3} graph[exact]={:.3} graph[kernel]={:.3} graph[scorer]={:.3}  returned/q: exact={:.1} kernel={:.1} scorer={:.1}  edges={} avgdeg={:.1}",
+                r_flat as f64 / den,
+                r_exact as f64 / den,
+                r_kernel as f64 / den,
+                r_scorer as f64 / den,
+                c_exact as f64 / nq as f64,
+                c_kernel as f64 / nq as f64,
+                c_scorer as f64 / nq as f64,
+                adj.edge_count(),
+                adj.edge_count() as f64 / n as f64,
+            );
+        }
+    }
+
     /// G-2c local RELATIVE scan timing: the SIMD LUT `GraphScorer`
     /// per-hop path vs the G-2a scalar `score_slots` path, same
     /// graph, same queries. This box's absolute latency is

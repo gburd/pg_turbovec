@@ -1150,6 +1150,55 @@ pub(crate) unsafe fn write_full_with_prepared_graph(
     );
 }
 
+/// C1: [`write_full_with_prepared_graph`] that ALSO re-persists the
+/// per-slot tombstone bitmap in the SAME rewrite (one meta commit).
+///
+/// `insert_graph_row` must use this, not the two-write pair it used
+/// before (`write_full_with_prepared_graph` +
+/// `write_tombstones_and_meta`): the first write plans a fresh meta
+/// with NO tombstone chain, so between the two commits the on-disk
+/// index has silently forgotten every VACUUM delete, and a crash /
+/// cancel in that window un-tombstones them permanently. Pass an
+/// empty slice when the index has no tombstones.
+///
+/// # Safety
+/// Same constraints as [`write_full`]: caller holds an exclusive
+/// relation lock (and, for the C1 read-modify-write, the relfile
+/// rewrite lock across the whole read -> recompute -> write).
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn write_full_with_prepared_graph_and_tombstones(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    scales: &[f32],
+    slot_to_id: &[u64],
+    am_version: u32,
+    prepared: PreparedParts<'_>,
+    graph: GraphParts<'_>,
+    tombstones: &[u8],
+) {
+    write_full_inner_with_tombstones(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        packed_codes,
+        scales,
+        slot_to_id,
+        am_version,
+        Some(prepared),
+        None,
+        Some(graph),
+        if tombstones.is_empty() {
+            None
+        } else {
+            Some(tombstones)
+        },
+    );
+}
+
 /// Layout state handed from [`write_packed_phase`] to
 /// [`write_blocked_phase_and_meta`]: the planned chain offsets and
 /// page counts for the row-major code / scales / ids chains, plus
@@ -1439,6 +1488,50 @@ unsafe fn write_full_inner(
     ivf: Option<IvfParts<'_>>,
     graph: Option<GraphParts<'_>>,
 ) {
+    write_full_inner_with_tombstones(
+        rel,
+        bit_width,
+        dim,
+        n_vectors,
+        packed_codes,
+        scales,
+        slot_to_id,
+        am_version,
+        prepared,
+        ivf,
+        graph,
+        None,
+    )
+}
+
+/// [`write_full_inner`] plus an OPTIONAL per-slot tombstone bitmap
+/// persisted in the SAME rewrite (C1, v2.0.x): planned into the meta
+/// page before the single meta write, so a crash can never land
+/// between "rows written" and "tombstones re-referenced".
+///
+/// Before this, the graph insert path called
+/// `write_full_with_prepared_graph` (which plans a fresh meta with NO
+/// tombstone chain, silently un-referencing the bitmap) and then a
+/// SECOND `write_tombstones_and_meta` to put it back — two meta
+/// commits, with a window in between where the on-disk index has
+/// forgotten every VACUUM delete. `Some(bitmap)` folds both into one
+/// atomic-complete meta write; `None` preserves the previous
+/// behaviour for every other caller (which carries no tombstones).
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_full_inner_with_tombstones(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    scales: &[f32],
+    slot_to_id: &[u64],
+    am_version: u32,
+    prepared: Option<PreparedParts<'_>>,
+    ivf: Option<IvfParts<'_>>,
+    graph: Option<GraphParts<'_>>,
+    tombstones: Option<&[u8]>,
+) {
     // v1.7.1 revert: restored to v1.6.0's single-pass batched-
     // GenericXLog flow. Phase W-2 (v1.7.0) split this into
     // `write_packed_phase` + `write_blocked_phase_and_meta` so
@@ -1573,12 +1666,42 @@ unsafe fn write_full_inner(
     // is correct either way) and stamp `kind = KIND_GRAPH` + bump
     // `version` to 6. A `None` graph (the ordinary flat/IVF/ColBERT
     // build) is a no-op here, leaving the meta unchanged.
+    // C1: the tombstone chain must be planned BEFORE the graph chain,
+    // because `set_graph_chain` derives `graph_first` from every prior
+    // chain's page count INCLUDING `tombstone_count` (and
+    // `write_tombstones_and_meta` symmetrically places the tombstone
+    // chain after `graph_count`). Only one of the two orders can be
+    // used consistently; the graph-last order is what a freshly built
+    // graph index already has on disk when it later gets vacuumed
+    // (build: no tombstones -> graph_first right after the row chains;
+    // vacuum: tombstone chain appended after graph_count). Re-persisting
+    // the tombstones here with the SAME "tombstones last" placement
+    // keeps every already-on-disk layout valid, so we plan the graph
+    // chain first and then append the tombstone chain after it.
     if let Some(g) = &graph {
         meta.set_graph_chain(
             g.offsets_bytes.len() as u64,
             g.neighbors_bytes.len() as u64,
             g.entry_point,
         );
+    }
+    // C1: plan the tombstone chain LAST (after the graph chain), the
+    // same position `write_tombstones_and_meta` uses, so the two paths
+    // agree on the layout and a re-persist never moves the chain.
+    let tombstone_buf: &[u8] = tombstones.unwrap_or(&[]);
+    if !tombstone_buf.is_empty() {
+        let after_all = 1
+            + meta.codes_count
+            + meta.scales_count
+            + meta.ids_count
+            + meta.blocked_count
+            + meta.rotation_count
+            + meta.coarse_count
+            + meta.cell_dir_count
+            + meta.graph_count;
+        meta.tombstone_first = after_all;
+        meta.tombstone_bytes = tombstone_buf.len() as u64;
+        meta.tombstone_count = MetaPageData::byte_pages_needed(meta.tombstone_bytes);
     }
     let new_total = meta.total_blocks().max(1);
 
@@ -1763,6 +1886,20 @@ unsafe fn write_full_inner(
                     combined.len() as u64,
                 );
             }
+        }
+
+        // C1: the tombstone bitmap, in the SAME rewrite (before the
+        // single meta write), so a graph insert can never leave a
+        // window where the index has forgotten its VACUUM deletes.
+        if !tombstone_buf.is_empty() {
+            write_chain_at(
+                rel,
+                meta.tombstone_first,
+                tombstone_buf,
+                1,
+                crate::index::page::PAYLOAD_BYTES as u32,
+                tombstone_buf.len() as u64,
+            );
         }
     }
 
@@ -2364,12 +2501,45 @@ pub(crate) unsafe fn read_graph_adjacency(
     rel: pg_sys::Relation,
     meta: &MetaPageData,
 ) -> Option<crate::index::graph::GraphAdjacency> {
+    match try_read_graph_adjacency(rel, meta) {
+        Ok(g) => g,
+        Err(e) => error!("turbovec relfile: corrupt graph adjacency chain: {}", e),
+    }
+}
+
+/// Non-fatal counterpart of [`read_graph_adjacency`]: returns the
+/// decode failure as an `Err(reason)` instead of raising an ERROR.
+/// `Ok(None)` means "this index has no graph adjacency" (non-graph
+/// kind, or a 0-row graph build).
+///
+/// BUG#5: `turbovec_check` is a MONITORING function — it must be able
+/// to report `is_corrupt = true` with a reason on a malformed
+/// adjacency rather than blowing up the operator's health query. The
+/// scan/insert/vacuum paths keep the ERROR policy (they cannot
+/// continue with a broken graph), so both policies share this one
+/// decode implementation.
+pub(crate) unsafe fn try_read_graph_adjacency(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Result<Option<crate::index::graph::GraphAdjacency>, String> {
     use crate::index::graph::GraphAdjacency;
     if !meta.has_graph() {
-        return None;
+        return Ok(None);
     }
     let n = meta.n_vectors as usize;
     let total_bytes = meta.graph_offsets_bytes + meta.graph_neighbors_bytes;
+    // Bound the chain against the physical relation BEFORE calling
+    // `read_chain`, which raises a hard ERROR on a past-EOF walk. A
+    // truncated/torn relfile is exactly the corruption this function
+    // must be able to REPORT.
+    let pages = MetaPageData::byte_pages_needed(total_bytes) as u64;
+    let nblk = nblocks(rel) as u64;
+    if meta.graph_first as u64 + pages > nblk {
+        return Err(format!(
+            "graph adjacency chain [blk {}, +{} pages] runs past the relation end ({} blocks)",
+            meta.graph_first, pages, nblk
+        ));
+    }
     let combined = read_chain(
         rel,
         meta.graph_first,
@@ -2380,15 +2550,10 @@ pub(crate) unsafe fn read_graph_adjacency(
     debug_assert_eq!(combined.len(), total_bytes as usize);
     let split = meta.graph_offsets_bytes as usize;
     if split > combined.len() {
-        error!(
-            "turbovec relfile: corrupt graph adjacency chain (offsets_bytes exceeds chain length)"
-        );
+        return Err("offsets_bytes exceeds chain length".to_string());
     }
     let (offsets_bytes, neighbors_bytes) = combined.split_at(split);
-    match GraphAdjacency::decode(offsets_bytes, neighbors_bytes, n) {
-        Ok(g) => Some(g),
-        Err(e) => error!("turbovec relfile: corrupt graph adjacency chain: {}", e),
-    }
+    GraphAdjacency::decode(offsets_bytes, neighbors_bytes, n).map(Some)
 }
 
 /// Read the v4 E-2 tombstone bitmap (one bit per slot, LSB-first;
@@ -2603,6 +2768,57 @@ pub(crate) unsafe fn force_meta_set_degraded(rel: pg_sys::Relation) {
     *degraded_byte = 1u8;
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
+}
+
+/// Test-only helper (BUG#5): overwrite one `u32` inside the persisted
+/// graph adjacency chain, simulating a torn write / the C1
+/// concurrent-insert corruption. `word_index` counts `u32`s from the
+/// START of the chain, so `0..=n` addresses the offsets sub-array and
+/// `n + 1 + e` addresses neighbor edge `e`. Returns the previous
+/// value.
+///
+/// The chain is a flat byte chain (stride 1, `PAYLOAD_BYTES` per
+/// page) starting at `meta.graph_first`, so the target byte offset is
+/// split into (page, offset-within-page) the same way `read_chain` /
+/// `write_chain_at` walk it. A `u32` can straddle a page boundary, so
+/// the write is done byte-by-byte.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock. Only compiled into
+/// the cargo-test / pgrx-test build — nothing in the shipped binary
+/// can corrupt an adjacency on purpose.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_corrupt_graph_word(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+    word_index: usize,
+    value: u32,
+) -> u32 {
+    let total_bytes = (meta.graph_offsets_bytes + meta.graph_neighbors_bytes) as usize;
+    let start = word_index * 4;
+    assert!(
+        start + 4 <= total_bytes,
+        "force_corrupt_graph_word: word {word_index} is past the chain ({total_bytes} bytes)"
+    );
+    let payload = crate::index::page::PAYLOAD_BYTES;
+    let new = value.to_le_bytes();
+    let mut old = [0u8; 4];
+    for i in 0..4 {
+        let byte_off = start + i;
+        let blkno = meta.graph_first + (byte_off / payload) as u32;
+        let within = byte_off % payload;
+        let buf = read_block(rel, blkno, /*exclusive=*/ true);
+        let state = pg_sys::GenericXLogStart(rel);
+        let page =
+            pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
+        let p = page.cast::<u8>().add(PAGE_HEADER_BYTES + within);
+        old[i] = *p;
+        *p = new[i];
+        pg_sys::GenericXLogFinish(state);
+        pg_sys::UnlockReleaseBuffer(buf);
+    }
+    u32::from_le_bytes(old)
 }
 
 #[cfg(test)]

@@ -1242,6 +1242,29 @@ unsafe fn graph_build_and_write(
     // buffer (Phase G-2's RAM-resident design) and the parallel real
     // external ids. Bounded by `n_vectors * dim * 4` bytes -- exactly
     // the corpus size the Vamana build needs resident regardless.
+    //
+    // FINDING#2 (v2.0.x): poll for interrupts at every graph-build
+    // STAGE BOUNDARY, mirroring the flat/IVF path above
+    // (`ivf_build_and_write`'s four `check_for_interrupts!()` calls).
+    // Before this the graph build had ZERO polls, so a query-cancel or
+    // `pg_terminate_backend` during a large `CREATE INDEX ... WITH
+    // (graph = true)` could not take effect until the whole build
+    // finished, and `pg_ctl stop -m fast` hung behind it (the rayon
+    // workers of the partitioned build sit in a futex wait, which is
+    // not itself interruptible).
+    //
+    // The polls are deliberately on the DRIVER thread, between stages,
+    // and never inside a rayon worker: `check_for_interrupts!()`
+    // longjmps, and a longjmp out of a rayon worker thread would
+    // unwind past the pool's join point with the driver still parked
+    // (and out of a non-PG thread, where the PG error stack does not
+    // even belong). No buffer lock is held at any of these points.
+    // Finer-grained polling inside `build_vamana`'s per-node loop needs
+    // an interrupt callback threaded into the Postgres-free `graph`
+    // module (same tracked follow-up the IVF Lloyd loop has); stage
+    // granularity is the lock-free first increment and is what makes
+    // the build cancellable.
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let mut flat = vec![0.0f32; n_vectors * dim];
     let mut ids = vec![0u64; n_vectors];
     spill.read_block(0, n_vectors, &mut ids, &mut flat);
@@ -1255,6 +1278,7 @@ unsafe fn graph_build_and_write(
     // soft-assign duplicates, kept here for symmetry even though a
     // graph build's slot ids and external ids happen to already be
     // in the same order (no permutation).
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let mut idx = IdMapIndex::new(dim, bit_width as usize)
         .expect("turbovec ambuild (graph): invalid (dim, bit_width)");
     let synthetic_ids: Vec<u64> = (0..n_vectors as u64).collect();
@@ -1272,8 +1296,19 @@ unsafe fn graph_build_and_write(
     // the identical on-disk CSR shape (no wire change); the
     // partitioned build is what lets the graph kind scale to millions
     // of rows (the single-pass build is inherently serial).
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     let partitions =
         crate::guc::graph_build_partitions(n_vectors, super::build_pool::resolve_pool_size());
+    // FINDING#2: install the driver-thread interrupt hook so the
+    // Postgres-free `graph` module can poll INSIDE the build too (every
+    // 256 nodes of the serial pass, and at each stage boundary of the
+    // partitioned pass). The guard uninstalls it when this scope ends.
+    // `graph::check_interrupts` is a no-op on any thread without the
+    // hook in its TLS, i.e. on every rayon worker, so the longjmp can
+    // only ever happen on this (the backend's own) thread.
+    let _interrupt_guard = graph::install_interrupt_hook(|| {
+        pg_sys::check_for_interrupts!();
+    });
     let (adjacency, entry_point) = super::build_pool::install(build_pool, || {
         if partitions <= 1 {
             graph::build_vamana(&flat, n_vectors, dim)
@@ -1283,6 +1318,7 @@ unsafe fn graph_build_and_write(
     });
     drop(flat);
 
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     super::build_pool::install(build_pool, || idx.prepare());
 
     let prepared = relfile::PreparedParts {
@@ -1297,6 +1333,12 @@ unsafe fn graph_build_and_write(
         neighbors_bytes: &neighbors_bytes,
         entry_point,
     };
+    // Last stage boundary before the (lock-taking) persist: after this
+    // point `write_full_with_prepared_graph` holds the relfile rewrite
+    // lock and polls its own interrupts per GenericXLog batch inside
+    // `write_chain_at`, so a cancel here is the last one that costs
+    // nothing.
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     relfile::write_full_with_prepared_graph(
         index_relation,
         bit_width,

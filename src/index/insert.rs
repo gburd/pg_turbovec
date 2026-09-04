@@ -12,7 +12,6 @@ use pgrx::prelude::*;
 use crate::cache::ReadOnlyIndex;
 use crate::guc;
 use crate::index::graph;
-use crate::index::page::MetaPageData;
 use crate::index::{options, relfile};
 use crate::kernels;
 use crate::vec::Vector;
@@ -98,7 +97,7 @@ unsafe fn aminsert_impl(
     // matching G-2a/G-2b's whole "correctness-first" scope.
     if let Some(meta) = relfile::read_meta(index_relation) {
         if meta.is_graph() {
-            return insert_graph_row(index_relation, &meta, value, id);
+            return insert_graph_row(index_relation, value, id);
         }
     }
 
@@ -284,8 +283,39 @@ unsafe fn aminsert_relfile(
 /// `IdMapIndex::add_with_ids` path every other kind's build/insert
 /// already uses, run [`graph::insert_one_node_via_oracle`] to extend
 /// the adjacency, then persist everything back via
-/// `relfile::write_full_with_prepared_graph` (the exact same
-/// function `build.rs`'s `graph_build_and_write` uses).
+/// `relfile::write_full_with_prepared_graph_and_tombstones` (the
+/// tombstone-aware twin of the function `build.rs`'s
+/// `graph_build_and_write` uses).
+///
+/// ## C1 (v2.0.x): the whole read-modify-write is under ONE lock
+///
+/// This function used to `read_full` WITHOUT the relfile rewrite lock,
+/// do the (expensive) quantize + Vamana-insert CPU work, then BLINDLY
+/// `write_full_with_prepared_graph` from that stale snapshot — the
+/// exact lost-update pattern v1.29.1/v1.29.4 fixed for flat/IVF but
+/// which was never applied to the graph kind. Two concurrent graph
+/// inserters both read `n_vectors = N`, both compute an adjacency for
+/// `N + 1`, and the second write lands a meta page whose
+/// `graph_offsets_bytes` describe `N + 2` nodes over a neighbors chain
+/// the first writer sized for `N + 1` — reproduced as
+/// `corrupt graph adjacency chain: graph offsets[n]=54272 !=
+/// neighbors.len()=54240`, plus silently lost rows (the loser's row is
+/// gone from the index while its heap tuple committed).
+///
+/// The fix is structural, not a retry loop: take
+/// [`relfile::lock_relfile_write`] FIRST, re-read the meta + every
+/// chain UNDER it, and hold it across recompute + write. That makes
+/// the whole insert serialize against another inserter, a VACUUM, and
+/// a deferred flat flush — all of which already take the same
+/// exclusive page lock. The lock is a heavyweight page lock, so it is
+/// released by the lock manager on a longjmp / xact end even if
+/// something below `error!`s.
+///
+/// The tombstone bitmap is re-persisted in the SAME rewrite (see
+/// `write_full_with_prepared_graph_and_tombstones`) instead of by a
+/// second `write_tombstones_and_meta` call, closing the M2 window
+/// where a crash between the two writes silently un-tombstoned every
+/// VACUUM delete.
 ///
 /// **Cost, documented explicitly**: this is `O(n)` per single-row
 /// insert (every existing chain is read AND rewritten), not the
@@ -297,36 +327,66 @@ unsafe fn aminsert_relfile(
 /// into an EXISTING graph index one at a time will be slow by
 /// design, not by oversight — REINDEX after a bulk load, per the
 /// same guidance the (now-removed) hard-error message used to give.
+/// Holding the rewrite lock across the CPU work makes concurrent
+/// graph inserts strictly serial, which is a throughput ceiling, not
+/// a new one: they were already O(n) each, and correctness is not
+/// negotiable here (AGENTS.md's hard mandate).
 /// A proper fix (touching only the handful of adjacency lists that
 /// actually change per insert, batching multiple inserts into one
 /// relfile rewrite per transaction like the flat/IVF path does) is
 /// real future work, not attempted here — G-2b's scope is
 /// correctness, not this performance profile.
-unsafe fn insert_graph_row(
-    index_relation: pg_sys::Relation,
-    meta: &MetaPageData,
-    value: Vector,
-    id: u64,
-) -> bool {
+unsafe fn insert_graph_row(index_relation: pg_sys::Relation, value: Vector, id: u64) -> bool {
+    let normalise = guc::NORMALIZE_ON_INSERT.get();
+
+    // C1: ONE exclusive rewrite lock across read -> recompute -> write.
+    // Taken BEFORE the meta re-read so the `meta` every step below uses
+    // is the state no other rewriter can change under us. Same-xact
+    // re-entry (the write path takes it again) does not self-conflict.
+    relfile::lock_relfile_write(index_relation);
+
+    // Re-read the meta UNDER the lock: the caller's `read_meta` was
+    // taken unlocked, so a concurrent insert/VACUUM may have rewritten
+    // the relfile (new n_vectors, new chain offsets) since.
+    let meta = match relfile::read_meta(index_relation) {
+        Some(m) if m.is_graph() => m,
+        Some(_) => {
+            // The index stopped being a graph index between the caller's
+            // unlocked probe and this locked re-read (only a concurrent
+            // REINDEX/build can do that, and it holds AccessExclusive on
+            // the relation, so this is unreachable in practice). Bail out
+            // loudly rather than write a graph chain over a flat index.
+            relfile::unlock_relfile_write(index_relation);
+            error!(
+                "turbovec aminsert (graph): index is no longer a graph index (concurrent REINDEX?); retry the statement"
+            );
+        }
+        None => {
+            relfile::unlock_relfile_write(index_relation);
+            error!("turbovec aminsert (graph): meta page vanished (concurrent REINDEX?)");
+        }
+    };
+
     let dim = meta.dim as usize;
     if value.dim() != dim {
+        relfile::unlock_relfile_write(index_relation);
         error!(
             "turbovec aminsert (graph): dim mismatch — index expects {}, row has {}",
             dim,
             value.dim()
         );
     }
-    let normalise = guc::NORMALIZE_ON_INSERT.get();
     let new_vec = if normalise {
         kernels::normalise_to_vec(value.as_slice())
     } else {
         value.as_slice().to_vec()
     };
 
-    // Read every existing chain back (same pattern
-    // `scan.rs::install_graph_index` uses to build a `ReadOnlyIndex`
-    // for the scan path — reused here, not reinvented).
-    let (codes, scales, ids) = relfile::read_full(index_relation, meta);
+    // Read every existing chain back, still under the same lock. Uses
+    // `read_full` (which takes the SHARED side; same-xact share-after-
+    // exclusive does not self-conflict and adds no window, since we
+    // never drop the exclusive side).
+    let (codes, scales, ids) = relfile::read_full(index_relation, &meta);
     if ids.contains(&id) {
         // Matches the flat path's `IdAlreadyPresent` handling: a
         // re-insert of the same heap TID (e.g. a HOT update that
@@ -335,9 +395,25 @@ unsafe fn insert_graph_row(
         // slot or corrupting the adjacency chain by assuming
         // `n_vectors` grew by one) is the safe, simple choice for a
         // whole-rewrite path — REINDEX recovers cleanly either way.
+        relfile::unlock_relfile_write(index_relation);
         error!(
             "turbovec aminsert (graph): heap tid {} already present in this graph index (re-insert of an existing row is not supported for the graph kind); REINDEX INDEX to rebuild if the underlying table changed",
             id
+        );
+    }
+    // C1 hard guard: the chains we just read must agree with the meta
+    // row count we are about to extend by one. A mismatch means the
+    // on-disk state is already torn (pre-fix binary, or a truncated
+    // relfile); reconciling onto it would ENTRENCH the corruption in a
+    // freshly written meta page. Abort with an actionable hint instead.
+    let n_disk = meta.n_vectors as usize;
+    if ids.len() != n_disk || scales.len() != n_disk {
+        relfile::unlock_relfile_write(index_relation);
+        error!(
+            "turbovec aminsert (graph): on-disk row count drift — meta says {} rows but the ids chain has {} and the scales chain has {}; the index appears corrupt. REINDEX INDEX to rebuild it from the heap",
+            n_disk,
+            ids.len(),
+            scales.len()
         );
     }
     let stored_index: ReadOnlyIndex = if meta.has_prepared_layout() {
@@ -345,7 +421,7 @@ unsafe fn insert_graph_row(
         // (bit_width, dim); the SIMD-blocked layout is recomputed
         // inside `from_prepared_parts`. Only the per-index TQ+ pair is
         // read back (empty = identity today).
-        let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, meta);
+        let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, &meta);
         ReadOnlyIndex::from_prepared_parts(
             meta.bit_width as usize,
             dim,
@@ -366,9 +442,30 @@ unsafe fn insert_graph_row(
             ids.clone(),
         )
     };
-    let adjacency = relfile::read_graph_adjacency(index_relation, meta)
-        .expect("insert_graph_row: meta.is_graph() was true but the adjacency chain is missing");
-    let tombstones = relfile::read_tombstones(index_relation, meta);
+    let adjacency = match relfile::read_graph_adjacency(index_relation, &meta) {
+        Some(a) => a,
+        None => {
+            relfile::unlock_relfile_write(index_relation);
+            error!(
+                "turbovec aminsert (graph): meta.is_graph() was true but the adjacency chain is missing; REINDEX INDEX to rebuild"
+            );
+        }
+    };
+    // C1 hard guard #2: the adjacency must describe exactly the rows
+    // the meta claims. `read_graph_adjacency` already rejects an
+    // offsets/neighbors length mismatch; this additionally pins the
+    // node count against `n_vectors`, so an adjacency built for a
+    // DIFFERENT row count (the exact artefact the unlocked
+    // read-modify-write produced) can never be extended in place.
+    if adjacency.n() != n_disk {
+        relfile::unlock_relfile_write(index_relation);
+        error!(
+            "turbovec aminsert (graph): adjacency describes {} nodes but the meta says {} rows; the index appears corrupt. REINDEX INDEX to rebuild it from the heap",
+            adjacency.n(),
+            n_disk
+        );
+    }
+    let tombstones = relfile::read_tombstones(index_relation, &meta);
 
     // Score oracle for `insert_one_node_via_oracle`: the new row's
     // raw f32 vector against a batch of EXISTING slot ids, via the
@@ -378,12 +475,12 @@ unsafe fn insert_graph_row(
     // candidates) rather than filtered post-hoc inside the oracle —
     // simpler, and `graph::insert_one_node_via_oracle`'s caller
     // contract doesn't need tombstone-awareness itself (VACUUM and
-    // insert are already serialized by the same exclusive relation
-    // lock every other kind's mutation path holds).
+    // insert are serialized by the relfile rewrite lock this function
+    // now holds for its whole body).
     let live_mask: Vec<bool> = if tombstones.is_empty() {
-        vec![true; meta.n_vectors as usize]
+        vec![true; n_disk]
     } else {
-        (0..meta.n_vectors as usize)
+        (0..n_disk)
             .map(|slot| {
                 tombstones
                     .get(slot / 8)
@@ -417,7 +514,7 @@ unsafe fn insert_graph_row(
     // `graph_build_and_write`'s "slot ids == 0..n_vectors, real
     // external ids kept in a parallel array" convention).
     // wire v8: per-index TQ+ (empty = identity; never calibrated today).
-    let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, meta);
+    let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, &meta);
     let mut idx = IdMapIndex::from_id_map_parts(
         meta.bit_width as usize,
         dim,
@@ -447,7 +544,31 @@ unsafe fn insert_graph_row(
         neighbors_bytes: &neighbors_bytes,
         entry_point: entry,
     };
-    relfile::write_full_with_prepared_graph(
+    // C1 / M2: ONE rewrite that carries the tombstone bitmap too.
+    //
+    // Before this, `write_full_with_prepared_graph` planned a brand-new
+    // meta page from scratch (`MetaPageData::plan_with_blocked`), which
+    // does NOT carry forward an existing tombstone chain — so the write
+    // silently reset `tombstone_count`/`tombstone_first`/
+    // `tombstone_bytes` to 0, and a SECOND `write_tombstones_and_meta`
+    // call had to put them back. Two meta commits means a crash /
+    // cancel / FATAL between them permanently un-tombstones every
+    // VACUUM delete. Folding the bitmap into the single rewrite closes
+    // that window: the meta page is written exactly once, last, already
+    // referencing the tombstone chain.
+    //
+    // The bitmap is extended by one bit for the new slot (defaulting to
+    // 0 = live; the new row is obviously not dead). An index that never
+    // had tombstones passes an empty slice and gets the previous
+    // no-tombstone-chain layout, byte-identical to before.
+    let new_tombstones: Vec<u8> = if tombstones.is_empty() {
+        Vec::new()
+    } else {
+        let mut b = tombstones;
+        b.resize((new_slot as usize + 2).div_ceil(8), 0);
+        b
+    };
+    relfile::write_full_with_prepared_graph_and_tombstones(
         index_relation,
         meta.bit_width,
         dim as u32,
@@ -458,45 +579,8 @@ unsafe fn insert_graph_row(
         meta.am_version.saturating_add(1),
         prepared,
         graph_parts,
+        &new_tombstones,
     );
-    // BUG FOUND + FIXED during G-2b's own test-writing:
-    // `write_full_with_prepared_graph` -> `write_full_inner` always
-    // plans a BRAND-NEW meta page from scratch (`MetaPageData::
-    // plan_with_blocked`), which does NOT carry forward an existing
-    // tombstone chain -- the write above just silently reset
-    // `tombstone_count`/`tombstone_first`/`tombstone_bytes` to 0,
-    // and the OLD tombstone bytes are now unreferenced (still
-    // physically on disk in old pages, but nothing points at them).
-    // Re-persist the (possibly nonexistent) tombstone bitmap NOW,
-    // extended by one bit for the new slot (defaulting to 0 = live,
-    // the new row is obviously not dead), via the SAME
-    // `write_tombstones_and_meta` VACUUM already uses -- this is a
-    // second small meta-page write immediately after the first, not
-    // a single atomic operation, but `write_full_with_prepared_graph`
-    // just finished (the relation is internally consistent at this
-    // point, just missing the tombstone reference) and this
-    // function holds the same exclusive lock the whole time, so
-    // there is no window where a concurrent reader could observe
-    // the intermediate (correct-but-tombstone-less) state.
-    if !tombstones.is_empty() {
-        let new_n_bytes = (new_slot as usize + 2).div_ceil(8);
-        let mut new_bitmap = tombstones.clone();
-        new_bitmap.resize(new_n_bytes, 0);
-        // Re-read the meta this write just produced (fresh chain
-        // offsets/counts) rather than reuse the stale `meta` this
-        // function was called with.
-        let fresh_meta = relfile::read_meta(index_relation)
-            .expect("insert_graph_row: meta vanished immediately after our own write");
-        relfile::write_tombstones_and_meta(
-            index_relation,
-            &fresh_meta,
-            &new_bitmap,
-            fresh_meta.am_version.saturating_add(1),
-        );
-    }
-    // `write_full_with_prepared_graph` only touches the
-    // codes/scales/ids/blocked/graph chains, never the tombstone
-    // chain — confirmed by reading that function's body, not
-    // assumed.
+    relfile::unlock_relfile_write(index_relation);
     true
 }

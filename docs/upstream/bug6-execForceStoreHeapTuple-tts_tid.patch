@@ -1,0 +1,81 @@
+Subject: [PATCH] Restore slot->tts_tid in ExecForceStoreHeapTuple's buffer-slot path
+
+ExecForceStoreHeapTuple() loses the tuple's item pointer when the target
+slot is a TTS_IS_BUFFERTUPLE slot.  That branch calls ExecClearTuple(),
+whose tts_buffer_heap_clear() does ItemPointerSetInvalid(&slot->tts_tid),
+then installs bslot->base.tuple = heap_copytuple(tuple) but never copies
+tuple->t_self back into slot->tts_tid.  The slot is therefore left
+advertising InvalidBlockNumber.
+
+The sibling routine ExecStoreHeapTuple() -> tts_heap_store_tuple() does
+set slot->tts_tid = tuple->t_self, so the omission looks like a plain
+asymmetry rather than an intentional choice.
+
+This is user-visible because slot_getsysattr() answers
+SelfItemPointerAttributeNumber straight out of slot->tts_tid.  Any plan
+that re-stores a heap tuple into a buffer slot through
+ExecForceStoreHeapTuple() and then projects ctid gets (4294967295,0).
+
+nodeIndexscan.c's reorder queue is one such path: reorderqueue_pop()
+hands the palloc'd copy to ExecForceStoreHeapTuple().  So for any index
+AM that sets xs_recheckorderby = true, every tuple that passes through
+the reorder queue projects the invalid-tid sentinel instead of its real
+heap tid, even though the AM set xs_heaptid correctly (which is why the
+row data itself is right and only the ctid system column is wrong).
+
+Reproducer using only core GiST -- thin diagonal triangles, so the
+bounding-box distance strictly under-estimates the true polygon
+distance, gist_poly_consistent sets recheck, was_exact comes out false
+and the tuples are pushed to the reorder queue:
+
+    CREATE TABLE tri (id int, p polygon);
+    INSERT INTO tri
+      SELECT i, ('((' || i*10 || ',0),(' || (i*10+9) || ',9),('
+                      || (i*10+9) || ',0))')::polygon
+      FROM generate_series(1,3000) i;
+    CREATE INDEX tri_idx ON tri USING gist (p);
+    ANALYZE tri;
+    SET enable_seqscan = off;
+
+    SELECT ctid, id FROM tri ORDER BY p <-> point(15000,4) LIMIT 5;
+
+           ctid      |  id
+    ----------------+------
+     (23,4)         | 1499     <- returned directly, ctid correct
+     (4294967295,0) | 1500     <- came off the reorder queue
+     (4294967295,0) | 1501
+     (4294967295,0) | 1498
+     (4294967295,0) | 1502
+
+Note the one row that IndexNextWithReorder returned without queueing
+keeps its real ctid, which pins the fault to the requeue path.  A
+ctid-based self-join over that result therefore finds 1 row instead of
+5, and ctid-keyed dedup / UPDATE ... WHERE ctid = ... silently match
+nothing.
+
+With the fix, all five rows report their true ctid and the self-join
+returns 5.
+
+Present in all supported branches (REL_13_STABLE .. master); the
+affected code in ExecForceStoreHeapTuple() is byte-identical across
+them.
+
+diff --git a/src/backend/executor/execTuples.c b/src/backend/executor/execTuples.c
+--- a/src/backend/executor/execTuples.c
++++ b/src/backend/executor/execTuples.c
+@@ ExecForceStoreHeapTuple(HeapTuple tuple,
+ 		oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
+ 		bslot->base.tuple = heap_copytuple(tuple);
+ 		slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+ 		MemoryContextSwitchTo(oldContext);
++
++		/*
++		 * ExecClearTuple() above invalidated tts_tid; restore it from the
++		 * tuple so that projecting ctid (slot_getsysattr() reads tts_tid)
++		 * yields the real heap tid rather than InvalidBlockNumber.  This
++		 * matches what tts_heap_store_tuple() does for heap slots.
++		 */
++		slot->tts_tid = tuple->t_self;
+ 
+ 		if (shouldFree)
+ 			pfree(tuple);

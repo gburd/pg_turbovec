@@ -4,9 +4,70 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.0] — 2026-09-04
 
-### Fixed
+**Graph-kind correctness release.** The `WITH (graph = true)` kind had a
+critical concurrent-INSERT data-loss bug, could return fewer than `k`
+rows, and its build could not be cancelled. All three are fixed here,
+plus graph health monitoring and an upstream-bug writeup. **No
+wire-format change (stays v8), NO REINDEX** — but `turbovec_check()`'s
+return type changes, so this is a MINOR (see the upgrade note).
+
+### Fixed — graph kind
+- **C1 (CRITICAL): concurrent `INSERT` into a graph index lost data.**
+  `insert_graph_row` did an *unlocked* whole-index read, then a *blind*
+  whole-relfile rewrite. Two concurrent graph inserters produced either
+  (a) a torn adjacency chain — `corrupt graph adjacency chain: graph
+  offsets[n]=54272 != neighbors.len()=54240`, a loud ERROR — or, worse,
+  (b) a **silent lost update**: the losing inserter's rows were simply
+  gone (heap rows committed with no index entry) while
+  `turbovec_check()` still reported `is_corrupt = false`, because the
+  surviving relfile was internally self-consistent. Measured
+  fail-before: 8 of 100 concurrent inserts lost, 8 heap rows unindexed.
+  Fixed by holding ONE `lock_relfile_write` across the entire
+  read-modify-write, re-reading the meta page under it, and adding
+  guards that ABORT rather than reconcile onto torn state. Also folded
+  in the tombstone two-write gap: the bitmap is now planned into the
+  **single** meta write (previously a second write re-attached it, and a
+  crash in that window permanently un-tombstoned every VACUUM delete).
+  Validated: 320/320 concurrent inserts clean, and a sustained 240 s run
+  of 6 inserters against a concurrent DELETE/VACUUM loop stayed
+  `is_corrupt = false` with zero SIGABRT.
+- **BUG#2: `graph_search` could return fewer than `k` rows.** Two real
+  causes: tombstoned nodes are never routing hops, so a large dead set
+  disconnects the live remnant (n=2000 at 99% dead returned 2 rows for
+  `k=10`); and a degenerate corpus of tied distances collapses
+  `RobustPrune`'s out-lists (500 identical rows returned 8 for `k=10`).
+  Fixed with a bounded backfill from unvisited live slots, gated behind
+  the existing `out.len() >= k` guard so the normal path is
+  byte-identical.
+- **FINDING#2: a graph `CREATE INDEX` could not be cancelled** and hung
+  `pg_ctl stop -m fast` (the rayon build had zero interrupt polling).
+  Added driver-thread stage polls mirroring `ivf_build_and_write`, plus
+  a TLS-scoped hook the Postgres-free graph module calls at its own
+  stage boundaries and every 256 nodes — a rayon worker cannot see the
+  TLS slot, so it can never `longjmp` out of the pool.
+
+### Documented — not a pg_turbovec bug
+- **BUG#6: a kNN index scan projects a sentinel `ctid`**
+  `(4294967295,0)` instead of the real heap tid. Root-caused to
+  **PostgreSQL core**, not this extension:
+  `ExecForceStoreHeapTuple()`'s buffer-slot branch calls
+  `ExecClearTuple()` (which invalidates `slot->tts_tid`) and never
+  restores `tts_tid` from `tuple->t_self`, while its sibling
+  `ExecStoreHeapTuple()` does — a plain asymmetry. `slot_getsysattr()`
+  reads the projected `ctid` straight out of `tts_tid`. Any AM that sets
+  `xs_recheckorderby = true` is affected; **core GiST reproduces it with
+  no turbovec loaded**, and a one-line core patch fixes both. Row *data*
+  is unaffected (`xs_heaptid` is correct), and the documented
+  `turbovec.allowlist`-from-`ctid` recipe still works (it harvests from
+  a *filter* scan). Only chaining off a *kNN scan's* `ctid` breaks. The
+  proposed core patch is in `docs/upstream/`, the limitation and the
+  supported alternatives are in `docs/FILTERING.md`, and a tripwire test
+  fails the moment upstream fixes core so this note gets retired.
+
+### Fixed — BUG#5 (monitoring, details)
+
 - **BUG#5: `turbovec_check()` was graph-adjacency-blind.** It validated
   the flat/IVF ids bijection + tombstones but never looked at a graph
   index's CSR adjacency chain, so a corrupt adjacency (a torn write, or

@@ -1,0 +1,28 @@
+-- 2.1.0 — MINOR. Graph-kind correctness + monitoring.
+--
+-- * C1 (CRITICAL): graph-kind concurrent INSERT was an unlocked
+--   read-modify-write -> a blind whole-relfile rewrite. Two concurrent
+--   graph inserters could (a) tear the adjacency chain (loud ERROR) or
+--   (b) SILENTLY lose the loser's rows while turbovec_check() still
+--   reported is_corrupt=false (the surviving relfile is self-consistent).
+--   Fixed: one lock_relfile_write across the whole RMW + meta re-read
+--   under it + abort-guards; the tombstone bitmap is now planned into the
+--   SINGLE meta write (the old two-write window permanently
+--   un-tombstoned every VACUUM delete).
+-- * BUG#2: graph_search could return fewer than k rows (tombstoned nodes
+--   are never routing hops; a degenerate all-tied corpus collapses
+--   RobustPrune out-lists). Fixed with a bounded live-slot backfill,
+--   gated so the normal path stays byte-identical.
+-- * FINDING#2: graph CREATE INDEX had no interrupt polling and could not
+--   be cancelled. Fixed with driver-thread stage polls + a TLS-scoped
+--   hook (rayon workers can't longjmp out of the pool).
+-- * BUG#5: turbovec_check() now validates the graph CSR adjacency
+--   (8 structural invariants) and reports a `reason`.
+-- * BUG#6: documented an UPSTREAM PostgreSQL limitation (the reorder-queue
+--   ctid projection); no AM change, a tripwire test + an upstream patch.
+--
+-- SQL SURFACE CHANGE: turbovec_check() gains a `reason text` OUT column.
+-- That CHANGES the function's return type, which CREATE OR REPLACE
+-- FUNCTION cannot do -- hence the DROP + CREATE in
+-- sql/pg_turbovec--2.0.0--2.1.0.sql, and why this is a MINOR, never a patch.
+-- No wire-format change (stays v8). NO REINDEX required.

@@ -7741,6 +7741,136 @@ mod tests {
         );
     }
 
+    /// BUG#6 -- an UPSTREAM PostgreSQL bug this AM cannot fix.
+    ///
+    /// `SELECT ctid ... ORDER BY emb <=> q LIMIT k` through a turbovec
+    /// index projects the invalid-item-pointer sentinel
+    /// `(4294967295,0)` (`InvalidBlockNumber`, i.e.
+    /// `ItemPointerSetInvalid`) instead of the real heap tid, for
+    /// every row that passes through the executor's reorder queue.
+    /// The kNN result DATA is correct -- `xs_heaptid` is right, which
+    /// is why the heap fetch and therefore every non-system column is
+    /// right. ONLY the projected `ctid` system column is garbage.
+    ///
+    /// Root cause is in core, `ExecForceStoreHeapTuple`
+    /// (`src/backend/executor/execTuples.c`). Its `TTS_IS_BUFFERTUPLE`
+    /// branch calls `ExecClearTuple`, whose `tts_buffer_heap_clear`
+    /// does `ItemPointerSetInvalid(&slot->tts_tid)`, then installs
+    /// `bslot->base.tuple = heap_copytuple(tuple)` and NEVER restores
+    /// `slot->tts_tid = tuple->t_self`. The sibling `ExecStoreHeapTuple`
+    /// -> `tts_heap_store_tuple` DOES set `tts_tid`, so the omission is
+    /// a plain asymmetry, not a design choice. Because
+    /// `slot_getsysattr(SelfItemPointerAttributeNumber)` returns
+    /// `slot->tts_tid`, the projected ctid is the sentinel.
+    /// `nodeIndexscan.c`'s `reorderqueue_pop` reaches exactly that
+    /// branch via `ExecForceStoreHeapTuple(tuple, slot, true)`.
+    ///
+    /// It is NOT turbovec-specific. Core GiST reproduces it with zero
+    /// turbovec code loaded (thin diagonal polygons, where the bbox
+    /// distance under-estimates the true polygon distance, so
+    /// `was_exact = false` and tuples get queued): the queued rows
+    /// return the sentinel while the one row returned directly from
+    /// `IndexNextWithReorder` keeps its real ctid. A one-line core
+    /// patch restoring `tts_tid` in that branch fixes BOTH turbovec
+    /// and GiST. See docs/FILTERING.md "Do not harvest ctid".
+    ///
+    /// The AM has no lever. `xs_heaptid` is already correct, and
+    /// everything downstream (`reorderqueue_push/pop`,
+    /// `ExecForceStoreHeapTuple`) is core-internal and runs after
+    /// `amgettuple` returns. The only AM-side escape is
+    /// `xs_recheckorderby = false`, which bypasses the queue and does
+    /// restore the ctid -- but it abandons the exact re-ranking of our
+    /// lossy quantized distances, i.e. it trades a correct ctid for a
+    /// WRONG `ORDER BY`. Verified empirically: the returned id set
+    /// changes. Never acceptable.
+    ///
+    /// So this test pins the SUPPORTED contract -- chain on your own
+    /// id column (or `turbovec.knn()`, which returns ids) and never on
+    /// a ctid harvested from a kNN scan -- plus a tripwire that fires
+    /// when upstream fixes core.
+    #[pg_test]
+    fn knn_scan_ctid_projection_upstream_limitation() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_ctid (id bigint PRIMARY KEY, emb vector)").unwrap();
+        // Deterministic 16-dim corpus (same shape as the parallel-build
+        // fixture): rows sharing `g % 16` are near-neighbours, so the
+        // top-k is stable and the quantized ranking is genuinely
+        // inexact -> every tuple lands on the reorder queue.
+        Spi::run(
+            "INSERT INTO t_ctid \
+             SELECT g, \
+                    ('[' || array_to_string(ARRAY(\
+                       SELECT CASE WHEN d = (g % 16) THEN 1.0 \
+                                   ELSE (((g * 31 + d * 7) % 17)::float8 / 100.0) \
+                              END \
+                       FROM generate_series(0, 15) AS d), ',') || ']')::vector \
+             FROM generate_series(1, 2000) AS g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_ctid_idx ON t_ctid USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE t_ctid").unwrap();
+        // Force the AM path; on 2000 small rows the planner would
+        // otherwise seqscan and the executor reorder queue (and hence
+        // the bug) would never be involved.
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // (1) THE SUPPORTED CONTRACT. Chaining a kNN scan on the id
+        // column must round-trip all k rows. This is what the docs
+        // tell users to do and it must never regress.
+        let id_chain = Spi::get_one::<i64>(
+            "WITH k AS (SELECT id FROM t_ctid \
+                        ORDER BY emb <=> (SELECT emb FROM t_ctid WHERE id = 1) \
+                        LIMIT 10) \
+             SELECT count(*) FROM k JOIN t_ctid USING (id)",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            id_chain, 10,
+            "id-column chaining off a kNN index scan must return all k rows"
+        );
+
+        // (2) The kNN result DATA is unaffected by the ctid bug: the
+        // heap fetch uses xs_heaptid, which IS correct. Nearest
+        // neighbour of row 1 is row 1 itself.
+        let nearest = Spi::get_one::<i64>(
+            "SELECT id FROM t_ctid \
+             ORDER BY emb <=> (SELECT emb FROM t_ctid WHERE id = 1) \
+             LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(nearest, Some(1), "kNN row DATA must be correct");
+
+        // (3) UPSTREAM TRIPWIRE. This is the self-join the bug report
+        // asks about: join the scanned ctid back to the heap. With the
+        // core bug present every scanned ctid is the sentinel, so it
+        // matches nothing and the count is 0. When core restores
+        // `slot->tts_tid` in ExecForceStoreHeapTuple this becomes 10 --
+        // at which point FLIP THIS ASSERTION TO 10, drop the
+        // limitation note from docs/FILTERING.md, and delete
+        // /mnt/nvme-style upstream patch tracking.
+        let ctid_chain = Spi::get_one::<i64>(
+            "WITH k AS (SELECT ctid AS sctid FROM t_ctid \
+                        ORDER BY emb <=> (SELECT emb FROM t_ctid WHERE id = 1) \
+                        LIMIT 10) \
+             SELECT count(*) FROM k JOIN t_ctid ON t_ctid.ctid = k.sctid",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            ctid_chain, 0,
+            "BUG#6 tripwire: a ctid harvested from a reorder-queued kNN \
+             scan cannot be joined back (upstream ExecForceStoreHeapTuple \
+             drops tts_tid). If this is now 10, PostgreSQL fixed the core \
+             bug -- change this expectation to 10 and retire the \
+             limitation note in docs/FILTERING.md."
+        );
+    }
+
     /// Flat index: SET turbovec.allowlist, ORDER BY <=> LIMIT k
     /// returns ONLY allowed ids, and the same allowed top-k as the
     /// unfiltered scan post-filtered by the id-set.

@@ -226,6 +226,52 @@ split_part(btrim(ctid::text,'()'),',',2)::bigint`.)
 over B-tree indexes — encode those instead. The point is the AM
 intersects a *set of physical rows*, identified by TID.)
 
+> ### Do not harvest `ctid` from a kNN (`ORDER BY <=>`) scan — BUG#6
+>
+> Harvest `ctid` from an ordinary **filter** scan (as above: `FROM
+> items WHERE tenant_id = ...`). That is correct and is what this
+> section's recipe does.
+>
+> A `ctid` projected by an `ORDER BY emb <=> q LIMIT k` **index** scan
+> is **not usable** — it comes back as the invalid-item-pointer
+> sentinel `(4294967295,0)` for every reorder-queued row, so
+> `turbovec.tid_to_bigint(ctid)` yields `-4294967296` and any
+> ctid-based self-join, dedup, or `UPDATE ... WHERE ctid = ...` matches
+> nothing:
+>
+> ```sql
+> -- BROKEN: ctid harvested from a kNN scan is the sentinel
+> WITH k AS (SELECT ctid FROM items ORDER BY emb <=> $1 LIMIT 10)
+> SELECT count(*) FROM k JOIN items ON items.ctid = k.ctid;  -- 0
+>
+> -- SUPPORTED: chain on your own key column
+> WITH k AS (SELECT id FROM items ORDER BY emb <=> $1 LIMIT 10)
+> SELECT count(*) FROM k JOIN items USING (id);              -- 10
+> ```
+>
+> Row **data** is unaffected — only the projected `ctid` system column
+> is. The AM sets `xs_heaptid` correctly, which is why every real
+> column (including your `id`) is right.
+>
+> **This is an upstream PostgreSQL bug, not a turbovec bug**, and the
+> index AM cannot work around it. Core's `ExecForceStoreHeapTuple`
+> (`src/backend/executor/execTuples.c`) clears `slot->tts_tid` in its
+> `TTS_IS_BUFFERTUPLE` branch and never restores it from
+> `tuple->t_self`; the projected `ctid` reads `tts_tid`. Any AM that
+> sets `xs_recheckorderby = true` — which turbovec must, to re-rank its
+> lossy quantized distances exactly — has its tuples routed through
+> `nodeIndexscan.c`'s reorder queue and re-stored through that branch.
+> **Core GiST reproduces it with no turbovec installed** (thin diagonal
+> polygons, where the bbox distance under-estimates the true distance,
+> so tuples get queued), and the code is identical in every PG major
+> 13 through master. A one-line core patch restoring `tts_tid` fixes
+> both. Tracked by the `knn_scan_ctid_projection_upstream_limitation`
+> regression test, which doubles as a tripwire for the upstream fix.
+>
+> **Use instead:** your own key column, or `turbovec.knn(rel, id_col,
+> vec_col, query, k)`, which returns `(id, score)` and never involves
+> the executor's reorder queue.
+
 The scan parses the CSV **once per scan** into a TID set and ANDs a
 by-slot allow mask into the slot mask it hands the kernel:
 

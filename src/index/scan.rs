@@ -827,6 +827,25 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     // Force the executor to recheck - our quantised distance is
     // approximate. The recheck recomputes the orderby expression
     // against the heap tuple, restoring exact distances.
+    //
+    // BUG#6 / known UPSTREAM limitation (do not "fix" by flipping this
+    // to false): setting `xs_recheckorderby = true` routes tuples
+    // through the executor's reorder queue, and core's
+    // `reorderqueue_pop` re-stores them with
+    // `ExecForceStoreHeapTuple`, whose TTS_IS_BUFFERTUPLE branch
+    // clears `slot->tts_tid` (via `ItemPointerSetInvalid`) and never
+    // restores it from `tuple->t_self`. Since the projected `ctid`
+    // system column reads `tts_tid`, `SELECT ctid ... ORDER BY emb
+    // <=> q LIMIT k` yields the sentinel `(4294967295,0)`. Our
+    // `xs_heaptid` below/above is correct, so all row DATA is correct;
+    // only the projected ctid is affected. It reproduces on core GiST
+    // with no turbovec loaded and is present in every PG major 13..19,
+    // so the AM cannot fix it. Flipping this flag to false WOULD
+    // restore the ctid but would abandon the exact re-rank of our
+    // lossy quantized distances, i.e. return a WRONG ORDER BY --
+    // strictly worse. Users chain on their id column or
+    // `turbovec.knn()` instead; see docs/FILTERING.md and the
+    // `knn_scan_ctid_projection_upstream_limitation` test.
     (*scan).xs_recheckorderby = true;
     (*scan).xs_recheck = false;
     true

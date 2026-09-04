@@ -1205,6 +1205,199 @@ mod tests {
         )
         .unwrap();
         assert_eq!(density, Some(0.0), "freshly built index has no tombstones");
+
+        let reason: Option<String> =
+            Spi::get_one("SELECT reason FROM turbovec.turbovec_check('t_chk_idx'::regclass)")
+                .unwrap();
+        assert_eq!(reason, None, "a healthy index reports no reason");
+    }
+
+    /// BUG#5 (a): `turbovec_check` on a HEALTHY graph index reports
+    /// `is_corrupt = false` with a NULL reason. Before the fix this
+    /// passed vacuously (the adjacency was never looked at); it is
+    /// the no-false-positive half of the pair — the graph validator
+    /// must not flag a legitimately-built adjacency.
+    #[pg_test]
+    fn turbovec_check_reports_healthy_graph_index() {
+        use_turbovec();
+        build_graph_index_for_check("t_gchk", 300, 16);
+
+        let kind: Option<String> =
+            Spi::get_one("SELECT kind FROM turbovec.turbovec_check('t_gchk_idx'::regclass)")
+                .unwrap();
+        assert_eq!(kind.as_deref(), Some("graph"), "must be a graph index");
+
+        let (corrupt, reason): (Option<bool>, Option<String>) = Spi::get_two(
+            "SELECT is_corrupt, reason \
+             FROM turbovec.turbovec_check('t_gchk_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(
+            reason, None,
+            "a healthy graph adjacency must produce no reason"
+        );
+        assert_eq!(
+            corrupt,
+            Some(false),
+            "a healthy graph index must not be flagged corrupt"
+        );
+
+        let (n_vectors, slot_count): (Option<i64>, Option<i64>) = Spi::get_two(
+            "SELECT n_vectors, slot_count \
+             FROM turbovec.turbovec_check('t_gchk_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(n_vectors, Some(300));
+        assert_eq!(slot_count, Some(300));
+
+        // A LEGITIMATELY TINY graph index must not false-positive: a
+        // 1-row graph is edgeless by construction (`build_vamana`'s
+        // n == 1 case), and a 0-row graph has no adjacency chain at
+        // all. Both are healthy, so the "trivially disconnected" and
+        // "no persisted adjacency chain" checks must not fire.
+        for n_tiny in [0usize, 1] {
+            let t = format!("t_gtiny{n_tiny}");
+            Spi::run(&format!(
+                "CREATE TABLE {t} (id bigint PRIMARY KEY, emb vector)"
+            ))
+            .unwrap();
+            if n_tiny > 0 {
+                Spi::run(&format!(
+                    "INSERT INTO {t} SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+                     FROM generate_series(1, {n_tiny}) g"
+                ))
+                .unwrap();
+            }
+            Spi::run(&format!(
+                "CREATE INDEX {t}_idx ON {t} USING turbovec (emb vec_l2_ops) \
+                 WITH (graph = true, dim = 8)"
+            ))
+            .unwrap();
+            let (c, r): (Option<bool>, Option<String>) = Spi::get_two(&format!(
+                "SELECT is_corrupt, reason FROM turbovec.turbovec_check('{t}_idx'::regclass)"
+            ))
+            .unwrap();
+            assert_eq!(
+                (c, r.clone()),
+                (Some(false), None),
+                "a {n_tiny}-row graph index must be healthy, got reason {r:?}"
+            );
+        }
+    }
+
+    /// BUG#5 (b): a DELIBERATELY CORRUPTED graph adjacency — one
+    /// neighbor id in the persisted CSR chain overwritten with an id
+    /// >= n_vectors — must be reported as `is_corrupt = true` with a
+    /// clear reason. This is the fail-before/pass-after gate: on
+    /// v2.0.0 `turbovec_check` never decoded the adjacency, so this
+    /// same corruption reported `is_corrupt = false` (a silent
+    /// monitoring hole) while the scan path would navigate into a
+    /// foreign slot.
+    #[pg_test]
+    fn turbovec_check_detects_corrupt_graph_adjacency() {
+        use_turbovec();
+        let n_rows = 300;
+        build_graph_index_for_check("t_gbad", n_rows, 16);
+
+        let check = || -> (bool, Option<String>) {
+            let (c, r): (Option<bool>, Option<String>) = Spi::get_two(
+                "SELECT is_corrupt, reason \
+                 FROM turbovec.turbovec_check('t_gbad_idx'::regclass)",
+            )
+            .unwrap();
+            (c.expect("is_corrupt"), r)
+        };
+
+        assert_eq!(
+            check(),
+            (false, None),
+            "the freshly built graph index must start healthy"
+        );
+
+        // Overwrite the FIRST neighbor id (u32 word `n + 1` of the
+        // chain: words `0..=n` are the offsets array) with an id far
+        // past the last valid slot.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_gbad_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            use crate::index::relfile;
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            assert!(m.has_graph(), "index must have a persisted adjacency");
+            assert!(
+                m.graph_neighbors_bytes >= 4,
+                "graph must have at least one edge to corrupt"
+            );
+            let first_neighbor_word = m.n_vectors as usize + 1;
+            relfile::force_corrupt_graph_word(rel, &m, first_neighbor_word, 999_999);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        let (corrupt, reason) = check();
+        assert!(
+            corrupt,
+            "an out-of-range neighbor id must be reported as corrupt"
+        );
+        let reason = reason.expect("a corrupt adjacency must carry a reason");
+        assert!(
+            reason.contains("999999") && reason.contains("out-of-range neighbor id"),
+            "reason must name the out-of-range neighbor id, got: {reason}"
+        );
+
+        // A NON-MONOTONIC offsets array is the other structural
+        // failure mode (it makes `neighbors_of` slice backwards).
+        // Corrupt offsets[1] to a value larger than offsets[2] by
+        // setting it past the end of the whole neighbor array.
+        unsafe {
+            use crate::index::relfile;
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            // restore the neighbor id first so the offsets violation
+            // is the one reported.
+            relfile::force_corrupt_graph_word(rel, &m, m.n_vectors as usize + 1, 0);
+            relfile::force_corrupt_graph_word(rel, &m, 1, u32::MAX);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        let (corrupt, reason) = check();
+        assert!(corrupt, "non-monotonic offsets must be reported as corrupt");
+        let reason = reason.expect("reason");
+        assert!(
+            reason.contains("not monotonic") || reason.contains("failed to decode"),
+            "reason must describe the offsets violation, got: {reason}"
+        );
+    }
+
+    /// Shared fixture for the BUG#5 `turbovec_check` graph tests:
+    /// build `<name>` + `<name>_idx` as a `WITH (graph = true)` index
+    /// over `n_rows` random `dim`-d vectors. The per-row
+    /// `generate_series` is CORRELATED to the outer row (`g, g + dim
+    /// - 1`) — an uncorrelated subquery gets hoisted by PostgreSQL and
+    /// makes every row identical (the test-harness bug found during
+    /// G-2b), which would build a degenerate graph.
+    fn build_graph_index_for_check(name: &str, n_rows: usize, dim: usize) {
+        Spi::run(&format!(
+            "CREATE TABLE {name} (id bigint PRIMARY KEY, emb vector)"
+        ))
+        .unwrap();
+        Spi::run("SELECT setseed(0.31)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {name} \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "CREATE INDEX {name}_idx ON {name} \
+             USING turbovec (emb vec_l2_ops) WITH (graph = true)"
+        ))
+        .unwrap();
     }
 
     /// Phase W (v1.6.0): the ambuild heap-scan callback streams

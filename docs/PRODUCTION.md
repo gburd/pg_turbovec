@@ -595,10 +595,11 @@ write (it takes only `AccessShareLock`, so it never blocks writers):
 ```sql
 SELECT * FROM turbovec.turbovec_check('docs_emb_idx'::regclass);
 --  wire_version | kind | n_vectors | slot_count | count_matches
---  | duplicate_id | is_corrupt | tombstone_density
+--  | duplicate_id | is_corrupt | tombstone_density | reason
 ```
 
-**Monitoring should alert on `is_corrupt = true`.** It surfaces the
+**Monitoring should alert on `is_corrupt = true`**, and read `reason`
+(NULL when healthy) for what tripped. It surfaces the
 duplicate-id `.tvim` corruption (which an unclean shutdown /
 `pg_resetwal` can leave) that a normal health check misses —
 `pg_index.indisvalid` stays `true` on a corrupt turbovec index, and
@@ -606,6 +607,18 @@ duplicate-id `.tvim` corruption (which an unclean shutdown /
 Recovery for a flagged index: `REINDEX INDEX <name>;` (durable as of
 v1.28.4), or `DROP` + `CREATE` if the corruption predates v1.28.4.
 See the "Known issues" section and `docs/UPGRADING.md`.
+
+For a `kind = graph` index the check also decodes the persisted CSR
+adjacency chain and validates its structure: offsets monotonic and
+consistent with the neighbor array, every neighbor id `< n_vectors`,
+a valid entry point that has at least one out-neighbor, no
+self-loops, strictly-ascending (deduplicated) neighbor lists, and at
+least one edge when `n_vectors > 1`. Before this, a corrupt graph
+adjacency (torn write, or a concurrent-insert bug) produced no health
+signal here at all — `turbovec_check` validated only the flat/IVF ids
+bijection and tombstones. The graph checks are `O(n + edges)` over
+the adjacency chain only (no vector data is read), so they stay cheap
+enough to poll.
 
 ---
 

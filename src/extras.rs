@@ -270,10 +270,23 @@ unsafe fn require_index_owner(index: pg_sys::Oid) {
 ///   (`lists = 0`) kind; an IVF index legitimately repeats ids
 ///   across cells, so this is left NULL there.
 /// - `is_corrupt` — `true` when a flat index has a duplicate id OR
-///   the counts disagree. This is the one column monitoring should
-///   alert on.
+///   the counts disagree OR (graph kind) the persisted CSR adjacency
+///   violates a structural invariant. This is the one column
+///   monitoring should alert on.
 /// - `tombstone_density` — fraction of slots tombstoned by VACUUM
 ///   (0.0 for a freshly built index).
+/// - `reason` — NULL when healthy; otherwise a human-readable
+///   description of the first problem found (duplicate id, count
+///   drift, or the specific graph-adjacency invariant violated).
+///
+/// BUG#5: for a `kind = graph` index the CSR adjacency chain is
+/// decoded and structurally validated (offsets monotonic + in-bounds,
+/// every neighbor id `< n_vectors`, a valid entry point, no
+/// self-loops, strictly-ascending neighbor lists, and not trivially
+/// disconnected — see `graph::GraphAdjacency::validate`). Before this
+/// a corrupt graph adjacency (torn write, or the C1 concurrent-insert
+/// bug) produced NO health signal here at all. Flat/IVF behaviour is
+/// unchanged.
 ///
 /// Ownership-checked (like PG's own maintenance functions):
 /// non-owners get a permission-denied ERROR. Takes only
@@ -296,6 +309,7 @@ fn turbovec_check(
         name!(duplicate_id, Option<i64>),
         name!(is_corrupt, bool),
         name!(tombstone_density, f64),
+        name!(reason, Option<String>),
     ),
 > {
     use crate::index::page::{KIND_COLBERT, KIND_GRAPH};
@@ -352,7 +366,47 @@ fn turbovec_check(
             None
         };
         let duplicate_id = dup.map(|id| id as i64);
-        let is_corrupt = dup.is_some() || !count_matches;
+        let mut reason: Option<String> = None;
+        if let Some(id) = dup {
+            reason = Some(format!("id {id} appears in more than one slot"));
+        } else if !count_matches {
+            reason = Some(format!(
+                "meta n_vectors {} disagrees with the ids chain length {}",
+                meta.n_vectors,
+                ids.len()
+            ));
+        }
+
+        // BUG#5: graph-kind adjacency validation. Decode the CSR
+        // chain non-fatally (`try_read_graph_adjacency`) so a
+        // malformed chain is REPORTED here rather than ERRORing out
+        // of the operator's health query, then run the structural
+        // invariants. No-op for flat/IVF/ColBERT (`has_graph()` is
+        // false), so those kinds keep byte-identical behaviour.
+        if meta.is_graph() {
+            let graph_reason = match crate::index::relfile::try_read_graph_adjacency(rel, &meta) {
+                Err(e) => Some(format!("graph adjacency chain failed to decode: {e}")),
+                Ok(None) if meta.n_vectors > 0 => {
+                    Some("graph index has no persisted adjacency chain".to_string())
+                }
+                Ok(None) => None,
+                Ok(Some(adj)) => {
+                    if adj.n() != meta.n_vectors as usize {
+                        Some(format!(
+                            "graph adjacency node count {} disagrees with meta n_vectors {}",
+                            adj.n(),
+                            meta.n_vectors
+                        ))
+                    } else {
+                        adj.validate(meta.graph_entry_point).err()
+                    }
+                }
+            };
+            if reason.is_none() {
+                reason = graph_reason;
+            }
+        }
+        let is_corrupt = reason.is_some();
 
         let tombstones = crate::index::relfile::read_tombstones(rel, &meta);
         let dead = tombstones
@@ -376,6 +430,7 @@ fn turbovec_check(
             duplicate_id,
             is_corrupt,
             tombstone_density,
+            reason,
         ))
     }
 }

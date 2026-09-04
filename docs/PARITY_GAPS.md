@@ -279,7 +279,7 @@ does not define arithmetic for `sparsevec`, so neither do we.
 | `halfvec_concat(halfvec, halfvec)` | ✓ | ✓ (also `\|\|` operator) |
 | `max_sim` / `max_sim_cosine` (ColBERT MaxSim) | ✗ | ✓ — SQL re-rank over `vector[]`; see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md) |
 | `rrf_score` (reciprocal rank fusion) | ✗ | ✓ — `1/(k+rank)` hybrid-fusion helper; see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md) |
-| `turbovec_check(regclass)` (index integrity) | ✗ | ✓ — read-only, ownership-checked; reports wire version, kind, n_vectors vs slot count, duplicate-id / `is_corrupt` health, tombstone density (v1.28.4). See [`PRODUCTION.md` § Monitoring](PRODUCTION.md) |
+| `turbovec_check(regclass)` (index integrity) | ✗ | ✓ — read-only, ownership-checked; reports wire version, kind, n_vectors vs slot count, duplicate-id / `is_corrupt` health, tombstone density (v1.28.4), plus a `reason` string and full graph-adjacency (CSR) structural validation for `kind = graph`. See [`PRODUCTION.md` § Monitoring](PRODUCTION.md) |
 | `index_is_degraded(regclass)` (IVF fallback) | ✗ | ✓ — reports whether an IVF index degraded to a flat O(n) scan |
 
 ## Index AMs

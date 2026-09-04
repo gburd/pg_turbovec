@@ -2364,12 +2364,45 @@ pub(crate) unsafe fn read_graph_adjacency(
     rel: pg_sys::Relation,
     meta: &MetaPageData,
 ) -> Option<crate::index::graph::GraphAdjacency> {
+    match try_read_graph_adjacency(rel, meta) {
+        Ok(g) => g,
+        Err(e) => error!("turbovec relfile: corrupt graph adjacency chain: {}", e),
+    }
+}
+
+/// Non-fatal counterpart of [`read_graph_adjacency`]: returns the
+/// decode failure as an `Err(reason)` instead of raising an ERROR.
+/// `Ok(None)` means "this index has no graph adjacency" (non-graph
+/// kind, or a 0-row graph build).
+///
+/// BUG#5: `turbovec_check` is a MONITORING function — it must be able
+/// to report `is_corrupt = true` with a reason on a malformed
+/// adjacency rather than blowing up the operator's health query. The
+/// scan/insert/vacuum paths keep the ERROR policy (they cannot
+/// continue with a broken graph), so both policies share this one
+/// decode implementation.
+pub(crate) unsafe fn try_read_graph_adjacency(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Result<Option<crate::index::graph::GraphAdjacency>, String> {
     use crate::index::graph::GraphAdjacency;
     if !meta.has_graph() {
-        return None;
+        return Ok(None);
     }
     let n = meta.n_vectors as usize;
     let total_bytes = meta.graph_offsets_bytes + meta.graph_neighbors_bytes;
+    // Bound the chain against the physical relation BEFORE calling
+    // `read_chain`, which raises a hard ERROR on a past-EOF walk. A
+    // truncated/torn relfile is exactly the corruption this function
+    // must be able to REPORT.
+    let pages = MetaPageData::byte_pages_needed(total_bytes) as u64;
+    let nblk = nblocks(rel) as u64;
+    if meta.graph_first as u64 + pages > nblk {
+        return Err(format!(
+            "graph adjacency chain [blk {}, +{} pages] runs past the relation end ({} blocks)",
+            meta.graph_first, pages, nblk
+        ));
+    }
     let combined = read_chain(
         rel,
         meta.graph_first,
@@ -2380,15 +2413,10 @@ pub(crate) unsafe fn read_graph_adjacency(
     debug_assert_eq!(combined.len(), total_bytes as usize);
     let split = meta.graph_offsets_bytes as usize;
     if split > combined.len() {
-        error!(
-            "turbovec relfile: corrupt graph adjacency chain (offsets_bytes exceeds chain length)"
-        );
+        return Err("offsets_bytes exceeds chain length".to_string());
     }
     let (offsets_bytes, neighbors_bytes) = combined.split_at(split);
-    match GraphAdjacency::decode(offsets_bytes, neighbors_bytes, n) {
-        Ok(g) => Some(g),
-        Err(e) => error!("turbovec relfile: corrupt graph adjacency chain: {}", e),
-    }
+    GraphAdjacency::decode(offsets_bytes, neighbors_bytes, n).map(Some)
 }
 
 /// Read the v4 E-2 tombstone bitmap (one bit per slot, LSB-first;
@@ -2603,6 +2631,57 @@ pub(crate) unsafe fn force_meta_set_degraded(rel: pg_sys::Relation) {
     *degraded_byte = 1u8;
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(buf);
+}
+
+/// Test-only helper (BUG#5): overwrite one `u32` inside the persisted
+/// graph adjacency chain, simulating a torn write / the C1
+/// concurrent-insert corruption. `word_index` counts `u32`s from the
+/// START of the chain, so `0..=n` addresses the offsets sub-array and
+/// `n + 1 + e` addresses neighbor edge `e`. Returns the previous
+/// value.
+///
+/// The chain is a flat byte chain (stride 1, `PAYLOAD_BYTES` per
+/// page) starting at `meta.graph_first`, so the target byte offset is
+/// split into (page, offset-within-page) the same way `read_chain` /
+/// `write_chain_at` walk it. A `u32` can straddle a page boundary, so
+/// the write is done byte-by-byte.
+///
+/// # Safety
+///
+/// Caller must hold an exclusive relation lock. Only compiled into
+/// the cargo-test / pgrx-test build — nothing in the shipped binary
+/// can corrupt an adjacency on purpose.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_corrupt_graph_word(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+    word_index: usize,
+    value: u32,
+) -> u32 {
+    let total_bytes = (meta.graph_offsets_bytes + meta.graph_neighbors_bytes) as usize;
+    let start = word_index * 4;
+    assert!(
+        start + 4 <= total_bytes,
+        "force_corrupt_graph_word: word {word_index} is past the chain ({total_bytes} bytes)"
+    );
+    let payload = crate::index::page::PAYLOAD_BYTES;
+    let new = value.to_le_bytes();
+    let mut old = [0u8; 4];
+    for i in 0..4 {
+        let byte_off = start + i;
+        let blkno = meta.graph_first + (byte_off / payload) as u32;
+        let within = byte_off % payload;
+        let buf = read_block(rel, blkno, /*exclusive=*/ true);
+        let state = pg_sys::GenericXLogStart(rel);
+        let page =
+            pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
+        let p = page.cast::<u8>().add(PAGE_HEADER_BYTES + within);
+        old[i] = *p;
+        *p = new[i];
+        pg_sys::GenericXLogFinish(state);
+        pg_sys::UnlockReleaseBuffer(buf);
+    }
+    u32::from_le_bytes(old)
 }
 
 #[cfg(test)]

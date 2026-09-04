@@ -280,6 +280,113 @@ impl GraphAdjacency {
         }
         Ok(Self { offsets, neighbors })
     }
+
+    /// BUG#5 (`turbovec_check` graph blindness): validate every
+    /// STRUCTURAL invariant a persisted CSR adjacency must satisfy,
+    /// returning a human-readable reason for the FIRST violation.
+    /// `Ok(())` means the adjacency is structurally sound.
+    ///
+    /// [`Self::decode`] only checks the two length relations that are
+    /// needed to slice the bytes at all (`offsets.len() == n+1`,
+    /// `offsets[n] == neighbors.len()`); everything below decodes
+    /// "fine" from a torn write or the C1 concurrent-insert bug and
+    /// then either panics in [`Self::neighbors_of`] (non-monotonic
+    /// offsets slice with `s > e`) or silently mis-navigates at scan
+    /// time (an out-of-range neighbor id indexes a foreign slot).
+    /// `turbovec_check` calls this so operators get a health signal
+    /// instead of a panic or wrong answers.
+    ///
+    /// Checked, in order (cheap → structural, all O(n + edges), no
+    /// vector data touched, so it stays safe to poll):
+    ///
+    /// 1. `offsets` is monotonically non-decreasing (a decreasing
+    ///    step makes `neighbors_of` slice backwards and panic).
+    /// 2. `offsets[n] == neighbors.len()` (re-checked here so the
+    ///    predicate also holds for hand-built adjacencies, not just
+    ///    freshly-decoded ones).
+    /// 3. `entry_point < n` — the slot `graph_search` starts from
+    ///    must exist.
+    /// 4. Every neighbor id is `< n` — an out-of-range id would make
+    ///    the scan read another slot's codes (or index out of bounds).
+    /// 5. No self-loop (`i` never appears in `neighbors_of(i)`) — the
+    ///    build and the reverse-edge pass both drop these, and the
+    ///    greedy-search visited bookkeeping assumes their absence.
+    /// 6. Each neighbor list is STRICTLY ascending — the canonical
+    ///    persisted order (`from_lists` sorts, `robust_prune_via`
+    ///    dedups), so a violation means duplicated or reordered edges.
+    /// 7. Not trivially disconnected: with `n > 1` the graph must
+    ///    have at least one edge, and the entry point must have at
+    ///    least one out-neighbor (otherwise `graph_search`'s first
+    ///    hop expands nothing and every query returns just the entry
+    ///    point).
+    ///
+    /// Deliberately NOT checked: the degree bound `R`, which is a
+    /// build-time tuning parameter rather than a wire invariant (an
+    /// index built under a different `R` is healthy), and liveness
+    /// (a tombstoned entry point is normal — `graph_search` and
+    /// VACUUM both re-point past dead nodes).
+    pub(crate) fn validate(&self, entry_point: u32) -> Result<(), String> {
+        let n = self.n();
+        if n == 0 {
+            return Ok(());
+        }
+        for i in 0..n {
+            if self.offsets[i] > self.offsets[i + 1] {
+                return Err(format!(
+                    "graph adjacency offsets are not monotonic at node {i}: offsets[{i}]={} > offsets[{}]={}",
+                    self.offsets[i],
+                    i + 1,
+                    self.offsets[i + 1]
+                ));
+            }
+        }
+        if self.offsets[n] as usize != self.neighbors.len() {
+            return Err(format!(
+                "graph adjacency offsets[n]={} disagrees with the neighbor array length {}",
+                self.offsets[n],
+                self.neighbors.len()
+            ));
+        }
+        if (entry_point as usize) >= n {
+            return Err(format!(
+                "graph entry point {entry_point} is out of range for {n} vectors"
+            ));
+        }
+        for i in 0..n {
+            let nbrs = self.neighbors_of(i);
+            for &nb in nbrs {
+                if nb as usize >= n {
+                    return Err(format!(
+                        "graph adjacency has out-of-range neighbor id {nb} for node {i} (n_vectors = {n})"
+                    ));
+                }
+                if nb as usize == i {
+                    return Err(format!("graph adjacency has a self-loop at node {i}"));
+                }
+            }
+            for w in nbrs.windows(2) {
+                if w[0] >= w[1] {
+                    return Err(format!(
+                        "graph adjacency neighbor list for node {i} is not strictly ascending ({} then {})",
+                        w[0], w[1]
+                    ));
+                }
+            }
+        }
+        if n > 1 {
+            if self.neighbors.is_empty() {
+                return Err(format!(
+                    "graph adjacency has {n} nodes but zero edges (trivially disconnected)"
+                ));
+            }
+            if self.neighbors_of(entry_point as usize).is_empty() {
+                return Err(format!(
+                    "graph entry point {entry_point} has no out-neighbors (every query would return only the entry point)"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Build a [`GraphAdjacency`] over `n` vectors (row-major, `n * dim`
@@ -1619,6 +1726,79 @@ mod tests {
         // has 1 entry -> mismatch.
         let err = GraphAdjacency::decode(&offsets_bytes, &bad_neighbors_bytes, n);
         assert!(err.is_err());
+    }
+
+    /// BUG#5: `validate` accepts a real build and rejects each
+    /// structural corruption `decode` alone lets through. This is the
+    /// pure-Rust core of what `turbovec_check` reports.
+    #[test]
+    fn validate_accepts_healthy_and_rejects_each_corruption() {
+        let n = 200;
+        let dim = 12;
+        let corpus = synth_corpus(n, dim, 909);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        g.validate(entry).expect("a real build must validate");
+
+        // Empty and single-node graphs are healthy (no edges required).
+        GraphAdjacency::empty(0).validate(0).unwrap();
+        GraphAdjacency::empty(1).validate(0).unwrap();
+
+        // Entry point out of range.
+        let e = g.validate(n as u32).expect_err("entry point n is invalid");
+        assert!(e.contains("entry point"), "{e}");
+
+        // Out-of-range neighbor id.
+        let mut lists = g.to_lists();
+        lists[0] = vec![n as u32 + 5];
+        let e = GraphAdjacency::from_lists(lists)
+            .validate(entry)
+            .expect_err("out-of-range neighbor must be rejected");
+        assert!(e.contains("out-of-range neighbor id"), "{e}");
+
+        // Self-loop.
+        let mut lists = g.to_lists();
+        lists[3] = vec![3];
+        let e = GraphAdjacency::from_lists(lists)
+            .validate(entry)
+            .expect_err("self-loop must be rejected");
+        assert!(e.contains("self-loop"), "{e}");
+
+        // Duplicate neighbor (not strictly ascending after sorting).
+        let mut lists = g.to_lists();
+        lists[4] = vec![7, 7];
+        let e = GraphAdjacency::from_lists(lists)
+            .validate(entry)
+            .expect_err("duplicate neighbor must be rejected");
+        assert!(e.contains("strictly ascending"), "{e}");
+
+        // Trivially disconnected: n > 1 with zero edges.
+        let e = GraphAdjacency::empty(n)
+            .validate(0)
+            .expect_err("edgeless multi-node graph must be rejected");
+        assert!(e.contains("trivially disconnected"), "{e}");
+
+        // Entry point with no out-neighbors (dead-end start).
+        let mut lists = g.to_lists();
+        lists[entry as usize].clear();
+        let e = GraphAdjacency::from_lists(lists)
+            .validate(entry)
+            .expect_err("edgeless entry point must be rejected");
+        assert!(e.contains("no out-neighbors"), "{e}");
+
+        // Non-monotonic offsets: hand-built via decode (from_lists
+        // can't express it). offsets = [0, 2, 1, ...] for n = 2 with 1
+        // stored edge -> offsets[1]=2 > offsets[2]=1.
+        let offsets: Vec<u32> = vec![0, 2, 1];
+        let mut ob = Vec::new();
+        for o in &offsets {
+            ob.extend_from_slice(&o.to_le_bytes());
+        }
+        let nb = 1u32.to_le_bytes().to_vec();
+        let bad = GraphAdjacency::decode(&ob, &nb, 2).expect("decode tolerates this");
+        let e = bad
+            .validate(0)
+            .expect_err("non-monotonic offsets must be rejected");
+        assert!(e.contains("not monotonic"), "{e}");
     }
 
     /// `RobustPrune` diversity check: a directly-adjacent duplicate

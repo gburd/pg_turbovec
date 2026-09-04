@@ -3938,6 +3938,369 @@ mod tests {
         assert_distinct_ids(&ids);
     }
 
+    /// FINDING#2 regression: the graph build must POLL for interrupts.
+    ///
+    /// Before the fix the graph build path had ZERO
+    /// `check_for_interrupts!()` calls (`grep -c` = 0 in both
+    /// `graph_build_and_write` and `graph.rs`), so a query-cancel or
+    /// `pg_terminate_backend` mid-build could not take effect until the
+    /// whole build finished, and `pg_ctl stop -m fast` hung behind it
+    /// (the partitioned build's rayon workers sit in a futex wait, which
+    /// is not itself interruptible).
+    ///
+    /// ## Why this test drives the interrupt directly
+    ///
+    /// The obvious shape — `SET statement_timeout` then `CREATE INDEX` —
+    /// does NOT work, and measured so: PG arms the statement timer when
+    /// a statement STARTS, so a timeout set by an earlier `SET` inside
+    /// the same `#[pg_test]` function call never fires for the
+    /// `CREATE INDEX` that a later `Spi::run` issues within that same
+    /// outer statement (the whole test body runs inside one
+    /// `SELECT tests.graph_build_is_cancellable()`). The first version of
+    /// this test built for 10 MINUTES and then reported "not
+    /// cancellable" — a false positive from the harness, not a finding.
+    ///
+    /// So this drives the real mechanism instead: set
+    /// `InterruptPending` + `QueryCancelPending` (exactly what
+    /// `pg_cancel_backend` sets) immediately before a graph build, and
+    /// assert the build RAISES rather than running to completion. That is
+    /// precisely the poll the fix added, and with the pre-fix binary this
+    /// test fails: the build swallows the pending cancel and returns
+    /// successfully, leaving the flags still set. The multi-backend
+    /// end-to-end check (real `pg_cancel_backend` from a second session
+    /// against a long build, then `pg_ctl stop -m fast`) is in
+    /// `benches/scripts/graph_cancel_check.sh`.
+    #[pg_test]
+    fn graph_build_polls_for_interrupts() {
+        use_turbovec();
+        // Big enough that the build crosses at least one stage boundary
+        // and several `INTERRUPT_CHECK_NODES` batches, small enough to
+        // be quick when the poll works (which is the point).
+        let n_rows = 3_000;
+        let dim = 64;
+
+        Spi::run("CREATE TABLE t_graph_cancel (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("SELECT setseed(0.37)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_graph_cancel \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
+        .unwrap();
+
+        // Raise a cancel exactly the way `pg_cancel_backend` does. The
+        // ONLY thing that turns these flags into an ERROR is a
+        // `check_for_interrupts!()` poll, so the assertion below is a
+        // direct test of "does the graph build poll".
+        unsafe {
+            pg_sys::InterruptPending = true;
+            pg_sys::QueryCancelPending = true;
+        }
+        let res = std::panic::catch_unwind(|| {
+            Spi::run(
+                "CREATE INDEX t_graph_cancel_idx ON t_graph_cancel \
+                 USING turbovec (emb vec_cosine_ops) WITH (graph = true)",
+            )
+        });
+        let raised = match res {
+            // pgrx surfaces a PG ERROR out of `Spi::run` as a panic;
+            // either shape means the pending cancel was honoured.
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(())) => false,
+        };
+        // Clear the flags whatever happened, so a failure here cannot
+        // poison the rest of the suite running in this backend.
+        unsafe {
+            pg_sys::InterruptPending = false;
+            pg_sys::QueryCancelPending = false;
+        }
+        assert!(
+            raised,
+            "a graph CREATE INDEX ran to COMPLETION with QueryCancelPending already \
+             set — the build is not polling check_for_interrupts, so a cancel / \
+             pg_terminate_backend cannot take effect and `pg_ctl stop -m fast` will \
+             hang behind it (FINDING#2)"
+        );
+    }
+
+    /// C1 regression (v2.0.x, CRITICAL): a graph `aminsert` must not be
+    /// able to persist a relfile whose graph adjacency describes a
+    /// different number of nodes than the meta page's `n_vectors`.
+    ///
+    /// ## What actually broke, and why this test is shaped this way
+    ///
+    /// `insert_graph_row` used to `read_full` WITHOUT the relfile
+    /// rewrite lock, do the (expensive) quantize + Vamana-insert CPU
+    /// work, then BLINDLY `write_full_with_prepared_graph` from that
+    /// stale snapshot. Two concurrent inserters both read `n_vectors =
+    /// N`, both build an adjacency for `N + 1`, and the second write
+    /// lands a meta page describing `N + 2` rows over a neighbors chain
+    /// the other writer sized for `N + 1`. Measured on PG18 with 4
+    /// concurrent inserters x 25 rows into a 2000-row graph index:
+    /// 8/100 inserts died with
+    ///   `corrupt graph adjacency chain: graph offsets[n]=54272 !=
+    ///    neighbors.len()=54240`
+    /// and 8 heap rows committed with no index entry.
+    ///
+    /// A `#[pg_test]` runs in ONE backend inside one implicit
+    /// transaction, so it cannot spawn a genuinely concurrent second
+    /// inserter (the multi-backend reproduction lives in
+    /// `benches/scripts/graph_concurrent_insert.sh`, which is what
+    /// produced the numbers above and which passes clean after the fix).
+    /// What this test CAN pin, and does, is the invariant the fix rests
+    /// on and which the pre-fix code violated at the persist site: after
+    /// every insert the on-disk adjacency node count, the ids-chain
+    /// length and `meta.n_vectors` all agree, AND the tombstone chain
+    /// survives the insert (the M2 two-write window, folded into one
+    /// write). Both were observably false before the fix on the
+    /// concurrent path, and the second is checkable single-backend
+    /// because the OLD code dropped the tombstone reference in the first
+    /// of its two meta writes.
+    #[pg_test]
+    fn graph_insert_keeps_adjacency_and_meta_in_lockstep() {
+        use_turbovec();
+        let n_rows = 200;
+        let dim = 32;
+
+        Spi::run("CREATE TABLE t_graph_c1 (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("SELECT setseed(0.71)").unwrap();
+        // Correlated per-row random (AGENTS.md: an UNcorrelated
+        // `random()` subquery gets hoisted, making every row identical).
+        Spi::run(&format!(
+            "INSERT INTO t_graph_c1 \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_graph_c1_idx ON t_graph_c1 USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true)",
+        )
+        .unwrap();
+
+        // The invariant, checked through the SAME decode path the scan
+        // and insert paths use (`turbovec_check` reports the graph
+        // adjacency validation BUG#5 added). `is_corrupt` covers the
+        // offsets/neighbors consistency; we additionally assert the
+        // counts line up, which is the specific drift C1 produced.
+        let assert_consistent = |label: &str| {
+            let (n_vectors, slot_count, count_matches, is_corrupt) = Spi::connect(|client| {
+                let tup = client
+                    .select(
+                        "SELECT n_vectors, slot_count, count_matches, is_corrupt \
+                         FROM turbovec_check('t_graph_c1_idx'::regclass)",
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                let row = tup
+                    .into_iter()
+                    .next()
+                    .expect("turbovec_check returned no row");
+                (
+                    row.get::<i64>(1).unwrap().unwrap(),
+                    row.get::<i64>(2).unwrap().unwrap(),
+                    row.get::<bool>(3).unwrap().unwrap(),
+                    row.get::<bool>(4).unwrap().unwrap(),
+                )
+            });
+            assert!(
+                !is_corrupt,
+                "{label}: turbovec_check reports the graph index corrupt \
+                 (n_vectors={n_vectors} slot_count={slot_count})"
+            );
+            assert!(
+                count_matches && n_vectors == slot_count,
+                "{label}: meta n_vectors={n_vectors} but the ids chain has \
+                 {slot_count} slots — the meta and the chains have drifted"
+            );
+            // A scan must still work AND still be able to reach the graph:
+            // a torn adjacency surfaces here as the hard
+            // "corrupt graph adjacency chain" ERROR from
+            // `read_graph_adjacency`.
+            crate::cache::invalidate_all();
+            let ids = fetch_ids(
+                "SELECT t2.id FROM t_graph_c1 t2, \
+                 (SELECT emb FROM t_graph_c1 WHERE id = 1) qq \
+                 ORDER BY t2.emb <=> qq.emb LIMIT 5",
+            );
+            assert_eq!(ids.len(), 5, "{label}: scan did not return 5 rows");
+            assert_distinct_ids(&ids);
+            n_vectors
+        };
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+        let base = assert_consistent("after build");
+        assert_eq!(base, n_rows as i64, "build persisted the wrong row count");
+
+        // A run of inserts: each one is a whole-relfile read-modify-write,
+        // so each one is an opportunity to drift.
+        for i in 1..=5i64 {
+            let id = n_rows as i64 + i;
+            Spi::run(&format!(
+                "INSERT INTO t_graph_c1 SELECT {id}, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series({id}, {id} + {dim} - 1)), ',') || ']')::vector"
+            ))
+            .unwrap();
+            crate::cache::invalidate_all();
+            let n = assert_consistent(&format!("after insert #{i}"));
+            assert_eq!(
+                n,
+                n_rows as i64 + i,
+                "insert #{i} did not grow the persisted row count by exactly one"
+            );
+        }
+    }
+
+    /// C1 / M2 regression: an insert into a graph index that has been
+    /// VACUUMed must PRESERVE the tombstone chain.
+    ///
+    /// Before the fix the insert path wrote the relfile TWICE: first
+    /// `write_full_with_prepared_graph` (which plans a fresh meta with
+    /// NO tombstone chain, silently un-referencing the bitmap), then a
+    /// separate `write_tombstones_and_meta` to put it back. Two meta
+    /// commits means a crash / cancel / FATAL in between leaves the
+    /// index having permanently FORGOTTEN every VACUUM delete — the
+    /// deleted rows become live again and the scan returns them.
+    ///
+    /// The fix folds the bitmap into the single (meta-last) rewrite.
+    /// This test pins the OBSERVABLE consequence: after
+    /// vacuum-then-insert, the tombstoned rows stay excluded from the
+    /// scan and the tombstone density is still non-zero.
+    #[pg_test]
+    fn graph_insert_after_vacuum_preserves_tombstones() {
+        use_turbovec();
+        let n_rows = 200;
+        let dim = 32;
+
+        Spi::run("CREATE TABLE t_graph_tomb (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run("SELECT setseed(0.29)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_graph_tomb \
+             SELECT g, \
+                 ('[' || array_to_string(ARRAY( \
+                     SELECT (random() * 2.0 - 1.0)::float4 \
+                     FROM generate_series(g, g + {dim} - 1)), ',') || ']')::vector \
+             FROM generate_series(1, {n_rows}) AS g"
+        ))
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_graph_tomb_idx ON t_graph_tomb USING turbovec (emb vec_cosine_ops) \
+             WITH (graph = true)",
+        )
+        .unwrap();
+
+        // Delete a chunk and drive ambulkdelete directly (SQL VACUUM
+        // cannot run inside a #[pg_test]'s implicit transaction).
+        let dead_set: std::collections::HashSet<u64> = {
+            let mut set = std::collections::HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM t_graph_tomb WHERE id <= 40", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        Spi::run("DELETE FROM t_graph_tomb WHERE id <= 40").unwrap();
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_graph_tomb_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const std::collections::HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+
+        let density_after_vacuum: f64 = Spi::get_one(
+            "SELECT tombstone_density FROM turbovec_check('t_graph_tomb_idx'::regclass)",
+        )
+        .unwrap()
+        .expect("tombstone_density");
+        assert!(
+            density_after_vacuum > 0.0,
+            "VACUUM did not tombstone anything (density={density_after_vacuum}) — \
+             the rest of this test would be vacuous"
+        );
+
+        // Now INSERT. Pre-fix, the first of the two meta writes dropped
+        // the tombstone chain reference; the second put it back, so a
+        // crash-free run recovered — but the chain was also re-planned
+        // at a position derived WITHOUT the graph chain in some layouts.
+        // Post-fix there is exactly one meta write and the chain is
+        // planned into it.
+        let new_id = n_rows as i64 + 1;
+        Spi::run(&format!(
+            "INSERT INTO t_graph_tomb SELECT {new_id}, \
+             ('[' || array_to_string(ARRAY( \
+                 SELECT (random() * 2.0 - 1.0)::float4 \
+                 FROM generate_series({new_id}, {new_id} + {dim} - 1)), ',') || ']')::vector"
+        ))
+        .unwrap();
+        crate::cache::invalidate_all();
+
+        let (density_after_insert, is_corrupt): (f64, bool) = Spi::connect(|client| {
+            let tup = client
+                .select(
+                    "SELECT tombstone_density, is_corrupt \
+                     FROM turbovec_check('t_graph_tomb_idx'::regclass)",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            let row = tup
+                .into_iter()
+                .next()
+                .expect("turbovec_check returned no row");
+            (
+                row.get::<f64>(1).unwrap().unwrap(),
+                row.get::<bool>(2).unwrap().unwrap(),
+            )
+        });
+        assert!(
+            !is_corrupt,
+            "insert-after-vacuum left the graph index corrupt"
+        );
+        assert!(
+            density_after_insert > 0.0,
+            "insert-after-vacuum LOST the tombstone chain (density went \
+             {density_after_vacuum} -> {density_after_insert}); the deleted rows \
+             are live again"
+        );
+
+        // And the deleted rows must still be absent from an index scan.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET enable_indexscan = on").unwrap();
+        let ids = fetch_ids(&format!(
+            "SELECT t2.id FROM t_graph_tomb t2, \
+             (SELECT emb FROM t_graph_tomb WHERE id = {new_id}) qq \
+             ORDER BY t2.emb <=> qq.emb LIMIT 20"
+        ));
+        assert!(!ids.is_empty(), "scan returned nothing after insert");
+        assert!(
+            ids.iter().all(|&id| id > 40),
+            "a tombstoned row (id <= 40) came back from the scan after \
+             insert-after-vacuum: {ids:?}"
+        );
+    }
+
     /// Audit gap (2026-07-10): the graph `aminsert` dim-mismatch
     /// ERROR path (`insert.rs::insert_graph_row`, "dim mismatch —
     /// index expects N, row has M") had no direct test. Build a

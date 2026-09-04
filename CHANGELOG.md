@@ -4,6 +4,45 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **BUG#5: `turbovec_check()` was graph-adjacency-blind.** It validated
+  the flat/IVF ids bijection + tombstones but never looked at a graph
+  index's CSR adjacency chain, so a corrupt adjacency (a torn write, or
+  the concurrent-insert corruption) reported `is_corrupt = false` —
+  operators had no health signal for the graph kind at all. For a
+  `kind = graph` index the check now decodes the adjacency chain and
+  validates: offsets monotonically non-decreasing and consistent with
+  the neighbor-array length, every neighbor id `< n_vectors`, the
+  entry point in range AND having at least one out-neighbor, no
+  self-loops, strictly-ascending (deduplicated) neighbor lists, the
+  adjacency's node count matching `meta.n_vectors`, and at least one
+  edge when `n_vectors > 1` (not trivially disconnected). Cost is
+  `O(n + edges)` over the adjacency chain only — no vector data is
+  read, so it stays cheap enough to poll. Flat/IVF/ColBERT behaviour is
+  byte-identical (the new code is gated on `meta.is_graph()`).
+- The chain decode used by the monitoring path is now non-fatal
+  (`relfile::try_read_graph_adjacency`), so a malformed chain is
+  REPORTED rather than ERRORing out of the operator's health query. It
+  also bounds the chain against the physical relation length before
+  reading, so a truncated relfile is reported instead of raising
+  `read_chain`'s hard past-EOF ERROR. The scan / insert / VACUUM paths
+  keep the ERROR policy (they cannot proceed on a broken graph) and
+  share the same decode implementation.
+
+### Changed (SQL surface — additive column, but see the upgrade note)
+- `turbovec.turbovec_check(regclass)` gains a trailing **`reason text`**
+  column: NULL when healthy, otherwise a human-readable description of
+  the first problem found (duplicate id, count drift, or the specific
+  graph-adjacency invariant violated). **Adding an OUT column changes
+  the function's return type**, which `CREATE OR REPLACE FUNCTION`
+  cannot do — the release that ships this needs a `DROP FUNCTION
+  turbovec_check(oid); CREATE FUNCTION ...` pair in its
+  `sql/pg_turbovec--<prev>--<this>.sql` upgrade script, and it is a
+  MINOR bump at minimum (never a patch). No wire-format change (still
+  v8); no REINDEX.
+
 ## [2.0.0] — 2026-08-26
 
 **MAJOR: pg_turbovec now runs on upstream turbovec 1.0.0.** This adopts

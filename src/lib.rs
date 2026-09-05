@@ -1371,6 +1371,87 @@ mod tests {
         );
     }
 
+    /// Field report 2026-09-05: `turbovec_check()` reported
+    /// `is_corrupt = false` on an IVF index whose EVERY scan died with
+    /// turbovec's `InvalidScaleValue { slot: 1, value: -2.559434e22 }`,
+    /// because the checker deliberately read only the meta page + ids
+    /// chain and skipped "the much larger codes/scales chains". The
+    /// scales chain is actually the cheap one (one f32 per vector) and is
+    /// load-bearing for `from_parts`, so a damaged scale is 100%
+    /// scan-fatal yet was invisible to the health query — which defeated
+    /// the operator's automated self-heal.
+    ///
+    /// Fail-before/pass-after: with the scales validation removed this
+    /// test fails at the `corrupt` assertion (the checker returns the same
+    /// clean row it did in the field).
+    #[pg_test]
+    fn turbovec_check_detects_invalid_scale() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_sbad (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_sbad \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 7 + s * 13) % 97)::float8 / 97.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::turbovec.vector \
+             FROM generate_series(1, 600) g",
+        )
+        .unwrap();
+        // IVF (lists > 0) -- the kind the field report was filed against.
+        Spi::run(
+            "CREATE INDEX t_sbad_idx ON t_sbad \
+             USING turbovec (emb turbovec.vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 8)",
+        )
+        .unwrap();
+
+        let check = || -> (bool, Option<String>) {
+            let (c, r): (Option<bool>, Option<String>) = Spi::get_two(
+                "SELECT is_corrupt, reason \
+                 FROM turbovec.turbovec_check('t_sbad_idx'::regclass)",
+            )
+            .unwrap();
+            (c.expect("is_corrupt"), r)
+        };
+        assert_eq!(
+            check(),
+            (false, None),
+            "a freshly built IVF index must start healthy"
+        );
+
+        // Reproduce the reported damage exactly: a large NEGATIVE scale
+        // (the reporter saw -2.559434e22, i.e. non-scale bytes read as
+        // f32), which violates both the sign and magnitude invariants
+        // `from_parts` enforces.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_sbad_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            use crate::index::relfile;
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            assert!(m.n_vectors > 1, "need at least 2 slots");
+            let prev = relfile::force_corrupt_scale(rel, &m, 1, -2.559434e22);
+            assert!(
+                prev.is_finite() && prev >= 0.0,
+                "the pre-corruption scale should have been valid, got {prev}"
+            );
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+        crate::cache::invalidate_all();
+
+        let (corrupt, reason) = check();
+        assert!(
+            corrupt,
+            "an invalid (negative, ~1e22) scale must be reported as corrupt \
+             -- this is the field-report blind spot"
+        );
+        let reason = reason.expect("an invalid scale must carry a reason");
+        assert!(
+            reason.contains("invalid scale at slot 1"),
+            "reason must name the failing slot, got: {reason}"
+        );
+    }
+
     /// Shared fixture for the BUG#5 `turbovec_check` graph tests:
     /// build `<name>` + `<name>_idx` as a `WITH (graph = true)` index
     /// over `n_rows` random `dim`-d vectors. The per-row
@@ -6809,7 +6890,7 @@ mod tests {
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
-            "2.0.0", "2.1.0", "2.2.0", "2.2.1",
+            "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

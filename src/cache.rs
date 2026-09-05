@@ -176,7 +176,27 @@ impl ReadOnlyIndex {
             Vec::new(),
             Vec::new(),
         )
-        .expect("ReadOnlyIndex::from_parts: from_parts rejected raw parts");
+        .unwrap_or_else(|e| {
+            // Field report 2026-09-05: this used to be a bare
+            // `.expect("...from_parts rejected raw parts")`, so an
+            // operator whose scales chain had been damaged got a Rust
+            // internal-invariant string with no index name and, worse, no
+            // hint that REINDEX is the recovery -- for a fault that fails
+            // 100% of index scans. Mirror the pre-v8 wire-version path
+            // instead: a real PG ERROR naming the failure and the fix.
+            // (This constructor is PG-agnostic and has no Relation, so the
+            // statement context supplies the index; the message carries
+            // turbovec's precise reason, e.g.
+            // `InvalidScaleValue { slot: 1, value: -2.559434e22 }`.)
+            // `error!` diverges (`-> !`), so it satisfies the value
+            // position here where `ereport!` (which types as `()`) cannot.
+            pgrx::error!(
+                "turbovec: this index's persisted parts are corrupt and cannot be scanned \
+                 ({e}). Run `REINDEX INDEX <name>;` to rebuild it from the heap; \
+                 `turbovec.turbovec_check(<name>)` reports the same fault in its \
+                 `reason` column."
+            )
+        });
         Self { inner, slot_to_id }
     }
 

@@ -352,6 +352,17 @@ fn turbovec_check(
         crate::index::relfile::lock_relfile_read(rel);
         let meta_consistent = crate::index::relfile::read_meta(rel).unwrap_or(meta);
         let ids = crate::index::relfile::read_ids_only(rel, &meta_consistent);
+        // Field report 2026-09-05: reading only meta+ids made this check
+        // BLIND to a scan-fatal fault. On a ~2.18M-vector IVF index the
+        // scales chain was the only damaged region, so every KNN scan died
+        // with turbovec's `InvalidScaleValue { slot: 1, value: -2.6e22 }`
+        // while this function reported `is_corrupt = false` and the
+        // operator's automated self-heal never fired. The scales chain is
+        // the CHEAP one (one f32 per vector, ~8.4 MB there, vs the codes
+        // chain's dim*bit_width/8 per vector), and it is load-bearing for
+        // `from_parts` — so validate it here, inside the SAME ShareLock as
+        // the meta/ids read so all three are one consistent observation.
+        let scales_problem = crate::index::relfile::validate_scales(rel, &meta_consistent).err();
         crate::index::relfile::unlock_relfile_read(rel);
         let meta = meta_consistent;
         let slot_count = ids.len() as i64;
@@ -405,6 +416,13 @@ fn turbovec_check(
             if reason.is_none() {
                 reason = graph_reason;
             }
+        }
+        // Scan-fatality check for EVERY kind (the field-report index was
+        // IVF/"single", not graph): a scales value that `from_parts`
+        // rejects makes 100% of index scans fail, so it must show up as
+        // corrupt here even though meta+ids are mutually consistent.
+        if reason.is_none() {
+            reason = scales_problem;
         }
         let is_corrupt = reason.is_some();
 

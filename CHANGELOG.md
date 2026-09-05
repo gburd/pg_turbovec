@@ -4,6 +4,62 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.2] — 2026-09-05
+
+**`turbovec_check()` no longer has a scan-fatal blind spot.** Code-only —
+no wire-format change (stays v8), no SQL surface change (the `reason`
+column already exists as of 2.1.0), no REINDEX required to upgrade.
+
+A field report (2026-09-05, pg.ddx.io) found an IVF index — ~2.18 M
+vectors, 768 d, `bit_width = 4`, `lists = 1400` — on which **every** KNN
+scan failed instantly with turbovec's
+`InvalidScaleValue { slot: 1, value: -2.559434e22 }`, while
+`turbovec_check()` reported `is_corrupt = false`, `count_matches = t`,
+`duplicate_id = NULL`. Because the operator's automated self-heal trusts
+that check, the index degraded **silently** until a manual `REINDEX`
+(~12 min) cleared it. The reporter correctly identified this as the more
+important of the two issues they filed: a checker that cannot detect an
+index failing 100 % of scans is a false-confidence generator.
+
+Root cause of the blind spot (a deliberate, documented decision that this
+incident falsifies): the check read only the meta page and the ids chain,
+skipping "the much larger codes/scales chains". But the **scales chain is
+the cheap one** — one `f32` per vector, **8.7 MB** at 2.18 M vectors,
+versus the **17.4 MB** ids chain it *already* read, versus **0.84 GB**
+for the codes chain it rightly still skips — and it is load-bearing for
+`TurboQuantIndex::from_parts`, i.e. exactly the gate a scan hits.
+
+- `turbovec_check()` now validates every persisted scale (finite,
+  non-negative, sane magnitude — the same invariants `from_parts`
+  enforces) for **every** index kind, inside the *same* shared
+  rewrite-lock bracket as the meta/ids read so all three are one
+  consistent observation, and names the failing slot in `reason`. Cost is
+  +50 % on an already-cheap query; no opt-in `deep` flag, because a
+  default that cannot see a scan-fatal fault is the bug.
+- The scan-path rejection is now a proper PostgreSQL `ERROR` naming the
+  fault and the **`REINDEX INDEX`** recovery, instead of the bare Rust
+  `.expect("...from_parts rejected raw parts")` string an operator used
+  to get with no hint that REINDEX fixes it.
+- Regression test `turbovec_check_detects_invalid_scale` writes the
+  reported value (`-2.559434e22`) into the *persisted* scales chain of an
+  IVF index via a page-straddle-safe test-only helper and asserts the
+  checker flags it; fail-before/pass-after.
+
+Note this is the same failure *shape* as the graph lost-update called out
+in the 2.1.0 notes: **internal self-consistency of meta+ids is not
+evidence of scannability.** The originating corruption itself (a damaged
+scales chain on an index that had survived several
+`pg_cancel_backend`/`pg_terminate_backend` events, a `kill -QUIT`
+immediate shutdown and a restart that aborted an in-flight backfill) is
+not yet reproduced and remains under investigation; this release makes it
+*detectable* and *actionable* rather than silent.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.2.2';` — no REINDEX to upgrade.
+(An index already damaged needs a one-time `REINDEX INDEX <name>;`, which
+this release will now actually tell you about.)
+
 ## [2.2.1] — 2026-09-05
 
 **Safety patch: the PARALLEL graph build was effectively uncancellable.**

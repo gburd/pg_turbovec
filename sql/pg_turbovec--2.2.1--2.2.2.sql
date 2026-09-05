@@ -1,0 +1,6 @@
+-- pg_turbovec 2.2.1 -> 2.2.2
+-- turbovec_check() now validates the per-vector scales chain (closing a
+-- blind spot where a scan-fatal index reported is_corrupt=false), and the
+-- scan-path from_parts rejection became a proper ERROR with a REINDEX hint.
+-- Code-only: no wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

@@ -1,0 +1,20 @@
+-- 2.2.2 — turbovec_check() no longer has a scan-fatal blind spot.
+--
+-- Field report 2026-09-05 (pg.ddx.io): an IVF index (~2.18M vectors, 768d,
+-- bit_width=4, lists=1400) failed 100% of KNN scans with turbovec's
+-- `InvalidScaleValue { slot: 1, value: -2.559434e22 }` while
+-- turbovec_check() reported is_corrupt=false -- so the operator's automated
+-- self-heal never fired and the index degraded silently until a manual
+-- REINDEX. Cause: the checker deliberately read only the meta page and the
+-- ids chain, skipping "the much larger codes/scales chains". But the scales
+-- chain is the CHEAP one (one f32 per vector: 8.7 MB there, vs 17.4 MB for
+-- the ids chain it already read, vs 0.84 GB for the codes chain) and it is
+-- load-bearing for from_parts. turbovec_check() now validates every scale
+-- (finite, non-negative, sane magnitude) inside the same shared rewrite
+-- lock as the meta/ids read, for EVERY index kind, and reports the failing
+-- slot in `reason`. Also: the from_parts rejection on the scan path is now
+-- a proper PG ERROR naming the fault and the REINDEX recovery instead of a
+-- bare Rust `.expect()` string.
+-- No wire-format change (stays v8), no SQL surface change (the `reason`
+-- column already existed as of 2.1.0), no REINDEX required to upgrade.
+-- This migration is intentionally empty.

@@ -2022,6 +2022,71 @@ pub(crate) unsafe fn copy_slot_in_chain(
 /// # Safety
 ///
 /// Caller must hold a relation reference.
+/// Validate the per-vector `scales` chain WITHOUT reconstructing an
+/// index, returning `Err(reason)` on the first bad value.
+///
+/// This exists because `turbovec_check()` used to read only the meta
+/// page + the ids chain, deliberately skipping "the much larger
+/// codes/scales chains". A field report (2026-09-05, an IVF index of
+/// ~2.18M vectors) showed that assumption is unsafe: the scales chain
+/// was the ONLY damaged region — every KNN scan died with turbovec's
+/// `InvalidScaleValue { slot: 1, value: -2.559434e22 }` while
+/// `turbovec_check()` reported `is_corrupt = false`, so the operator's
+/// automated self-heal never fired. Internal self-consistency of
+/// meta+ids is NOT evidence of scannability.
+///
+/// The scales chain is the CHEAP one: one f32 per vector (~8.4 MB at
+/// 2.18M vectors) versus the codes chain's `dim * bit_width / 8` bytes
+/// each, so validating it keeps the checker pollable. The rules mirror
+/// what `TurboQuantIndex::from_parts` enforces (finite, non-negative,
+/// within a sane magnitude), which is exactly the gate the scan path
+/// hits — so a pass here means the scan's own scale check will pass too.
+///
+/// `MAX_SANE_SCALE` is deliberately our own generous bound rather than
+/// turbovec's `io::MAX_VECTOR_SCALE` (which is `pub(crate)` upstream and
+/// so not importable); it is set to the same 1e22 so the two agree, and
+/// the reported corruption (`-2.6e22`) violates BOTH sign and magnitude.
+///
+/// # Safety
+/// Caller must hold a relation reference; take the shared rewrite lock
+/// around this if the result must be consistent with a meta/ids read.
+pub(crate) unsafe fn validate_scales(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Result<(), String> {
+    /// Same value as turbovec's private `io::MAX_VECTOR_SCALE`.
+    const MAX_SANE_SCALE: f32 = 1e22;
+
+    if meta.n_vectors == 0 {
+        return Ok(());
+    }
+    let bytes = read_chain(
+        rel,
+        meta.scales_first,
+        std::mem::size_of::<f32>() as u32,
+        meta.rows_per_scales_page,
+        meta.n_vectors,
+    );
+    let want = meta.n_vectors as usize;
+    let got = bytes.len() / std::mem::size_of::<f32>();
+    if got < want {
+        return Err(format!(
+            "scales chain is short: {got} values on disk for n_vectors {want}"
+        ));
+    }
+    for (slot, c) in bytes.chunks_exact(4).take(want).enumerate() {
+        let s = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        if !s.is_finite() || s < 0.0 || s > MAX_SANE_SCALE {
+            return Err(format!(
+                "invalid scale at slot {slot}: {s} (a scale must be finite, \
+                 non-negative and <= {MAX_SANE_SCALE:e}); every index scan \
+                 will fail until this is rebuilt"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) unsafe fn read_ids_only(rel: pg_sys::Relation, meta: &MetaPageData) -> Vec<u64> {
     if meta.n_vectors == 0 {
         return Vec::new();
@@ -2819,6 +2884,49 @@ pub(crate) unsafe fn force_corrupt_graph_word(
         pg_sys::UnlockReleaseBuffer(buf);
     }
     u32::from_le_bytes(old)
+}
+
+/// Test-only: overwrite one f32 of the persisted `scales` chain and
+/// return the previous value, so a `#[pg_test]` can prove
+/// `turbovec_check()` DETECTS a scan-fatal scales fault (the
+/// 2026-09-05 field report: an IVF index whose only damaged region was
+/// the scales chain failed 100% of scans while the checker said
+/// `is_corrupt = false`). Straddles page boundaries a byte at a time,
+/// like [`force_corrupt_graph_word`].
+///
+/// # Safety
+/// Caller must hold an exclusive-enough relation lock; this WRITES pages.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) unsafe fn force_corrupt_scale(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+    slot: usize,
+    value: f32,
+) -> f32 {
+    assert!(
+        (slot as u64) < meta.n_vectors,
+        "force_corrupt_scale: slot {slot} is past n_vectors {}",
+        meta.n_vectors
+    );
+    let payload = crate::index::page::PAYLOAD_BYTES;
+    let start = slot * std::mem::size_of::<f32>();
+    let new = value.to_le_bytes();
+    let mut old = [0u8; 4];
+    for i in 0..4 {
+        let byte_off = start + i;
+        let blkno = meta.scales_first + (byte_off / payload) as u32;
+        let within = byte_off % payload;
+        let buf = read_block(rel, blkno, /*exclusive=*/ true);
+        let state = pg_sys::GenericXLogStart(rel);
+        let page =
+            pg_sys::GenericXLogRegisterBuffer(state, buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
+        let p = page.cast::<u8>().add(PAGE_HEADER_BYTES + within);
+        old[i] = *p;
+        *p = new[i];
+        pg_sys::GenericXLogFinish(state);
+        pg_sys::UnlockReleaseBuffer(buf);
+    }
+    f32::from_le_bytes(old)
 }
 
 #[cfg(test)]

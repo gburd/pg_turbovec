@@ -1,0 +1,29 @@
+-- 2.2.0 — MINOR. Graph-kind scan-beam (`ef`) retune + decoupling.
+--
+-- * The graph kind's scan-time beam width is now its OWN knob,
+--   `turbovec.graph_ef` (int, Userset, default 0 = auto = 512), instead
+--   of `ef = (candidate_count * 4).max(64)`. Because that old rule was a
+--   function of the candidate count, `turbovec.hi_dim_rerank = auto`
+--   (whose real job is the flat/IVF exact-rerank WINDOW for dim >= 256)
+--   was setting the graph's beam as a side effect. Symptom: an INVERTED
+--   recall cliff -- 128d, below the rerank threshold with the beam stuck
+--   at the bare 64 floor, was the WORST at R@10 0.720, while 512d looked
+--   perfect at 1.00 -- and a recall collapse at EVERY dim with
+--   hi_dim_rerank = off. Recall was never dim-dependent, only
+--   beam-dependent.
+-- * The 512 auto default is set from a measured 1M-scale
+--   recall-vs-latency frontier on SIFT-128 and GIST-960 (32 vCPU
+--   AVX-512, exact-cosine GT); see docs/GRAPH_EF_BENCH.md.
+-- * `hi_dim_rerank` keeps doing its real job for flat/IVF, unchanged.
+--
+-- Wire format UNCHANGED (stays v8). NO REINDEX: the beam is resolved at
+-- scan time, so existing graph indexes get the new default immediately.
+-- Flat and IVF indexes are unaffected (no beam on those paths).
+--
+-- No SQL-surface objects are created or altered by this release: a GUC
+-- is registered by the shared library in _PG_init, not by SQL. This file
+-- exists to satisfy the per-release migration-coverage invariant
+-- (scripts/drift-check.sh, migration_files_cover_documented_versions).
+--
+-- Upgrade: ALTER EXTENSION pg_turbovec UPDATE TO '2.2.0'; then restart
+-- the backend so _PG_init re-runs and registers turbovec.graph_ef.

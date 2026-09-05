@@ -626,10 +626,17 @@ impl GraphIndex {
         // `O(n)` blocked buffer the old `score_slots` re-scanned per
         // hop.
         let scorer = self.inner.graph_scorer(query);
-        let hits = crate::index::graph::graph_search(
+        // v2.2.0: the beam comes from `turbovec.graph_ef` (its own
+        // knob), NOT from `k`. Pre-v2.2.0 it was `(k * 4).max(64)`,
+        // which let `turbovec.hi_dim_rerank`'s candidate-count floor
+        // (a flat/IVF exact-rerank-window knob) set the graph's beam
+        // as a side effect -- the inverted-recall-cliff bug.
+        let ef = crate::guc::graph_scan_ef(k, self.len());
+        let hits = crate::index::graph::graph_search_with_ef(
             &self.adjacency,
             self.entry_point,
             k,
+            ef,
             &self.tombstones,
             |ids| scorer.score_batch(ids),
         );

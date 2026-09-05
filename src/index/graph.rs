@@ -194,22 +194,45 @@ pub const GRAPH_TARGET_SHARD_ROWS: usize = 12_000;
 /// small table can't create thousands of near-empty shards.
 pub const GRAPH_MIN_SHARD_ROWS: usize = 2_000;
 
-/// Scan-time beam-width multiplier, mirroring
-/// `ivf::GRAPH_EF_MULTIPLIER`'s pattern but sized for CORPUS scale
-/// (thousands to millions of nodes) rather than centroid scale
-/// (thousands of cells). `ef = (k * MULTIPLIER).max(FLOOR).min(n)`.
-/// 4x the requested `k` gives the beam room to recover from a
-/// locally-suboptimal hop without materially widening the per-query
-/// cost — the same recall-safety margin `ivf::graph_probe` already
-/// validated empirically at centroid scale.
+/// Scan-time beam-width multiplier used by the pure-`k` fallback
+/// beam ([`default_scan_ef`]) that the non-GUC [`graph_search`]
+/// entry point (unit tests, `aminsert`'s findability check) uses.
+/// The LIVE scan path does NOT use this: it resolves the beam from
+/// `turbovec.graph_ef` (see `guc::graph_scan_ef`), which is
+/// deliberately independent of the candidate count so the beam can
+/// never be set as a side effect of `turbovec.hi_dim_rerank`.
 pub const GRAPH_SCAN_EF_MULTIPLIER: usize = 4;
 
-/// Floor on the scan-time beam width, so a tiny `k` (e.g. `LIMIT 1`)
-/// still searches widely enough to be recall-safe. 64 matches the
-/// common HNSW `ef_search` default (e.g. Faiss/hnswlib ship 64 as a
-/// reasonable out-of-the-box value) — reusing an established
-/// reference point rather than inventing a new one.
+/// Floor on the pure-`k` fallback beam ([`default_scan_ef`]), so a
+/// tiny `k` (e.g. `LIMIT 1`) still searches widely enough to be
+/// recall-safe. 64 matches the common HNSW `ef_search` default
+/// (Faiss/hnswlib ship 64) — an established reference point rather
+/// than a new invention. The live scan path's floor is
+/// [`GRAPH_SCAN_EF_DEFAULT`] instead.
 pub const GRAPH_SCAN_EF_FLOOR: usize = 64;
+
+/// Default scan-time beam width for the graph kind
+/// (`turbovec.graph_ef = 0` = auto), chosen from the measured
+/// recall-vs-latency frontier at 1M scale on SIFT-128 and GIST-960
+/// (see `docs/GRAPH_EF_BENCH.md` / the v2.2.0 CHANGELOG entry): the
+/// R@10 curve is a pure function of the beam and plateaus by ~512 on
+/// both corpora, where the per-query cost is still a small multiple
+/// of the pre-retune beam's. Unlike the pre-v2.2.0
+/// `(k * MULTIPLIER).max(FLOOR)` rule this is an ABSOLUTE beam: it
+/// does not scale with the candidate count, so
+/// `turbovec.hi_dim_rerank` (whose job is the flat/IVF exact-rerank
+/// WINDOW) can no longer silently widen or starve the graph's beam.
+pub const GRAPH_SCAN_EF_DEFAULT: usize = 512;
+
+/// The pure-`k` fallback beam for callers with no live GUC (unit
+/// tests, the `aminsert` findability probe): `(k *
+/// GRAPH_SCAN_EF_MULTIPLIER).max(GRAPH_SCAN_EF_FLOOR).min(n)`. The
+/// live scan path uses `guc::graph_scan_ef` instead.
+pub fn default_scan_ef(k: usize, n: usize) -> usize {
+    (k.saturating_mul(GRAPH_SCAN_EF_MULTIPLIER))
+        .max(GRAPH_SCAN_EF_FLOOR)
+        .min(n)
+}
 
 /// CSR (compressed sparse row) adjacency: `offsets[i]..offsets[i+1]`
 /// indexes `neighbors` for node `i`'s (ascending-id, deduplicated,
@@ -1460,9 +1483,11 @@ fn robust_prune(
 /// candidate". Returns the scores in the SAME order as the input ids.
 ///
 /// Returns the `k` best (score DESCENDING, ties → ascending id for
-/// determinism) `(score, id)` pairs found. `ef` (the internal beam
-/// width) is `(k * GRAPH_SCAN_EF_MULTIPLIER).max(GRAPH_SCAN_EF_FLOOR)`,
-/// clamped to `n`.
+/// determinism) `(score, id)` pairs found. This entry point picks the
+/// internal beam width with [`default_scan_ef`] (the pure-`k`
+/// fallback for callers with no live GUC); the live scan path calls
+/// [`graph_search_with_ef`] with the beam resolved from
+/// `turbovec.graph_ef`.
 ///
 /// Deterministic: a fixed serial traversal with a fixed `(score, id)`
 /// tie-break at every heap comparison — same idea as `ivf::graph_probe`.
@@ -1489,6 +1514,32 @@ pub fn graph_search<F>(
     entry: u32,
     k: usize,
     tombstones: &[u8],
+    score_batch: F,
+) -> Vec<(f32, u32)>
+where
+    F: FnMut(&[u32]) -> Vec<f32>,
+{
+    let ef = default_scan_ef(k, adjacency.n());
+    graph_search_with_ef(adjacency, entry, k, ef, tombstones, score_batch)
+}
+
+/// [`graph_search`] with an EXPLICIT beam width `ef` — the entry
+/// point the live scan path uses, so the beam is a first-class knob
+/// (`turbovec.graph_ef`) instead of a function of the candidate
+/// count. `ef` is clamped up to `k` (a beam narrower than `k` could
+/// not hold `k` results) and down to `n`.
+///
+/// Beam width is the graph kind's dominant recall dial: on the same
+/// index and the same scorer, R@10 recovers monotonically with `ef`
+/// (measured 0.750 → 0.990 → 1.000 across a 32 → 128 → 512 beam),
+/// which is why v2.2.0 made it explicit rather than a side effect of
+/// whatever candidate count `scan.rs` happened to compute.
+pub fn graph_search_with_ef<F>(
+    adjacency: &GraphAdjacency,
+    entry: u32,
+    k: usize,
+    ef: usize,
+    tombstones: &[u8],
     mut score_batch: F,
 ) -> Vec<(f32, u32)>
 where
@@ -1506,9 +1557,11 @@ where
         let byte = slot / 8;
         byte < tombstones.len() && (tombstones[byte] >> (slot % 8)) & 1 != 0
     };
-    let ef = (k.saturating_mul(GRAPH_SCAN_EF_MULTIPLIER))
-        .max(GRAPH_SCAN_EF_FLOOR)
-        .min(n);
+    // A beam narrower than `k` can never hold `k` results (the
+    // shortfall would fall through to the backfill below and pad the
+    // result set with arbitrary ascending-id rows), so floor it at
+    // `k`; `n` is the hard ceiling.
+    let ef = ef.max(k).min(n);
     let entry = (entry as usize).min(n - 1) as u32;
     // Defense in depth (the primary fix lives in VACUUM's own
     // fallback selection, `vacuum.rs::graph_tombstone_dead` -- this
@@ -2201,6 +2254,129 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// v2.2.0: recall is a monotone function of the BEAM on a fixed
+    /// index with a fixed scorer -- the finding that motivated making
+    /// the beam its own knob (`turbovec.graph_ef`), and the regression
+    /// guard for it. A narrow beam under-recalls; widening it recovers,
+    /// with no change to the index or the scoring oracle.
+    #[test]
+    fn recall_increases_monotonically_with_the_beam() {
+        let n = 3_000;
+        let dim = 32;
+        let corpus = synth_corpus(n, dim, 4242);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let k = 10;
+
+        let exact_set = |q: &[f32]| -> std::collections::HashSet<u32> {
+            let mut e: Vec<(f32, u32)> = (0..n as u32)
+                .map(|id| {
+                    (
+                        -sq_dist(q, &corpus[id as usize * dim..(id as usize + 1) * dim]),
+                        id,
+                    )
+                })
+                .collect();
+            e.sort_unstable_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            e.truncate(k);
+            e.into_iter().map(|(_, id)| id).collect()
+        };
+
+        // Fixed query set (drawn off-corpus so the answers aren't
+        // trivially the query's own node).
+        let mut qseed = 0x5EED_1234u64;
+        let mut queries: Vec<Vec<f32>> = Vec::new();
+        for _ in 0..25 {
+            let mut q = vec![0.0f32; dim];
+            for v in q.iter_mut() {
+                qseed = qseed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *v = ((qseed >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+            }
+            queries.push(q);
+        }
+
+        let mut recalls: Vec<(usize, f64)> = Vec::new();
+        for &ef in &[10usize, 32, 128, 512, 2048] {
+            let mut total = 0.0f64;
+            for q in &queries {
+                let truth = exact_set(q);
+                let got: std::collections::HashSet<u32> =
+                    graph_search_with_ef(&g, entry, k, ef, &[], |ids| {
+                        neg_sq_dist_batch(&corpus, dim, q, ids)
+                    })
+                    .into_iter()
+                    .map(|(_, id)| id)
+                    .collect();
+                total += truth.intersection(&got).count() as f64 / k as f64;
+            }
+            recalls.push((ef, total / queries.len() as f64));
+        }
+
+        // Monotone non-decreasing in the beam (f32-noise tolerance).
+        for w in recalls.windows(2) {
+            assert!(
+                w[1].1 >= w[0].1 - 1e-9,
+                "recall must not DROP as the beam widens: {recalls:?}"
+            );
+        }
+        // The widest beam reaches near-exact and the narrowest is
+        // strictly worse -- otherwise the test proves nothing.
+        let narrow = recalls[0].1;
+        let wide = recalls[recalls.len() - 1].1;
+        assert!(
+            wide >= 0.95,
+            "widest beam should be near-exact, got {wide:.3} ({recalls:?})"
+        );
+        assert!(
+            narrow < wide,
+            "a narrow beam must under-recall relative to a wide one ({recalls:?})"
+        );
+    }
+
+    /// An explicit beam NARROWER than `k` is floored at `k`, so the
+    /// index-AM contract ("return `k` results when `n >= k`") is met by
+    /// the beam itself rather than by leaning on the BUG#2 backfill.
+    #[test]
+    fn explicit_beam_is_floored_at_k() {
+        let n = 500;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 5);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let q: Vec<f32> = corpus[0..dim].to_vec();
+        let out = graph_search_with_ef(&g, entry, 25, 1, &[], |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        assert_eq!(
+            out.len(),
+            25,
+            "ef < k must be floored at k, not truncate the result set"
+        );
+    }
+
+    /// `graph_search` (the no-GUC entry point) is exactly
+    /// `graph_search_with_ef` at the pure-`k` fallback beam, so the
+    /// v2.2.0 split is a refactor for every existing caller.
+    #[test]
+    fn graph_search_matches_explicit_default_ef() {
+        let n = 800;
+        let dim = 16;
+        let corpus = synth_corpus(n, dim, 11);
+        let (g, entry) = build_vamana(&corpus, n, dim);
+        let q: Vec<f32> = corpus[3 * dim..4 * dim].to_vec();
+        let a = graph_search(&g, entry, 10, &[], |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        let b = graph_search_with_ef(&g, entry, 10, default_scan_ef(10, n), &[], |ids| {
+            neg_sq_dist_batch(&corpus, dim, &q, ids)
+        });
+        assert_eq!(a, b);
     }
 
     #[test]

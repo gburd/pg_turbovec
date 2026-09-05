@@ -4,6 +4,130 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] — 2026-09-04
+
+**Graph-kind scan-beam retune.** The graph kind's scan-time beam width
+is now its own knob (`turbovec.graph_ef`, default auto = 512) instead of
+a side effect of the candidate count, and the auto default is set from a
+measured 1M-scale recall-vs-latency frontier on SIFT-128 and GIST-960.
+**No wire-format change (stays v8), NO REINDEX** — but a new GUC is a
+SQL-surface addition, so this is a MINOR.
+
+### Fixed — the graph "high-dim recall cliff" was a BEAM bug, not a scorer bug
+
+The tracked "GraphScorer diverges from the kernel at `dim >= 512`" is
+**disproved**. An exact-f32-oracle control gives recall identical to the
+LUT scorer (within 0.015), and recall recovers monotonically with the
+BEAM on the same index and the same scorer (`search_k` 32 → 128 → 512
+gives R@10 0.750 → 0.990 → 1.000). The real mechanism was the scan-time
+beam width, and — worse — **which knob was setting it**:
+
+- Through v2.1.0, `graph_search` computed `ef = (k * 4).max(64)` where
+  `k` was the candidate count `scan.rs` had already widened. Since
+  `turbovec.hi_dim_rerank = auto` raises that count to
+  `clamp(dim, 256..=1024)` for `dim >= 256` — a knob whose actual job is
+  the **flat/IVF exact-rerank window** over a cell scan's quantized
+  ranking — the graph's beam was being set as a side effect of an
+  unrelated feature.
+- The visible symptom was an **inverted** cliff. With
+  `hi_dim_rerank = auto`, 128d was the WORST (R@10 0.720: 128d is below
+  the rerank threshold, so the beam stayed at the bare 64 floor) while
+  384/512d looked perfect (0.99/1.00: the inflated candidate count
+  multiplied the beam up). With `hi_dim_rerank = off` recall collapsed at
+  EVERY dim (~0.40/0.38). Recall was never dim-dependent; it was
+  beam-dependent, and the beam was accidental.
+
+Fixed by splitting `graph_search` into `graph_search_with_ef(.., ef, ..)`
+(the live scan path, beam resolved from the new GUC) and the original
+`graph_search` (the pure-`k` fallback for callers with no live GUC —
+unit tests, the `aminsert` findability probe). `scan.rs`'s graph arm now
+passes the user's OWN candidate count (`search_k * oversample`), not
+`hi_dim_rerank`'s floor. `hi_dim_rerank` keeps doing its real job for
+flat/IVF, unchanged.
+
+Verified on 42 paired `(k, ef)` configs across SIFT-200k, SIFT-1M and
+GIST-1M: `off` and `auto` now give recall within **0.0000** of each other
+at every beam, at 128d AND at 960d.
+
+### Added
+- **`turbovec.graph_ef`** (int, `Userset`, default `0` = auto = 512,
+  range `0..=1000000`) — the graph kind's recall/latency dial, the direct
+  analogue of `hnsw.ef_search` (and of `turbovec.probes` for IVF). `0` =
+  auto; a positive `N` pins the beam. Always clamped up to the query's
+  candidate count (a beam narrower than it cannot fill it) and down to
+  the live corpus size. Pure scan-time knob: no wire change, no REINDEX,
+  honoured immediately by any graph index built by any 2.x binary.
+
+### Changed — defaults
+- **Graph scan beam default 64 → 512** (`GRAPH_SCAN_EF_DEFAULT`), and it
+  is now ABSOLUTE rather than `(k * 4).max(64)`. Measured frontier (32
+  vCPU AVX-512, 1M rows, R@10 vs exact cosine GT, warm p50, `search_k`
+  pinned to `max(32, k)`):
+
+  | corpus | beam 64 | beam 512 | beam 2048 |
+  |---|---|---|---|
+  | SIFT-1M (128d) | R@10 0.943 / 1.25 ms | **R@10 0.990 / 5.19 ms** | R@10 0.991 / 14.13 ms |
+  | GIST-1M (960d) | R@10 0.760 / 8.65 ms | **R@10 0.920 / 34.55 ms** | R@10 0.966 / 93.44 ms |
+
+  At 128d 512 is the unambiguous knee: it is within 0.001 R@10 of the
+  2048-beam ceiling at 0.37× its p50, and doubling past it buys +0.001
+  for 1.7× the latency. At 960d the curve has NOT plateaued by 2048, so
+  512 is a deliberate latency cap — the widest beam that keeps 960d p50
+  under ~35 ms — not a knee; `SET turbovec.graph_ef = 2048` reaches
+  0.966 for ~95 ms if that is the trade you want.
+
+  ⚠️ **One configuration REGRESSES on recall, deliberately.** A 960d
+  graph index queried with `hi_dim_rerank = auto` (the default) goes
+  R@10 0.971 → 0.920 and R@100 0.958 → 0.826, in exchange for p50
+  194 ms → 34 ms (5.6×) and 196 ms → 42 ms (4.7×). The old numbers came
+  from the side-effect beam of **3840** that `auto` was silently buying
+  at 960d — never a documented beam, and it evaporated the moment a user
+  set `hi_dim_rerank = off` (0.840, the "collapse"). A ~200 ms p50 is
+  not a defensible default, and the old recall is now REACHABLE and
+  documented for the first time: `SET turbovec.graph_ef = 3840`
+  reproduces the pre-patch `auto` beam exactly. 128d indexes improve in
+  BOTH modes (R@10 0.976 → 0.990 at 1M) and lose nothing — 128d is below
+  `hi_dim_rerank`'s `dim >= 256` threshold, so 128d `auto` was never
+  above `off`.
+
+### Known limitation — the graph kind is NOT the fastest kind at 1M
+
+Measured on the same box, same corpora, same GT, at k=10: the **flat**
+kind beats the graph on BOTH recall and latency on BOTH corpora.
+SIFT-1M flat R@10 0.993 / 0.96 ms vs the graph's best-defensible 0.990 /
+5.19 ms (5.4× lower latency, higher recall). GIST-1M flat R@10 0.997 /
+5.91 ms vs the graph's 0.920 / 34.55 ms (5.8× lower latency, +0.077
+recall) — and even beam 2048 (0.966 / 93 ms) does not catch flat. At 1M
+rows on a 32-core AVX-512 host, turbovec's SIMD full scan (one linear
+sweep of a compact quantized buffer at memory bandwidth) is simply
+faster than navigating a graph (~`ef` scattered gathers with a serial
+dependency between hops). The graph's advantage is asymptotic and 1M is
+below the crossover on this hardware. **Guidance: use flat (or IVF for
+a smaller RAM footprint) at this scale.** The graph's one measured win
+is CONCURRENCY scaling — the flat scan saturates memory bandwidth and
+goes 713 → 1313 qps from 1 to 8 clients (1.8×) while the graph goes 688
+→ 4906 (7.1×) — so it is the better throughput engine under load even
+where it loses isolated p50. Full curves and the reasoning in
+`docs/GRAPH_EF_BENCH.md`.
+
+### Docs
+- `docs/GRAPH_EF_BENCH.md` — the full measured frontier (both corpora,
+  both `hi_dim_rerank` settings, the whole `ef` grid, at `k` = 10 and
+  100), the flat/IVF comparators at the same `k`, the before/after A/B on
+  byte-identical index files, and the reasoning behind 512.
+- `docs/PRODUCTION.md` — `turbovec.graph_ef` reference section.
+- `README.md` — GUC table + count (18 → 19).
+
+### Migration
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.2.0';` and restart the backend
+(the new GUC is registered in `_PG_init`). **No REINDEX**: the wire
+format is unchanged (v8) and the beam is resolved at scan time, so
+existing graph indexes get the new default immediately. Flat and IVF
+indexes are unaffected — the beam does not exist on those paths. To
+restore a pre-v2.2.0 effective beam exactly: `SET turbovec.graph_ef =
+128` for what `hi_dim_rerank = off` gave at any dim (and what `auto`
+gave below 256d), or `= 3840` for what `auto` gave at 960d.
+
 ## [2.1.0] — 2026-09-04
 
 **Graph-kind correctness release.** The `WITH (graph = true)` kind had a

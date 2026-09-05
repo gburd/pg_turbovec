@@ -697,6 +697,10 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // recheck. It only ever RAISES the count -- an explicit
         // search_k/oversample override past the floor always wins --
         // and does nothing at low dim (where recall already plateaus).
+        // The user's own candidate count, before any hi_dim_rerank
+        // widening -- what the graph kind uses (see the graph arm
+        // below); `ceil(k_pref * oversample)`.
+        let k_user = ((k_pref as f64) * oversample).ceil() as usize;
         let k_oversampled = crate::guc::hi_dim_rerank_candidate_count(
             crate::guc::HI_DIM_RERANK.get(),
             dim,
@@ -705,6 +709,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             oversample,
         );
         let k = k_oversampled.min(n_live.max(1)).max(1);
+        let mut k_used = k;
 
         // Phase C operator-path allowlist: parse turbovec.allowlist
         // ONCE per scan (not per refill). None = unfiltered hot path.
@@ -729,7 +734,19 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         // it is mutually exclusive with the IVF/flat paths below.
         let (scores, ids) = if let Some(g) = arc.graph() {
             (*opaque).ivf = None;
-            g.search(&(*opaque).query, k)
+            // v2.2.0 decoupling: the graph kind takes the user's own
+            // candidate count, NOT `hi_dim_rerank`'s dim-scaled floor.
+            // `hi_dim_rerank` widens the flat/IVF *exact-rerank
+            // window* over a cell scan's quantized ranking; the graph
+            // has no cell scan, and through v2.1.0 that floor's only
+            // effect here was to multiply the graph's BEAM (`ef =
+            // (k * 4).max(64)`) at dim >= 256, i.e. the beam was set
+            // by an unrelated knob and left at the bare 64 floor
+            // below 128d. The beam is now `turbovec.graph_ef`
+            // (resolved in `GraphIndex::search`), so the graph's
+            // recall no longer depends on `hi_dim_rerank` at all.
+            k_used = k_user.min(n_live.max(1)).max(1);
+            g.search(&(*opaque).query, k_used)
         } else {
             let ivf_results = ivf_setup_and_search(
                 scan,
@@ -752,7 +769,11 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         };
         (*opaque).arc = Some(arc);
         (*opaque).n_live = n_live;
-        (*opaque).current_k = k;
+        // `k_used` differs from `k` only on the graph path, which
+        // searches with the user's own candidate count rather than
+        // `hi_dim_rerank`'s floor; the iterative-refill schedule must
+        // double from what was ACTUALLY searched.
+        (*opaque).current_k = k_used;
         populate_batch(opaque, &scores, &ids);
         (*opaque).cursor = 0;
         (*opaque).fetched = true;

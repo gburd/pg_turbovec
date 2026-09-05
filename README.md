@@ -554,7 +554,7 @@ nibble-LUT kernels (NEON, AVX2, AVX-512BW).
 
 ## Configuration
 
-`pg_turbovec` exposes 18 GUCs under the `turbovec.*` namespace (all
+`pg_turbovec` exposes 19 GUCs under the `turbovec.*` namespace (all
 USERSET — settable per session). The full reference with tuning
 guidance is in [docs/PRODUCTION.md](docs/PRODUCTION.md); the most
 commonly-tuned ones:
@@ -571,6 +571,7 @@ commonly-tuned ones:
 | `turbovec.max_scan_tuples`       | int  | (see docs) |             |
 | `turbovec.out_of_core`           | enum | `auto`  | off, auto, on  |
 | `turbovec.coarse_graph`          | enum | `auto`  | off, auto, on  |
+| `turbovec.graph_ef`              | int  | `0`     | 0 auto (=512) / `1..=1000000` |
 | `turbovec.graph_build_partitions`| int  | `-1`    | -1 auto / 0-1 single-pass / N |
 | `turbovec.build_parallelism`     | int  | `0`     | `0..=128`      |
 | `turbovec.scan_parallelism`      | int  | `0`     | `0..=128`      |

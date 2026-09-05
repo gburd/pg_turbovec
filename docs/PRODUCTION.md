@@ -281,6 +281,71 @@ SET turbovec.oversample = 1.0;  -- 1.0 .. 100.0
 SET turbovec.hi_dim_rerank = auto;  -- off | auto | on
 ```
 
+### `turbovec.graph_ef`
+
+```sql
+-- v2.2.0. SCAN-time knob for the graph index kind (WITH (graph =
+-- true)) ONLY -- the graph's recall/latency dial, the direct analogue
+-- of hnsw.ef_search (and of turbovec.probes for IVF).
+--
+-- A graph query is a greedy beam search: it keeps the `ef` best
+-- candidates seen so far and stops once the best unexpanded candidate
+-- can no longer improve that set. So `ef` is literally "how much of
+-- the graph is one query allowed to explore": higher = better recall,
+-- more scoring work; lower = faster, lower recall.
+--
+--   0 (default) -- auto = 512.
+--   N           -- pin the beam at N.
+--
+-- Always clamped UP to the query's candidate count (a beam narrower
+-- than the candidate count cannot fill it) and DOWN to the live
+-- corpus size, so tiny indexes and huge LIMITs both stay coherent.
+--
+-- The measured frontier the 512 default comes from (32 vCPU
+-- AVX-512, 1M rows, R@10 vs exact cosine GT, warm p50):
+--
+--   SIFT-1M (128d)    ef=64   R@10 0.943 /  1.25ms
+--                     ef=512  R@10 0.990 /  5.19ms   <- default
+--                     ef=2048 R@10 0.991 / 14.13ms
+--   GIST-1M (960d)    ef=64   R@10 0.760 /  8.65ms
+--                     ef=512  R@10 0.920 / 34.55ms   <- default
+--                     ef=2048 R@10 0.966 / 93.44ms
+--
+-- At 128d 512 is the knee (within 0.001 R@10 of the 2048 ceiling at
+-- 0.37x its p50). At 960d the curve has NOT plateaued by 2048, so 512
+-- is a deliberate latency CAP, not a knee -- raise it explicitly if you
+-- want 960d recall past 0.92 and can afford ~95ms.
+--
+-- NOTE (v2.2.0 migration): a 960d graph index under the DEFAULT
+-- hi_dim_rerank = auto used to get an undocumented 3840-wide beam as a
+-- side effect (R@10 0.971 at ~194ms p50). That is a recall regression
+-- here, deliberately -- `SET turbovec.graph_ef = 3840` reproduces it
+-- exactly, now as an explicit, documented choice.
+--
+-- HONEST SCALE LIMIT: at 1M rows the FLAT kind beats the graph on both
+-- recall AND latency on both corpora (SIFT-1M flat 0.993/0.96ms; GIST-1M
+-- flat 0.997/5.91ms). turbovec's SIMD full scan is one linear sweep at
+-- memory bandwidth; the graph does ~ef scattered gathers with a serial
+-- hop dependency. Prefer flat/IVF at this scale. The graph's measured
+-- win is CONCURRENCY scaling: flat goes 713->1313 qps from 1->8 clients
+-- (1.8x, bandwidth-bound) while the graph goes 688->4906 (7.1x).
+--
+-- Recall is a pure function of the BEAM, not of dim: the same beam
+-- gives the same recall whatever turbovec.hi_dim_rerank is set to.
+-- Through v2.1.0 that was NOT true -- the beam was (k * 4).max(64),
+-- i.e. a function of the candidate count, so hi_dim_rerank = auto
+-- (whose real job is the flat/IVF exact-rerank WINDOW at dim >= 256)
+-- set the graph's beam as a side effect. Symptom: an INVERTED recall
+-- cliff, where 128d (below the rerank threshold, beam stuck at the 64
+-- floor) was the WORST at R@10 0.720 while 512d looked perfect, and
+-- recall collapsed at EVERY dim with hi_dim_rerank = off. The beam is
+-- now independent, so the two knobs no longer interact.
+--
+-- Pure scan-time knob: no wire-format change, no REINDEX -- a graph
+-- index built by any 2.x binary honours it immediately.
+SET turbovec.graph_ef = 0;   -- 0=auto(512) | N=pin the beam
+```
+
 ### `turbovec.graph_build_partitions`
 
 ```sql

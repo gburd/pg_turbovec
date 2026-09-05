@@ -1,0 +1,14 @@
+-- pg_turbovec upgrade 2.1.0 -> 2.2.0 (MINOR)
+--
+-- Graph-kind scan-beam retune: the beam is now `turbovec.graph_ef`
+-- (int, Userset, default 0 = auto = 512) rather than a side effect of
+-- the candidate count (and therefore of `turbovec.hi_dim_rerank`).
+--
+-- This is entirely BINARY-side. A GUC is registered by the shared
+-- library in _PG_init, not by SQL, so there are no new/changed SQL
+-- objects: no new functions, no operator/opclass changes, no type
+-- changes. Restart the backend after the UPDATE so _PG_init re-runs.
+--
+-- No wire-format change (stays v8). NO REINDEX required -- the beam is
+-- resolved at scan time, so existing graph indexes honour the new
+-- default immediately. Flat/IVF indexes are unaffected.

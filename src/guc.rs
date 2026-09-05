@@ -23,6 +23,7 @@
 //! | `turbovec.coarse_graph`          | enum | auto    | off, auto, on  |
 //! | `turbovec.hi_dim_rerank`         | enum | auto    | off, auto, on  |
 //! | `turbovec.graph_build_partitions`| int  | -1      | -1 (auto), 0/1 (single-pass), N |
+//! | `turbovec.graph_ef`              | int  | 0       | 0 (auto), 1..=1_000_000 |
 //! | `turbovec.allowlist`             | str  | `""`    | CSV of bigint ids |
 
 use core::ffi::CStr;
@@ -493,6 +494,55 @@ pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// thread scheduling. See [`graph_build_partitions_decide`].
 pub static GRAPH_BUILD_PARTITIONS: GucSetting<i32> = GucSetting::<i32>::new(-1);
 
+/// Scan-time beam width (`ef_search`) for the graph index kind — the
+/// graph's recall/latency dial, the direct analogue of
+/// `hnsw.ef_search` / `turbovec.probes`.
+///
+/// `0` (the default) = auto =
+/// [`crate::index::graph::GRAPH_SCAN_EF_DEFAULT`]; a positive `N`
+/// pins the beam at `N`. Always clamped up to the query's candidate
+/// count (a beam narrower than the candidate count cannot fill it)
+/// and down to the live corpus size.
+///
+/// **Why this is its own knob (v2.2.0).** Through v2.1.0 the beam was
+/// `(k * 4).max(64)`, i.e. a function of the candidate count
+/// `scan.rs` computed — which meant `turbovec.hi_dim_rerank = auto`
+/// (whose actual job is widening the flat/IVF *exact-rerank window*
+/// for `dim >= 256`) silently set the graph's beam as a SIDE EFFECT.
+/// The visible symptom was an inverted recall "cliff": with
+/// `hi_dim_rerank = auto` the graph's WORST recall was at LOW dim
+/// (128d R@10 0.720, because 128d is below the rerank threshold so
+/// the beam stayed at the 64 floor) while 384/512d looked great
+/// (0.99/1.00, because the inflated candidate count multiplied the
+/// beam up); with `hi_dim_rerank = off` recall collapsed at EVERY dim
+/// (~0.40). Recall was never dim-dependent at all — it was
+/// beam-dependent, and the beam was being set by an unrelated knob.
+/// Making it absolute and explicit fixes both halves.
+pub static GRAPH_EF: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Live-GUC entry: resolve the graph kind's scan-time beam width for
+/// a query asking for `k` candidates against an `n`-row graph.
+/// Factored through the pure [`graph_scan_ef_decide`] so the policy is
+/// unit-testable without a live GUC.
+pub fn graph_scan_ef(k: usize, n: usize) -> usize {
+    graph_scan_ef_decide(GRAPH_EF.get(), k, n)
+}
+
+/// Pure decision for [`graph_scan_ef`]. `setting` is the raw
+/// `turbovec.graph_ef` value: `<= 0` = auto
+/// ([`crate::index::graph::GRAPH_SCAN_EF_DEFAULT`]), `N > 0` = pin the
+/// beam at `N`. The result is clamped to `[k, n]` (never narrower
+/// than the candidate count it must fill, never wider than the
+/// corpus) — except for `n == 0`, where it is 0.
+pub fn graph_scan_ef_decide(setting: i32, k: usize, n: usize) -> usize {
+    let want = if setting > 0 {
+        setting as usize
+    } else {
+        crate::index::graph::GRAPH_SCAN_EF_DEFAULT
+    };
+    want.max(k).min(n)
+}
+
 /// IVF fine-scan intra-query parallelism (item #2 of the IVF-scaling
 /// work). The IVF out-of-core scan gathers the probed cells into one
 /// compact contiguous code buffer on the backend thread, then fine-
@@ -818,6 +868,19 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.graph_ef\0"),
+        c_str(b"Scan-time beam width (ef_search) for graph-kind indexes (0 = auto = 512).\0"),
+        c_str(
+            b"The graph kind's recall/latency dial, the direct analogue of hnsw.ef_search (and of turbovec.probes for IVF). A graph query is a greedy beam search: it keeps the `ef` best candidates seen so far and stops once the best unexpanded candidate can no longer improve that set, so `ef` is how much of the graph one query is allowed to explore. Higher = better recall, more scoring work per query; lower = faster, lower recall. 0 (the default) = auto = 512, chosen from the measured recall-vs-latency frontier at 1M scale on SIFT-128 and GIST-960 (R@10 is a pure function of the beam and plateaus by ~512 on both). Always clamped up to the query's candidate count (turbovec.search_k * oversample, and turbovec.hi_dim_rerank's floor where it applies -- a beam narrower than the candidate count could not fill it) and down to the live corpus size. This knob is ABSOLUTE and independent of the candidate count on purpose: through v2.1.0 the beam was (k * 4).max(64), so turbovec.hi_dim_rerank = auto (whose real job is the flat/IVF exact-rerank window at dim >= 256) set the graph's beam as a side effect, which showed up as an INVERTED recall cliff (128d, below the rerank threshold, was the WORST at R@10 0.720 while 512d looked perfect) and as a recall collapse at every dim with hi_dim_rerank = off. No effect on flat or IVF indexes, and never changes on-disk bytes -- this is a pure scan-time knob, so a graph index built by any 2.x binary honours it with no REINDEX.\0",
+        ),
+        &GRAPH_EF,
+        0,
+        1_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_string_guc(
         c_str(b"turbovec.allowlist\0"),
         c_str(b"Per-query allowlist of heap TIDs for ORDER BY scans (CSV of bigints; empty = unfiltered).\0"),
@@ -837,6 +900,65 @@ const fn c_str(bytes: &'static [u8]) -> &'static CStr {
     match CStr::from_bytes_with_nul(bytes) {
         Ok(s) => s,
         Err(_) => panic!("missing trailing NUL in GUC string"),
+    }
+}
+
+#[cfg(test)]
+mod graph_ef_tests {
+    use super::graph_scan_ef_decide;
+    use crate::index::graph::GRAPH_SCAN_EF_DEFAULT;
+
+    /// `0` (and any non-positive) = auto = the measured default beam.
+    #[test]
+    fn auto_uses_the_measured_default() {
+        let n = 1_000_000;
+        assert_eq!(graph_scan_ef_decide(0, 10, n), GRAPH_SCAN_EF_DEFAULT);
+        assert_eq!(graph_scan_ef_decide(-1, 10, n), GRAPH_SCAN_EF_DEFAULT);
+    }
+
+    /// A positive setting pins the beam exactly.
+    #[test]
+    fn positive_setting_pins_the_beam() {
+        let n = 1_000_000;
+        assert_eq!(graph_scan_ef_decide(64, 10, n), 64);
+        assert_eq!(graph_scan_ef_decide(2048, 10, n), 2048);
+    }
+
+    /// The beam is floored at the candidate count: a beam narrower
+    /// than `k` could never hold `k` results.
+    #[test]
+    fn floored_at_the_candidate_count() {
+        let n = 1_000_000;
+        assert_eq!(graph_scan_ef_decide(64, 500, n), 500);
+        assert_eq!(graph_scan_ef_decide(0, 5_000, n), 5_000);
+    }
+
+    /// The beam never exceeds the corpus.
+    #[test]
+    fn capped_at_the_corpus() {
+        assert_eq!(graph_scan_ef_decide(0, 10, 100), 100);
+        assert_eq!(graph_scan_ef_decide(4096, 10, 50), 50);
+        // Degenerate: an empty corpus yields a zero beam, not a panic.
+        assert_eq!(graph_scan_ef_decide(0, 10, 0), 0);
+    }
+
+    /// The whole POINT of the v2.2.0 decoupling: the resolved beam is
+    /// a function of `(setting, k, n)` ONLY -- there is no
+    /// `hi_dim_rerank` or `dim` input, so no rerank mode and no
+    /// dimensionality can move it. Through v2.1.0 the beam WAS a
+    /// function of the candidate count, which `hi_dim_rerank = auto`
+    /// inflated for `dim >= 256`.
+    #[test]
+    fn beam_signature_admits_no_dim_or_rerank_input() {
+        // Repeated identical calls are the strongest statement the
+        // type system lets us make here: whatever the session's
+        // hi_dim_rerank / index dim, this is the resolved beam.
+        for k in [1usize, 10, 32, 100] {
+            let a = graph_scan_ef_decide(0, k, 1_000_000);
+            let b = graph_scan_ef_decide(0, k, 1_000_000);
+            assert_eq!(a, b);
+            assert_eq!(a, GRAPH_SCAN_EF_DEFAULT.max(k));
+        }
     }
 }
 

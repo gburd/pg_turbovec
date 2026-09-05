@@ -2773,6 +2773,7 @@ mod tests {
     /// under-recalls is a failed approach.
     #[test]
     fn partitioned_build_recall_parity_with_single_pass() {
+        let _serialize = BUILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = 20_000;
         let dim = 64;
         let corpus = clustered_corpus(n, dim, 50, 20260709);
@@ -2813,6 +2814,17 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that build partitioned graphs against the
+    /// abort-predicate test. [`ABORT_PREDICATE`] is deliberately
+    /// process-wide (rayon workers must be able to see it, unlike the TLS
+    /// interrupt hook), so an "always abort" predicate installed by one
+    /// test is visible to any OTHER test building concurrently in the same
+    /// process — which made `partitioned_build_is_bit_identical_across_
+    /// thread_counts` fail intermittently by pg-version scheduling luck.
+    /// Every test that installs a predicate, and every test whose result
+    /// depends on no predicate being installed, takes this lock.
+    static BUILD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The parallel build's cooperative-cancel path: with an abort
     /// predicate that reports "stop", the shard fan-out must bail out
     /// early instead of building every shard. Regression guard for the
@@ -2822,6 +2834,7 @@ mod tests {
     /// the predicate is injected rather than reading `pg_sys` here.
     #[test]
     fn partitioned_build_bails_out_when_abort_is_requested() {
+        let _serialize = BUILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = 8_000;
         let dim = 32;
         let corpus = clustered_corpus(n, dim, 20, 909);
@@ -2862,6 +2875,7 @@ mod tests {
     /// AND entry point.
     #[test]
     fn partitioned_build_is_deterministic() {
+        let _serialize = BUILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = 8_000;
         let dim = 32;
         let corpus = clustered_corpus(n, dim, 20, 555);
@@ -2897,6 +2911,7 @@ mod tests {
     /// is serial — so the result never depends on thread scheduling.
     #[test]
     fn partitioned_build_is_bit_identical_across_thread_counts() {
+        let _serialize = BUILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = 8_000;
         let dim = 48;
         let corpus = clustered_corpus(n, dim, 25, 42);
@@ -2944,6 +2959,7 @@ mod tests {
     /// CSR round-trips, no isolated live nodes.
     #[test]
     fn partitioned_build_invariants() {
+        let _serialize = BUILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = 10_000;
         let dim = 32;
         let r = 24;

@@ -1,0 +1,5 @@
+-- pg_turbovec 2.2.0 -> 2.2.1
+-- Safety patch: the parallel graph build is now cancellable (workers poll an
+-- injected abort predicate; the driver raises the real error). Code-only, no
+-- wire change (v8), no SQL surface change, no REINDEX. Intentionally empty
+-- but MUST exist so ALTER EXTENSION pg_turbovec UPDATE TO '2.2.1' succeeds.

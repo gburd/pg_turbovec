@@ -105,6 +105,73 @@ thread_local! {
 /// per-node cost while being invisible in the build time.
 const INTERRUPT_CHECK_NODES: usize = 256;
 
+/// Process-wide "the driver asked us to stop" check for the PARALLEL
+/// build, and the reason the TLS hook above is not sufficient on its
+/// own.
+///
+/// The TLS hook is deliberately invisible to rayon workers (a worker
+/// must never `longjmp` out of the pool). But that left a real hole: the
+/// driver enters `par_iter().map(..).collect()` and parks in a futex
+/// inside rayon's `join` until the WHOLE parallel phase finishes, so it
+/// cannot reach a poll either. Measured consequence on a 10M-node
+/// build: `pg_cancel_backend()` and a direct `SIGINT` were both ignored
+/// for **>13 minutes** while 32 threads ran at 100% CPU — and because no
+/// backend code was executing, `pg_stat_activity` showed
+/// `wait_event = NULL`, i.e. the runaway build looked *idle*. An
+/// operator could not stop it.
+///
+/// Fix: workers cooperatively consult this predicate at their safe
+/// points and bail out early WITHOUT unwinding (a worker never
+/// `longjmp`s — it just stops producing work). Once the parallel phase
+/// collapses and the driver is back on the backend thread, the driver's
+/// own [`check_interrupts`] poll raises the real PG error. So a cancel
+/// is honoured at the first worker safe point instead of at the end of
+/// the phase, while all error *raising* still happens only on the driver
+/// thread.
+///
+/// This module stays **Postgres-free** (see the module doc): the
+/// predicate is INJECTED by the PG-side caller (`build.rs`), which
+/// supplies a closure reading PostgreSQL's `sig_atomic_t` pending-
+/// interrupt globals. Unlike [`INTERRUPT_HOOK`] this is a plain
+/// `AtomicPtr`-backed process-wide slot rather than TLS, precisely
+/// because rayon workers MUST be able to see it.
+static ABORT_PREDICATE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Install `pred` as the parallel-build abort predicate for the lifetime
+/// of the returned guard. `pred` must be cheap (it is polled in inner
+/// loops), must NOT raise, and must be safe to call from any thread.
+pub struct AbortPredicateGuard(usize);
+
+impl Drop for AbortPredicateGuard {
+    fn drop(&mut self) {
+        ABORT_PREDICATE.store(self.0, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// See [`ABORT_PREDICATE`]. Returns a guard that restores the previous
+/// predicate on drop (so nesting is safe).
+pub fn install_abort_predicate(pred: fn() -> bool) -> AbortPredicateGuard {
+    let prev = ABORT_PREDICATE.swap(pred as usize, std::sync::atomic::Ordering::AcqRel);
+    AbortPredicateGuard(prev)
+}
+
+/// True once a stop has been requested. One relaxed load plus (at most)
+/// one indirect call — cheap enough for a worker's inner loop, and a
+/// plain `false` when no predicate is installed (e.g. in unit tests, or
+/// any non-PG embedding of this module).
+#[inline]
+pub fn build_abort_requested() -> bool {
+    let p = ABORT_PREDICATE.load(std::sync::atomic::Ordering::Acquire);
+    if p == 0 {
+        return false;
+    }
+    // SAFETY: `p` is non-null and was stored by `install_abort_predicate`
+    // from a `fn() -> bool` function pointer, which has no lifetime or
+    // capture state to invalidate.
+    let f: fn() -> bool = unsafe { std::mem::transmute::<usize, fn() -> bool>(p) };
+    f()
+}
+
 /// Install `hook` as the build interrupt callback for the lifetime of
 /// the returned guard, on THIS thread only. Restores the previous hook
 /// on drop (so nesting is safe).
@@ -663,6 +730,17 @@ pub fn build_vamana_partitioned_with_params(
         .par_iter()
         .enumerate()
         .map(|(s, &(a, b))| {
+            // Cooperative cancel: if the driver has a pending PG cancel/
+            // terminate, stop producing work instead of running the full
+            // shard. A worker must NOT raise or longjmp, so it returns an
+            // empty shard; the driver re-polls `check_interrupts()` after
+            // the phase collapses and raises the real error there. Without
+            // this, the driver is parked in rayon's `join` and a cancel is
+            // ignored until the whole phase ends (measured >13 min on a
+            // 10M-node build).
+            if build_abort_requested() {
+                return (Vec::new(), Vec::new());
+            }
             let global_ids: Vec<u32> = order[a..b].to_vec();
             let m = global_ids.len();
             // Gather this shard's vectors contiguously in local order.
@@ -2732,6 +2810,51 @@ mod tests {
         assert!(
             r_part >= r_single - 0.03,
             "partitioned recall {r_part:.4} under-recalls single-pass {r_single:.4} by more than tolerance"
+        );
+    }
+
+    /// The parallel build's cooperative-cancel path: with an abort
+    /// predicate that reports "stop", the shard fan-out must bail out
+    /// early instead of building every shard. Regression guard for the
+    /// >13-minute uncancellable build measured on a 10M-node partitioned
+    /// build (the driver parks in rayon's `join`, so only the WORKERS can
+    /// observe a pending cancel). Exercised PG-free, which is exactly why
+    /// the predicate is injected rather than reading `pg_sys` here.
+    #[test]
+    fn partitioned_build_bails_out_when_abort_is_requested() {
+        let n = 8_000;
+        let dim = 32;
+        let corpus = clustered_corpus(n, dim, 20, 909);
+
+        // Baseline: no predicate installed -> a real graph with edges.
+        let (full, _e) = build_vamana_partitioned(&corpus, n, dim, 6);
+        let full_edges: usize = (0..n).map(|i| full.neighbors_of(i).len()).sum();
+        assert!(full_edges > 0, "baseline build must produce edges");
+
+        // With an always-abort predicate the workers stop producing work,
+        // so strictly less work is done. Must not panic or hang.
+        {
+            let _g = install_abort_predicate(|| true);
+            assert!(build_abort_requested(), "predicate must be observable");
+            let (bailed, _e2) = build_vamana_partitioned(&corpus, n, dim, 6);
+            let upto = bailed.n().min(n);
+            let bailed_edges: usize = (0..upto).map(|i| bailed.neighbors_of(i).len()).sum();
+            assert!(
+                bailed_edges < full_edges,
+                "an aborted parallel build must do strictly less work (edges {bailed_edges} < {full_edges})"
+            );
+        }
+
+        // The guard restored the previous (absent) predicate.
+        assert!(
+            !build_abort_requested(),
+            "the guard must restore the previous predicate on drop"
+        );
+        let (again, _e3) = build_vamana_partitioned(&corpus, n, dim, 6);
+        let again_edges: usize = (0..n).map(|i| again.neighbors_of(i).len()).sum();
+        assert_eq!(
+            again_edges, full_edges,
+            "after the abort guard drops, the build must be normal again"
         );
     }
 

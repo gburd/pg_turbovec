@@ -1,0 +1,12 @@
+-- 2.2.1 — safety patch: the PARALLEL graph build was effectively
+-- uncancellable. v2.1.0's interrupt hook is invisible to rayon workers by
+-- design (a worker must never longjmp out of the pool), but that also left
+-- the driver parked in rayon's `join` for the whole parallel phase, unable
+-- to reach a poll: a pg_cancel_backend()/SIGINT against a 10M-node
+-- partitioned graph build was measured ignored for >13 MINUTES while 32
+-- threads ran at 100% CPU, with pg_stat_activity showing wait_event = NULL
+-- (the runaway build looked idle). Workers now consult an injected,
+-- thread-safe abort predicate at their safe points and stop producing work;
+-- the driver raises PG's real cancel error once the phase collapses.
+-- Code-only. No wire-format change (stays v8), no SQL surface change, no
+-- REINDEX. This migration is intentionally empty.

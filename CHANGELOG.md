@@ -4,6 +4,40 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] — 2026-09-05
+
+**Safety patch: the PARALLEL graph build was effectively uncancellable.**
+Code-only — no wire-format change (stays v8), no SQL surface change, no
+REINDEX.
+
+v2.1.0 made the graph build interruptible, but its hook lives in
+thread-local storage and is therefore invisible to rayon workers *by
+design* (a worker must never `longjmp` out of the pool). That left a
+hole nobody had measured: during the partitioned build the driver parks
+in a futex inside rayon's `join` for the entire parallel phase, so it
+cannot reach a poll either. Measured on a 10M-node build:
+`pg_cancel_backend()` **and** a direct `SIGINT` were both ignored for
+**over 13 minutes** while 32 threads ran at 100% CPU — and because no
+backend code was executing, `pg_stat_activity` reported
+`wait_event = NULL`, so the runaway build looked *idle*. An operator had
+no way to stop it.
+
+Workers now consult a cheap, thread-safe **abort predicate** at their
+safe points and stop producing work; the driver raises PostgreSQL's real
+cancel/terminate error at its own poll once the phase collapses, so all
+error *raising* still happens only on the backend thread. The predicate
+is **injected** by the PG-side caller, so `src/index/graph.rs` stays
+Postgres-free and the mechanism is unit-testable without a server
+(`partitioned_build_bails_out_when_abort_is_requested`).
+
+Found while measuring whether the graph kind could be made
+production-grade at scale (see the 2.2.1 note in `docs/UPGRADING.md` and
+the deprecation discussion for v2.3.0).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.2.1';` — no REINDEX.
+
 ## [2.2.0] — 2026-09-04
 
 **Graph-kind scan-beam retune.** The graph kind's scan-time beam width

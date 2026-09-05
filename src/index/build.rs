@@ -1309,6 +1309,23 @@ unsafe fn graph_build_and_write(
     let _interrupt_guard = graph::install_interrupt_hook(|| {
         pg_sys::check_for_interrupts!();
     });
+    // Companion to the TLS hook above, for the PARALLEL build. The hook
+    // is invisible to rayon workers by design (a worker must never
+    // longjmp out of the pool) -- but that also meant the driver, parked
+    // in rayon's `join` for the whole parallel phase, could not reach a
+    // poll either: a `pg_cancel_backend()` on a 10M-node partitioned
+    // build was measured ignored for >13 minutes with 32 threads at 100%
+    // CPU while `pg_stat_activity` showed `wait_event = NULL` (it looked
+    // idle). This installs a cheap, thread-safe predicate the WORKERS can
+    // consult so they stop producing work at their next safe point; the
+    // driver then raises the real error at its own poll once the phase
+    // collapses. `graph` stays Postgres-free -- only this closure touches
+    // pg_sys, and it only READS PG's sig_atomic_t pending-interrupt
+    // globals (exactly what that type is for), never calling a PG API.
+    let _abort_guard = graph::install_abort_predicate(|| unsafe {
+        pg_sys::InterruptPending != 0
+            && (pg_sys::QueryCancelPending != 0 || pg_sys::ProcDiePending != 0)
+    });
     let (adjacency, entry_point) = super::build_pool::install(build_pool, || {
         if partitions <= 1 {
             graph::build_vamana(&flat, n_vectors, dim)
@@ -1316,6 +1333,11 @@ unsafe fn graph_build_and_write(
             graph::build_vamana_partitioned(&flat, n_vectors, dim, partitions)
         }
     });
+    // The parallel phase may have bailed early on a pending cancel (the
+    // workers cannot raise). Now that we are back on the backend thread,
+    // honour it here -- this longjmps out of the build with PG's own
+    // cancel/terminate error rather than persisting a half-built graph.
+    pg_sys::check_for_interrupts!();
     drop(flat);
 
     pg_sys::check_for_interrupts!(); // stage boundary; no lock held

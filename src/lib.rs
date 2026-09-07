@@ -1470,12 +1470,15 @@ mod tests {
     /// the old always-rewrite behaviour, and the assertion below fails.
     #[pg_test]
     fn insert_wal_scales_with_change_not_index_size() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
         use std::sync::atomic::Ordering;
+        use turbovec::IdMapIndex;
+
         use_turbovec();
         Spi::run("CREATE TABLE t_wal (id bigint, emb turbovec.vector)").unwrap();
-        // Seed enough rows that the index spans many pages, so a
-        // whole-relfile rewrite is clearly distinguishable from a
-        // tail-only append.
+        // Seed enough rows that the chains span many pages, so a
+        // whole-relfile rewrite is unmistakably larger than a tail append.
         Spi::run(
             "INSERT INTO t_wal \
              SELECT g, ('[' || array_to_string(array(\
@@ -1489,42 +1492,90 @@ mod tests {
              USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 4)",
         )
         .unwrap();
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_wal_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
 
-        // WAL cost of ONE single-row insert transaction.
-        let wal_for_one_insert = |id: i64| -> i64 {
+        // Load the built index into the in-memory shape a flush needs.
+        // A `#[pg_test]`'s outer transaction always rolls back before
+        // PreCommit fires, so the real aminsert path can never be
+        // observed in-band -- drive the same flush directly, exactly
+        // like the v1.28.4 corruption reproduction test does.
+        let load = || unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, &meta);
+            let dim = meta.dim as usize;
+            let bit_width = meta.bit_width as usize;
+            let idx = IdMapIndex::from_id_map_parts(
+                bit_width,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                tqplus_shift,
+                tqplus_scale,
+            )
+            .expect("from_id_map_parts");
+            let state = PersistState {
+                bit_width: bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state, dim)
+        };
+
+        // WAL cost of flushing ONE appended row -- the per-commit cost a
+        // row-at-a-time writer pays.
+        let wal_for_one_appended_row = |new_id: u64| -> i64 {
+            let (mut idx, mut state, dim) = load();
+            let v: Vec<f32> = (0..dim)
+                .map(|k| ((new_id as usize + k) % 7) as f32 / 7.0)
+                .collect();
+            idx.add_with_ids(&v, &[new_id]).expect("add row");
+            state.live_ids.push(new_id);
+            state.touched_ids.push(new_id);
+            state.n_vectors += 1;
+            state.version += 1;
+
             let before: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
                 .unwrap()
                 .expect("lsn");
-            Spi::run(&format!(
-                "INSERT INTO t_wal \
-                 SELECT {id}, ('[' || array_to_string(array(\
-                     SELECT (({id} + s) % 7)::float8 / 7.0 \
-                     FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector"
-            ))
-            .unwrap();
+            unsafe {
+                crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
+            }
             let after: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
                 .unwrap()
                 .expect("lsn");
             after - before
         };
 
-        // Warm up (first flush may extend the relation).
-        let _ = wal_for_one_insert(100_001);
-        let fixed = wal_for_one_insert(100_002);
+        let fixed = wal_for_one_appended_row(100_001);
 
-        // Now force the PRE-FIX behaviour and measure the same thing.
-        crate::index::relfile::SKIP_UNCHANGED_PAGES.store(false, Ordering::Relaxed);
-        let _ = wal_for_one_insert(100_003);
-        let unfixed = wal_for_one_insert(100_004);
-        crate::index::relfile::SKIP_UNCHANGED_PAGES.store(true, Ordering::Relaxed);
+        // Force the PRE-FIX behaviour (rewrite + WAL-log every page).
+        relfile::SKIP_UNCHANGED_PAGES.store(false, Ordering::Relaxed);
+        let unfixed = wal_for_one_appended_row(100_002);
+        relfile::SKIP_UNCHANGED_PAGES.store(true, Ordering::Relaxed);
 
+        assert!(
+            fixed > 0 && unfixed > 0,
+            "both paths must actually emit WAL (fixed={fixed}, unfixed={unfixed}); \
+             if both are 0 the flush never ran and the test proves nothing"
+        );
         assert!(
             fixed * 5 < unfixed,
             "skipping unchanged pages must cut per-commit WAL substantially: \
              fixed={fixed} bytes vs always-rewrite={unfixed} bytes"
         );
 
-        // ...and the index must still be correct and scannable.
+        // ...and the index must still be uncorrupt and scannable.
+        crate::cache::invalidate_all();
         let (corrupt, reason): (Option<bool>, Option<String>) = Spi::get_two(
             "SELECT is_corrupt, reason FROM turbovec.turbovec_check('t_wal_idx'::regclass)",
         )

@@ -3897,7 +3897,11 @@ mod tests {
             let rows = client
                 .select(
                     &format!(
-                        "SELECT p::text FROM turbovec.nearest_partitions(\
+                        // nearest_partitions returns SETOF oid, so cast
+                        // through regclass to get the relation NAME (a bare
+                        // `p::text` renders the numeric oid and no name
+                        // comparison can ever match).
+                        "SELECT p::regclass::text FROM turbovec.nearest_partitions(\
                          'ps_docs'::regclass, {q}::turbovec.vector, 2, '<->') p"
                     ),
                     None,

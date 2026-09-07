@@ -1291,6 +1291,11 @@ impl MetaPageData {
     /// bug here cannot change the layout of a non-BQ index.
     pub fn plan_bq(dim: u32, n_vectors: u64, am_version: u32) -> Self {
         assert_eq!(dim % 8, 0, "dim must be a multiple of 8");
+        // `dim == 0` is the empty-build case (no rows, no pinned dim). It
+        // yields stride 0 -> rows_per_page 0 -> every chain count 0, which
+        // is exactly right: nothing is written and nothing is read, so the
+        // `rows_per_page == 0` corrupt-meta guard in `read_chain` is never
+        // reached for it.
         let stride_bytes = crate::index::onebit::codes_stride(dim as usize) as u32;
         let rows_per_codes_page = Self::rows_per_page(stride_bytes);
         let rows_per_ids_page = Self::rows_per_page(size_of::<u64>() as u32);

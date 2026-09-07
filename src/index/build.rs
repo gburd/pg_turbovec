@@ -364,6 +364,11 @@ struct BuildState {
     /// `lists > 0 || graph`) rather than a second spill field —
     /// there is never a build that needs both at once.
     graph: bool,
+    /// 1-bit sign-BQ build (`bit_width = 1`). Like `graph`, reuses
+    /// `ivf_spill` for the streamed heap scan, but constructs NO
+    /// `IdMapIndex` at all: turbovec hard-rejects `bit_width < 2`, so the
+    /// codes are produced by `onebit::pack_signs` after the scan instead.
+    bq: bool,
 }
 
 impl BuildState {
@@ -579,6 +584,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         colbert,
         assign_dups,
         graph: cfg_graph,
+        bq: cfg_bit_width == 1,
     };
     // Parity gap #2: a bounded rayon pool sized from
     // `turbovec.build_parallelism` (auto = max_parallel_maintenance_workers
@@ -594,10 +600,16 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // Pre-construct the IdMapIndex when reloptions pinned the dim.
         // Otherwise we wait for the first non-NULL row and construct
         // there. Either way the per-row callback path is identical.
-        state.idx = Some(
-            IdMapIndex::new(d, cfg_bit_width as usize)
-                .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
-        );
+        //
+        // A 1-bit sign-BQ build constructs NO IdMapIndex: turbovec rejects
+        // bit_width < 2 in both constructors, so this would ERROR with
+        // BitWidthOutOfRange(1) before the BQ encode path is ever reached.
+        if !state.bq {
+            state.idx = Some(
+                IdMapIndex::new(d, cfg_bit_width as usize)
+                    .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
+            );
+        }
         state.chunk_rows = BuildState::compute_chunk_rows(d);
         // IVF: build the rotation matrix up front so sampled vectors
         // can be rotated into the clustering space during the scan.
@@ -613,7 +625,11 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
             // stride (8 + d*4) is known. The heap scan streams every
             // accepted vector into it instead of `ivf_flat`.
             state.ivf_spill = Some(CorpusSpill::new(d));
-        } else if state.graph {
+        } else if state.graph || state.bq {
+            // Same streamed-spill pattern for the graph and 1-bit BQ
+            // builds: both read the whole corpus back after the scan (the
+            // graph to build adjacency, BQ to compute the corpus mean
+            // before it can take signs), and neither needs a rotation.
             state.ivf_spill = Some(CorpusSpill::new(d));
         }
     }
@@ -653,16 +669,25 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // empty meta page so subsequent aminserts have stable state
     // to extend.
     let Some(dim) = state.dim else {
-        relfile::write_full(
-            index_relation,
-            cfg_bit_width as u8,
-            /*dim=*/ 0,
-            /*n_vectors=*/ 0,
-            &[],
-            &[],
-            &[],
-            /*am_version=*/ 1,
-        );
+        // Empty heap AND no pinned dim. A 1-bit build must still write a
+        // BQ-shaped meta page: writing the flat shape here would leave
+        // `kind = KIND_SINGLE`, and the first aminsert would then extend
+        // it down the TurboQuant path (which rejects bit_width = 1) rather
+        // than the BQ one.
+        if cfg_bit_width == 1 {
+            relfile::write_full_bq(index_relation, /*dim=*/ 0, 0, &[], &[], &[], 1);
+        } else {
+            relfile::write_full(
+                index_relation,
+                cfg_bit_width as u8,
+                /*dim=*/ 0,
+                /*n_vectors=*/ 0,
+                &[],
+                &[],
+                &[],
+                /*am_version=*/ 1,
+            );
+        }
         let _ = indexrelid;
         (*result).heap_tuples = state.heap_seen as f64;
         (*result).index_tuples = 0.0;
@@ -1611,10 +1636,13 @@ unsafe extern "C-unwind" fn build_callback(
             state.dim = Some(row_dim);
             // First non-NULL row pinning the dim. Lazily construct
             // the IdMapIndex and compute the chunk threshold now.
-            state.idx = Some(
-                IdMapIndex::new(row_dim, state.bit_width)
-                    .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
-            );
+            // (Not for a 1-bit BQ build -- see the eager site above.)
+            if !state.bq {
+                state.idx = Some(
+                    IdMapIndex::new(row_dim, state.bit_width)
+                        .expect("turbovec ambuild: invalid (dim, bit_width) for IdMapIndex::new"),
+                );
+            }
             state.chunk_rows = BuildState::compute_chunk_rows(row_dim);
             // IVF: build the rotation matrix now that dim is pinned,
             // so reservoir samples land in the clustering space.
@@ -1622,10 +1650,10 @@ unsafe extern "C-unwind" fn build_callback(
                 state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
                 // Phase B-4: open the disk spill (stride needs dim).
                 state.ivf_spill = Some(CorpusSpill::new(row_dim));
-            } else if state.graph && state.ivf_spill.is_none() {
-                // Phase G-2a: same streamed-spill pattern, no
+            } else if (state.graph || state.bq) && state.ivf_spill.is_none() {
+                // Phase G-2a / 1-bit BQ: same streamed-spill pattern, no
                 // rotation matrix needed (see the module doc on
-                // `graph.rs`).
+                // `graph.rs`, and `bq_build_and_write`).
                 state.ivf_spill = Some(CorpusSpill::new(row_dim));
             }
         }
@@ -1664,11 +1692,15 @@ unsafe extern "C-unwind" fn build_callback(
     // streamed disk spill as IVF, no coarse sample / rotation. The
     // Vamana build + quantize-and-persist happens at end-of-scan in
     // `ambuild` -> `graph_build_and_write`.
-    if state.graph {
+    // A 1-bit sign-BQ build takes the SAME early return: it must see the
+    // whole corpus before it can compute the mean it centres by, and it
+    // never feeds `pending_ids`/`flush()` (which require an IdMapIndex a
+    // BQ build deliberately does not construct).
+    if state.graph || state.bq {
         let spill = state
             .ivf_spill
             .as_mut()
-            .expect("turbovec ambuild (graph): spill not opened before first row");
+            .expect("turbovec ambuild (graph/1-bit): spill not opened before first row");
         if state.normalise {
             let mut buf = vec![0.0_f32; row_dim];
             kernels::normalise_into(&mut buf, value.as_slice());

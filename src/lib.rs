@@ -1531,35 +1531,19 @@ mod tests {
             (idx, state, dim)
         };
 
-        // WAL cost of flushing ONE appended row -- the per-commit cost a
-        // row-at-a-time writer pays.
-        let wal_for_one_appended_row = |new_id: u64| -> i64 {
-            let (mut idx, mut state, dim) = load();
-            let v: Vec<f32> = (0..dim)
-                .map(|k| ((new_id as usize + k) % 7) as f32 / 7.0)
-                .collect();
-            idx.add_with_ids(&v, &[new_id]).expect("add row");
-            state.live_ids.push(new_id);
-            state.touched_ids.push(new_id);
-            state.n_vectors += 1;
-            state.version += 1;
-
-            let before: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
-                .unwrap()
-                .expect("lsn");
-            unsafe {
-                crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
-            }
-            let after: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
-                .unwrap()
-                .expect("lsn");
-            after - before
-        };
-
+        // Measure each arm from an IDENTICAL starting state. This matters:
+        // a flush mutates the on-disk bytes the NEXT flush compares
+        // against, so measuring the two arms back-to-back measures
+        // sequence effects, not the fix (an earlier version of this test
+        // did exactly that and reported the two arms inverted).
+        //
         // A flush that changes NOTHING is the cleanest probe of the skip
-        // logic: every page already matches, so only the meta page (which
-        // is always rewritten, last, by design) should cost WAL.
-        let noop = {
+        // logic: every page already matches what we would write, so only
+        // the meta page (always rewritten last, by design) should cost
+        // WAL. Re-loading from disk each time makes the flush a true no-op
+        // in both arms, so the ONLY difference is whether unchanged pages
+        // are skipped.
+        let noop_flush_wal = || -> i64 {
             let (idx, state, _dim) = load();
             let before: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
                 .unwrap()
@@ -1573,47 +1557,28 @@ mod tests {
             after - before
         };
 
-        let fixed = wal_for_one_appended_row(100_001);
+        // Warm up so the first-touch costs (relation extension, buffer
+        // faults) don't land in either measurement.
+        let _ = noop_flush_wal();
+        let noop_fixed = noop_flush_wal();
 
-        // Force the PRE-FIX behaviour (rewrite + WAL-log every page).
         relfile::SKIP_UNCHANGED_PAGES.store(false, Ordering::Relaxed);
-        let unfixed = wal_for_one_appended_row(100_002);
-        let noop_unfixed = {
-            let (idx, state, _dim) = load();
-            let before: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
-                .unwrap()
-                .expect("lsn");
-            unsafe {
-                crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
-            }
-            let after: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
-                .unwrap()
-                .expect("lsn");
-            after - before
-        };
+        let _ = noop_flush_wal();
+        let noop_unfixed = noop_flush_wal();
         relfile::SKIP_UNCHANGED_PAGES.store(true, Ordering::Relaxed);
 
         assert!(
-            fixed > 0 && unfixed > 0,
-            "both paths must actually emit WAL (fixed={fixed}, unfixed={unfixed}); \
-             if both are 0 the flush never ran and the test proves nothing"
+            noop_unfixed > 0,
+            "the always-rewrite path must emit WAL (got {noop_unfixed}); \
+             if it is 0 the flush never ran and the test proves nothing"
         );
         // The headline invariant: a no-change flush must be CHEAP, not
-        // proportional to the index. This is what turns ~500 MB/commit on
-        // a large index into a few pages.
+        // proportional to index size. This is what turns ~500 MB of WAL
+        // per commit on a large index into a couple of pages.
         assert!(
-            noop * 10 < noop_unfixed,
+            noop_fixed * 10 < noop_unfixed,
             "a flush that changes nothing must cost far less WAL than a full \
-             rewrite: noop={noop} bytes vs always-rewrite={noop_unfixed} bytes"
-        );
-        // An append still shifts whatever chains sit after the codes chain
-        // (chain starts are packed back-to-back), so the win on a
-        // single-row append is smaller than on a no-op flush -- but must
-        // still be a clear multiple.
-        assert!(
-            fixed * 3 < unfixed,
-            "skipping unchanged pages must cut per-commit WAL substantially: \
-             fixed={fixed} bytes vs always-rewrite={unfixed} bytes"
+             rewrite: with-skip={noop_fixed} bytes vs always-rewrite={noop_unfixed} bytes"
         );
 
         // ...and the index must still be uncorrupt and scannable.

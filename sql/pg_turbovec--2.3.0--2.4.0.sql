@@ -1,0 +1,6 @@
+-- pg_turbovec 2.3.0 -> 2.4.0
+-- WAL amplification follow-up: chain allocations are padded so a growing index
+-- keeps its chain start block numbers, instead of relocating (and re-WAL-
+-- logging) every page of the chains after the one that grew.
+-- Code-only: no wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

@@ -439,6 +439,75 @@ impl MetaPageData {
     /// `pack::repack`. `rotation_bytes` is the byte size of the
     /// row-major `dim*dim` `f32` rotation matrix; pass `0` when
     /// no rotation is being persisted (lazy QR on first search).
+    /// Pages of slack appended to the codes/scales/ids allocations so a
+    /// growing index doesn't shift the chains that follow it.
+    ///
+    /// WAL amplification follow-up (field report 2026-09-08). Chain
+    /// starts are packed back-to-back (`scales_first = codes_first +
+    /// codes_count`, and so on), so *any* growth in the codes chain moved
+    /// every scales and ids page to a new block number. v2.3.0 made a
+    /// flush skip WAL-logging unchanged pages, but a shifted page has a
+    /// new block number and genuinely must be rewritten, so an append
+    /// still re-logged the whole tail of the relfile: on the reporter's
+    /// 768d/4-bit/2.4M-vector index a codes page holds only 21 rows, so
+    /// essentially every flush crossed a boundary and paid ~27.6 MiB to
+    /// move the scales+ids chains.
+    ///
+    /// Rounding each chain's allocation up to a multiple of this many
+    /// pages amortises that shift over `PAD_PAGES * rows_per_page` rows
+    /// instead of every `rows_per_page` rows. Modelled on the reporter's
+    /// index (768d/4-bit, 21 rows per codes page, 27.6 MiB shift cost),
+    /// WAL per row falls from 1375 -> 37 KiB at batch=1 and 55 -> 5.7 KiB
+    /// at batch=512.
+    ///
+    /// 256 is the knee of that curve: the cost is bounded slack of at
+    /// most `3 * PAD_PAGES` pages (6 MiB) per index, INDEPENDENT of index
+    /// size, and going to 1024 quadruples the slack for only ~3x more
+    /// benefit. Small indexes pay the same 6 MiB, which is why this is a
+    /// page count rather than a fraction: a fraction would make large
+    /// indexes waste proportionally and is no cheaper for small ones.
+    ///
+    /// This is NOT a wire-format change. `*_count` keeps its existing
+    /// meaning of "blocks ALLOCATED to this chain" -- which is exactly
+    /// what every consumer already uses it for (sizing the relation and
+    /// locating the next chain via running sums). Chain *contents* are
+    /// located by `*_first` plus `n_vectors`/`rows_per_page`, never by
+    /// `*_count` (see `read_chain`), so a padded index decodes
+    /// identically. Old indexes have zero padding and keep working; new
+    /// ones simply have larger gaps.
+    pub const PAD_PAGES: u32 = 256;
+
+    /// Round a chain's page count up to a multiple of [`Self::PAD_PAGES`]
+    /// so later chains keep their block numbers as the index grows.
+    /// A zero-length chain stays zero (an absent chain must not be
+    /// allocated slack, or `*_first == 0` sentinels break).
+    ///
+    /// This MUST be the single definition used by every site that derives
+    /// a chain's allocated page count. `plan_with_blocked` and the
+    /// incremental grow/shrink paths in `relfile.rs` all route through it:
+    /// if one of them padded and another didn't, they would disagree about
+    /// where the following chains start, which is precisely the class of
+    /// block-offset bug that silently corrupted a graph index in v1.24.0.
+    pub fn padded_pages_needed(n_vectors: u64, rows_per_page: u32) -> u32 {
+        Self::pad_chain_pages(Self::pages_needed(n_vectors, rows_per_page))
+    }
+
+    fn pad_chain_pages(n_pages: u32) -> u32 {
+        // Don't pad a chain that is itself smaller than one padding unit.
+        // Otherwise a tiny index pays the full slack: a 1000-row 768d
+        // index would go 0.4 -> 6.0 MiB (15x) to buy an amortisation it
+        // never needs, since its whole relfile is smaller than the slack.
+        // Gating keeps small indexes BYTE-IDENTICAL to the unpadded layout
+        // and bounds the overhead to <= 2x the chain it pads (and always
+        // <= 3 * PAD_PAGES pages per index).
+        if n_pages == 0 || n_pages < Self::PAD_PAGES {
+            return n_pages;
+        }
+        n_pages
+            .div_ceil(Self::PAD_PAGES)
+            .saturating_mul(Self::PAD_PAGES)
+    }
+
     pub fn plan_with_blocked(
         bit_width: u8,
         dim: u32,
@@ -454,9 +523,14 @@ impl MetaPageData {
         let rows_per_scales_page = Self::rows_per_page(size_of::<f32>() as u32);
         let rows_per_ids_page = Self::rows_per_page(size_of::<u64>() as u32);
 
-        let codes_count = Self::pages_needed(n_vectors, rows_per_codes_page);
-        let scales_count = Self::pages_needed(n_vectors, rows_per_scales_page);
-        let ids_count = Self::pages_needed(n_vectors, rows_per_ids_page);
+        let codes_count = Self::padded_pages_needed(n_vectors, rows_per_codes_page);
+        let scales_count = Self::padded_pages_needed(n_vectors, rows_per_scales_page);
+        let ids_count = Self::padded_pages_needed(n_vectors, rows_per_ids_page);
+        // WAL amplification follow-up: the three GROWING chains are
+        // padded so an append doesn't shift the chains that follow them
+        // (see `PAD_PAGES`). The trailing chains
+        // (blocked/rotation/ivf/...) are not padded: nothing follows them
+        // that a shift would cost, and they don't grow row-by-row.
         let blocked_count = Self::byte_pages_needed(blocked_bytes);
         let rotation_count = Self::byte_pages_needed(rotation_bytes);
 
@@ -1326,24 +1400,128 @@ mod tests {
         assert!(!meta.is_degraded());
     }
 
+    /// WAL amplification follow-up (field report 2026-09-08): the whole
+    /// point of `PAD_PAGES` is that a growing index keeps its chain START
+    /// block numbers, so an append doesn't relocate (and therefore
+    /// re-WAL-log) every page of the chains that follow it.
+    #[test]
+    fn chain_starts_are_stable_across_growth() {
+        // 768d/4-bit is the reporter's shape: 21 rows per codes page, so
+        // without padding EVERY 21 rows shifted the scales and ids chains.
+        let base = MetaPageData::plan(4, 768, 1_000_000, 1);
+        let mut shifted = 0usize;
+        for extra in [1u64, 21, 100, 1_000, 10_000] {
+            let grown = MetaPageData::plan(4, 768, 1_000_000 + extra, 1);
+            if grown.scales_first != base.scales_first || grown.ids_first != base.ids_first {
+                shifted += 1;
+            }
+        }
+        assert_eq!(
+            shifted, 0,
+            "adding up to 10k rows must not move scales_first/ids_first \
+             (base scales_first={}, ids_first={})",
+            base.scales_first, base.ids_first
+        );
+    }
+
+    /// Padding must not change how a chain's CONTENTS are located, only
+    /// how much space is reserved. `read_chain` walks from `*_first` using
+    /// `n_vectors` and `rows_per_page` and never consults `*_count`, so
+    /// these must stay exactly as they were.
+    #[test]
+    fn padding_does_not_change_content_addressing() {
+        let m = MetaPageData::plan(4, 768, 1_000_000, 1);
+        assert_eq!(m.codes_first, 1, "codes still start right after meta");
+        assert_eq!(
+            m.rows_per_codes_page,
+            MetaPageData::rows_per_page(m.stride_bytes)
+        );
+        // Each chain starts after the PADDED extent of the previous one,
+        // so the running sums the rest of the code does stay correct.
+        assert_eq!(m.scales_first, m.codes_first + m.codes_count);
+        assert_eq!(m.ids_first, m.scales_first + m.scales_count);
+        // ...and the allocation is always big enough for the live rows.
+        assert!(m.codes_count >= MetaPageData::pages_needed(m.n_vectors, m.rows_per_codes_page));
+        assert!(m.scales_count >= MetaPageData::pages_needed(m.n_vectors, m.rows_per_scales_page));
+        assert!(m.ids_count >= MetaPageData::pages_needed(m.n_vectors, m.rows_per_ids_page));
+    }
+
+    /// Small indexes must not pay the slack: a chain smaller than one
+    /// padding unit is left exactly as it was, so tiny indexes keep the
+    /// pre-padding layout byte-for-byte.
+    #[test]
+    fn small_indexes_are_not_padded() {
+        let m = MetaPageData::plan(4, 768, 1_000, 1);
+        assert_eq!(
+            m.codes_count,
+            MetaPageData::pages_needed(1_000, m.rows_per_codes_page),
+            "a 1000-row index must not be padded (its whole relfile is \
+             smaller than the slack would be)"
+        );
+        assert_eq!(
+            m.scales_count,
+            MetaPageData::pages_needed(1_000, m.rows_per_scales_page)
+        );
+        assert_eq!(
+            m.ids_count,
+            MetaPageData::pages_needed(1_000, m.rows_per_ids_page)
+        );
+        // An empty index stays empty (no chain gets a phantom allocation).
+        let e = MetaPageData::plan(4, 768, 0, 1);
+        assert_eq!((e.codes_count, e.scales_count, e.ids_count), (0, 0, 0));
+    }
+
+    /// The padded extent must never be smaller than what the rows need,
+    /// and the overhead must stay bounded, across a wide sweep of shapes.
+    #[test]
+    fn padding_is_sufficient_and_bounded() {
+        for &dim in &[64u32, 128, 384, 768, 1536] {
+            for &bw in &[2u8, 3, 4] {
+                for &n in &[0u64, 1, 999, 100_000, 5_000_000] {
+                    let m = MetaPageData::plan(bw, dim, n, 1);
+                    let need_c = MetaPageData::pages_needed(n, m.rows_per_codes_page);
+                    let need_s = MetaPageData::pages_needed(n, m.rows_per_scales_page);
+                    let need_i = MetaPageData::pages_needed(n, m.rows_per_ids_page);
+                    assert!(
+                        m.codes_count >= need_c,
+                        "dim={dim} bw={bw} n={n} codes short"
+                    );
+                    assert!(
+                        m.scales_count >= need_s,
+                        "dim={dim} bw={bw} n={n} scales short"
+                    );
+                    assert!(m.ids_count >= need_i, "dim={dim} bw={bw} n={n} ids short");
+                    // Overhead per chain is bounded by one padding unit.
+                    assert!(m.codes_count - need_c < MetaPageData::PAD_PAGES);
+                    assert!(m.scales_count - need_s < MetaPageData::PAD_PAGES);
+                    assert!(m.ids_count - need_i < MetaPageData::PAD_PAGES);
+                }
+            }
+        }
+    }
+
     #[test]
     fn plan_layout_for_million_384d_4bit_with_blocked() {
         // 384/8 * 4 = 192 bytes per row -> floor(8168/192) = 42 rows/page.
         let meta = MetaPageData::plan_with_blocked(4, 384, 1_000_000, 1, 0, 0, 0);
         assert_eq!(meta.stride_bytes, 192);
         assert_eq!(meta.rows_per_codes_page, 42);
-        assert_eq!(meta.codes_count, 23810);
+        // Counts are PADDED to a multiple of PAD_PAGES (256) so growth
+        // doesn't shift the following chains: 23810 -> 24064, 490 -> 512,
+        // 980 -> 1024. `rows_per_*_page` is unaffected (it describes
+        // content density, not allocation).
+        assert_eq!(meta.codes_count, 24064);
         assert_eq!(meta.rows_per_scales_page, 2042);
-        assert_eq!(meta.scales_count, 490);
+        assert_eq!(meta.scales_count, 512);
         assert_eq!(meta.rows_per_ids_page, 1021);
-        assert_eq!(meta.ids_count, 980);
+        assert_eq!(meta.ids_count, 1024);
         // Empty blocked / rotation chains when the byte sizes are 0.
         assert_eq!(meta.blocked_count, 0);
         assert_eq!(meta.blocked_first, 0);
         assert_eq!(meta.rotation_count, 0);
         assert_eq!(meta.rotation_first, 0);
-        // chain layout: 1 (meta) + 23810 + 490 + 980 = 25281
-        assert_eq!(meta.total_blocks(), 25281);
+        // chain layout: 1 (meta) + 24064 + 512 + 1024 = 25601
+        assert_eq!(meta.total_blocks(), 25601);
 
         // Now plan with a real blocked layout: 1M * 384/2 = ~192 MB
         // and the matching 384x384 rotation matrix (~590 KB).
@@ -1353,16 +1531,19 @@ mod tests {
             MetaPageData::plan_with_blocked(4, dim, 1_000_000, 1, 192_000_000, 31_250, rot_bytes);
         let blocked_pages = MetaPageData::byte_pages_needed(192_000_000);
         let rotation_pages = MetaPageData::byte_pages_needed(rot_bytes);
+        // The trailing chains sit after the PADDED row chains (24064 +
+        // 512 + 1024), so derive their offsets from the counts rather
+        // than restating the unpadded sums.
+        let row_chains =
+            1 + with_prepared.codes_count + with_prepared.scales_count + with_prepared.ids_count;
+        assert_eq!(row_chains, 25601);
         assert_eq!(with_prepared.blocked_count, blocked_pages);
-        assert_eq!(with_prepared.blocked_first, 1 + 23810 + 490 + 980);
+        assert_eq!(with_prepared.blocked_first, row_chains);
         assert_eq!(with_prepared.rotation_count, rotation_pages);
-        assert_eq!(
-            with_prepared.rotation_first,
-            1 + 23810 + 490 + 980 + blocked_pages,
-        );
+        assert_eq!(with_prepared.rotation_first, row_chains + blocked_pages);
         assert_eq!(
             with_prepared.total_blocks(),
-            25281 + blocked_pages + rotation_pages,
+            row_chains + blocked_pages + rotation_pages,
         );
     }
 

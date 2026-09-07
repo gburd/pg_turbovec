@@ -2320,9 +2320,13 @@ pub(crate) unsafe fn write_meta_shrink_in_place(
     let new_meta = MetaPageData {
         n_vectors: new_n_vectors,
         am_version: new_am_version,
-        codes_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_codes_page),
-        scales_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_scales_page),
-        ids_count: MetaPageData::pages_needed(new_n_vectors, old.rows_per_ids_page),
+        // MUST use the same padding as `plan_with_blocked`, or this path
+        // and the planner would disagree about where the chains AFTER
+        // these start (the v1.24.0 graph corruption was exactly that
+        // class of block-offset mismatch).
+        codes_count: MetaPageData::padded_pages_needed(new_n_vectors, old.rows_per_codes_page),
+        scales_count: MetaPageData::padded_pages_needed(new_n_vectors, old.rows_per_scales_page),
+        ids_count: MetaPageData::padded_pages_needed(new_n_vectors, old.rows_per_ids_page),
         // Phase P: invalidate the prepared layout. The blocked
         // chain on disk is now stale (old slot order); readers
         // see has_prepared_layout() == false and fall back to
@@ -2381,7 +2385,7 @@ pub(crate) unsafe fn truncate_ids_tail(rel: pg_sys::Relation, meta: &MetaPageDat
     if meta.n_vectors == 0 && meta.ids_first == 0 {
         return;
     }
-    let new_ids_count = MetaPageData::pages_needed(meta.n_vectors, meta.rows_per_ids_page);
+    let new_ids_count = MetaPageData::padded_pages_needed(meta.n_vectors, meta.rows_per_ids_page);
     let new_total = meta.ids_first + new_ids_count;
     let cur = nblocks(rel);
     if cur > new_total {

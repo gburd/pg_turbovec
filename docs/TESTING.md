@@ -148,3 +148,41 @@ comments that are not valid standalone Rust and so are marked
 `ignore`. They are documentation, not disabled tests. Nothing in the
 real test suite is being silently skipped; the `ignored` count is
 purely these doc-comment SQL snippets.
+
+---
+
+## Writing tests that measure a global counter (WAL, LSN, cluster stats)
+
+**`#[pg_test]`s run concurrently against ONE shared cluster.** Any
+assertion built on a cluster-wide counter therefore also observes every
+*other* test's activity, and will be nondeterministic in a way that looks
+like a bug in the code under test.
+
+This bit hard during the v2.3.0 WAL-amplification work. A regression test
+diffed `pg_current_wal_lsn()` around a flush to prove WAL dropped. Across
+three CI runs the *same* operation measured **32 KB, then 1097 KB, then
+1425 KB**, and one run ranked the fixed and unfixed arms **inverted** —
+i.e. the measurement "disproved" a fix that was in fact working. The
+numbers were other tests' WAL.
+
+Rules that follow:
+
+- **Count the thing you control, not a global.** The fix was a test-only
+  `AtomicU64` counting pages the code path registered for WAL. Per-backend,
+  deterministic, and a direct proxy for the quantity of interest.
+- **Beware sequencing when a flush mutates what the next one observes.**
+  An earlier version measured the two arms back-to-back; because the first
+  flush left every page at its final contents, the second arm had nothing
+  left to write. Reset to an identical starting state for each arm.
+- **Assert the control arm is non-trivial.** `assert!(unfixed > 50)`
+  alongside `assert!(fixed * 10 < unfixed)` — otherwise "0 vs 0" passes and
+  proves nothing. An earlier version failed exactly this way, because a
+  `#[pg_test]`'s outer transaction always rolls back before `PreCommit`
+  fires, so the flush under test never ran at all. Use
+  `xact::flush_to_relfile_for_test` to drive a flush in-band.
+- **A wildly varying "before" number is a broken harness, not a flaky
+  fix.** Investigate the measurement before relaxing the threshold;
+  loosening it would have shipped a test that asserted nothing.
+
+The same reasoning applies to `pg_stat_*` views, checkpoint counters, and
+anything else that is cluster-global rather than backend-local.

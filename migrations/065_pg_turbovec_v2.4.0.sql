@@ -1,0 +1,35 @@
+-- 2.4.0 — WAL amplification follow-up: stable chain starts.
+--
+-- v2.3.0 stopped WAL-logging index pages whose contents hadn't changed. But
+-- chain starts were packed back-to-back (scales_first = codes_first +
+-- codes_count, ids_first = scales_first + scales_count), so ANY growth in the
+-- codes chain moved every scales and ids page to a NEW block number -- and a
+-- relocated page is genuinely different, so it had to be rewritten. On the
+-- reporting operator's 768d/4-bit index a codes page holds just 21 rows, so
+-- essentially every flush crossed a boundary and paid ~27.6 MiB to move the
+-- scales+ids chains.
+--
+-- Fix: round the three GROWING chains' allocations up to a multiple of
+-- MetaPageData::PAD_PAGES (256), so a shift happens once per ~5400 rows
+-- instead of once per 21. Modelled on that index, WAL per row falls from
+-- ~55 KiB to ~5.7 KiB at batch=512 and from ~1375 KiB to ~37 KiB at batch=1,
+-- on top of v2.3.0's own ~33x.
+--
+-- Cost is bounded slack: at most 3 * PAD_PAGES pages (6 MiB) per index,
+-- independent of index size. Chains smaller than one padding unit are NOT
+-- padded, so small indexes keep the previous layout byte-for-byte (a 1000-row
+-- 768d index would otherwise have gone 0.4 -> 6.0 MiB).
+--
+-- NOT a wire-format change (stays v8), and no REINDEX:
+--   * `*_count` keeps its existing meaning, "blocks ALLOCATED to this chain",
+--     which is what every consumer already uses it for (sizing the relation,
+--     and locating the next chain via running sums).
+--   * A chain's CONTENTS are located by `*_first` plus n_vectors/rows_per_page
+--     and never by `*_count` (see read_chain), so a padded index decodes
+--     identically to an unpadded one.
+--   * Existing unpadded indexes keep working as-is. Their chains relocate on
+--     the first full rewrite, which is safe by the v1.29.4 invariant (all
+--     chains are written BEFORE the meta page, so an interrupted rewrite
+--     leaves the old meta pointing at the old, intact chains).
+--
+-- This migration is intentionally empty.

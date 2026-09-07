@@ -4,6 +4,68 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] — 2026-09-07
+
+**WAL amplification follow-up: stable chain starts.** No wire-format
+change (stays v8), no SQL surface change, no REINDEX. Minor rather than
+patch because the on-disk *allocation* layout of new/rewritten indexes
+changes (chain contents and decoding do not).
+
+v2.3.0 stopped WAL-logging pages whose contents hadn't changed, which cut
+the reported ~500 MB-per-commit to ~28 MB. This release addresses what was
+left. Chain starts were packed back-to-back — `scales_first = codes_first
++ codes_count`, `ids_first = scales_first + scales_count` — so **any**
+growth in the codes chain moved every scales and ids page to a new block
+number, and a relocated page is genuinely different, so it had to be
+rewritten. On the reporter's 768d/4-bit index a codes page holds only
+**21 rows**, so essentially every flush crossed an allocation boundary and
+paid ~27.6 MiB to move the scales+ids chains.
+
+- The three growing chains' allocations are now rounded up to a multiple
+  of `MetaPageData::PAD_PAGES` (256 pages), so a shift happens once per
+  ~5400 rows instead of once per 21. Modelled on that index, WAL per row
+  falls from ~55 → ~5.7 KiB at batch=512, and ~1375 → ~37 KiB at batch=1,
+  on top of v2.3.0's own ~33×.
+- Cost is **bounded slack**: at most `3 * PAD_PAGES` pages (6 MiB) per
+  index, independent of index size. Chains smaller than one padding unit
+  are **not** padded, so small indexes keep the previous layout
+  byte-for-byte — without that gate a 1000-row 768d index would have gone
+  0.4 → 6.0 MiB (15×) to buy an amortisation it never needs.
+- `padded_pages_needed()` is the single definition, used by the planner
+  *and* the incremental grow/shrink paths in `relfile.rs`. If one site
+  padded and another didn't they would disagree about where the following
+  chains start — precisely the class of block-offset bug that silently
+  corrupted a graph index in v1.24.0.
+
+Why this is safe without a REINDEX: `*_count` keeps its existing meaning
+of "blocks **allocated** to this chain", which is what every consumer
+already uses it for (sizing the relation, and locating the next chain via
+running sums). A chain's **contents** are located by `*_first` plus
+`n_vectors`/`rows_per_page` and never by `*_count` (see `read_chain`), so
+a padded index decodes identically. Existing unpadded indexes keep working
+as-is; their chains relocate on the first full rewrite, which is safe by
+the v1.29.4 invariant (all chains are written **before** the meta page, so
+an interrupted rewrite leaves the old meta pointing at the old, intact
+chains).
+
+Four new layout tests cover the invariants directly: chain starts don't
+move when up to 10k rows are added; padding never changes content
+addressing; small and empty indexes aren't padded; and across a
+dim × bit_width × n sweep every padded extent is large enough for its rows
+with overhead bounded by one padding unit.
+
+`docs/TESTING.md` gains a section on measuring global counters, distilled
+from the three self-inflicted CI failures in v2.3.0 — concurrent
+`#[pg_test]`s share one cluster, so `pg_current_wal_lsn()` deltas capture
+other tests' WAL (the same operation measured 32 KB / 1097 KB / 1425 KB
+across runs and once ranked the arms inverted). Count a backend-local
+value you control, reset each arm to an identical starting state, and
+assert the control arm is non-trivial so "0 vs 0" can't pass.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.4.0';` — no REINDEX.
+
 ## [2.3.0] — 2026-09-07
 
 **WAL amplification fix: a flush now only WAL-logs the index pages that

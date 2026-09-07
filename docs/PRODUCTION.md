@@ -518,7 +518,12 @@ One commit = one flush, regardless of whether it carried 1 row or 5000.
 
 As of **v2.3.0** a flush only WAL-logs the index pages whose contents
 actually *changed* — new vectors append at the tail, so the untouched
-leading pages are no longer re-logged. Before v2.3.0 every flush
+leading pages are no longer re-logged. **v2.4.0** extends that: chain
+allocations are padded so a growing index keeps its chain *start* block
+numbers, instead of relocating (and therefore re-logging) every page of
+the chains that follow the one that grew. On a 768d/4-bit index a codes
+page holds only 21 rows, so before v2.4.0 essentially every flush crossed
+an allocation boundary and paid to move the scales and ids chains. Before v2.3.0 every flush
 WAL-logged a full-page image of the **entire** index relfile; an operator
 running a single-row backfill against an 882 MB / 2.4 M-vector IVF index
 measured **~500 MB of WAL per commit** and ~4.3 TB of WAL/day, which was

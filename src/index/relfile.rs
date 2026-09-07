@@ -423,50 +423,6 @@ pub(crate) unsafe fn write_meta_in_fork(
     pg_sys::UnlockReleaseBuffer(buf);
 }
 
-/// Append `chain_bytes` worth of payload across freshly-extended
-/// pages, `rows_per_page * stride` bytes per page (last page may be
-/// short). Returns the first block number of the chain.
-///
-/// Currently unused by the in-place rewrite path; kept for the
-/// Phase L follow-up that lazily extends instead of upfront-extends.
-///
-/// # Safety
-///
-/// `chain_bytes.len()` must equal `n_vectors * stride`. Caller must
-/// hold an exclusive relation lock.
-#[allow(dead_code)]
-pub(crate) unsafe fn write_chain(
-    rel: pg_sys::Relation,
-    chain_bytes: &[u8],
-    stride: u32,
-    rows_per_page: u32,
-    n_vectors: u64,
-) -> u32 {
-    if n_vectors == 0 || rows_per_page == 0 {
-        return pg_sys::InvalidBlockNumber;
-    }
-    debug_assert_eq!(chain_bytes.len() as u64, n_vectors * u64::from(stride));
-
-    let bytes_per_full_page = (rows_per_page as usize) * (stride as usize);
-    let mut written = 0usize;
-    let mut first_blkno: u32 = pg_sys::InvalidBlockNumber;
-
-    while written < chain_bytes.len() {
-        let buf = extend_block(rel);
-        let blkno = pg_sys::BufferGetBlockNumber(buf);
-        if first_blkno == pg_sys::InvalidBlockNumber {
-            first_blkno = blkno;
-        }
-        let take = bytes_per_full_page.min(chain_bytes.len() - written);
-        let src = chain_bytes.as_ptr().add(written);
-        std::ptr::copy_nonoverlapping(src, page_data_mut(buf), take);
-        pg_sys::MarkBufferDirty(buf);
-        pg_sys::UnlockReleaseBuffer(buf);
-        written += take;
-    }
-    first_blkno
-}
-
 /// Write `chain_bytes` to a fixed range of blocks starting at
 /// `start_blkno`. Each block is reinitialised via `PageInit` so any
 /// stale contents from an earlier layout get wiped. The caller is
@@ -478,6 +434,28 @@ pub(crate) unsafe fn write_chain(
 ///
 /// `chain_bytes.len()` must equal `n_vectors * stride`. Caller must
 /// hold an exclusive relation lock.
+/// How many leading pages of a chain rewrite may be skipped because
+/// their on-disk contents already match what we are about to write.
+///
+/// Set to `usize::MAX` (no cap) in production; the tear-injection and
+/// WAL tests flip it to force the old always-rewrite behaviour so the
+/// fail-before/pass-after gate is exercisable.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) static SKIP_UNCHANGED_PAGES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+#[inline]
+fn skip_unchanged_enabled() -> bool {
+    #[cfg(any(test, feature = "pg_test"))]
+    {
+        SKIP_UNCHANGED_PAGES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(any(test, feature = "pg_test")))]
+    {
+        true
+    }
+}
+
 pub(crate) unsafe fn write_chain_at(
     rel: pg_sys::Relation,
     start_blkno: u32,
@@ -510,12 +488,71 @@ pub(crate) unsafe fn write_chain_at(
         // — no buffer content lock is held here, so a cancel unwinds
         // cleanly. (Never poll between RegisterBuffer and Finish.)
         pg_sys::check_for_interrupts!();
+        // The `GenericXLog` state is started LAZILY, on the first page
+        // in this batch that actually needs writing. When every page in
+        // a batch is skipped as unchanged (the common case for a
+        // tail-append flush on a large index) we must not
+        // Start/Finish an empty state, or we would emit an empty WAL
+        // record per batch and give back the savings.
         let mut bufs: [pg_sys::Buffer; GENERIC_XLOG_BATCH] =
             [pg_sys::InvalidBuffer as pg_sys::Buffer; GENERIC_XLOG_BATCH];
-        let state = pg_sys::GenericXLogStart(rel);
+        let mut state: *mut pg_sys::GenericXLogState = std::ptr::null_mut();
         let mut n_in_batch = 0usize;
 
         while n_in_batch < GENERIC_XLOG_BATCH && written < total {
+            let take = bytes_per_full_page.min(total - written);
+            let src = chain_bytes.as_ptr().add(written);
+
+            // WAL amplification fix (field report 2026-09-08): every
+            // flush used to re-register EVERY page of EVERY chain with
+            // GENERIC_XLOG_FULL_IMAGE, so a single-row `aminsert`
+            // PreCommit flush WAL-logged a full-page image of the whole
+            // index -- ~500 MB of WAL per commit on an 882 MB index,
+            // measured at ~42,000x the WAL of the same host with that
+            // one writer stopped, and ~4.3 TB WAL/day burning through
+            // NVMe endurance.
+            //
+            // But `reconcile_flush_image` APPENDS new slots at the end
+            // and updates touched slots in place: every other page ends
+            // up byte-identical to what is already on disk. So compare
+            // first and skip the untouched pages -- WAL then scales with
+            // bytes actually CHANGED instead of with index size, without
+            // any on-disk format change (a skipped page is by definition
+            // already correct).
+            //
+            // Correctness notes:
+            //  * Only skip when the page ALREADY has our no-hole header
+            //    (pd_lower == pd_upper). A page written by an older
+            //    layout, freshly extended, or otherwise shaped
+            //    differently is always rewritten, so we never inherit a
+            //    header GenericXLogFinish would treat as a hole and zero.
+            //  * Only skip a FULL page (`take == bytes_per_full_page`).
+            //    The final partial page's tail is padding we always
+            //    normalise by rewriting.
+            //  * Skipping is invisible to crash recovery: we skip only
+            //    pages whose durable contents already equal the intended
+            //    contents, so replay has nothing to fix.
+            let mut skipped = false;
+            if skip_unchanged_enabled() && blkno < existing && take == bytes_per_full_page {
+                // Shared lock is enough to compare; upgrade to the
+                // exclusive write path only if it actually differs.
+                let buf = read_block(rel, blkno, /*exclusive=*/ false);
+                let page = pg_sys::BufferGetPage(buf);
+                let hdr = page.cast::<pg_sys::PageHeaderData>();
+                let no_hole = (*hdr).pd_lower == (*hdr).pd_upper;
+                if no_hole {
+                    let dst = page.cast::<u8>().add(PAGE_HEADER_BYTES);
+                    skipped = std::slice::from_raw_parts(dst, take)
+                        == std::slice::from_raw_parts(src, take);
+                }
+                pg_sys::UnlockReleaseBuffer(buf);
+            }
+            if skipped {
+                written += take;
+                blkno += 1;
+                continue;
+            }
+
             // Fresh-extend trailing blocks; rewrite leading blocks
             // in place. Both paths land us with a pinned +
             // exclusive-locked buffer ready for GenericXLog.
@@ -524,6 +561,9 @@ pub(crate) unsafe fn write_chain_at(
             } else {
                 extend_block(rel)
             };
+            if state.is_null() {
+                state = pg_sys::GenericXLogStart(rel);
+            }
             let page = pg_sys::GenericXLogRegisterBuffer(
                 state,
                 buf,
@@ -534,8 +574,6 @@ pub(crate) unsafe fn write_chain_at(
             // flags the data region as "used" so GenericXLogFinish
             // doesn't zero it.
             page_init_no_hole(page);
-            let take = bytes_per_full_page.min(total - written);
-            let src = chain_bytes.as_ptr().add(written);
             let dst = page.cast::<u8>().add(PAGE_HEADER_BYTES);
             std::ptr::copy_nonoverlapping(src, dst, take);
 
@@ -545,7 +583,9 @@ pub(crate) unsafe fn write_chain_at(
             blkno += 1;
         }
 
-        pg_sys::GenericXLogFinish(state);
+        if !state.is_null() {
+            pg_sys::GenericXLogFinish(state);
+        }
         for buf in &bufs[..n_in_batch] {
             pg_sys::UnlockReleaseBuffer(*buf);
         }

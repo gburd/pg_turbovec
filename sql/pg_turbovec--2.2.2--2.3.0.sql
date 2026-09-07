@@ -1,0 +1,6 @@
+-- pg_turbovec 2.2.2 -> 2.3.0
+-- WAL amplification fix: an index flush now only WAL-logs the pages whose
+-- contents actually changed (previously every flush wrote a full-page image of
+-- the entire index relfile, ~500 MB of WAL per commit on an 882 MB index).
+-- Code-only: no wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

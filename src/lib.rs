@@ -1452,6 +1452,97 @@ mod tests {
         );
     }
 
+    /// Field report 2026-09-08: WAL amplification. Every flush
+    /// re-registered EVERY page of EVERY chain with
+    /// `GENERIC_XLOG_FULL_IMAGE`, so a single-row `aminsert` PreCommit
+    /// flush WAL-logged a full-page image of the whole index. The
+    /// operator measured ~500 MB of WAL per commit on an 882 MB index
+    /// (~42,000x the WAL of the same host with that one writer stopped,
+    /// ~4.3 TB/day, and their NVMe at 49% endurance used).
+    ///
+    /// WAL per commit was ~constant at the index size and WAL per row a
+    /// clean 1/batch curve -- the signature of a whole-relfile rewrite.
+    /// But `reconcile_flush_image` appends new slots at the END and
+    /// updates touched slots in place, so all the other pages are
+    /// byte-identical; skipping those makes WAL scale with bytes CHANGED.
+    ///
+    /// Fail-before/pass-after: `SKIP_UNCHANGED_PAGES = false` restores
+    /// the old always-rewrite behaviour, and the assertion below fails.
+    #[pg_test]
+    fn insert_wal_scales_with_change_not_index_size() {
+        use std::sync::atomic::Ordering;
+        use_turbovec();
+        Spi::run("CREATE TABLE t_wal (id bigint, emb turbovec.vector)").unwrap();
+        // Seed enough rows that the index spans many pages, so a
+        // whole-relfile rewrite is clearly distinguishable from a
+        // tail-only append.
+        Spi::run(
+            "INSERT INTO t_wal \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT ((g * 31 + s * 17) % 101)::float8 / 101.0 \
+                FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector \
+             FROM generate_series(1, 20000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_wal_idx ON t_wal \
+             USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+
+        // WAL cost of ONE single-row insert transaction.
+        let wal_for_one_insert = |id: i64| -> i64 {
+            let before: i64 = Spi::get_one("SELECT pg_current_wal_lsn() - '0/0'::pg_lsn")
+                .unwrap()
+                .expect("lsn");
+            Spi::run(&format!(
+                "INSERT INTO t_wal \
+                 SELECT {id}, ('[' || array_to_string(array(\
+                     SELECT (({id} + s) % 7)::float8 / 7.0 \
+                     FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector"
+            ))
+            .unwrap();
+            let after: i64 = Spi::get_one("SELECT pg_current_wal_lsn() - '0/0'::pg_lsn")
+                .unwrap()
+                .expect("lsn");
+            after - before
+        };
+
+        // Warm up (first flush may extend the relation).
+        let _ = wal_for_one_insert(100_001);
+        let fixed = wal_for_one_insert(100_002);
+
+        // Now force the PRE-FIX behaviour and measure the same thing.
+        crate::index::relfile::SKIP_UNCHANGED_PAGES.store(false, Ordering::Relaxed);
+        let _ = wal_for_one_insert(100_003);
+        let unfixed = wal_for_one_insert(100_004);
+        crate::index::relfile::SKIP_UNCHANGED_PAGES.store(true, Ordering::Relaxed);
+
+        assert!(
+            fixed * 5 < unfixed,
+            "skipping unchanged pages must cut per-commit WAL substantially: \
+             fixed={fixed} bytes vs always-rewrite={unfixed} bytes"
+        );
+
+        // ...and the index must still be correct and scannable.
+        let (corrupt, reason): (Option<bool>, Option<String>) = Spi::get_two(
+            "SELECT is_corrupt, reason FROM turbovec.turbovec_check('t_wal_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(
+            (corrupt.expect("is_corrupt"), reason),
+            (false, None),
+            "page-skipping must not corrupt the index"
+        );
+        let hits: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM (SELECT id FROM t_wal \
+             ORDER BY emb OPERATOR(turbovec.<=>) \
+               (SELECT emb FROM t_wal WHERE id = 1) LIMIT 10) q",
+        )
+        .unwrap();
+        assert_eq!(hits, Some(10), "index must still return results");
+    }
+
     /// Shared fixture for the BUG#5 `turbovec_check` graph tests:
     /// build `<name>` + `<name>_idx` as a `WITH (graph = true)` index
     /// over `n_rows` random `dim`-d vectors. The per-row
@@ -6890,7 +6981,7 @@ mod tests {
             "1.22.1", "1.22.2", "1.23.0", "1.24.0", "1.25.0", "1.25.1", "1.26.0", "1.27.0",
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
-            "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2",
+            "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(

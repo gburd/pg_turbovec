@@ -4,6 +4,73 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] — 2026-09-08
+
+**WAL amplification fix: a flush now only WAL-logs the index pages that
+actually changed.** No wire-format change (stays v8), no SQL surface
+change, no REINDEX. Minor rather than patch because insert-path write
+behaviour changes materially.
+
+A field report (2026-09-08, pg.ddx.io) measured pg_turbovec inserts
+accounting for **~100 % of all WAL** on the host: **1322 MB / 25 s** with
+an embedding backfill running versus **31 kB / 25 s** with that one unit
+stopped — a **~42,000×** difference from a single writer doing
+~100–1400 rows/minute. The decisive detail: `pg_stat_statements`
+attributed only 434 kB of a ~3 GB/60 s window to SQL, so **>99.98 % of
+the WAL was generated outside any statement** — index maintenance, not
+the `INSERT`.
+
+WAL per *commit* was roughly **constant and close to the 882 MB index
+size** (~500 MB at 16 rows/txn, ~754 MB at 128, ~670 MB at 512) and WAL
+per *row* a clean `1/batch` curve with no knee — the signature of the
+whole relfile being rewritten and fully WAL-logged on every flush. A
+scratch-index A/B isolated it to commit boundaries alone: 32 × 16 rows =
+**643 MB** WAL versus 1 × 512 rows = **2.6 MB** (245×), both *after*
+`wal_compression=zstd`. Cost: **~4.3 TB WAL/day**, archived off-host so
+paid for twice, and the dominant consumer of the host NVMe's endurance
+(49 % used, 172 TB written in 5306 power-on hours). It also kept
+`num_requested` checkpoints at ~2× `num_timed` with a 220–390 % FPI
+ratio, which sent the operator chasing a checkpoint misconfiguration.
+
+Cause: `write_chain_at` registered **every** page of **every** chain with
+`GENERIC_XLOG_FULL_IMAGE`. But `reconcile_flush_image` appends new slots
+at the **end** and updates touched slots in place, so every other page
+was already byte-identical on disk — we were paying a full-page image to
+rewrite pages with their own contents.
+
+- Each full page is now compared against the bytes about to be written
+  (under a shared buffer lock) and skipped when identical, so WAL scales
+  with bytes **changed** rather than index size. Only pages already
+  carrying our own no-hole header are eligible, so a page whose header
+  `GenericXLogFinish` would treat as a hole is never inherited; a skipped
+  page is by definition already correct, so crash recovery is unaffected.
+- The `GenericXLog` state is started **lazily**, so a batch in which every
+  page is skipped emits no WAL record at all instead of an empty one.
+- Removed the dead, never-called `write_chain()` helper. It wrote pages
+  with `MarkBufferDirty` and **no WAL** — a latent footgun that would have
+  made a skipped page's missing WAL permanent. Every page mutation now
+  provably goes through `GenericXLog` (zero live `MarkBufferDirty` sites).
+- Test `insert_wal_scales_with_change_not_index_size` measures real
+  `pg_current_wal_lsn()` deltas around single-row insert transactions on a
+  20k-vector index and asserts the fixed path costs <1/5 the WAL of the
+  always-rewrite path, then asserts the index is still uncorrupt and
+  scannable. Fail-before/pass-after via `SKIP_UNCHANGED_PAGES`.
+
+**Batching still matters** and the docs now say so: WAL scales with
+commits, so a flush's remaining cost (tail pages, meta page, IVF cell
+directory) is paid per transaction. `docs/PRODUCTION.md` gains a "WAL cost
+of inserts — batch your writes" section including how to measure it with
+LSN deltas, since `pg_stat_statements` will not show it.
+
+Also documents the **partial-index verification gotcha** (Ask 3 of the
+2026-09-05 report): a KNN query that omits a partial index's predicate
+silently gets a sequential scan, which masks index faults as latency
+problems — always confirm `EXPLAIN` shows `Index Scan using <name>`.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.3.0';` — no REINDEX.
+
 ## [2.2.2] — 2026-09-05
 
 **`turbovec_check()` no longer has a scan-fatal blind spot.** Code-only —

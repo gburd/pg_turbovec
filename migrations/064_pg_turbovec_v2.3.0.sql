@@ -1,0 +1,33 @@
+-- 2.3.0 — WAL amplification fix: a flush only WAL-logs CHANGED index pages.
+--
+-- Field report 2026-09-08 (pg.ddx.io): on an 882 MB / ~2.4M-vector IVF index
+-- under a single-row backfill, pg_turbovec inserts accounted for ~100% of all
+-- WAL on the host -- ~1322 MB/25s with the backfill running vs 31 kB/25s with
+-- it stopped (~42,000x). >99.98% of that WAL was invisible to
+-- pg_stat_statements because it is index maintenance, not the INSERT.
+-- WAL per commit was roughly CONSTANT at the index size (~500-750 MB) and WAL
+-- per row a clean 1/batch curve: the signature of the whole relfile being
+-- rewritten and fully WAL-logged on every flush. ~4.3 TB WAL/day, the dominant
+-- consumer of the host NVMe's write endurance (49% used, 172 TB written).
+--
+-- Cause: write_chain_at registered EVERY page of EVERY chain with
+-- GENERIC_XLOG_FULL_IMAGE. But reconcile_flush_image appends new slots at the
+-- END and updates touched slots in place, so all the other pages were already
+-- byte-identical on disk -- we were paying a full-page image to rewrite pages
+-- with their own contents.
+--
+-- Fix: compare each full page against what is about to be written (under a
+-- shared buffer lock) and skip registering it when identical, so WAL scales
+-- with bytes CHANGED instead of index size. The GenericXLog state is now
+-- started lazily so an all-skipped batch emits no WAL record at all. A skipped
+-- page is by definition already correct, so crash recovery is unaffected; only
+-- pages carrying our own no-hole header are eligible, so no page whose header
+-- GenericXLogFinish would treat as a hole is ever inherited.
+--
+-- Also removed the dead, never-called write_chain() helper, which wrote pages
+-- with MarkBufferDirty and NO WAL -- a latent footgun that would have made a
+-- skipped page's missing WAL permanent. Every page mutation now provably goes
+-- through GenericXLog.
+--
+-- No wire-format change (stays v8), no SQL surface change, no REINDEX.
+-- This migration is intentionally empty.

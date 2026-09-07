@@ -505,6 +505,89 @@ or index-AM change). Full guide with worked CTEs:
 
 ---
 
+## WAL cost of inserts — batch your writes
+
+**`pg_turbovec` WAL scales with the number of COMMITS, not just the
+number of rows.** If you insert row-at-a-time, you pay a per-commit
+overhead that is independent of how much data the row added. Batch your
+inserts into larger transactions.
+
+Why: an `aminsert` accumulates into a per-transaction snapshot and
+flushes the index at PreCommit (see [ARCHITECTURE.md](ARCHITECTURE.md)).
+One commit = one flush, regardless of whether it carried 1 row or 5000.
+
+As of **v2.3.0** a flush only WAL-logs the index pages whose contents
+actually *changed* — new vectors append at the tail, so the untouched
+leading pages are no longer re-logged. Before v2.3.0 every flush
+WAL-logged a full-page image of the **entire** index relfile; an operator
+running a single-row backfill against an 882 MB / 2.4 M-vector IVF index
+measured **~500 MB of WAL per commit** and ~4.3 TB of WAL/day, which was
+the dominant consumer of their NVMe write endurance. If you are on an
+earlier version, upgrade — and batch regardless.
+
+Batching still matters after the fix, because a flush also rewrites the
+tail pages, the meta page, and (for IVF) the cell directory:
+
+```sql
+-- Good: one flush for 500 rows.
+BEGIN;
+INSERT INTO docs (id, emb) SELECT ... ;  -- 500 rows
+COMMIT;
+
+-- Costly: 500 flushes for 500 rows.
+-- (each autocommit INSERT is its own transaction)
+```
+
+A batch size of a few hundred to a few thousand rows per transaction is
+a good default. Bulk-loading a large corpus from scratch is still
+fastest via `CREATE INDEX` after the data is in the heap.
+
+### Measuring it yourself
+
+`pg_stat_statements` does **not** attribute index-maintenance WAL to the
+`INSERT` statement, so a WAL problem here looks like it comes from
+nowhere. Measure LSN deltas around the transaction instead:
+
+```sql
+SELECT pg_current_wal_lsn() AS before \gset
+-- ... run your insert transaction ...
+SELECT pg_current_wal_lsn() - :'before'::pg_lsn AS wal_bytes;
+```
+
+Divide by the number of rows in the transaction and vary the batch size:
+if WAL-per-row falls as a clean `1/batch` curve, you are paying
+per-commit overhead and should batch harder.
+
+---
+
+## Verifying a PARTIAL index actually scans
+
+If you create a partial index, **a query that omits the index predicate
+cannot use it** — the planner silently falls back to a sequential scan.
+That is a correctness-of-diagnosis trap: a slow seq scan looks like a
+latency problem, and it will mask a genuine index fault entirely.
+
+```sql
+CREATE INDEX docs_emb_idx ON docs
+  USING turbovec (emb turbovec.vec_cosine_ops)
+  WHERE emb IS NOT NULL;            -- partial!
+
+-- Does NOT use the index (seq scan + sort):
+SELECT id FROM docs ORDER BY emb <=> $1 LIMIT 5;
+
+-- Uses the index (predicate repeated):
+SELECT id FROM docs WHERE emb IS NOT NULL
+ ORDER BY emb <=> $1 LIMIT 5;
+```
+
+Always confirm with `EXPLAIN` that you see
+`Index Scan using <your index>` before drawing any conclusion about
+latency or health. An operator chasing a 30 s query on a 2.18 M-vector
+partial index found it was a masked seq scan; adding the predicate
+surfaced the real (scan-fatal) error in 2 s.
+
+---
+
 ## Replication and standbys
 
 `pg_turbovec` indexes are crash-safe and replicate cleanly:

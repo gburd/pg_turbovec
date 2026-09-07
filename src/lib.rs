@@ -2475,20 +2475,26 @@ mod tests {
         // It must actually scan, via the index, and rank a vector nearest
         // to itself.
         Spi::run("SET enable_seqscan = off").unwrap();
-        // Confirm the BQ index is actually USED (not a seq scan silently
-        // masking it -- the partial-index lesson from the 2026-09-05 field
-        // report). `EXPLAIN` output comes back one row per line.
-        let plan: Option<String> = Spi::get_one(
-            "SELECT string_agg(x, ' ') FROM (\
-               EXPLAIN (COSTS OFF) SELECT id FROM t_bq1 \
-               ORDER BY emb OPERATOR(turbovec.<=>) \
-                 (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 5\
-             ) AS e(x)",
-        )
-        .unwrap();
+        // Confirm the BQ index is actually USED, not a seq scan silently
+        // masking it (the partial-index lesson from the 2026-09-05 field
+        // report). `EXPLAIN` cannot appear in a subquery, so read its rows
+        // directly and look for the Index Scan node.
+        let plan_has_index_scan = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "EXPLAIN (COSTS OFF) SELECT id FROM t_bq1 \
+                     ORDER BY emb OPERATOR(turbovec.<=>) \
+                       (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 5",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            rows.filter_map(|r| r.get::<String>(1).ok().flatten())
+                .any(|l| l.contains("Index Scan"))
+        });
         assert!(
-            plan.as_deref().unwrap_or("").contains("Index Scan"),
-            "the BQ index must be used for an ORDER BY scan, got plan: {plan:?}"
+            plan_has_index_scan,
+            "the BQ index must be used for an ORDER BY scan, not a seq scan"
         );
 
         let first: Option<i64> = Spi::get_one(

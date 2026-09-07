@@ -50,11 +50,29 @@ rewrite pages with their own contents.
   with `MarkBufferDirty` and **no WAL** — a latent footgun that would have
   made a skipped page's missing WAL permanent. Every page mutation now
   provably goes through `GenericXLog` (zero live `MarkBufferDirty` sites).
-- Test `insert_wal_scales_with_change_not_index_size` measures real
-  `pg_current_wal_lsn()` deltas around single-row insert transactions on a
-  20k-vector index and asserts the fixed path costs <1/5 the WAL of the
-  always-rewrite path, then asserts the index is still uncorrupt and
-  scannable. Fail-before/pass-after via `SKIP_UNCHANGED_PAGES`.
+- Test `insert_wal_scales_with_change_not_index_size` drives a real flush
+  (via the existing `flush_to_relfile_for_test` hook — a `#[pg_test]`'s
+  outer transaction always rolls back before PreCommit fires, so the
+  aminsert path can't be observed in-band) on a ~109-chain-page index and
+  asserts a no-change flush WAL-logs <1/10th the pages of a full rewrite.
+  Fail-before/pass-after via `SKIP_UNCHANGED_PAGES`.
+
+  It counts pages registered for WAL rather than diffing
+  `pg_current_wal_lsn()`, which is load-bearing: `#[pg_test]`s run
+  concurrently against one cluster, so a global LSN delta also captures
+  every other test's WAL. Three CI runs reported the same operation as
+  32 KB, then 1097 KB, then 1425 KB, and once ranked the two arms
+  *inverted* — the LSN measurement was never valid in either direction.
+  Registered pages are per-backend, deterministic, and are the direct
+  driver of WAL volume (one full-page image each).
+
+  Note the residual cost on an *append* (as opposed to a no-change flush):
+  chain starts are packed back-to-back (`scales_first = codes_first +
+  codes_count`), so when the codes chain grows by one page every scales and
+  ids page lands at a new block number and genuinely must be rewritten.
+  Measured 392 KB vs 1416 KB always-rewriting on a 20k-vector/64d index.
+  Making chain starts stable across growth would shrink that further and is
+  left as follow-up.
 
 **Batching still matters** and the docs now say so: WAL scales with
 commits, so a flush's remaining cost (tail pages, meta page, IVF cell

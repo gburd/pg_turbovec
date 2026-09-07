@@ -312,7 +312,7 @@ fn turbovec_check(
         name!(reason, Option<String>),
     ),
 > {
-    use crate::index::page::{KIND_COLBERT, KIND_GRAPH};
+    use crate::index::page::{KIND_BQ, KIND_COLBERT, KIND_GRAPH};
     unsafe {
         require_index_owner(index);
         let rel = pg_sys::index_open(index, pg_sys::AccessShareLock as i32);
@@ -330,6 +330,7 @@ fn turbovec_check(
         let kind = match meta.kind {
             KIND_COLBERT => "colbert",
             KIND_GRAPH => "graph",
+            KIND_BQ => "bq",
             _ => "single",
         }
         .to_string();
@@ -362,7 +363,16 @@ fn turbovec_check(
         // chain's dim*bit_width/8 per vector), and it is load-bearing for
         // `from_parts` — so validate it here, inside the SAME ShareLock as
         // the meta/ids read so all three are one consistent observation.
-        let scales_problem = crate::index::relfile::validate_scales(rel, &meta_consistent).err();
+        // A 1-bit sign-BQ index has NO scales chain (sign quantization
+        // discards magnitude, so there is nothing to scale), so validating
+        // one would report every BQ index corrupt. Skip it for that kind
+        // only -- every other kind keeps the v2.2.2 check that closed the
+        // scan-fatal blind spot.
+        let scales_problem = if meta_consistent.is_bq() {
+            None
+        } else {
+            crate::index::relfile::validate_scales(rel, &meta_consistent).err()
+        };
         crate::index::relfile::unlock_relfile_read(rel);
         let meta = meta_consistent;
         let slot_count = ids.len() as i64;

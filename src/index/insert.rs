@@ -99,6 +99,9 @@ unsafe fn aminsert_impl(
         if meta.is_graph() {
             return insert_graph_row(index_relation, value, id);
         }
+        if meta.is_bq() {
+            return insert_bq_row(index_relation, value, id);
+        }
     }
 
     let normalise = guc::NORMALIZE_ON_INSERT.get();
@@ -336,6 +339,91 @@ unsafe fn aminsert_relfile(
 /// relfile rewrite per transaction like the flat/IVF path does) is
 /// real future work, not attempted here — G-2b's scope is
 /// correctness, not this performance profile.
+/// `aminsert` for a 1-bit sign-BQ index (`kind = KIND_BQ`).
+///
+/// Like the graph kind, this is a deliberate O(n)-per-row whole-relfile
+/// rewrite under ONE exclusive lock across read -> recompute -> write.
+/// That locking shape is not a style choice: an unlocked read-modify-write
+/// is exactly the bug that SILENTLY lost rows from graph indexes before
+/// v2.1.0 (while `turbovec_check()` reported `is_corrupt = false`).
+///
+/// The corpus mean is deliberately NOT recomputed on insert. Recomputing
+/// it would invalidate every previously-packed sign code (they were taken
+/// relative to the OLD mean), so a single insert would silently corrupt
+/// the ranking of the whole index. The persisted build-time mean is
+/// therefore treated as fixed, and drift is a REINDEX concern -- the same
+/// build-then-serve model the reloption's guidance already sets out.
+unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64) -> bool {
+    use crate::index::onebit;
+
+    let normalise = guc::NORMALIZE_ON_INSERT.get();
+    relfile::lock_relfile_write(index_relation);
+
+    let meta = match relfile::read_meta(index_relation) {
+        Some(m) if m.is_bq() => m,
+        Some(_) => {
+            relfile::unlock_relfile_write(index_relation);
+            error!(
+                "turbovec aminsert (1-bit): index is no longer a 1-bit index (concurrent REINDEX?); retry the statement"
+            );
+        }
+        None => {
+            relfile::unlock_relfile_write(index_relation);
+            error!("turbovec aminsert (1-bit): meta page vanished (concurrent REINDEX?)");
+        }
+    };
+
+    let dim = meta.dim as usize;
+    if value.dim() != dim {
+        relfile::unlock_relfile_write(index_relation);
+        error!(
+            "turbovec aminsert (1-bit): dim mismatch — index expects {}, row has {}",
+            dim,
+            value.dim()
+        );
+    }
+
+    let mean = relfile::read_bq_mean(index_relation, &meta);
+    if mean.len() != dim {
+        relfile::unlock_relfile_write(index_relation);
+        error!(
+            "turbovec aminsert (1-bit): index is missing its corpus-mean vector; REINDEX INDEX to rebuild it"
+        );
+    }
+
+    // Read the current codes + ids, append this row, write it all back.
+    let mut codes = relfile::read_chain(
+        index_relation,
+        meta.codes_first,
+        meta.stride_bytes,
+        meta.rows_per_codes_page,
+        meta.n_vectors,
+    );
+    let mut ids = relfile::read_ids_only(index_relation, &meta);
+
+    let v = if normalise {
+        kernels::normalise_to_vec(value.as_slice())
+    } else {
+        value.as_slice().to_vec()
+    };
+    let centered = onebit::center(&v, &mean);
+    codes.extend_from_slice(&onebit::pack_signs(&centered));
+    ids.push(id);
+
+    relfile::write_full_bq(
+        index_relation,
+        dim as u32,
+        ids.len() as u64,
+        &codes,
+        &ids,
+        &mean,
+        meta.am_version + 1,
+    );
+    relfile::unlock_relfile_write(index_relation);
+    crate::cache::invalidate_all();
+    false
+}
+
 unsafe fn insert_graph_row(index_relation: pg_sys::Relation, value: Vector, id: u64) -> bool {
     let normalise = guc::NORMALIZE_ON_INSERT.get();
 

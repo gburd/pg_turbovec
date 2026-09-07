@@ -2424,38 +2424,212 @@ mod tests {
         );
     }
 
-    /// `bit_width = 1` (binary quantization) is ACCEPTED by the
-    /// reloption validator (the user-facing CREATE INDEX knob), but the
-    /// sign-BQ encode + Hamming scan path is not yet wired, so the build
-    /// must ERROR clearly -- NOT panic the backend (turbovec's
-    /// IdMapIndex::new would reject bit_width < 2 with an opaque
-    /// expect()), and NOT silently ship an all-ones landmine. This is
-    /// the footgun-safe half-state until the encode path lands: the knob
-    /// exists, the failure mode is loud and clear. See docs/ONEBIT_BQ.md.
+    /// `bit_width = 1` (sign binary quantization) end-to-end: the index
+    /// builds, scans, finds its neighbours, and costs about half the
+    /// storage of the same corpus at `bit_width = 2`.
+    ///
+    /// This replaces the old `index_am_onebit_errors_clearly_not_panic`,
+    /// which asserted the build ERRORed -- correct while only the
+    /// foundation had landed, now the opposite of the intended behaviour.
     #[pg_test]
-    fn index_am_onebit_errors_clearly_not_panic() {
+    fn onebit_index_builds_scans_and_halves_storage() {
         use_turbovec();
-        Spi::run("CREATE TABLE t_1bit (id bigint, emb vector)").unwrap();
-        Spi::run("INSERT INTO t_1bit VALUES (1, '[1,0,0,0,0,0,0,0]')").unwrap();
-        // The reloption itself parses (bit_width = 1 is in 1..=4); the
-        // build raises a clear "not yet implemented" ERROR. We assert
-        // the index does NOT come into existence and the specific
-        // message text is present (loud, not silent).
+        // Zero-centred synthetic corpus: coordinates in [-1, 1) so the
+        // per-dim mean is ~0 and sign bits split each dimension. (The
+        // all-positive case is covered by the footgun test below.)
+        for (tbl, bw) in [("t_bq1", 1), ("t_bq2", 2)] {
+            Spi::run(&format!(
+                "CREATE TABLE {tbl} (id bigint, emb turbovec.vector)"
+            ))
+            .unwrap();
+            Spi::run(&format!(
+                "INSERT INTO {tbl} \
+                 SELECT g, ('[' || array_to_string(array(\
+                    SELECT (((g * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
+                    FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector \
+                 FROM generate_series(1, 2000) g"
+            ))
+            .unwrap();
+            Spi::run(&format!(
+                "CREATE INDEX {tbl}_idx ON {tbl} \
+                 USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = {bw})"
+            ))
+            .unwrap();
+        }
+
+        // The BQ index must exist and report its own kind.
+        let kind: Option<String> =
+            Spi::get_one("SELECT kind FROM turbovec.turbovec_check('t_bq1_idx'::regclass)")
+                .unwrap();
+        assert_eq!(kind.as_deref(), Some("bq"), "must report the BQ kind");
+        let (corrupt, reason): (Option<bool>, Option<String>) = Spi::get_two(
+            "SELECT is_corrupt, reason FROM turbovec.turbovec_check('t_bq1_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(
+            (corrupt.expect("is_corrupt"), reason),
+            (false, None),
+            "a fresh BQ index must be healthy (and must NOT trip the scales check -- BQ has no scales chain)"
+        );
+
+        // It must actually scan, via the index, and rank a vector nearest
+        // to itself.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let plan: Option<String> = Spi::get_one(
+            "SELECT string_agg(l, ' ') FROM (\
+               SELECT unnest(string_to_array(\
+                 (SELECT * FROM (EXPLAIN (COSTS OFF) \
+                    SELECT id FROM t_bq1 ORDER BY emb OPERATOR(turbovec.<=>) \
+                      (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 5) x LIMIT 1), E'\\n')) l) q",
+        )
+        .unwrap();
+        assert!(
+            plan.as_deref().unwrap_or("").contains("Index Scan"),
+            "the BQ index must be used for an ORDER BY scan, got plan: {plan:?}"
+        );
+        let first: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_bq1 ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            Some(42),
+            "a vector must be its own nearest neighbour through the BQ index"
+        );
+
+        // Recall against exact brute force, with the AM's exact rerank
+        // engaged (hi_dim_rerank treats 1-bit as high-dim at any dim).
+        let hits: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_bq1 WHERE id = 7), \
+                  truth AS (SELECT id FROM t_bq1, q \
+                            ORDER BY t_bq1.emb OPERATOR(turbovec.<=>) q.emb LIMIT 10) \
+             SELECT count(*) FROM truth",
+        )
+        .unwrap();
+        assert_eq!(hits, Some(10), "the index must return a full top-10");
+
+        // Storage: 1-bit codes are dim/8 per vector with NO scale, versus
+        // dim/8*2 + 4 for 2-bit, so the BQ index must be clearly smaller.
+        // (Not asserted at exactly 2x: both carry a meta page, an ids
+        // chain -- 8 B/row, larger than the codes at dim 64 -- and padded
+        // chain allocations.)
+        let (s1, s2): (Option<i64>, Option<i64>) =
+            Spi::get_two("SELECT pg_relation_size('t_bq1_idx'), pg_relation_size('t_bq2_idx')")
+                .unwrap();
+        let (s1, s2) = (s1.expect("size1"), s2.expect("size2"));
+        assert!(
+            s1 < s2,
+            "the 1-bit index ({s1} bytes) must be smaller than the 2-bit one ({s2} bytes)"
+        );
+    }
+
+    /// The documented 1-bit footgun: on dense-positive data the naive
+    /// sign-at-zero rule sets EVERY bit, so every code is identical and
+    /// Hamming carries no signal (measured R@10 = 0.0 on GIST). Mean-
+    /// centering fixes it. This asserts the outcome is either a working
+    /// index (centering did its job) or a clear ERROR -- never silent
+    /// garbage.
+    #[pg_test]
+    fn onebit_all_positive_corpus_is_centered_or_errors_clearly() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_bqpos (id bigint, emb turbovec.vector)").unwrap();
+        // Every coordinate strictly positive, and NOT constant across rows.
+        Spi::run(
+            "INSERT INTO t_bqpos \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT 10.0 + (((g * 31 + s * 17) % 100)::float8 / 100.0) \
+                FROM generate_series(1, 32) s), ',') || ']')::turbovec.vector \
+             FROM generate_series(1, 500) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_bqpos_idx ON t_bqpos \
+             USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 1)",
+        )
+        .unwrap();
+        // Centering makes this indexable, so the build succeeds AND the
+        // index must still rank a vector nearest to itself. If a future
+        // change breaks centering this assertion fails loudly rather than
+        // returning arbitrary rows.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let first: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_bqpos ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM t_bqpos WHERE id = 100) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            Some(100),
+            "mean-centering must make an all-positive corpus indexable (this is the \
+             documented footgun: without centering every sign bit is 1, every code is \
+             identical, and Hamming ranks arbitrarily)"
+        );
+    }
+
+    /// A constant corpus cannot be BQ-indexed: every code is identical
+    /// even AFTER centering, so Hamming has no signal. The build must
+    /// ERROR clearly rather than ship an index that returns arbitrary rows.
+    #[pg_test]
+    fn onebit_constant_corpus_errors_not_silently_useless() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_bqconst (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_bqconst \
+             SELECT g, '[1,1,1,1,1,1,1,1]'::turbovec.vector FROM generate_series(1, 50) g",
+        )
+        .unwrap();
         let created: Option<bool> = Spi::get_one(
             "DO $$ BEGIN \
-                CREATE INDEX t_1bit_idx ON t_1bit \
-                  USING turbovec (emb vec_cosine_ops) WITH (bit_width = 1); \
+                CREATE INDEX t_bqconst_idx ON t_bqconst \
+                  USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 1); \
              EXCEPTION WHEN OTHERS THEN \
-                RAISE NOTICE 'onebit build error: %', SQLERRM; \
+                RAISE NOTICE 'expected: %', SQLERRM; \
              END $$; \
-             SELECT to_regclass('t_1bit_idx') IS NULL",
+             SELECT to_regclass('t_bqconst_idx') IS NULL",
         )
         .unwrap();
         assert_eq!(
             created,
             Some(true),
-            "bit_width = 1 must NOT create an index yet (must error at build, not panic or succeed)"
+            "a constant corpus must ERROR at build, not produce a signal-free index"
         );
+    }
+
+    /// 1-bit + IVF is not composed yet, and 1-bit + graph is rejected by
+    /// the reloption validator. Both must fail LOUDLY rather than
+    /// silently building a non-BQ index.
+    #[pg_test]
+    fn onebit_rejects_unsupported_combinations() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_bqcombo (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_bqcombo SELECT g, ('[' || array_to_string(array(\
+                SELECT (((g + s) % 200)::float8 / 100.0) - 1.0 \
+                FROM generate_series(1, 16) s), ',') || ']')::turbovec.vector \
+             FROM generate_series(1, 100) g",
+        )
+        .unwrap();
+        for (name, opts) in [
+            ("t_bqivf", "bit_width = 1, lists = 4"),
+            ("t_bqgraph", "bit_width = 1, graph = true"),
+        ] {
+            let created: Option<bool> = Spi::get_one(&format!(
+                "DO $$ BEGIN \
+                    CREATE INDEX {name} ON t_bqcombo \
+                      USING turbovec (emb turbovec.vec_cosine_ops) WITH ({opts}); \
+                 EXCEPTION WHEN OTHERS THEN \
+                    RAISE NOTICE 'expected: %', SQLERRM; \
+                 END $$; \
+                 SELECT to_regclass('{name}') IS NULL"
+            ))
+            .unwrap();
+            assert_eq!(
+                created,
+                Some(true),
+                "{opts} must be rejected, not silently built as a non-BQ index"
+            );
+        }
     }
 
     #[pg_test]

@@ -502,11 +502,19 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // ERROR clearly here rather than let IdMapIndex::new panic the
     // backend with an opaque expect() message. (Guarding at the single
     // ambuild entry point covers every kind; aminsert re-checks below.)
-    if cfg_bit_width == 1 {
+    // bit_width = 1 (sign binary quantization / BQ) takes a distinct
+    // code path: turbovec's IdMapIndex hard-rejects bit_width < 2, so BQ
+    // is its own scheme (sign bits + Hamming), not TurboQuant-at-1-bit.
+    // Dispatched below, after the corpus has been spilled, by
+    // `bq_build_and_write`. `graph = true` with bit_width = 1 is rejected
+    // by the reloption validator (the Vamana scorer is not wired for
+    // Hamming), and IVF + BQ is not yet composed, so reject that here
+    // rather than silently building a non-BQ index.
+    if cfg_bit_width == 1 && cfg_lists > 0 {
         error!(
-            "turbovec: bit_width = 1 (binary quantization) index build is not yet implemented; \
-             use bit_width = 2, 3, or 4. (The reloption is accepted for forward compatibility; \
-             the sign-BQ encode + Hamming scan path is a follow-up -- see docs/ONEBIT_BQ.md.)"
+            "turbovec: bit_width = 1 (binary quantization) is not yet supported with lists > 0 \
+             (IVF); use bit_width = 1 without lists for a flat BQ index, or bit_width >= 2 \
+             for an IVF index"
         );
     }
     let indexrelid = (*index_relation).rd_id;
@@ -660,6 +668,17 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         (*result).index_tuples = 0.0;
         return result;
     };
+
+    // 1-bit sign-BQ build path. Must come BEFORE the IVF/graph
+    // branches: it is a distinct encode scheme (sign bits + Hamming),
+    // not a variant of the TurboQuant quantize+pack those paths run.
+    if cfg_bit_width == 1 {
+        let n_built = bq_build_and_write(index_relation, &mut state, dim);
+        let _ = indexrelid;
+        (*result).heap_tuples = state.heap_seen as f64;
+        (*result).index_tuples = n_built as f64;
+        return result;
+    }
 
     // IVF-1 build path: train coarse centroids, assign, permute the
     // flat corpus cell-contiguous, then run the EXISTING
@@ -1214,6 +1233,79 @@ unsafe fn ivf_build_and_write(
 ///
 /// `index_relation` is a valid, exclusively-held index relation
 /// (ambuild holds it for the whole build).
+/// 1-bit sign-BQ build (`WITH (bit_width = 1)`).
+///
+/// Bypasses `IdMapIndex` entirely: turbovec hard-rejects `bit_width < 2`
+/// in both constructors, so 1-bit is a distinct scheme (sign binary
+/// quantization) rather than TurboQuant-at-1-bit. See
+/// `docs/ONEBIT_BQ.md` for why, and `onebit.rs` for the primitives.
+///
+/// Steps: read the spilled corpus back resident, compute the per-dim
+/// corpus mean, centre each vector by it, take sign bits. The centring is
+/// the load-bearing part -- the naive sign-at-zero rule sets every bit on
+/// dense-positive data (GIST measured R@10 = 0.0), so the mean is
+/// persisted and applied to queries too.
+unsafe fn bq_build_and_write(
+    index_relation: pg_sys::Relation,
+    state: &mut BuildState,
+    dim: usize,
+) -> usize {
+    use crate::index::onebit;
+
+    let spill = state
+        .ivf_spill
+        .take()
+        .expect("bq_build_and_write: spill not opened");
+    let n_vectors = spill.rows;
+    if n_vectors == 0 {
+        // Empty build: a BQ-shaped meta page with no chains, so later
+        // inserts have stable state to extend.
+        relfile::write_full_bq(index_relation, dim as u32, 0, &[], &[], &[], 1);
+        return 0;
+    }
+
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    let mut flat = vec![0.0f32; n_vectors * dim];
+    let mut ids = vec![0u64; n_vectors];
+    spill.read_block(0, n_vectors, &mut ids, &mut flat);
+    drop(spill);
+
+    // The footgun guard: if every code would be identical even AFTER
+    // centring (a constant corpus), Hamming carries no signal and the
+    // index would silently return arbitrary rows. ERROR instead.
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    if onebit::is_degenerate(&flat, dim) {
+        error!(
+            "turbovec: bit_width = 1 (binary quantization) cannot index this corpus -- \
+             every vector has the same sign pattern after mean-centering, so Hamming \
+             distance carries no signal (a constant or near-constant corpus). \
+             Use bit_width = 2, 3, or 4 instead."
+        );
+    }
+
+    let mean = onebit::corpus_mean(&flat, dim);
+    let stride = onebit::codes_stride(dim);
+    let mut codes = Vec::with_capacity(n_vectors * stride);
+    for row in flat.chunks_exact(dim) {
+        let centered = onebit::center(row, &mean);
+        codes.extend_from_slice(&onebit::pack_signs(&centered));
+    }
+    debug_assert_eq!(codes.len(), n_vectors * stride);
+    drop(flat);
+
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    relfile::write_full_bq(
+        index_relation,
+        dim as u32,
+        n_vectors as u64,
+        &codes,
+        &ids,
+        &mean,
+        1,
+    );
+    n_vectors
+}
+
 unsafe fn graph_build_and_write(
     index_relation: pg_sys::Relation,
     state: &mut BuildState,

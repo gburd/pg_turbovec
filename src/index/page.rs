@@ -798,6 +798,7 @@ impl MetaPageData {
             .saturating_add(self.cell_dir_count)
             .saturating_add(self.tombstone_count)
             .saturating_add(self.graph_count)
+            .saturating_add(self.bq_mean_count)
     }
 
     /// Serialise the meta header (no PG page header) to a

@@ -670,6 +670,108 @@ impl GraphIndex {
     }
 }
 
+/// RAM-resident 1-bit sign-BQ index (`WITH (bit_width = 1)`).
+///
+/// Holds the packed sign codes (`dim/8` per vector), the slot->id map, and
+/// the persisted corpus mean. Scored by Hamming distance, never decoded:
+/// there is nothing to decode to, since sign quantization discards
+/// magnitude. See `docs/ONEBIT_BQ.md` and `index/onebit.rs`.
+pub(crate) struct BqIndex {
+    codes: Vec<u8>,
+    slot_to_id: Vec<u64>,
+    /// Per-dim corpus mean, subtracted before taking signs. Applying the
+    /// SAME mean to the query is what makes the comparison meaningful --
+    /// omitting it is the documented footgun that measured R@10 = 0.0 on
+    /// dense-positive data.
+    mean: Vec<f32>,
+    dim: usize,
+    stride: usize,
+    /// Per-slot tombstone bitmap (LSB-first, bit set => dead), read once
+    /// at cache-install time exactly like the graph/IVF paths.
+    tombstones: Vec<u8>,
+}
+
+impl BqIndex {
+    pub(crate) fn new(
+        codes: Vec<u8>,
+        slot_to_id: Vec<u64>,
+        mean: Vec<f32>,
+        dim: usize,
+        tombstones: Vec<u8>,
+    ) -> Self {
+        let stride = crate::index::onebit::codes_stride(dim);
+        Self {
+            codes,
+            slot_to_id,
+            mean,
+            dim,
+            stride,
+            tombstones,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.slot_to_id.len()
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.codes.len() + self.slot_to_id.len() * 8 + self.mean.len() * 4 + self.tombstones.len()
+    }
+
+    fn is_dead(&self, slot: usize) -> bool {
+        let byte = slot / 8;
+        byte < self.tombstones.len() && (self.tombstones[byte] >> (slot % 8)) & 1 == 1
+    }
+
+    /// Top-`k` by Hamming distance, returned as `(score, id)` with score
+    /// DESCENDING-better to match every other `ScanHandle` arm (the AM
+    /// treats larger as nearer). Hamming is a distance, so the score is
+    /// its negation.
+    ///
+    /// Hamming over `dim` bits takes only `dim + 1` distinct values, so
+    /// ties are the common case and this ranking is COARSE by design. The
+    /// AM's exact rerank (`xs_recheckorderby`) is what makes it accurate:
+    /// `guc::hi_dim_rerank_candidate_count` treats a 1-bit index as
+    /// high-dim at ANY dim so `hi_dim_rerank = auto` widens the exact
+    /// window for BQ. Compose with that; do not try to fix ranking here.
+    pub(crate) fn search(&self, query: &[f32], k: usize) -> (Vec<f32>, Vec<u64>) {
+        if self.len() == 0 || k == 0 || query.len() != self.dim {
+            return (Vec::new(), Vec::new());
+        }
+        // Centre the query by the SAME mean the corpus was centred by.
+        let centered = crate::index::onebit::center(query, &self.mean);
+        let qcode = crate::index::onebit::pack_signs(&centered);
+        // Over-fetch when tombstones exist so dead slots can be dropped
+        // without under-filling k.
+        let want = if self.tombstones.is_empty() {
+            k
+        } else {
+            k.saturating_mul(2).max(k + 8).min(self.len())
+        };
+        let hits = crate::index::onebit::topk_hamming(&qcode, &self.codes, self.len(), want);
+        let mut scores = Vec::with_capacity(k);
+        let mut ids = Vec::with_capacity(k);
+        for (d, slot) in hits {
+            if self.is_dead(slot as usize) {
+                continue;
+            }
+            scores.push(-(d as f32));
+            ids.push(self.slot_to_id[slot as usize]);
+            if ids.len() == k {
+                break;
+            }
+        }
+        (scores, ids)
+    }
+
+    /// Unused-but-symmetric accessor kept for the stride assertion in
+    /// tests; the scan path reads `codes` through `search` only.
+    #[cfg(any(test, feature = "pg_test"))]
+    pub(crate) fn stride(&self) -> usize {
+        self.stride
+    }
+}
+
 impl OocIvfIndex {
     /// Build an OOC IVF index. The caller (the scan path) has
     /// already read the meta page and the (bounded) static regions;
@@ -1098,6 +1200,9 @@ pub(crate) enum ScanHandle {
     /// RAM-resident Vamana graph index (Phase G-2a). Navigated via
     /// greedy beam search instead of a flat/masked whole-index scan.
     Graph(Arc<GraphIndex>),
+    /// RAM-resident 1-bit sign-BQ index (`WITH (bit_width = 1)`). Scored
+    /// by Hamming over packed sign bits, then exactly reranked by the AM.
+    Bq(Arc<BqIndex>),
 }
 
 impl ScanHandle {
@@ -1107,6 +1212,7 @@ impl ScanHandle {
             ScanHandle::Mutable(a) => a.read().len(),
             ScanHandle::Ooc(a) => a.len(),
             ScanHandle::Graph(a) => a.len(),
+            ScanHandle::Bq(a) => a.len(),
         }
     }
 
@@ -1129,6 +1235,7 @@ impl ScanHandle {
             // `GraphIndex::search`, not this whole-index arm; same
             // inert fallback as Ooc should a future caller hit it.
             ScanHandle::Graph(a) => a.search(queries, k),
+            ScanHandle::Bq(a) => a.search(queries, k),
         }
     }
 
@@ -1149,6 +1256,7 @@ impl ScanHandle {
     pub(crate) fn graph(&self) -> Option<Arc<GraphIndex>> {
         match self {
             ScanHandle::Graph(a) => Some(a.clone()),
+            ScanHandle::Bq(_) => None,
             _ => None,
         }
     }
@@ -1174,6 +1282,7 @@ impl ScanHandle {
             // The graph scan path routes through `graph()` /
             // `GraphIndex::search` instead of a slot mask.
             ScanHandle::Graph(_) => None,
+            ScanHandle::Bq(_) => None,
         }
     }
 
@@ -1186,7 +1295,10 @@ impl ScanHandle {
     pub(crate) fn allow_slot_mask(&self, allowed: &HashSet<u64>) -> Option<Vec<bool>> {
         match self {
             ScanHandle::ReadOnly(a) => Some(a.allow_slot_mask(allowed)),
-            ScanHandle::Mutable(_) | ScanHandle::Ooc(_) | ScanHandle::Graph(_) => None,
+            ScanHandle::Mutable(_)
+            | ScanHandle::Ooc(_)
+            | ScanHandle::Graph(_)
+            | ScanHandle::Bq(_) => None,
         }
     }
 }
@@ -1253,6 +1365,8 @@ enum Stored {
     /// RAM-resident Vamana graph index (Phase G-2a). Installed by the
     /// graph scan path for a `kind = KIND_GRAPH` index.
     Graph(Arc<GraphIndex>),
+    /// RAM-resident 1-bit sign-BQ index. Installed by the BQ scan path.
+    Bq(Arc<BqIndex>),
 }
 
 impl Stored {
@@ -1263,6 +1377,7 @@ impl Stored {
             Stored::ReadOnly(a) => ScanHandle::ReadOnly(a.clone()),
             Stored::Ooc(a) => ScanHandle::Ooc(a.clone()),
             Stored::Graph(a) => ScanHandle::Graph(a.clone()),
+            Stored::Bq(a) => ScanHandle::Bq(a.clone()),
         }
     }
 }
@@ -1340,6 +1455,10 @@ pub fn lookup(
             Some(a)
         }
         Stored::ReadOnly(_) => None,
+        // A BQ index is scan-path-only and immutable in memory (sign codes
+        // carry no magnitude to update in place), so the knn `lookup` path
+        // treats it as a miss exactly like ReadOnly/Ooc/Graph.
+        Stored::Bq(_) => None,
         // OOC entries are installed only under the AM key (attnum=0);
         // the knn `lookup` (positive attnum) never matches one. Treat
         // it as a miss for the knn path (it can't be mutated in place).
@@ -1546,6 +1665,33 @@ pub(crate) fn scan_install_ooc(
     ScanHandle::Ooc(arc)
 }
 
+/// Index-AM scan install for a 1-bit sign-BQ index: cache a freshly-read
+/// [`BqIndex`] under `key`. Returns the installed [`ScanHandle::Bq`].
+pub(crate) fn scan_install_bq(
+    key: CacheKey,
+    index: BqIndex,
+    bytes: usize,
+    relfilenode: u32,
+    n_rows: i64,
+) -> ScanHandle {
+    let arc = Arc::new(index);
+    let mut g = CACHE.lock();
+    g.insert(
+        key,
+        Entry {
+            index: Stored::Bq(arc.clone()),
+            bytes,
+            relfilenode,
+            n_rows,
+            seq: next_seq(),
+            dirty: false,
+            persist: None,
+        },
+    );
+    enforce_cap(&mut g);
+    ScanHandle::Bq(arc)
+}
+
 /// Index-AM scan install for a Vamana graph index (Phase G-2a): cache
 /// a freshly-built [`GraphIndex`] under `key`. Returns the installed
 /// [`ScanHandle::Graph`].
@@ -1730,6 +1876,7 @@ pub fn am_entry_variant(rel_oid: pg_sys::Oid) -> Option<&'static str> {
                 Stored::ReadOnly(_) => "readonly",
                 Stored::Mutable(_) => "mutable",
                 Stored::Graph(_) => "graph",
+                Stored::Bq(_) => "bq",
             };
             if tag == "ooc" {
                 return Some("ooc");

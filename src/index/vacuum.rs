@@ -190,7 +190,14 @@ unsafe fn ambulkdelete_relfile(
     // helpers in relfile.rs are already generic over slot index,
     // not IVF-specific). The scan path (`scan.rs` / `graph.rs`)
     // excludes tombstoned slots from traversal and results.
-    if meta.is_graph() {
+    // A 1-bit sign-BQ index takes the same tombstone-only path as the
+    // graph kind, for the same reason: compacting would mean rewriting the
+    // whole packed codes chain and renumbering every slot, and
+    // `graph_tombstone_dead` is already generic over slot index (it does
+    // pure bitmap arithmetic, nothing graph-specific). Naming it `graph_*`
+    // is now a misnomer, kept to avoid churning the graph paths while that
+    // kind is being deprecated.
+    if meta.is_graph() || meta.is_bq() {
         let next_version = meta.am_version.saturating_add(1);
         let total_dead = graph_tombstone_dead(index, &meta, &dead_slots, next_version);
         let live = meta.n_vectors.saturating_sub(total_dead);

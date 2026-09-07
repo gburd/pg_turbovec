@@ -722,6 +722,116 @@ pub(crate) unsafe fn read_chain(
 /// which is sufficient for the existing single-writer SPI path
 /// and remains so here.
 #[allow(clippy::too_many_arguments)]
+/// Write a complete 1-bit sign-BQ relfile: the packed sign-code chain,
+/// the ids chain, the corpus-mean chain, then the meta page LAST.
+///
+/// A BQ index has no scales, codebook, rotation/TQ+ or blocked chain (see
+/// [`crate::index::page::KIND_BQ`]), so this is deliberately a separate
+/// writer rather than four "unless BQ" branches inside
+/// `write_full_inner` — which is load-bearing for every existing index.
+///
+/// Meta LAST is the v1.29.4 crash-safety invariant: an interrupted write
+/// leaves block 0 in its previous state (zero-filled for a fresh build),
+/// so readers see the index as empty or as the previous version, never as
+/// a half-written new layout.
+///
+/// # Safety
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_full_bq(
+    rel: pg_sys::Relation,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    slot_to_id: &[u64],
+    mean: &[f32],
+    am_version: u32,
+) {
+    use crate::index::page::MetaPageData;
+
+    let mut meta = MetaPageData::plan_bq(dim, n_vectors, am_version);
+    if n_vectors > 0 {
+        assert_eq!(
+            packed_codes.len() as u64,
+            n_vectors * u64::from(meta.stride_bytes),
+            "BQ codes length must be n_vectors * dim/8"
+        );
+        assert_eq!(slot_to_id.len() as u64, n_vectors, "one id per slot");
+        assert_eq!(mean.len(), dim as usize, "mean must be dim f32");
+    }
+
+    // Make room for every chain before writing any of them, so the meta
+    // page's offsets are valid the moment readers can see them.
+    extend_to(rel, meta.total_blocks().max(1));
+
+    if n_vectors > 0 {
+        write_chain_at(
+            rel,
+            meta.codes_first,
+            packed_codes,
+            meta.stride_bytes,
+            meta.rows_per_codes_page,
+            n_vectors,
+        );
+        let ids_bytes: &[u8] = std::slice::from_raw_parts(
+            slot_to_id.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(slot_to_id),
+        );
+        write_chain_at(
+            rel,
+            meta.ids_first,
+            ids_bytes,
+            std::mem::size_of::<u64>() as u32,
+            meta.rows_per_ids_page,
+            n_vectors,
+        );
+        // Corpus mean: an opaque byte chain, written with the same
+        // (stride = 1, rows_per_page = PAYLOAD_BYTES) convention the TQ+
+        // and coarse-centroid chains already use.
+        let mean_bytes: &[u8] =
+            std::slice::from_raw_parts(mean.as_ptr().cast::<u8>(), std::mem::size_of_val(mean));
+        write_chain_at(
+            rel,
+            meta.bq_mean_first,
+            mean_bytes,
+            1,
+            crate::index::page::PAYLOAD_BYTES as u32,
+            mean_bytes.len() as u64,
+        );
+    } else {
+        // Empty build: no chains, but the meta page must still exist so
+        // later inserts have stable state to extend.
+        meta.bq_mean_first = 0;
+        meta.bq_mean_count = 0;
+        meta.bq_mean_bytes = 0;
+    }
+
+    write_meta(rel, &meta);
+}
+
+/// Read the persisted corpus-mean vector of a BQ index.
+///
+/// # Safety
+/// Caller must hold a relation reference; `meta` must be this relation's.
+pub(crate) unsafe fn read_bq_mean(
+    rel: pg_sys::Relation,
+    meta: &crate::index::page::MetaPageData,
+) -> Vec<f32> {
+    if meta.bq_mean_bytes == 0 || meta.bq_mean_first == 0 {
+        return Vec::new();
+    }
+    let bytes = read_chain(
+        rel,
+        meta.bq_mean_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        meta.bq_mean_bytes,
+    );
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 pub(crate) unsafe fn write_full(
     rel: pg_sys::Relation,
     bit_width: u8,
@@ -1760,7 +1870,11 @@ unsafe fn write_full_inner_with_tombstones(
             + meta.rotation_count
             + meta.coarse_count
             + meta.cell_dir_count
-            + meta.graph_count;
+            + meta.graph_count
+            // See the identical sum in `write_tombstones_and_meta`: every
+            // chain must be counted or the tombstone chain lands on top of
+            // one (the v1.24.0 corruption). 0 for non-BQ kinds.
+            + meta.bq_mean_count;
         meta.tombstone_first = after_all;
         meta.tombstone_bytes = tombstone_buf.len() as u64;
         meta.tombstone_count = MetaPageData::byte_pages_needed(meta.tombstone_bytes);
@@ -2753,7 +2867,14 @@ pub(crate) unsafe fn write_tombstones_and_meta(
         + old.rotation_count
         + old.coarse_count
         + old.cell_dir_count
-        + old.graph_count;
+        + old.graph_count
+        // MUST include the BQ mean chain. Omitting a chain here is not a
+        // cosmetic slip: the v1.24.0 corruption was exactly this sum
+        // missing `graph_count`, which placed the tombstone chain on top
+        // of the graph adjacency and corrupted the index on the first
+        // insert after VACUUM. `bq_mean_count` is 0 for every non-BQ
+        // kind, so this is a no-op except for 1-bit indexes.
+        + old.bq_mean_count;
     let tombstone_first = if old.tombstone_first != 0 {
         old.tombstone_first
     } else {

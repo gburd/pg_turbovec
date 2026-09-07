@@ -588,7 +588,22 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                     // turbovec.cache_size_mb; `on` always, `off` never.
                     let codes_bytes = (meta.n_vectors as u64)
                         .saturating_mul(((meta.dim as u64) * (meta.bit_width as u64)) / 8);
-                    if meta.has_graph() {
+                    if meta.is_bq() {
+                        // 1-bit sign-BQ: its own chain shape (no scales,
+                        // codebook, rotation or blocked chain) and its own
+                        // Hamming scorer, so it must be dispatched before
+                        // every TurboQuant-shaped path below. Mutually
+                        // exclusive with graph/IVF by construction (the
+                        // reloption validator rejects graph + 1-bit, and
+                        // ambuild rejects lists + 1-bit).
+                        install_bq_index(
+                            (*scan).indexRelation,
+                            &meta,
+                            key,
+                            relfile_node,
+                            version_as_i64,
+                        )
+                    } else if meta.has_graph() {
                         // Phase G-2a: a graph index is never IVF (a
                         // build never sets both), so this branch is
                         // mutually exclusive with the out_of_core_
@@ -1002,6 +1017,59 @@ unsafe fn install_whole_index(
 /// `relfile::read_meta(rel)` on the same relation and has
 /// `meta.has_graph() == true`.
 #[allow(clippy::too_many_arguments)]
+/// Build and install a RAM-resident [`cache::BqIndex`] for a 1-bit
+/// sign-BQ index (`kind = KIND_BQ`).
+///
+/// Reads the packed sign codes, the ids chain, the persisted corpus mean
+/// and the tombstone bitmap under ONE outer shared rewrite lock -- the
+/// v1.29.1 monitor-consistency invariant, same as `install_whole_index`
+/// and `install_graph_index`, so the four reads are one snapshot.
+///
+/// # Safety
+/// `rel` holds a live index relation reference; `meta` came from
+/// `relfile::read_meta(rel)` on the same relation. Caller holds at least
+/// `AccessShareLock`.
+unsafe fn install_bq_index(
+    rel: pg_sys::Relation,
+    meta: &crate::index::page::MetaPageData,
+    key: CacheKey,
+    relfile_node: u32,
+    version_as_i64: i64,
+) -> cache::ScanHandle {
+    relfile::lock_relfile_read(rel);
+    // Re-read the meta under the lock so the chains we read below belong
+    // to the same snapshot (see read_full_consistent's rationale).
+    let meta_consistent = relfile::read_meta(rel).unwrap_or(*meta);
+    let meta = &meta_consistent;
+    let n = meta.n_vectors as usize;
+    let codes = relfile::read_chain(
+        rel,
+        meta.codes_first,
+        meta.stride_bytes,
+        meta.rows_per_codes_page,
+        meta.n_vectors,
+    );
+    let ids = relfile::read_ids_only(rel, meta);
+    let mean = relfile::read_bq_mean(rel, meta);
+    let tombstones = relfile::read_tombstones(rel, meta);
+    relfile::unlock_relfile_read(rel);
+
+    // A BQ index without its mean cannot be queried correctly: the query
+    // must be centred by the SAME vector the corpus was. Refuse rather
+    // than silently return garbage (the documented R@10 = 0.0 footgun).
+    if n > 0 && mean.len() != meta.dim as usize {
+        ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            "turbovec: this 1-bit (binary quantization) index is missing its corpus-mean vector",
+            "The index cannot be scanned without it. Run REINDEX INDEX on this index to rebuild it from the heap."
+        );
+    }
+    let bq = cache::BqIndex::new(codes, ids, mean, meta.dim as usize, tombstones);
+    let bytes = bq.bytes();
+    cache::scan_install_bq(key, bq, bytes, relfile_node, version_as_i64)
+}
+
 unsafe fn install_graph_index(
     rel: pg_sys::Relation,
     meta: &crate::index::page::MetaPageData,

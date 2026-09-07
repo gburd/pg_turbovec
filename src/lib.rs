@@ -1492,7 +1492,7 @@ mod tests {
 
         // WAL cost of ONE single-row insert transaction.
         let wal_for_one_insert = |id: i64| -> i64 {
-            let before: i64 = Spi::get_one("SELECT pg_current_wal_lsn() - '0/0'::pg_lsn")
+            let before: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
                 .unwrap()
                 .expect("lsn");
             Spi::run(&format!(
@@ -1502,7 +1502,7 @@ mod tests {
                      FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector"
             ))
             .unwrap();
-            let after: i64 = Spi::get_one("SELECT pg_current_wal_lsn() - '0/0'::pg_lsn")
+            let after: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
                 .unwrap()
                 .expect("lsn");
             after - before

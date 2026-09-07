@@ -158,6 +158,68 @@ pub fn codes_stride(dim: usize) -> usize {
     dim.div_ceil(8)
 }
 
+/// Hamming distance between two packed sign-code rows of equal length.
+///
+/// No tail masking is needed: [`pack_signs`] zeroes the unused trailing
+/// bits of the last byte (unit-asserted by `tail_bits_are_zero`), so
+/// equal-length codes agree on those bits and they contribute 0 to the
+/// XOR. This is the same MSB-first convention as `bitvec.rs` and
+/// Postgres's `bit` type, so the SQL popcount kernels and this scorer
+/// cannot disagree.
+#[inline]
+pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum()
+}
+
+/// Top-`k` nearest slots to `query_code` by Hamming distance over a flat
+/// chain of `n` packed codes, returned as `(distance, slot)` ascending.
+///
+/// Deliberately SCALAR. The v1.7.3 incident — where pre-AVX2 CPUs
+/// returned WRONG ANN results from a mis-specialised kernel — is the
+/// reason: `u8::count_ones` lowers to `POPCNT` on any modern x86_64 and
+/// to the equivalent elsewhere, and a hand-vectorised version must be
+/// proven bit-identical against THIS function before it can replace it.
+/// A wide-SIMD popcount is a follow-up, not a prerequisite.
+///
+/// Ties break toward the lower slot so results are deterministic (the
+/// same reason `partition::rank_nearest` does). Hamming over `dim` bits
+/// has only `dim + 1` distinct values, so ties are COMMON — which is
+/// exactly why the caller must rerank exactly: see
+/// `guc::hi_dim_rerank_candidate_count`, which treats a 1-bit index as
+/// high-dim at any `dim` so `hi_dim_rerank = auto` widens the exact
+/// rerank window for BQ.
+pub fn topk_hamming(query_code: &[u8], codes: &[u8], n: usize, k: usize) -> Vec<(u32, u32)> {
+    let stride = query_code.len();
+    if k == 0 || n == 0 || stride == 0 {
+        return Vec::new();
+    }
+    debug_assert!(codes.len() >= n * stride);
+    // A bounded max-heap of the k best: O(n log k), no full sort of n.
+    let mut heap: std::collections::BinaryHeap<(u32, u32)> =
+        std::collections::BinaryHeap::with_capacity(k + 1);
+    for slot in 0..n {
+        let row = &codes[slot * stride..(slot + 1) * stride];
+        let d = hamming(query_code, row);
+        if heap.len() < k {
+            heap.push((d, slot as u32));
+        } else if let Some(&(worst, worst_slot)) = heap.peek() {
+            // Strictly-better OR equal-distance-but-lower-slot, so the
+            // tie-break is deterministic rather than heap-order-dependent.
+            if d < worst || (d == worst && (slot as u32) < worst_slot) {
+                heap.pop();
+                heap.push((d, slot as u32));
+            }
+        }
+    }
+    let mut out = heap.into_vec();
+    out.sort_unstable_by_key(|&(d, slot)| (d, slot));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +343,85 @@ mod tests {
     }
 
     /// Storage: 1-bit stride is exactly half of 2-bit.
+    #[test]
+    fn hamming_matches_bitvec_convention() {
+        // Same MSB-first packing as bitvec.rs, so XOR popcount must agree
+        // with a hand count. 0b1010_0000 vs 0b1100_0000 differ in 2 bits.
+        let a = pack_signs(&[1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0]);
+        let b = pack_signs(&[1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]);
+        assert_eq!(a, vec![0b1010_0000]);
+        assert_eq!(b, vec![0b1100_0000]);
+        assert_eq!(hamming(&a, &b), 2);
+        assert_eq!(hamming(&a, &a), 0, "self-distance must be zero");
+    }
+
+    #[test]
+    fn hamming_ignores_zeroed_tail_bits() {
+        // dim=12 -> 2 bytes with 4 unused trailing bits. pack_signs zeroes
+        // them, so two codes that agree on all 12 real dims are distance 0
+        // regardless of the tail.
+        let v: Vec<f32> = (0..12)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let a = pack_signs(&v);
+        let b = pack_signs(&v);
+        assert_eq!(a.len(), 2);
+        assert_eq!(hamming(&a, &b), 0);
+    }
+
+    /// The top-k heap must agree with brute force on every query. A
+    /// bounded heap with a tie-break is easy to get subtly wrong, and
+    /// Hamming over `dim` bits has only `dim + 1` distinct values so ties
+    /// are the common case, not the edge case.
+    #[test]
+    fn topk_hamming_matches_brute_force() {
+        let dim = 32usize;
+        let n = 200usize;
+        let stride = codes_stride(dim);
+        // Deterministic pseudo-random corpus of packed codes.
+        let mut codes = vec![0u8; n * stride];
+        let mut x: u32 = 0x1234_5678;
+        for b in codes.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (x >> 24) as u8;
+        }
+        for qi in 0..8usize {
+            let q = &codes[qi * stride..(qi + 1) * stride];
+            for k in [1usize, 5, 10, 50] {
+                let got = topk_hamming(q, &codes, n, k);
+                // Brute force: full sort by (distance, slot).
+                let mut all: Vec<(u32, u32)> = (0..n)
+                    .map(|s| (hamming(q, &codes[s * stride..(s + 1) * stride]), s as u32))
+                    .collect();
+                all.sort_unstable_by_key(|&(d, s)| (d, s));
+                all.truncate(k);
+                assert_eq!(got, all, "query {qi}, k={k}");
+            }
+        }
+    }
+
+    #[test]
+    fn topk_hamming_finds_self_first_and_handles_edges() {
+        let dim = 64usize;
+        let stride = codes_stride(dim);
+        let n = 10usize;
+        let mut codes = vec![0u8; n * stride];
+        // Slot i gets i bits set, so distances from slot 0 are distinct.
+        for i in 0..n {
+            for bit in 0..i {
+                codes[i * stride + bit / 8] |= 0x80 >> (bit % 8);
+            }
+        }
+        let q = codes[3 * stride..4 * stride].to_vec();
+        let got = topk_hamming(&q, &codes, n, 3);
+        assert_eq!(got[0], (0, 3), "a vector must be its own nearest neighbour");
+        // k == 0 and n == 0 must not panic and must return nothing.
+        assert!(topk_hamming(&q, &codes, n, 0).is_empty());
+        assert!(topk_hamming(&q, &codes, 0, 5).is_empty());
+        // k larger than n clamps.
+        assert_eq!(topk_hamming(&q, &codes, n, 99).len(), n);
+    }
+
     #[test]
     fn onebit_stride_is_half_of_twobit() {
         for dim in [8usize, 128, 768, 1536] {

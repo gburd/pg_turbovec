@@ -55,7 +55,10 @@
 //!  296     8  graph_offsets_bytes (u64)                |
 //!  304     8  graph_neighbors_bytes (u64)              |
 //!  312     4  graph_entry_point (u32)                 |
-//!  316   ...  reserved (zero)                         /
+//!  316     4  bq_mean_first (BlockNumber)              |  v8 (1-bit sign-BQ)
+//!  320     4  bq_mean_count (u32)                     |
+//!  324     8  bq_mean_bytes (u64)                     |
+//!  332   ...  reserved (zero)                         /
 //! ```
 //!
 //! After the meta block come three contiguous page chains for
@@ -223,6 +226,22 @@ pub const KIND_SINGLE: u8 = 0;
 pub const KIND_COLBERT: u8 = 1;
 /// Vamana graph index kind (Phase G-2a). See [`KIND_SINGLE`].
 pub const KIND_GRAPH: u8 = 2;
+/// 1-bit sign binary-quantization index kind (`WITH (bit_width = 1)`).
+///
+/// A BQ relfile is a DIFFERENT shape from every other kind: the codes
+/// chain holds `dim/8` packed sign bits per vector and there is **no**
+/// scales chain, no codebook, no rotation/TQ+ chain and no blocked chain
+/// (see `docs/ONEBIT_BQ.md`). Instead it carries one new chain: the
+/// corpus mean vector (`dim` f32), needed to centre a query the same way
+/// the corpus was centred before taking signs.
+///
+/// Discriminating by `kind` rather than bumping `VERSION` is deliberate
+/// and is what keeps this additive: every pre-existing index keeps
+/// `kind` = SINGLE/COLBERT/GRAPH and decodes byte-identically with no
+/// REINDEX, exactly as the v4→v5→v6 per-kind bumps did. The three
+/// `bq_mean_*` fields land in bytes that were reserved-and-zero on every
+/// prior version, so an old meta page reads them as "absent".
+pub const KIND_BQ: u8 = 3;
 
 /// The on-disk version we read **and** write today. Decode
 /// accepts strictly older versions for migration-HINT purposes
@@ -381,6 +400,16 @@ pub struct MetaPageData {
     /// starts). `0` when this is not a graph index or the graph is
     /// empty.
     pub graph_entry_point: u32,
+
+    // ---- v8 fields (1-bit sign-BQ, `kind = KIND_BQ`) ----
+    /// First block of the corpus-mean chain (`dim` f32, the per-dim mean
+    /// subtracted before taking sign bits). `0` when this is not a BQ
+    /// index. See [`KIND_BQ`] and `docs/ONEBIT_BQ.md`.
+    pub bq_mean_first: u32,
+    /// Number of pages in the mean chain.
+    pub bq_mean_count: u32,
+    /// Byte length of the mean vector (`dim * 4`).
+    pub bq_mean_bytes: u64,
 }
 
 impl MetaPageData {
@@ -604,6 +633,10 @@ impl MetaPageData {
             graph_offsets_bytes: 0,
             graph_neighbors_bytes: 0,
             graph_entry_point: 0,
+            // v8 1-bit sign-BQ: absent unless kind == KIND_BQ.
+            bq_mean_first: 0,
+            bq_mean_count: 0,
+            bq_mean_bytes: 0,
         }
     }
 
@@ -849,6 +882,14 @@ impl MetaPageData {
         out[v6_base + 8..v6_base + 16].copy_from_slice(&self.graph_offsets_bytes.to_le_bytes());
         out[v6_base + 16..v6_base + 24].copy_from_slice(&self.graph_neighbors_bytes.to_le_bytes());
         out[v6_base + 24..v6_base + 28].copy_from_slice(&self.graph_entry_point.to_le_bytes());
+        // v8 1-bit sign-BQ fields begin at v6_base + 28 = 292 (page
+        // offset 316): bq_mean_first + bq_mean_count (u32 each) +
+        // bq_mean_bytes (u64). Zero for every non-BQ kind, which is what
+        // every pre-v8-BQ index already has in these reserved bytes.
+        let bq_base = v6_base + 28;
+        out[bq_base..bq_base + 4].copy_from_slice(&self.bq_mean_first.to_le_bytes());
+        out[bq_base + 4..bq_base + 8].copy_from_slice(&self.bq_mean_count.to_le_bytes());
+        out[bq_base + 8..bq_base + 16].copy_from_slice(&self.bq_mean_bytes.to_le_bytes());
         // Trailing bytes reserved (zero).
         out
     }
@@ -930,6 +971,10 @@ impl MetaPageData {
             graph_offsets_bytes: 0,
             graph_neighbors_bytes: 0,
             graph_entry_point: 0,
+            // v8 1-bit sign-BQ: absent unless kind == KIND_BQ.
+            bq_mean_first: 0,
+            bq_mean_count: 0,
+            bq_mean_bytes: 0,
         };
 
         if version >= 2 {
@@ -1023,6 +1068,20 @@ impl MetaPageData {
                     u64::from_le_bytes(bytes[v6_base + 16..v6_base + 24].try_into().unwrap());
                 me.graph_entry_point =
                     u32::from_le_bytes(bytes[v6_base + 24..v6_base + 28].try_into().unwrap());
+            }
+            // v8 1-bit sign-BQ mean chain (data offset 292..308, page
+            // offset 316..332). Additive exactly like the v6 block above:
+            // any pre-BQ meta page has these bytes zeroed ("no mean
+            // chain"), so existing indexes decode unchanged with no
+            // REINDEX. A short buffer leaves them at the 0 default.
+            let bq_base = v6_base + 28; // 292
+            if bytes.len() >= bq_base + 16 {
+                me.bq_mean_first =
+                    u32::from_le_bytes(bytes[bq_base..bq_base + 4].try_into().unwrap());
+                me.bq_mean_count =
+                    u32::from_le_bytes(bytes[bq_base + 4..bq_base + 8].try_into().unwrap());
+                me.bq_mean_bytes =
+                    u64::from_le_bytes(bytes[bq_base + 8..bq_base + 16].try_into().unwrap());
             }
         }
 
@@ -1205,6 +1264,96 @@ impl MetaPageData {
     /// consults it to find the persistent token index.
     pub fn is_colbert(&self) -> bool {
         self.kind == KIND_COLBERT
+    }
+
+    /// Returns `true` when this meta page describes a 1-bit sign-BQ
+    /// index (`kind = KIND_BQ`, `WITH (bit_width = 1)`). Every other kind
+    /// returns `false`.
+    ///
+    /// A BQ index has NO scales chain, no codebook, no rotation/TQ+ chain
+    /// and no blocked chain; its codes chain holds `dim/8` packed sign
+    /// bits per vector and it carries a corpus-mean chain instead. Readers
+    /// MUST consult this before assuming the TurboQuant chain shape.
+    pub fn is_bq(&self) -> bool {
+        self.kind == KIND_BQ
+    }
+
+    /// Plan the relfile layout for a 1-bit sign-BQ index: a codes chain of
+    /// `dim/8` packed sign bits per vector, an ids chain, and a
+    /// corpus-mean chain of `dim` f32 — and nothing else.
+    ///
+    /// Deliberately a separate constructor rather than a flag on
+    /// [`Self::plan_with_blocked`]: the BQ shape has no scales, codebook,
+    /// rotation or blocked chain, so threading it through the TurboQuant
+    /// planner would mean four "unless BQ" branches in code that is
+    /// load-bearing for every existing index. Keeping them apart means a
+    /// bug here cannot change the layout of a non-BQ index.
+    pub fn plan_bq(dim: u32, n_vectors: u64, am_version: u32) -> Self {
+        assert_eq!(dim % 8, 0, "dim must be a multiple of 8");
+        let stride_bytes = crate::index::onebit::codes_stride(dim as usize) as u32;
+        let rows_per_codes_page = Self::rows_per_page(stride_bytes);
+        let rows_per_ids_page = Self::rows_per_page(size_of::<u64>() as u32);
+
+        let codes_count = Self::padded_pages_needed(n_vectors, rows_per_codes_page);
+        let ids_count = Self::padded_pages_needed(n_vectors, rows_per_ids_page);
+        let mean_bytes = u64::from(dim) * 4;
+        let mean_count = Self::byte_pages_needed(mean_bytes);
+
+        let codes_first = 1;
+        // No scales chain: ids follow codes directly.
+        let ids_first = codes_first + codes_count;
+        let mean_first = ids_first + ids_count;
+
+        Self {
+            version: VERSION,
+            bit_width: 1,
+            kind: KIND_BQ,
+            dim,
+            n_vectors,
+            codes_first,
+            codes_count,
+            // A BQ index has NO scales chain. `0`/`0` here is what
+            // `is_bq()` readers rely on, and what keeps `total_blocks()`
+            // and the running-sum chain offsets correct.
+            scales_first: 0,
+            scales_count: 0,
+            ids_first,
+            ids_count,
+            rows_per_codes_page,
+            // Meaningless for BQ (no scales chain) but must be non-zero:
+            // `read_chain` treats rows_per_page == 0 as a corrupt meta.
+            rows_per_scales_page: Self::rows_per_page(size_of::<f32>() as u32),
+            rows_per_ids_page,
+            stride_bytes,
+            am_version,
+            blocked_first: 0,
+            blocked_count: 0,
+            blocked_bytes: 0,
+            n_blocks_blocked: 0,
+            codebook_n_levels: 0,
+            centroids: [0.0; MAX_CODEBOOK_LEVELS],
+            boundaries: [0.0; MAX_CODEBOOK_LEVELS - 1],
+            rotation_first: 0,
+            rotation_count: 0,
+            rotation_dim: 0,
+            lists: 0,
+            coarse_first: 0,
+            coarse_count: 0,
+            cell_dir_first: 0,
+            cell_dir_count: 0,
+            ivf_degraded: false,
+            tombstone_first: 0,
+            tombstone_count: 0,
+            tombstone_bytes: 0,
+            graph_first: 0,
+            graph_count: 0,
+            graph_offsets_bytes: 0,
+            graph_neighbors_bytes: 0,
+            graph_entry_point: 0,
+            bq_mean_first: if mean_bytes > 0 { mean_first } else { 0 },
+            bq_mean_count: mean_count,
+            bq_mean_bytes: mean_bytes,
+        }
     }
 
     /// Returns `true` when this meta page describes a Vamana graph

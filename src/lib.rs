@@ -2475,18 +2475,22 @@ mod tests {
         // It must actually scan, via the index, and rank a vector nearest
         // to itself.
         Spi::run("SET enable_seqscan = off").unwrap();
+        // Confirm the BQ index is actually USED (not a seq scan silently
+        // masking it -- the partial-index lesson from the 2026-09-05 field
+        // report). `EXPLAIN` output comes back one row per line.
         let plan: Option<String> = Spi::get_one(
-            "SELECT string_agg(l, ' ') FROM (\
-               SELECT unnest(string_to_array(\
-                 (SELECT * FROM (EXPLAIN (COSTS OFF) \
-                    SELECT id FROM t_bq1 ORDER BY emb OPERATOR(turbovec.<=>) \
-                      (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 5) x LIMIT 1), E'\\n')) l) q",
+            "SELECT string_agg(x, ' ') FROM (\
+               EXPLAIN (COSTS OFF) SELECT id FROM t_bq1 \
+               ORDER BY emb OPERATOR(turbovec.<=>) \
+                 (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 5\
+             ) AS e(x)",
         )
         .unwrap();
         assert!(
             plan.as_deref().unwrap_or("").contains("Index Scan"),
             "the BQ index must be used for an ORDER BY scan, got plan: {plan:?}"
         );
+
         let first: Option<i64> = Spi::get_one(
             "SELECT id FROM t_bq1 ORDER BY emb OPERATOR(turbovec.<=>) \
              (SELECT emb FROM t_bq1 WHERE id = 42) LIMIT 1",

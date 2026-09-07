@@ -1,0 +1,5 @@
+-- pg_turbovec 2.5.0 -> 2.6.0
+-- 1-bit sign binary quantization (WITH (bit_width = 1)) now builds, scans,
+-- inserts and vacuums. New index kind (KIND_BQ), no wire-version bump, no
+-- REINDEX, no SQL surface change.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

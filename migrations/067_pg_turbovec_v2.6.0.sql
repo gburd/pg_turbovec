@@ -1,0 +1,30 @@
+-- 2.6.0 — 1-bit sign binary quantization (bit_width = 1) end to end.
+--
+-- WITH (bit_width = 1) now builds, scans, inserts and vacuums. Previously the
+-- reloption was accepted for forward compatibility but the build raised a
+-- clear "not yet implemented" ERROR.
+--
+-- 1-bit is NOT TurboQuant-at-1-bit: the turbovec crate hard-rejects
+-- bit_width < 2 in both constructors, so this is a distinct scheme -- sign
+-- binary quantization (the DiskANN/pgvector/Qdrant coarse code). Per-vector
+-- storage is dim/8 with NO scale (half the 2-bit stride), scored by Hamming
+-- (popcount of XOR) and then exactly reranked by the AM.
+--
+-- NO wire-format change (stays v8) and NO REINDEX: this is a new kind byte
+-- (KIND_BQ = 3), not a version bump. Every existing index keeps
+-- kind = SINGLE/COLBERT/GRAPH and decodes byte-identically -- the same
+-- additive per-kind path v4->v5->v6 used. The three bq_mean_* meta fields
+-- occupy page offset 316, which was reserved-and-zero on every prior version,
+-- so an old meta page reads them as absent.
+--
+-- Mean-centering is load-bearing: the naive sign-at-zero rule sets every bit
+-- on dense-positive data (measured R@10 = 0.0 on GIST), so the per-dim corpus
+-- mean is subtracted before taking signs, persisted, and applied to queries.
+-- A corpus still collapsed AFTER centering (constant/near-constant) is
+-- rejected at build rather than shipping a signal-free index.
+--
+-- Not yet composed: bit_width = 1 with lists > 0 (IVF), rejected with a clear
+-- ERROR. bit_width = 1 with graph = true stays rejected in the reloption
+-- validator (and the graph kind is deprecated as of 2.5.0).
+--
+-- No SQL surface change. This migration is intentionally empty.

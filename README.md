@@ -181,6 +181,19 @@ and there is no reason to use pg_turbovec instead.
 | RAG / semantic search, R@10 ≥ 0.95 acceptable | **`bit_width = 4` (default)** | 780 B | 1.000 |
 | Memory pressure dominates, R@10 ≥ 0.85 acceptable | `bit_width = 2` | 396 B | 1.000 |
 | Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 396 B | 1.000 (vs 0.65-0.75) |
+| Absolute minimum storage, recall matters less | `bit_width = 1` (sign BQ, opt-in) | 192 B | not yet published |
+
+**`bit_width = 1`** (new in v2.6.0) is a different scheme from the 2/3/4-bit
+TurboQuant path: it keeps only each coordinate's sign (after subtracting the
+corpus mean), scores by Hamming, and relies on the exact re-rank for
+accuracy. It is the smallest option — `dim/8` bytes and no per-vector scale —
+and deliberately **opt-in, never a default**: it is lossy enough that
+`turbovec.hi_dim_rerank` widens the exact-rerank window for it at any
+dimension. A corpus whose vectors all share one sign pattern even after
+centering is rejected at build rather than silently returning arbitrary rows.
+Its recall/latency frontier on real corpora is not yet published; the
+correctness, storage and scan behaviour are covered by tests. Not yet
+combinable with `lists = N` (IVF).
 
 Measured storage and recall come from the head-to-head sweep on
 1 M × 1536-d OpenAI ada-002 embeddings; methodology and the synthetic

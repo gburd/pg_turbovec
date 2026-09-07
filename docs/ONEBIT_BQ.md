@@ -1,12 +1,24 @@
 # 1-bit binary quantization (`WITH (bit_width = 1)`) — design + status
 
-**Status (feat/onebit-rerank):** foundation landed (reloption + rerank
-default + pure-Rust sign-BQ core, all compiling + unit-tested). The
-build/scan encode path is **not yet wired** — a `bit_width = 1` build
-currently ERRORs clearly (never panics, never ships a silent landmine).
-This doc records the kernel evidence, the design decision, the wire
-impact, and the precise remaining work so the orchestrator (or a
-follow-up agent) can finish the M-L integration.
+**Status: SHIPPED in v2.6.0 — `bit_width = 1` builds, scans, inserts and
+vacuums.** The foundation (reloption + rerank default + pure-Rust sign-BQ
+core) landed earlier; v2.6.0 wired the encode path, the Hamming scan
+kernel, `aminsert`, VACUUM and `turbovec_check`.
+
+Two corrections to what this doc originally specified, both recorded
+below in place:
+
+- **No wire-version bump.** §4 said "bump `VERSION` 7 → 8". That was
+  written when v7 was current; by the time the encode path landed the
+  format was already at v8, and the right discriminator turned out to be
+  a **new `kind` byte (`KIND_BQ = 3`)**, not a version bump. Existing
+  indexes keep `kind = SINGLE/COLBERT/GRAPH` and decode byte-identically
+  — **no REINDEX**. The `bq_mean_*` fields sit at page offset 316, which
+  was reserved-and-zero on every prior version.
+- **IVF + 1-bit is not composed yet.** §5's closing line said IVF
+  "composes"; it is currently rejected with a clear ERROR
+  (`bit_width = 1` with `lists > 0`), because the cell-contiguous layout
+  and per-cell Hamming path are not wired. Flat BQ works.
 
 Prior offline study: `.agent/notes/BQ_HNSW_FEASIBILITY.md` (measured
 recall + storage; findings respected here, not re-derived).
@@ -143,7 +155,7 @@ not landed. The bump lands with the encode path, not before.
 
 ---
 
-## 5. Remaining work (the M-L integration — needs the pgrx cluster)
+## 5. What shipped (v2.6.0) — was "remaining work"
 
 Not landed here because it (a) is a real new scan kernel + wire path
 that can't be validated end-to-end in the shared-cluster sandbox, and
@@ -179,3 +191,77 @@ that can't be validated end-to-end in the shared-cluster sandbox, and
 IVF `WITH (lists = N, bit_width = 1)` composes (cell-contiguous sign
 codes + Hamming per-cell); the graph kind is explicitly excluded for now
 (rejected in `options.rs`).
+
+---
+
+## 6. As-built notes (v2.6.0)
+
+What differed from the spec above, and the bugs found wiring it:
+
+1. **`KIND_BQ = 3`, not a version bump** (see the Status note). A BQ
+   relfile has: a codes chain of `dim/8` packed sign bits per vector, an
+   ids chain, and a corpus-mean chain (`dim` f32). No scales, no
+   codebook, no rotation/TQ+, no blocked chain. `MetaPageData::plan_bq`
+   is a **separate** constructor rather than a flag on
+   `plan_with_blocked`, so a bug in the BQ layout cannot change the
+   layout of any existing index.
+
+2. **Three instances of the v1.24.0 corruption class, found and fixed.**
+   `write_tombstones_and_meta`, the tombstone placement inside the
+   rewrite path, and `MetaPageData::total_blocks()` each summed chain
+   page counts *without* `bq_mean_count`. On a BQ index that would have
+   placed the tombstone chain **on top of the mean vector** and
+   under-sized the relation — the identical shape of the v1.24.0 graph
+   bug (which omitted `graph_count`). Found by auditing every
+   chain-offset sum in the tree, not just the path being added.
+
+3. **Degeneracy must be checked on the CENTERED corpus.** The first
+   implementation checked the raw corpus, which rejects exactly the
+   dense-positive corpora this feature exists to handle (they *are*
+   degenerate raw — every sign bit is 1 — and index fine after
+   centering). The existing unit test
+   `all_positive_is_degenerate_raw_but_centering_fixes_it` says so in its
+   name. CI caught it. The guard still fires for a corpus collapsed
+   *after* centering (constant / near-constant), where Hamming is
+   uniformly 0 and results would be arbitrary.
+
+4. **The mean is NOT recomputed on `aminsert`.** Recomputing it would
+   invalidate every sign code already packed against the old mean, so a
+   single insert would silently degrade the whole index's ranking. The
+   build-time mean is treated as fixed; drift is a REINDEX concern, which
+   matches the build-then-serve model the reloption's guidance already
+   sets out.
+
+5. **VACUUM is tombstone-only**, sharing the graph kind's path
+   (`graph_tombstone_dead` was already kind-agnostic slot arithmetic).
+   Compacting would require rewriting the whole packed codes chain and
+   renumbering every slot.
+
+6. **`turbovec_check` skips the scales validation for BQ only.** BQ has
+   no scales chain, so the v2.2.2 check that closed the scan-fatal blind
+   spot would otherwise report every BQ index corrupt. It reports
+   `kind = 'bq'`.
+
+7. **The Hamming kernel is deliberately scalar.** `u8::count_ones`
+   lowers to `POPCNT`; a hand-vectorised version must be proven
+   bit-identical against `onebit::topk_hamming` first. This is the
+   v1.7.3 lesson (a mis-specialised kernel returned *wrong* ANN results
+   on pre-AVX2 CPUs) applied pre-emptively. Ties break toward the lower
+   slot, and since Hamming over `dim` bits has only `dim + 1` distinct
+   values, ties are the common case — which is why the AM's exact rerank
+   does the fine ranking and `hi_dim_rerank` treats a 1-bit index as
+   high-dim at any `dim`.
+
+### Still open
+
+- **IVF + 1-bit** (`lists > 0` with `bit_width = 1`) — rejected with a
+  clear ERROR; the cell-contiguous sign layout and per-cell Hamming scan
+  are unwired.
+- **Graph + 1-bit** — rejected in `options.rs` (and the graph kind is
+  deprecated as of v2.5.0, so this will not be pursued).
+- **SIMD popcount** — see note 7.
+- **Recall at scale.** The `#[pg_test]`s prove correctness, storage and
+  end-to-end scan behaviour on synthetic corpora. The published
+  recall/latency frontier for BQ still needs a real-corpus run on an
+  AVX2 host (per `AGENTS.md`, latency numbers may only come from
+  `arnold`).

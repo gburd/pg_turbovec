@@ -4,6 +4,83 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.0] — 2026-09-07
+
+**1-bit sign binary quantization (`WITH (bit_width = 1)`) works end to
+end** — build, scan, `aminsert`, VACUUM. **No wire-format change (stays
+v8), no REINDEX, no SQL surface change.** Previously the reloption was
+accepted for forward compatibility but the build raised a clear "not yet
+implemented" ERROR.
+
+1-bit is **not** TurboQuant-at-1-bit: the turbovec crate hard-rejects
+`bit_width < 2` in both constructors, so this is a distinct scheme — sign
+binary quantization, the DiskANN/pgvector/Qdrant coarse code. Per-vector
+storage is `dim/8` with **no** per-vector scale (half the 2-bit stride,
+and it also drops the codebook, the rotation/TQ+ chain and the blocked
+chain), scored by Hamming (`popcount(XOR)`) and then **exactly reranked**
+by the AM's existing `xs_recheckorderby` machinery.
+
+### Why there is no wire bump
+
+A new **`kind` byte** (`KIND_BQ = 3`), not a version bump. Every existing
+index keeps `kind = SINGLE/COLBERT/GRAPH` and decodes byte-identically —
+the same additive per-kind path v4→v5→v6 used. The three `bq_mean_*` meta
+fields occupy page offset 316, reserved-and-zero on every prior version,
+so an old meta page reads them as "absent". (`docs/ONEBIT_BQ.md` §4
+originally specified a 7→8 bump; that was written when v7 was current.)
+
+### Mean-centering is load-bearing
+
+The naive sign-at-zero rule sets every bit on dense-positive data
+(measured R@10 = 0.0 on GIST), so the per-dim corpus mean is subtracted
+before taking signs, **persisted**, and applied to queries too. A corpus
+still collapsed *after* centering (constant / near-constant) is rejected
+at build rather than shipping a signal-free index. Scanning an index whose
+mean is missing ERRORs with a REINDEX hint rather than returning garbage.
+
+### Three instances of the v1.24.0 corruption class, found and fixed
+
+`write_tombstones_and_meta`, the tombstone placement inside the rewrite
+path, and `MetaPageData::total_blocks()` each summed chain page counts
+**without** `bq_mean_count`. On a BQ index that would have placed the
+tombstone chain **on top of the mean vector** and under-sized the
+relation — the identical shape of the v1.24.0 graph bug (which omitted
+`graph_count`). Found by auditing every chain-offset sum in the tree, not
+only the path being added.
+
+### Notes
+
+- `aminsert` does **not** recompute the mean: that would invalidate every
+  sign code already packed against the old mean, silently degrading the
+  whole index's ranking from one insert. Build-time mean is fixed; drift
+  is a REINDEX concern. The insert is one exclusive lock across
+  read-modify-write — an unlocked RMW is exactly what silently lost graph
+  rows before v2.1.0.
+- VACUUM is tombstone-only, sharing the graph kind's path (compacting
+  would mean renumbering every slot).
+- `turbovec_check` reports `kind = 'bq'` and skips the v2.2.2 scales
+  validation for that kind only — BQ has no scales chain, so validating
+  one would report every BQ index corrupt.
+- The Hamming kernel is deliberately **scalar** (`count_ones` lowers to
+  `POPCNT`); any hand-vectorised version must first be proven
+  bit-identical against it. This is the v1.7.3 lesson — a mis-specialised
+  kernel returned *wrong* ANN results on pre-AVX2 CPUs — applied
+  pre-emptively.
+
+### Not yet supported
+
+`bit_width = 1` with `lists > 0` (IVF) is rejected with a clear ERROR; the
+cell-contiguous sign layout and per-cell Hamming scan are unwired.
+`bit_width = 1` with `graph = true` stays rejected in the reloption
+validator (and the graph kind is deprecated as of 2.5.0). BQ's
+recall/latency frontier on real corpora still needs an AVX2-host run; the
+tests prove correctness, storage and scan behaviour, not a published
+frontier.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.6.0';` — no REINDEX.
+
 ## [2.5.0] — 2026-09-07
 
 Two changes: the graph kind is **deprecated**, and **Phase S-1 partition

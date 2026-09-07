@@ -1400,27 +1400,47 @@ mod tests {
         assert!(!meta.is_degraded());
     }
 
-    /// WAL amplification follow-up (field report 2026-09-08): the whole
-    /// point of `PAD_PAGES` is that a growing index keeps its chain START
-    /// block numbers, so an append doesn't relocate (and therefore
-    /// re-WAL-log) every page of the chains that follow it.
+    /// WAL amplification follow-up (field report 2026-09-08): the point of
+    /// `PAD_PAGES` is that a growing index keeps its chain START block
+    /// numbers for a long stretch of inserts, so an append doesn't
+    /// relocate (and therefore re-WAL-log) every page of the chains that
+    /// follow the one that grew.
+    ///
+    /// Note this AMORTISES the shift, it cannot eliminate it: growth
+    /// eventually crosses a padding boundary and the chains do move once.
+    /// The guarantee is about FREQUENCY, so that is what this asserts.
     #[test]
     fn chain_starts_are_stable_across_growth() {
         // 768d/4-bit is the reporter's shape: 21 rows per codes page, so
-        // without padding EVERY 21 rows shifted the scales and ids chains.
+        // WITHOUT padding every 21 rows shifted the scales and ids chains.
         let base = MetaPageData::plan(4, 768, 1_000_000, 1);
-        let mut shifted = 0usize;
-        for extra in [1u64, 21, 100, 1_000, 10_000] {
-            let grown = MetaPageData::plan(4, 768, 1_000_000 + extra, 1);
-            if grown.scales_first != base.scales_first || grown.ids_first != base.ids_first {
-                shifted += 1;
+        assert_eq!(base.rows_per_codes_page, 21, "fixture assumption");
+
+        // Walk 100k rows one codes-page at a time and count relocations.
+        let mut shifts = 0usize;
+        let mut prev = base.scales_first;
+        let step = u64::from(base.rows_per_codes_page);
+        let mut n = 1_000_000u64;
+        while n < 1_100_000 {
+            n += step;
+            let m = MetaPageData::plan(4, 768, n, 1);
+            if m.scales_first != prev {
+                shifts += 1;
+                prev = m.scales_first;
             }
         }
-        assert_eq!(
-            shifted, 0,
-            "adding up to 10k rows must not move scales_first/ids_first \
-             (base scales_first={}, ids_first={})",
-            base.scales_first, base.ids_first
+        // 100k rows at 21 rows/page is ~4762 codes pages. Unpadded, EVERY
+        // one of those steps relocates the later chains (~4762 shifts);
+        // padded to 256-page units it is ~4762/256 ~= 19.
+        assert!(
+            shifts <= 25,
+            "padding must amortise chain relocation over many appends, \
+             got {shifts} shifts across 100k rows (unpadded would be ~4762)"
+        );
+        assert!(
+            shifts > 0,
+            "sanity: 100k rows must eventually cross a padding boundary, \
+             else the fixture is not exercising growth"
         );
     }
 

@@ -1531,54 +1531,48 @@ mod tests {
             (idx, state, dim)
         };
 
-        // Measure each arm from an IDENTICAL starting state. This matters:
-        // a flush mutates the on-disk bytes the NEXT flush compares
-        // against, so measuring the two arms back-to-back measures
-        // sequence effects, not the fix (an earlier version of this test
-        // did exactly that and reported the two arms inverted).
+        // Count the pages a flush actually WAL-logs, rather than diffing
+        // pg_current_wal_lsn(). `#[pg_test]`s run concurrently against ONE
+        // cluster, so a global LSN delta also captures every other test's
+        // WAL: an earlier version of this test swung between 32 KB and
+        // 1.4 MB for the same operation and even reported the two arms
+        // inverted. Registered pages are per-process, deterministic, and
+        // are the direct driver of the WAL volume (one full-page image
+        // each).
         //
-        // A flush that changes NOTHING is the cleanest probe of the skip
-        // logic: every page already matches what we would write, so only
-        // the meta page (always rewritten last, by design) should cost
-        // WAL. Re-loading from disk each time makes the flush a true no-op
-        // in both arms, so the ONLY difference is whether unchanged pages
-        // are skipped.
-        let noop_flush_wal = || -> i64 {
+        // A flush that changes NOTHING is the cleanest probe: every page
+        // already matches what we would write, so with the fix only the
+        // meta page (always rewritten last, by design) should be logged.
+        let pages_for_noop_flush = || -> u64 {
             let (idx, state, _dim) = load();
-            let before: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
-                .unwrap()
-                .expect("lsn");
+            relfile::PAGES_WAL_LOGGED.store(0, Ordering::Relaxed);
             unsafe {
                 crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
             }
-            let after: i64 = Spi::get_one("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
-                .unwrap()
-                .expect("lsn");
-            after - before
+            relfile::PAGES_WAL_LOGGED.load(Ordering::Relaxed)
         };
 
-        // Warm up so the first-touch costs (relation extension, buffer
-        // faults) don't land in either measurement.
-        let _ = noop_flush_wal();
-        let noop_fixed = noop_flush_wal();
+        let with_skip = pages_for_noop_flush();
 
         relfile::SKIP_UNCHANGED_PAGES.store(false, Ordering::Relaxed);
-        let _ = noop_flush_wal();
-        let noop_unfixed = noop_flush_wal();
+        let always_rewrite = pages_for_noop_flush();
         relfile::SKIP_UNCHANGED_PAGES.store(true, Ordering::Relaxed);
 
+        // 20k vectors at dim 64 / bit_width 4 is ~109 chain pages, so the
+        // always-rewrite path must log a lot; if it logs ~nothing the
+        // flush never ran and the test proves nothing.
         assert!(
-            noop_unfixed > 0,
-            "the always-rewrite path must emit WAL (got {noop_unfixed}); \
-             if it is 0 the flush never ran and the test proves nothing"
+            always_rewrite > 50,
+            "the always-rewrite path must WAL-log the whole chain \
+             (got {always_rewrite} pages); if it is ~0 the flush never ran"
         );
-        // The headline invariant: a no-change flush must be CHEAP, not
-        // proportional to index size. This is what turns ~500 MB of WAL
-        // per commit on a large index into a couple of pages.
+        // The headline invariant: a no-change flush WAL-logs a handful of
+        // pages, not the whole index. This is what turns ~500 MB of WAL
+        // per commit on an 882 MB index into a couple of pages.
         assert!(
-            noop_fixed * 10 < noop_unfixed,
-            "a flush that changes nothing must cost far less WAL than a full \
-             rewrite: with-skip={noop_fixed} bytes vs always-rewrite={noop_unfixed} bytes"
+            with_skip * 10 < always_rewrite,
+            "a flush that changes nothing must WAL-log far fewer pages than a \
+             full rewrite: with-skip={with_skip} vs always-rewrite={always_rewrite}"
         );
 
         // ...and the index must still be uncorrupt and scannable.

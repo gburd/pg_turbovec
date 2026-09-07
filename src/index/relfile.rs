@@ -444,6 +444,27 @@ pub(crate) unsafe fn write_meta_in_fork(
 pub(crate) static SKIP_UNCHANGED_PAGES: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
+/// Test-only counter of pages actually REGISTERED for WAL by
+/// [`write_chain_at`] (i.e. not skipped as unchanged). Each registered
+/// page costs a full-page image, so this is the direct driver of the WAL
+/// volume the 2026-09-08 field report measured.
+///
+/// Counting pages rather than diffing `pg_current_wal_lsn()` is
+/// deliberate: `#[pg_test]`s run concurrently against ONE cluster, so a
+/// global LSN delta also picks up every other test's WAL, which made an
+/// earlier version of the regression test swing between 32 KB and 1.4 MB
+/// for the same operation and even report the two arms inverted. This
+/// counter is per-process and deterministic.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) static PAGES_WAL_LOGGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn note_page_wal_logged() {
+    #[cfg(any(test, feature = "pg_test"))]
+    PAGES_WAL_LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[inline]
 fn skip_unchanged_enabled() -> bool {
     #[cfg(any(test, feature = "pg_test"))]
@@ -579,6 +600,7 @@ pub(crate) unsafe fn write_chain_at(
 
             bufs[n_in_batch] = buf;
             n_in_batch += 1;
+            note_page_wal_logged();
             written += take;
             blkno += 1;
         }

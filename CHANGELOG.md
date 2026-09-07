@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.3.0] — 2026-09-08
+## [2.3.0] — 2026-09-07
 
 **WAL amplification fix: a flush now only WAL-logs the index pages that
 actually changed.** No wire-format change (stays v8), no SQL surface

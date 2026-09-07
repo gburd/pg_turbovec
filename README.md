@@ -11,8 +11,8 @@ your data. Supports:
 - **three index kinds**: a **flat** quantized scan (exact-recall-
   capable), an opt-in **IVF** layer (`WITH (lists = N)`) that is
   out-of-core end-to-end so a larger-than-RAM index can be built and
-  queried, and an opt-in **Vamana navigable-graph** kind
-  (`WITH (graph = true)`) for low-latency ANN
+  queried (a **Vamana navigable-graph** kind, `WITH (graph = true)`,
+  also exists but is **deprecated** — see below)
 - single-precision (`f32`) vectors with on-disk compression to ~16×
   smaller than `pgvector` at 4-bit
 - L2 distance (`<->`), inner product (`<#>`), cosine distance (`<=>`),
@@ -79,8 +79,22 @@ pre-AVX2-fix measurement artifact and is retracted (see
 - **IVF** (`WITH (lists = N)`) — cell-pruned scan, out-of-core capable.
   Measured ~17–24 ms warm p50 at 1 M × 1536-d (R@10 0.84–0.89), the
   practical latency config.
-- **Vamana graph** (`WITH (graph = true)`) — navigable-graph ANN for
-  low-latency at moderate scale.
+- **Vamana graph** (`WITH (graph = true)`) — **DEPRECATED, scheduled for
+  removal.** It was added to chase HNSW's query latency while keeping
+  TurboQuant's compression, but measured at *matched recall* it never
+  delivers: its apparent sublinearity holds only at iso-*beam*, and once
+  recall is held equal the curves diverge rather than cross. Use the
+  default flat index below ~1 M vectors, or `WITH (lists = N)` (IVF) at
+  scale.
+
+  | corpus / target        | flat            | IVF                 | graph        |
+  |------------------------|-----------------|---------------------|--------------|
+  | SIFT-1M/128d, R@10 ≥0.95  | 0.98 ms, qps@8 1380 | 1.8 ms, qps@8 2039 | 26.2 ms, qps@8 299 |
+  | GIST-1M/960d, R@10 ≥0.95  | 5.88 ms, qps@8 279  | 11.3 ms, qps@8 480 | **unreachable** |
+  | GIST-10M/960d, R@10 ≥0.98 | 34.2 ms, qps@8 31   | 28.4 ms, qps@8 161 | **unreachable** |
+
+  It also loses on build time (57–90×), storage, and has no out-of-core
+  path. It is **IVF, not the graph**, that beats flat's O(n) wall.
 
 Use pg_turbovec when your workload is **cosine / inner-product semantic
 search that is storage-constrained** and you want exact-recall re-ranking

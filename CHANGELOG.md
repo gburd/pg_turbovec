@@ -4,6 +4,78 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] — 2026-09-07
+
+Two changes: the graph kind is **deprecated**, and **Phase S-1 partition
+pruning** lands (additive SQL). No index wire-format change (stays v8), no
+REINDEX.
+
+### `WITH (graph = true)` is deprecated
+
+It now emits a deprecation `WARNING`; the build path is scheduled for
+removal, with decode retained one further release so a stale graph index
+fails loudly with a REINDEX hint rather than silently.
+
+The kind was added in v1.23.0 to chase HNSW's query latency while keeping
+TurboQuant's storage compression. Measured at **matched recall** it never
+delivers. Its apparent sublinearity holds only at iso-**beam** (p50 1.11×
+for a 10× corpus — but recall falls 0.605 → 0.472); once recall is held
+equal the curves **diverge and never cross**:
+
+| corpus / target            | flat                | IVF                  | graph        |
+|----------------------------|---------------------|----------------------|--------------|
+| SIFT-1M/128d, R@10 ≥0.95   | 0.98 ms, qps@8 1380 | 1.8 ms, qps@8 2039   | 26.2 ms, qps@8 299 |
+| GIST-1M/960d, R@10 ≥0.95   | 5.88 ms, qps@8 279  | 11.3 ms, qps@8 480   | **unreachable** |
+| GIST-10M/960d, R@10 ≥0.98  | 34.2 ms, qps@8 31   | 28.4 ms, qps@8 161   | **unreachable** |
+
+It also loses on build time (57–90×), storage, and has no out-of-core
+path. **It is IVF, not the graph, that beats flat's O(n) wall.** Use the
+default flat index below ~1M vectors and `WITH (lists = N)` at scale.
+
+Retained deliberately: `turbovec.graph_ef`, `pack::repack`, and the
+`coarse_graph` work (Phase G-1) — that one navigates *centroids*, and
+IVF's win partly rests on it. Deprecating the graph *kind* is not
+deprecating graph *techniques*.
+
+Also recorded: the "60× parallel build speedup" was an artefact.
+`graph_build_partitions_decide` coupled shard count to thread count, and
+shards cost recall (GIST-1M R@10 0.920 at P=4 → 0.605 at P=83); threads at
+a recall-preserving P buy <5×. The partitioned-build parity test is
+annotated with the blind spot that hid this (2.5k rows/shard at dim 64,
+versus ~12k at 960d in reality) rather than re-tuned, since the kind is on
+its way out.
+
+### Phase S-1: partition-level coarse quantizer
+
+At 1T scale the design is a partitioned parent with one turbovec index per
+partition and native `Merge Append` doing scatter → gather. That is correct
+for any N but the per-query fan-out is `O(N)` in the partition count: at
+~100k partitions, opening an `Index Scan` per partition dominates. S-1
+lifts IVF one tier up — each partition gets a **summary** (its mean in the
+**original**, un-rotated space, so summaries are comparable across
+partitions; each partition trains its own rotation, so the persisted coarse
+centroids are *not*) — and `nearest_partitions()` returns the `Kp` nearest
+so the caller fans out to `Kp` instead of `N`.
+
+New SQL (additive): table `turbovec.partition_summary`, plus
+`turbovec.refresh_partition_summary(parent, vec_col)` and
+`turbovec.nearest_partitions(parent, query, k_partitions, metric)`.
+
+S-1 was first attempted in v1.29.0 and reverted when its `#[pg_test]`
+failed CI. **The assertion was wrong, not the code**: it demanded the
+pruned top-k be identical to the full-fan-out top-k, but pruning is an
+approximation by construction — scoring a query against partition *means*
+cannot be equivalent to scanning every partition, so on unclustered data a
+`Kp < N` probe can legitimately miss a true top-k member. The revived test
+asserts what pruning actually guarantees: exactly `Kp` partitions returned,
+the query's own cluster ranked first on content-clustered data, and a
+**recall floor** against full fan-out.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.5.0';` — no REINDEX. Existing
+graph indexes keep working and will warn on rebuild.
+
 ## [2.4.0] — 2026-09-07
 
 **WAL amplification follow-up: stable chain starts.** No wire-format

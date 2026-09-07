@@ -2771,6 +2771,27 @@ mod tests {
     /// within a small tolerance of (or better than) the single-pass
     /// build's, on the SAME clustered corpus. A partitioned build that
     /// under-recalls is a failed approach.
+    ///
+    /// **KNOWN BLIND SPOT — do not read this test as validating the
+    /// partitioned build at production shape.** It uses 20k rows / 8
+    /// shards = 2.5k rows per shard at dim 64. Real workloads shard far
+    /// larger vectors far more coarsely (~12k rows/shard at 960d), and at
+    /// that shape shard count DOES cost recall: measured GIST-1M R@10
+    /// 0.920 at P=4 falling to 0.605 at P=83. This fixture is too small
+    /// and too low-dimensional to see that, which is why the "60x parallel
+    /// build speedup" claim survived as long as it did (
+    /// `graph_build_partitions_decide` couples shard count to thread
+    /// count, so more threads silently meant more recall loss; threads at
+    /// a recall-preserving P buy <5x).
+    ///
+    /// The graph kind is deprecated as of v2.5.0 and its build path is
+    /// scheduled for removal, so this gate is retained as-is rather than
+    /// re-tuned: it still catches a partitioned build that regresses
+    /// against single-pass, which is all it was ever asked to do. If the
+    /// kind is ever un-deprecated, this fixture MUST be re-shaped to
+    /// realistic rows/shard at realistic dim, and `GRAPH_TARGET_SHARD_ROWS`
+    /// (whose 12k came from a wall-clock-only sweep) re-tuned WITH a
+    /// recall column.
     #[test]
     fn partitioned_build_recall_parity_with_single_pass() {
         let _serialize = BUILD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

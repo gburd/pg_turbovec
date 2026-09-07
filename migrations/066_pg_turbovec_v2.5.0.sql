@@ -1,0 +1,33 @@
+-- 2.5.0 — graph-kind deprecation + Phase S-1 partition pruning.
+--
+-- 1. WITH (graph = true) now emits a deprecation WARNING. The kind was added
+--    (v1.23.0) to chase HNSW's latency while keeping TurboQuant's storage
+--    compression, but measured at MATCHED RECALL it never delivers: its
+--    apparent sublinearity holds only at iso-BEAM, and once recall is held
+--    equal the curves diverge rather than cross. At GIST-10M/960d R@10>=0.98
+--    is reachable by IVF (28.4ms, qps@8 161) and flat (34.2ms, 31) but NOT by
+--    the graph at any setting (ceiling 0.873 at 181ms). Also 57-90x slower to
+--    build, larger on disk, and no out-of-core path. It is IVF, not the graph,
+--    that beats flat's O(n) wall. WARNING (not ERROR) so existing indexes and
+--    scripts keep working; the BUILD path is scheduled for removal with DECODE
+--    retained one further release so a stale graph index fails loudly.
+--
+-- 2. Phase S-1 partition pruning (additive SQL, see the .sql upgrade edge).
+--    At 1T scale the design is one turbovec index per partition with native
+--    Merge Append doing scatter/gather, but per-query fan-out is O(N) in the
+--    partition count. S-1 lifts IVF one tier up: each partition gets a
+--    summary (its mean in ORIGINAL space, so summaries are comparable across
+--    partitions -- each partition trains its own rotation, so persisted
+--    coarse centroids are NOT comparable), and nearest_partitions() picks the
+--    Kp nearest so the user fans out to Kp instead of N.
+--
+--    S-1 was first attempted in v1.29.0 and reverted when its #[pg_test]
+--    failed CI. The ASSERTION was wrong, not the code: it demanded the pruned
+--    top-k be identical to full fan-out, but pruning is an approximation by
+--    construction (scoring against partition MEANS cannot equal scanning
+--    every partition). The revived test asserts what pruning guarantees --
+--    exactly Kp partitions, the query's own cluster first, and a RECALL floor
+--    against full fan-out.
+--
+-- No index wire-format change (stays v8), no REINDEX. SQL surface is additive.
+-- This migration is intentionally empty; the DDL lives in the upgrade edge.

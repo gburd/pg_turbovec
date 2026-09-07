@@ -229,6 +229,37 @@ pub(crate) unsafe extern "C-unwind" fn amoptions(
                 "turbovec: graph = true is mutually exclusive with lists > 0 (a graph index is never IVF-backed)"
             );
         }
+        if o.graph {
+            // DEPRECATED in v2.5.0, build path removed in a later release.
+            //
+            // The graph kind was added (v1.23.0, Phase G-2a) to chase
+            // HNSW's query latency while keeping TurboQuant's storage
+            // compression. Measured at MATCHED RECALL it does not deliver:
+            // its apparent sublinearity holds only at iso-BEAM, and once
+            // recall is held equal the lines diverge rather than cross.
+            // At GIST-10M/960d, R@10 >= 0.98 is reachable by IVF
+            // (28.4 ms/q, qps@8 161) and by flat (34.2 ms, 31) but NOT by
+            // the graph at any setting (ceiling 0.873 at 181 ms). It also
+            // loses on build time (57-90x), storage, and has no
+            // out-of-core path. It is IVF, not the graph, that beats
+            // flat's O(n) wall.
+            //
+            // WARNING (not ERROR) so existing indexes and scripts keep
+            // working through the deprecation window; the build path is
+            // scheduled for removal, with DECODE retained one further
+            // release so a stale graph index fails loudly with a REINDEX
+            // hint rather than silently.
+            pgrx::ereport!(
+                pgrx::PgLogLevel::WARNING,
+                pgrx::PgSqlErrorCode::ERRCODE_WARNING_DEPRECATED_FEATURE,
+                "turbovec: WITH (graph = true) is deprecated and will be removed",
+                "At matched recall the graph kind is slower and less accurate than \
+                 the default flat index below ~1M vectors and than WITH (lists = N) \
+                 (IVF) at scale, and it has no out-of-core path. Use the default \
+                 (flat) for small corpora, or WITH (lists = N) for large ones. \
+                 See docs/PARITY_GAPS.md for the measured comparison."
+            );
+        }
     }
 
     opts as *mut pg_sys::bytea

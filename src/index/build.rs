@@ -1295,28 +1295,39 @@ unsafe fn bq_build_and_write(
     spill.read_block(0, n_vectors, &mut ids, &mut flat);
     drop(spill);
 
-    // The footgun guard: if every code would be identical even AFTER
-    // centring (a constant corpus), Hamming carries no signal and the
-    // index would silently return arbitrary rows. ERROR instead.
+    let mean = onebit::corpus_mean(&flat, dim);
+    let stride = onebit::codes_stride(dim);
+    let mut centered_all = Vec::with_capacity(n_vectors * dim);
+    for row in flat.chunks_exact(dim) {
+        centered_all.extend_from_slice(&onebit::center(row, &mean));
+    }
+    drop(flat);
+
+    // The footgun guard, checked on the CENTERED corpus -- which is the
+    // only meaningful place to check it. A dense-positive corpus IS
+    // degenerate raw (every sign bit is 1) but is perfectly indexable
+    // after centering, which is the whole point of persisting the mean;
+    // checking raw data here would reject exactly the corpora this
+    // feature exists to handle. What genuinely cannot be indexed is a
+    // corpus still collapsed AFTER centering (constant or
+    // near-constant): every code is identical, Hamming is uniformly 0,
+    // and the index would silently return arbitrary rows.
     pg_sys::check_for_interrupts!(); // stage boundary; no lock held
-    if onebit::is_degenerate(&flat, dim) {
+    if onebit::is_degenerate(&centered_all, dim) {
         error!(
             "turbovec: bit_width = 1 (binary quantization) cannot index this corpus -- \
-             every vector has the same sign pattern after mean-centering, so Hamming \
+             every vector has the same sign pattern even after mean-centering, so Hamming \
              distance carries no signal (a constant or near-constant corpus). \
              Use bit_width = 2, 3, or 4 instead."
         );
     }
 
-    let mean = onebit::corpus_mean(&flat, dim);
-    let stride = onebit::codes_stride(dim);
     let mut codes = Vec::with_capacity(n_vectors * stride);
-    for row in flat.chunks_exact(dim) {
-        let centered = onebit::center(row, &mean);
-        codes.extend_from_slice(&onebit::pack_signs(&centered));
+    for centered in centered_all.chunks_exact(dim) {
+        codes.extend_from_slice(&onebit::pack_signs(centered));
     }
     debug_assert_eq!(codes.len(), n_vectors * stride);
-    drop(flat);
+    drop(centered_all);
 
     pg_sys::check_for_interrupts!(); // stage boundary; no lock held
     relfile::write_full_bq(

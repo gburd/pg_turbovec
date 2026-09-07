@@ -815,7 +815,8 @@ impl MetaPageData {
         // version byte is the belt-and-braces signal a pre-v7 binary
         // uses to refuse the index outright (is_legacy_v6).
         debug_assert!(
-            self.version == VERSION && matches!(self.kind, KIND_SINGLE | KIND_COLBERT | KIND_GRAPH),
+            self.version == VERSION
+                && matches!(self.kind, KIND_SINGLE | KIND_COLBERT | KIND_GRAPH | KIND_BQ),
             "version/kind out of sync: kind={} version={}",
             self.kind,
             self.version,

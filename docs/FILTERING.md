@@ -278,8 +278,15 @@ intersects a *set of physical rows*, identified by TID.)
 > | sentinel ctids at `LIMIT 50` | **49/50** | **0/50** |
 >
 > The `UPDATE` row is the dangerous one: it raises no error, it just
-> updates one row instead of five. The patch is in
-> `docs/upstream/bug6-execForceStoreHeapTuple-tts_tid.patch`.
+> updates one row instead of five.
+>
+> **Reported upstream** on pgsql-hackers (2026-09-08), with the one-line
+> patch and a core regression test:
+> <https://www.postgresql.org/message-id/0498c10f-839b-4f68-9994-c29b454e55a4%40app.fastmail.com>
+> Until a fixed PostgreSQL ships, the guidance below stands. The
+> `knn_scan_ctid_projection_upstream_limitation` test asserts today's broken
+> behaviour, so it will fail loudly when a fixed PG reaches CI — that is the
+> signal to relax this warning.
 >
 > **There is no query-level workaround** — verified against stock 18.4:
 > `WITH ... AS MATERIALIZED`, casting to `text` inside a subquery, and

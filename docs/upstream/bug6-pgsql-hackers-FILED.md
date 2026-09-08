@@ -1,26 +1,50 @@
-# pgsql-hackers submission — DRAFT, needs Greg's review before sending
+# BUG#6 upstream submission — **FILED 2026-09-08**
 
-**Status: NOT SENT.** This is prepared for Greg Burd to review and send (or
-to hand off). Nothing here has been posted anywhere.
+**Status: SENT.** Filed on pgsql-hackers by Greg Burd, 2026-09-08 17:28 UTC.
 
-- **To:** pgsql-hackers@lists.postgresql.org
+- **Thread:** https://www.postgresql.org/message-id/0498c10f-839b-4f68-9994-c29b454e55a4%40app.fastmail.com
 - **Subject:** `ExecForceStoreHeapTuple() loses tts_tid, so ORDER BY-op index scans project an invalid ctid`
-- **Attachment:** `bug6-execForceStoreHeapTuple-tts_tid.patch`
+- **Attachment as filed:** `v1-0001-ExecForceStoreHeapTuple-loses-the-tuple-s-item-po.patch`
+- **Responses as of last check:** none yet.
 
-Notes for whoever sends it:
+## What was filed vs what this repo verified
 
-- Keep the reproducer first. It uses only core GiST and needs no extension,
-  which is what makes the report actionable; leading with a third-party
-  index AM would invite "your AM is doing something wrong".
-- Do not describe this as a security or data-loss bug. It is silent wrong
-  behaviour in a system column, which is bad enough stated plainly.
-- The patch applies to master; the function body is byte-identical in
-  REL_13_STABLE..REL_18_STABLE (hashed and checked), so back-patching is
-  mechanical. Say so, but let the committers decide the back-patch policy.
+The filed patch's `execTuples.c` hunk is **identical** to the one verified
+here by an A/B build (`slot->tts_tid = tuple->t_self;` plus its comment);
+only a blank line differs. The filed version additionally adds a **core
+regression test** to `src/test/regress/{sql,expected}/gist.sql|out` — 20
+thin diagonal triangles and a ctid self-join over the top-5.
+
+That added test was itself checked against both builds here:
+
+| | unpatched 18.4 | patched 18.3 |
+|---|---:|---:|
+| upstream test's `ctid_matches` (expects 5) | **1** | **5** |
+
+So the regression test genuinely gates the fix rather than passing
+vacuously — worth knowing, because a test that passes either way is worse
+than no test.
+
+## Tracking on our side
+
+`knn_scan_ctid_projection_upstream_limitation` in `src/lib.rs` is the
+tripwire: it asserts the CURRENT (broken) behaviour, so **it will fail
+loudly once a fixed PostgreSQL reaches CI**. That failure is the signal to:
+
+1. flip the tripwire to assert correct ctids, gated on the PG version that
+   ships the fix;
+2. relax the `docs/FILTERING.md` "do not harvest ctid from a kNN scan"
+   warning to name the fixed versions;
+3. note the fix in `CHANGELOG.md`.
+
+Until then the workaround guidance stands unchanged, and it is a proven
+necessity rather than a preference: `MATERIALIZED`, text casts and subquery
+nesting were all tested and all still yield the sentinel.
 
 ---
 
-## Message body
+## Message body as filed (archived for reference)
+
 
 Hi,
 

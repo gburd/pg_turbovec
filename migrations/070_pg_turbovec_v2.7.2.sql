@@ -1,0 +1,28 @@
+-- 2.7.2 — BUG#6 filed upstream. Documentation-only.
+--
+-- No shippable code change: the binary is byte-identical to 2.7.1 (the only
+-- src/ edit is a doc comment). No wire change (v8), no SQL surface change,
+-- no REINDEX.
+--
+-- The BUG#6 root-cause analysis and one-line core fix that 2.7.1 verified
+-- have been REPORTED UPSTREAM on pgsql-hackers (2026-09-08 17:28 UTC):
+--   https://www.postgresql.org/message-id/0498c10f-839b-4f68-9994-c29b454e55a4%40app.fastmail.com
+--
+-- The filed patch's execTuples.c hunk is identical to the one verified here
+-- by A/B build; the filed version additionally adds a core regression test to
+-- src/test/regress/{sql,expected}/gist.*. That added test was checked against
+-- both builds: it reports ctid_matches = 1 on unpatched 18.4 and 5 on the
+-- patched build, so it genuinely gates the fix rather than passing vacuously.
+--
+-- docs/FILTERING.md and the knn_scan_ctid_projection_upstream_limitation test
+-- now carry the thread link. That test still asserts the CURRENT (broken)
+-- behaviour, so it will FAIL once a fixed PostgreSQL reaches CI -- which is
+-- the intended signal to flip the assertion (gated on the fixing version) and
+-- relax the docs, NOT a regression in this AM.
+--
+-- Until a fixed PostgreSQL ships, the workaround is unchanged and remains a
+-- proven necessity, not a preference: MATERIALIZED CTEs, text casts inside a
+-- subquery, and extra subquery nesting were all tested and all still yield
+-- the sentinel. Chain on your own key column, or use turbovec.knn().
+--
+-- This migration is intentionally empty.

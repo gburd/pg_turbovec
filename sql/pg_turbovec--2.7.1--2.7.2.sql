@@ -1,0 +1,5 @@
+-- pg_turbovec 2.7.1 -> 2.7.2
+-- Documentation-only: BUG#6 reported upstream on pgsql-hackers, thread link
+-- recorded in docs/FILTERING.md and in the tripwire test. Binary
+-- byte-identical to 2.7.1. No wire change (v8), no SQL change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

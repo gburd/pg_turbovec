@@ -4,6 +4,42 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.2] — 2026-09-08
+
+**BUG#6 is now reported upstream.** Documentation-only: the binary is
+byte-identical to 2.7.1 (the sole `src/` edit is a doc comment). No wire
+change, no SQL surface change, no REINDEX.
+
+The root-cause analysis and one-line core fix that v2.7.1 verified have been
+filed on pgsql-hackers:
+
+> **[ExecForceStoreHeapTuple() loses tts_tid, so ORDER BY-op index scans
+> project an invalid ctid](https://www.postgresql.org/message-id/0498c10f-839b-4f68-9994-c29b454e55a4%40app.fastmail.com)**
+> — 2026-09-08, with the patch attached as `v1-0001-...`.
+
+The filed patch's `execTuples.c` hunk is **identical** to the one verified
+here by A/B build. The filed version additionally adds a **core regression
+test** to `src/test/regress/{sql,expected}/gist.*`, and that test was itself
+checked against both builds: it reports `ctid_matches = 1` on unpatched 18.4
+and `5` on the patched build, so it genuinely gates the fix rather than
+passing vacuously.
+
+`docs/FILTERING.md` and the `knn_scan_ctid_projection_upstream_limitation`
+test now carry the thread link. That test still asserts the **current
+(broken)** behaviour, so it will **fail once a fixed PostgreSQL reaches
+CI** — which is the intended signal to flip the assertion (gated on the
+fixing version) and relax the docs, not a regression in this AM.
+
+Until a fixed PostgreSQL ships nothing changes for users, and the workaround
+remains a proven necessity rather than a preference: `MATERIALIZED` CTEs,
+text casts inside a subquery, and extra subquery nesting were all tested and
+all still yield the sentinel. Chain on your own key column, or use
+`turbovec.knn()`.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.2';` — no REINDEX.
+
 ## [2.7.1] — 2026-09-08
 
 **BUG#6 root cause proven against stock PostgreSQL, and the one-line core

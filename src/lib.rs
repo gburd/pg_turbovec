@@ -7950,7 +7950,7 @@ mod tests {
             "1.27.1", "1.27.2", "1.27.3", "1.28.0", "1.28.1", "1.28.2", "1.28.3", "1.28.4",
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
-            "2.7.0", "2.7.1",
+            "2.7.0", "2.7.1", "2.7.2",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -8914,6 +8914,14 @@ mod tests {
     /// `IndexNextWithReorder` keeps its real ctid. A one-line core
     /// patch restoring `tts_tid` in that branch fixes BOTH turbovec
     /// and GiST. See docs/FILTERING.md "Do not harvest ctid".
+    ///
+    /// REPORTED UPSTREAM 2026-09-08 on pgsql-hackers, with the patch and a
+    /// core regression test:
+    /// <https://www.postgresql.org/message-id/0498c10f-839b-4f68-9994-c29b454e55a4%40app.fastmail.com>
+    /// This test asserts the CURRENT (broken) behaviour, so it FAILS once a
+    /// fixed PostgreSQL reaches CI -- that failure is the signal to flip the
+    /// assertion (gated on the fixing version) and relax the docs, not a
+    /// regression in this AM. See docs/upstream/bug6-pgsql-hackers-FILED.md.
     ///
     /// Verified end-to-end (2026-09-08) by building PostgreSQL both ways
     /// on one machine and running one script: stock 18.4 vs an 18.3 tree

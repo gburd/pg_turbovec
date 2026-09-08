@@ -192,8 +192,13 @@ and deliberately **opt-in, never a default**: it is lossy enough that
 dimension. A corpus whose vectors all share one sign pattern even after
 centering is rejected at build rather than silently returning arbitrary rows.
 Its recall/latency frontier on real corpora is not yet published; the
-correctness, storage and scan behaviour are covered by tests. Not yet
-combinable with `lists = N` (IVF).
+correctness, storage and scan behaviour are covered by tests. It composes
+with `lists = N` (IVF): `WITH (lists = N, bit_width = 1)` stores the sign
+codes cell-contiguous and probes only `turbovec.probes` cells, combining
+the storage win with the scan win. Note an `INSERT` into an existing
+IVF+BQ index appends rather than placing the row in its cell, which
+degrades that index to a flat Hamming scan until the next `REINDEX` —
+reportable via `turbovec.index_is_degraded()`.
 
 Measured storage and recall come from the head-to-head sweep on
 1 M × 1536-d OpenAI ada-002 embeddings; methodology and the synthetic

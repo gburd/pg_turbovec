@@ -72,8 +72,12 @@ pub fn unpack_signs(bytes: &[u8], dim: usize) -> Vec<f32> {
 /// header, negligible next to the `n * dim/8` codes) so the SAME shift
 /// is applied to query vectors at scan time. Returns all-zeros for an
 /// empty corpus (centering then a no-op).
+///
+/// Expressed in terms of [`accumulate_sums`] + [`finish_mean`] so the
+/// whole-corpus (flat build) and streamed-in-blocks (IVF build) paths are
+/// the SAME arithmetic in the same order, not two implementations that
+/// could drift (gated by `streamed_mean_matches_whole_corpus_mean`).
 pub fn corpus_mean(flat: &[f32], dim: usize) -> Vec<f32> {
-    let mut mean = vec![0.0f64; dim];
     if dim == 0 {
         return Vec::new();
     }
@@ -81,13 +85,37 @@ pub fn corpus_mean(flat: &[f32], dim: usize) -> Vec<f32> {
     if n == 0 {
         return vec![0.0f32; dim];
     }
+    let mut sums = vec![0.0f64; dim];
+    accumulate_sums(&mut sums, flat, dim);
+    finish_mean(&sums, n)
+}
+
+/// Add a row-major block's per-dimension values into `sums` (an f64
+/// accumulator of length `dim`), row by row in block order.
+///
+/// The streaming half of [`corpus_mean`]: an out-of-core build calls this
+/// once per spill block and [`finish_mean`] at the end, which sums the
+/// rows in exactly the same order (spill order) as a whole-corpus
+/// `corpus_mean` would, so the resulting mean is BIT-IDENTICAL.
+pub fn accumulate_sums(sums: &mut [f64], flat: &[f32], dim: usize) {
+    if dim == 0 || sums.len() != dim {
+        return;
+    }
     for row in flat.chunks_exact(dim) {
-        for (m, &x) in mean.iter_mut().zip(row) {
+        for (m, &x) in sums.iter_mut().zip(row) {
             *m += x as f64;
         }
     }
+}
+
+/// Divide accumulated [`accumulate_sums`] totals by `n` rows to get the
+/// per-dimension mean. `n == 0` yields all-zeros (centering a no-op).
+pub fn finish_mean(sums: &[f64], n: usize) -> Vec<f32> {
+    if n == 0 {
+        return vec![0.0f32; sums.len()];
+    }
     let inv = 1.0 / n as f64;
-    mean.iter().map(|&m| (m * inv) as f32).collect()
+    sums.iter().map(|&m| (m * inv) as f32).collect()
 }
 
 /// Subtract `mean` from `v` in place-free form, returning the centered
@@ -124,30 +152,30 @@ pub fn is_degenerate(flat: &[f32], dim: usize) -> bool {
         // hurts ranking (nothing to rank against).
         return false;
     }
-    // For each dimension, are ALL rows the same sign? If even one
-    // dimension splits the corpus, the codes are not all identical and
-    // Hamming ranking has signal — not degenerate.
-    'dim: for d in 0..dim {
-        let mut saw_pos = false;
-        let mut saw_nonpos = false;
-        for row in flat.chunks_exact(dim) {
-            if row[d] > 0.0 {
-                saw_pos = true;
-            } else {
-                saw_nonpos = true;
-            }
-            if saw_pos && saw_nonpos {
-                // This dim distinguishes some rows: signal exists.
-                continue 'dim;
-            }
-        }
-        // Reaching here means dim `d` did NOT split — keep checking.
-    }
-    // Degenerate iff NO dimension split the corpus (every code
-    // identical). We detect that by checking every row's packed code
-    // equals row 0's.
+    // Degenerate iff EVERY row's packed code equals row 0's (no
+    // dimension split the corpus, so Hamming is uniformly 0).
     let code0 = pack_signs(&flat[..dim]);
     flat.chunks_exact(dim).all(|row| pack_signs(row) == code0)
+}
+
+/// [`is_degenerate`] on ALREADY-PACKED codes: `true` iff every one of the
+/// `n` code rows equals row 0, so Hamming distance is uniformly 0 and the
+/// ranking would be arbitrary.
+///
+/// This is the streamable form the out-of-core (IVF) build needs — it
+/// never has the whole centered f32 corpus resident — and it is exactly
+/// equivalent to `is_degenerate` on the corresponding centered corpus,
+/// because `pack_signs` is a per-row pure function (gated by
+/// `packed_degeneracy_matches_centered_degeneracy`).
+///
+/// `n <= 1` returns `false`, matching `is_degenerate`: a 0- or 1-row
+/// corpus has nothing to rank against.
+pub fn codes_are_degenerate(codes: &[u8], stride: usize, n: usize) -> bool {
+    if stride == 0 || n <= 1 || codes.len() < n * stride {
+        return false;
+    }
+    let code0 = &codes[..stride];
+    (1..n).all(|s| &codes[s * stride..(s + 1) * stride] == code0)
 }
 
 /// On-disk / scan-side per-vector byte width for a 1-bit index:
@@ -178,6 +206,24 @@ pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
 /// Top-`k` nearest slots to `query_code` by Hamming distance over a flat
 /// chain of `n` packed codes, returned as `(distance, slot)` ascending.
 ///
+/// Thin wrapper over [`topk_hamming_slots`] with the full slot range —
+/// ONE heap implementation shared by the flat scan and the IVF
+/// cell-restricted scan, so the two can never diverge on the tie-break
+/// (asserted by `topk_hamming_slots_full_range_matches_flat`).
+pub fn topk_hamming(query_code: &[u8], codes: &[u8], n: usize, k: usize) -> Vec<(u32, u32)> {
+    debug_assert!(query_code.is_empty() || codes.len() >= n * query_code.len());
+    topk_hamming_slots(query_code, codes, 0..(n as u32), k)
+}
+
+/// Top-`k` nearest slots to `query_code` by Hamming distance, considering
+/// ONLY the slots yielded by `slots`, returned as `(distance, slot)`
+/// ascending.
+///
+/// This is the IVF+BQ scan primitive: the caller yields exactly the slots
+/// belonging to the probed cells (minus tombstones), so the unprobed
+/// cells' codes are never scored — the scan win the cell-contiguous
+/// layout exists for. [`topk_hamming`] is this same function over `0..n`.
+///
 /// Deliberately SCALAR. The v1.7.3 incident — where pre-AVX2 CPUs
 /// returned WRONG ANN results from a mis-specialised kernel — is the
 /// reason: `u8::count_ones` lowers to `POPCNT` on any modern x86_64 and
@@ -186,32 +232,43 @@ pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
 /// A wide-SIMD popcount is a follow-up, not a prerequisite.
 ///
 /// Ties break toward the lower slot so results are deterministic (the
-/// same reason `partition::rank_nearest` does). Hamming over `dim` bits
-/// has only `dim + 1` distinct values, so ties are COMMON — which is
-/// exactly why the caller must rerank exactly: see
-/// `guc::hi_dim_rerank_candidate_count`, which treats a 1-bit index as
-/// high-dim at any `dim` so `hi_dim_rerank = auto` widens the exact
-/// rerank window for BQ.
-pub fn topk_hamming(query_code: &[u8], codes: &[u8], n: usize, k: usize) -> Vec<(u32, u32)> {
+/// same reason `partition::rank_nearest` does), INDEPENDENT of the order
+/// `slots` yields them in. Hamming over `dim` bits has only `dim + 1`
+/// distinct values, so ties are COMMON — which is exactly why the caller
+/// must rerank exactly: see `guc::hi_dim_rerank_candidate_count`, which
+/// treats a 1-bit index as high-dim at any `dim` so `hi_dim_rerank =
+/// auto` widens the exact rerank window for BQ.
+///
+/// A slot whose code row would fall outside `codes` is SKIPPED rather
+/// than panicking: an IVF slot list is derived from the on-disk cell
+/// directory, which is only as trustworthy as the relfile, and a torn
+/// read must not abort the backend.
+pub fn topk_hamming_slots<I>(query_code: &[u8], codes: &[u8], slots: I, k: usize) -> Vec<(u32, u32)>
+where
+    I: IntoIterator<Item = u32>,
+{
     let stride = query_code.len();
-    if k == 0 || n == 0 || stride == 0 {
+    if k == 0 || stride == 0 {
         return Vec::new();
     }
-    debug_assert!(codes.len() >= n * stride);
-    // A bounded max-heap of the k best: O(n log k), no full sort of n.
+    // A bounded max-heap of the k best: O(candidates log k), no full sort.
     let mut heap: std::collections::BinaryHeap<(u32, u32)> =
         std::collections::BinaryHeap::with_capacity(k + 1);
-    for slot in 0..n {
-        let row = &codes[slot * stride..(slot + 1) * stride];
-        let d = hamming(query_code, row);
+    for slot in slots {
+        let start = (slot as usize) * stride;
+        let end = start + stride;
+        if end > codes.len() {
+            continue;
+        }
+        let d = hamming(query_code, &codes[start..end]);
         if heap.len() < k {
-            heap.push((d, slot as u32));
+            heap.push((d, slot));
         } else if let Some(&(worst, worst_slot)) = heap.peek() {
             // Strictly-better OR equal-distance-but-lower-slot, so the
             // tie-break is deterministic rather than heap-order-dependent.
-            if d < worst || (d == worst && (slot as u32) < worst_slot) {
+            if d < worst || (d == worst && slot < worst_slot) {
                 heap.pop();
-                heap.push((d, slot as u32));
+                heap.push((d, slot));
             }
         }
     }
@@ -428,6 +485,229 @@ mod tests {
             let onebit = codes_stride(dim);
             let twobit = dim / 8 * 2;
             assert_eq!(twobit, onebit * 2, "dim {dim}: 2-bit must be 2x 1-bit");
+        }
+    }
+
+    /// Deterministic pseudo-random packed-code chain for the slot-restricted
+    /// tests below. Same LCG the brute-force test uses.
+    fn synth_codes(n: usize, stride: usize, seed: u32) -> Vec<u8> {
+        let mut codes = vec![0u8; n * stride];
+        let mut x = seed;
+        for b in codes.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (x >> 24) as u8;
+        }
+        codes
+    }
+
+    /// `topk_hamming` MUST be exactly `topk_hamming_slots` over the full
+    /// slot range. The flat BQ scan and the IVF+BQ cell-restricted scan
+    /// share one heap implementation precisely so the two can never
+    /// disagree on the tie-break; this gates that they are the same code.
+    #[test]
+    fn topk_hamming_slots_full_range_matches_flat() {
+        let dim = 40usize;
+        let stride = codes_stride(dim);
+        let n = 150usize;
+        let codes = synth_codes(n, stride, 0x0BAD_F00D);
+        for qi in [0usize, 7, 99] {
+            let q = &codes[qi * stride..(qi + 1) * stride];
+            for k in [1usize, 3, 25, 200] {
+                assert_eq!(
+                    topk_hamming(q, &codes, n, k),
+                    topk_hamming_slots(q, &codes, 0..(n as u32), k),
+                    "query {qi}, k={k}"
+                );
+            }
+        }
+    }
+
+    /// The IVF+BQ scan primitive: restricting to a subset of slots must
+    /// return exactly the brute-force top-k OVER THAT SUBSET -- not the
+    /// global top-k filtered afterwards (which would under-fill k when the
+    /// global winners are all outside the probed cells). This is the
+    /// property that makes probing a fraction of cells CORRECT rather than
+    /// just cheap.
+    #[test]
+    fn topk_hamming_slots_matches_brute_force_over_the_subset() {
+        let dim = 32usize;
+        let stride = codes_stride(dim);
+        let n = 200usize;
+        let codes = synth_codes(n, stride, 0x1234_5678);
+        // Three subsets: a contiguous "cell" range (what the IVF layout
+        // actually produces), a sparse stride, and a single slot.
+        let subsets: Vec<Vec<u32>> = vec![
+            (40u32..90).collect(),
+            (0u32..n as u32).filter(|s| s % 7 == 3).collect(),
+            vec![123],
+        ];
+        for (si, subset) in subsets.iter().enumerate() {
+            for qi in [0usize, 55, 140] {
+                let q = &codes[qi * stride..(qi + 1) * stride];
+                for k in [1usize, 4, 20, 500] {
+                    let got = topk_hamming_slots(q, &codes, subset.iter().copied(), k);
+                    let mut want: Vec<(u32, u32)> = subset
+                        .iter()
+                        .map(|&s| {
+                            let row = &codes[s as usize * stride..(s as usize + 1) * stride];
+                            (hamming(q, row), s)
+                        })
+                        .collect();
+                    want.sort_unstable_by_key(|&(d, s)| (d, s));
+                    want.truncate(k);
+                    assert_eq!(got, want, "subset {si}, query {qi}, k={k}");
+                }
+            }
+        }
+    }
+
+    /// The tie-break must not depend on the ORDER the slot iterator yields
+    /// slots in. A probe set is built from `coarse_probe`'s
+    /// distance-ordered cell list, so slots arrive out of ascending order;
+    /// if the heap's tie-break were order-sensitive, the same query would
+    /// return different rows depending on which cell happened to be
+    /// nearest.
+    #[test]
+    fn topk_hamming_slots_is_order_independent() {
+        // The sharpest case first: EVERY distance identical (an all-ties
+        // corpus), slots arriving in DESCENDING order. Ties must resolve to
+        // the lowest slots regardless. A bounded heap that evicts only on
+        // `d < worst` (dropping the `slot < worst_slot` half of the
+        // tie-break) returns the HIGHEST arriving slots here instead -- the
+        // exact non-determinism this asserts against. Verified to fail if
+        // that half is removed.
+        {
+            let stride = codes_stride(8);
+            let codes = vec![0u8; 6 * stride]; // all identical => all d = 0
+            let q = vec![0u8; stride];
+            assert_eq!(
+                topk_hamming_slots(&q, &codes, [5u32, 4, 3, 2, 1, 0], 2),
+                vec![(0, 0), (0, 1)],
+                "an all-ties corpus must resolve to the LOWEST slots, not the first-arriving"
+            );
+        }
+        let dim = 24usize; // few bits => MANY ties, the case that matters
+        let stride = codes_stride(dim);
+        let n = 120usize;
+        let codes = synth_codes(n, stride, 0xFEED_BEEF);
+        let ascending: Vec<u32> = (10u32..80).collect();
+        let mut shuffled = ascending.clone();
+        // Deterministic "shuffle": reverse then rotate, so the order is
+        // definitely not ascending and definitely not the heap's.
+        shuffled.reverse();
+        shuffled.rotate_left(17);
+        for qi in [0usize, 33] {
+            let q = &codes[qi * stride..(qi + 1) * stride];
+            for k in [1usize, 5, 30] {
+                assert_eq!(
+                    topk_hamming_slots(q, &codes, ascending.iter().copied(), k),
+                    topk_hamming_slots(q, &codes, shuffled.iter().copied(), k),
+                    "query {qi}, k={k}: tie-break must be slot-id based, not arrival-order based"
+                );
+            }
+        }
+    }
+
+    /// An out-of-range slot (a torn cell directory) must be SKIPPED, not
+    /// panic across the FFI boundary -- the same reasoning as
+    /// `ReadOnlyIndex::id_at_slot_checked`. A backend abort under load is
+    /// strictly worse than a short result.
+    #[test]
+    fn topk_hamming_slots_skips_out_of_range_slots() {
+        let dim = 16usize;
+        let stride = codes_stride(dim);
+        let n = 10usize;
+        let codes = synth_codes(n, stride, 42);
+        let q = codes[0..stride].to_vec();
+        // Slots 5, 9 are valid; 10, 999, u32::MAX are not.
+        let got = topk_hamming_slots(&q, &codes, [5u32, 10, 9, 999, u32::MAX], 5);
+        assert_eq!(
+            got.iter().map(|&(_, s)| s).collect::<Vec<_>>(),
+            {
+                let mut want = vec![
+                    (hamming(&q, &codes[5 * stride..6 * stride]), 5u32),
+                    (hamming(&q, &codes[9 * stride..10 * stride]), 9u32),
+                ];
+                want.sort_unstable_by_key(|&(d, s)| (d, s));
+                want.iter().map(|&(_, s)| s).collect::<Vec<_>>()
+            },
+            "only the in-range slots may be scored"
+        );
+    }
+
+    /// The streamed (out-of-core / IVF) mean MUST be bit-identical to the
+    /// whole-corpus mean. `bq_ivf_build_and_write` accumulates per spill
+    /// block; `bq_build_and_write` computes over the resident corpus. If
+    /// they diverged, the same table would get different sign codes
+    /// depending on `maintenance_work_mem`, i.e. the on-disk bytes would
+    /// depend on a runtime knob.
+    #[test]
+    fn streamed_mean_matches_whole_corpus_mean() {
+        let dim = 12usize;
+        let n = 997usize; // prime, so blocks don't divide it evenly
+        let flat: Vec<f32> = (0..n * dim)
+            .map(|i| (((i * 37) % 211) as f32) * 0.031 - 3.0)
+            .collect();
+        let whole = corpus_mean(&flat, dim);
+        for block_rows in [1usize, 7, 64, 512, 997, 4096] {
+            let mut sums = vec![0.0f64; dim];
+            let mut start = 0usize;
+            while start < n {
+                let rows = (n - start).min(block_rows);
+                accumulate_sums(&mut sums, &flat[start * dim..(start + rows) * dim], dim);
+                start += rows;
+            }
+            let streamed = finish_mean(&sums, n);
+            assert_eq!(
+                whole.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                streamed.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                "block_rows={block_rows}: streamed mean must be BIT-identical"
+            );
+        }
+    }
+
+    /// The packed-codes degeneracy check (what the streaming IVF build can
+    /// afford) must agree with the centered-corpus one (what the flat build
+    /// uses) on every case that matters: the rescued dense-positive corpus,
+    /// the unindexable constant corpus, and normal spread data.
+    #[test]
+    fn packed_degeneracy_matches_centered_degeneracy() {
+        let dim = 8usize;
+        let stride = codes_stride(dim);
+        let cases: Vec<(&str, Vec<f32>)> = vec![
+            // Dense-positive with spread: degenerate RAW, fine centered.
+            (
+                "all_positive_spread",
+                (0..5 * dim).map(|i| 10.0 + (i as f32) * 0.5).collect(),
+            ),
+            // Constant: degenerate even after centering.
+            ("constant", vec![7.0f32; 5 * dim]),
+            // Zero-centered spread: never degenerate.
+            (
+                "spread",
+                (0..5 * dim)
+                    .map(|i| if i % 3 == 0 { 1.0 } else { -0.5 })
+                    .collect(),
+            ),
+            // Single row: never "degenerate" (nothing to rank against).
+            ("one_row", vec![1.0f32; dim]),
+        ];
+        for (name, flat) in cases {
+            let n = flat.len() / dim;
+            let mean = corpus_mean(&flat, dim);
+            let centered: Vec<f32> = flat
+                .chunks_exact(dim)
+                .flat_map(|r| center(r, &mean))
+                .collect();
+            let codes: Vec<u8> = centered
+                .chunks_exact(dim)
+                .flat_map(|r| pack_signs(r))
+                .collect();
+            assert_eq!(
+                is_degenerate(&centered, dim),
+                codes_are_degenerate(&codes, stride, n),
+                "case {name}: the two degeneracy checks must agree"
+            );
         }
     }
 }

@@ -1307,17 +1307,32 @@ unsafe fn ivf_setup_and_search(
     let dim = meta.dim as usize;
     let lists = meta.lists as usize;
 
-    // Coarse centroids (f32, rotated space) + cell directory. wire v8:
-    // materialize the rotation from `dim` (not read from disk); see
-    // the OOC path + P1_PROGRESS.md D-ivf-rotation.
+    // Coarse centroids + cell directory.
+    //
+    // SPACE: a TurboQuant index's cells were trained in the ROTATED space
+    // (that is the space its fine quantizer encodes in, so coarse and
+    // fine must agree), and wire v8 materializes the rotation from `dim`
+    // rather than reading it (see the OOC path + P1_PROGRESS.md
+    // D-ivf-rotation). A 1-bit sign-BQ index has NO rotated fine space --
+    // its code is the sign of the centred raw coordinate -- so
+    // `build::bq_ivf_build_and_write` trains cells in the raw
+    // L2-NORMALISED space and this must probe in that same space, i.e.
+    // skip the rotation entirely. Rotating a BQ query here would probe
+    // the wrong cells and silently collapse recall.
     let centroids = relfile::read_coarse_centroids((*scan).indexRelation, &meta);
     if centroids.len() != lists * dim {
         return None;
     }
-    let rotation = crate::index::ivf::materialize_rotation_matrix(dim);
-    if rotation.len() != dim * dim {
-        return None;
-    }
+    let is_bq = arc.is_bq();
+    let rotation = if is_bq {
+        Vec::new()
+    } else {
+        let r = crate::index::ivf::materialize_rotation_matrix(dim);
+        if r.len() != dim * dim {
+            return None;
+        }
+        r
+    };
     let directory = relfile::read_cell_directory((*scan).indexRelation, &meta)?;
     // The cell directory must partition exactly n_live slots; if it
     // doesn't, the mask would be wrong — fall back to flat.
@@ -1350,7 +1365,15 @@ unsafe fn ivf_setup_and_search(
     // is also the >RAM / large-`lists` regime the plan targets. This
     // path keeps the exact linear `coarse_probe`.
     let unit = kernels::normalise_to_vec(query);
-    let q_rot = crate::index::ivf::rotate_query(&rotation, &unit, dim);
+    // See the SPACE note above: no rotation for a BQ index (cells live in
+    // the normalised space); `q_rot` then IS the normalised query, which
+    // is exactly what a probe-widening refill needs to re-run
+    // `coarse_probe` against the same centroids.
+    let q_rot = if is_bq {
+        unit
+    } else {
+        crate::index::ivf::rotate_query(&rotation, &unit, dim)
+    };
     let probes = (crate::guc::PROBES.get() as usize).clamp(1, lists);
     let probed = crate::index::ivf::coarse_probe(&centroids, lists, dim, &q_rot, probes);
 

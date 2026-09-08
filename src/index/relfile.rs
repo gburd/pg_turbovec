@@ -725,15 +725,9 @@ pub(crate) unsafe fn read_chain(
 /// Write a complete 1-bit sign-BQ relfile: the packed sign-code chain,
 /// the ids chain, the corpus-mean chain, then the meta page LAST.
 ///
-/// A BQ index has no scales, codebook, rotation/TQ+ or blocked chain (see
-/// [`crate::index::page::KIND_BQ`]), so this is deliberately a separate
-/// writer rather than four "unless BQ" branches inside
-/// `write_full_inner` — which is load-bearing for every existing index.
-///
-/// Meta LAST is the v1.29.4 crash-safety invariant: an interrupted write
-/// leaves block 0 in its previous state (zero-filled for a fresh build),
-/// so readers see the index as empty or as the previous version, never as
-/// a half-written new layout.
+/// Thin wrapper over [`write_full_bq_parts`] for a FLAT (`lists = 0`) BQ
+/// build with no tombstones. `aminsert` and the IVF build call
+/// `write_full_bq_parts` directly.
 ///
 /// # Safety
 /// Caller must hold an exclusive relation lock.
@@ -746,6 +740,97 @@ pub(crate) unsafe fn write_full_bq(
     mean: &[f32],
     am_version: u32,
 ) {
+    write_full_bq_parts(
+        rel,
+        dim,
+        n_vectors,
+        packed_codes,
+        slot_to_id,
+        mean,
+        am_version,
+        None,
+        &[],
+        0,
+    );
+}
+
+/// Write a complete IVF + 1-bit sign-BQ relfile (`WITH (lists = N,
+/// bit_width = 1)`): the CELL-CONTIGUOUS packed sign codes, the ids
+/// chain, the corpus mean, the coarse centroids and the cell directory,
+/// then the meta page LAST.
+///
+/// # Safety
+/// Caller must hold an exclusive relation lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn write_full_bq_ivf(
+    rel: pg_sys::Relation,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    slot_to_id: &[u64],
+    mean: &[f32],
+    am_version: u32,
+    ivf: IvfParts<'_>,
+) {
+    write_full_bq_parts(
+        rel,
+        dim,
+        n_vectors,
+        packed_codes,
+        slot_to_id,
+        mean,
+        am_version,
+        Some(ivf),
+        &[],
+        0,
+    );
+}
+
+/// Write a complete 1-bit sign-BQ relfile: the packed sign-code chain,
+/// the ids chain, the corpus-mean chain, optionally the IVF
+/// coarse-centroid + cell-directory chains and a tombstone bitmap, then
+/// the meta page LAST.
+///
+/// A BQ index has no scales, codebook, rotation/TQ+ or blocked chain (see
+/// [`crate::index::page::KIND_BQ`]), so this is deliberately a separate
+/// writer rather than four "unless BQ" branches inside
+/// `write_full_inner` — which is load-bearing for every existing index.
+///
+/// Meta LAST is the v1.29.4 crash-safety invariant: an interrupted write
+/// leaves block 0 in its previous state (zero-filled for a fresh build),
+/// so readers see the index as empty or as the previous version, never as
+/// a half-written new layout.
+///
+/// `tombstones` re-persists an existing per-slot tombstone bitmap in the
+/// SAME rewrite (pass `&[]` when there is none). This is load-bearing:
+/// [`crate::index::page::MetaPageData::plan_bq`] plans a fresh meta with
+/// the tombstone fields zeroed, so a rewrite that dropped the bitmap
+/// would silently RESURRECT every VACUUM-deleted row — the M2 bug the
+/// graph kind fixed in v2.1.0 via
+/// `write_full_with_prepared_graph_and_tombstones`.
+///
+/// `degraded_lists` is non-zero only when an IVF+BQ index is being
+/// rewritten WITHOUT its cell metadata (the `aminsert` path): it
+/// preserves `lists` and stamps `ivf_degraded` so the degradation to a
+/// flat Hamming scan is OBSERVABLE via
+/// `turbovec.index_is_degraded()` and the scan-time WARNING, instead of
+/// silently blanking the index's IVF identity. The coarse/cell-dir chain
+/// OFFSETS stay zero in that case, so no reader can walk a stale chain.
+///
+/// # Safety
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_full_bq_parts(
+    rel: pg_sys::Relation,
+    dim: u32,
+    n_vectors: u64,
+    packed_codes: &[u8],
+    slot_to_id: &[u64],
+    mean: &[f32],
+    am_version: u32,
+    ivf: Option<IvfParts<'_>>,
+    tombstones: &[u8],
+    degraded_lists: u32,
+) {
     use crate::index::page::MetaPageData;
 
     let mut meta = MetaPageData::plan_bq(dim, n_vectors, am_version);
@@ -757,6 +842,52 @@ pub(crate) unsafe fn write_full_bq(
         );
         assert_eq!(slot_to_id.len() as u64, n_vectors, "one id per slot");
         assert_eq!(mean.len(), dim as usize, "mean must be dim f32");
+    }
+
+    // IVF chains, when this is an IVF+BQ index. MUST be planned BEFORE
+    // `total_blocks()` / the tombstone placement / `write_meta`, so the
+    // offsets readers see are the ones we actually wrote to.
+    // `set_ivf_chains` counts `bq_mean_count` in its running sum, so the
+    // coarse chain lands AFTER the mean chain rather than on top of it.
+    if let Some(iv) = &ivf {
+        let coarse_bytes = std::mem::size_of_val(iv.coarse_centroids) as u64;
+        let cell_dir_bytes = iv.cell_dir_bytes.len() as u64;
+        meta.set_ivf_chains(iv.lists, coarse_bytes, cell_dir_bytes);
+        assert!(
+            !iv.colbert,
+            "a ColBERT index cannot be 1-bit: `kind` holds one discriminator, \
+             and KIND_COLBERT / KIND_BQ are mutually exclusive"
+        );
+    } else if degraded_lists > 0 {
+        // Degraded IVF+BQ: keep `lists` so `index_was_ivf()` stays true
+        // and the operator-facing degradation signal fires, but leave
+        // every coarse/cell-dir OFFSET at zero so `read_coarse_centroids`
+        // / `read_cell_directory` return nothing and the scan takes the
+        // flat Hamming fallback deterministically (not by a length
+        // coincidence).
+        meta.lists = degraded_lists;
+        meta.ivf_degraded = true;
+    }
+
+    // Tombstone chain LAST, exactly where `write_tombstones_and_meta`
+    // places it, so the two paths agree and a re-persist never moves the
+    // chain. Every preceding chain must be in this sum — including the
+    // mean and the IVF chains — or the bitmap lands on top of one (the
+    // v1.24.0 corruption class).
+    if !tombstones.is_empty() && n_vectors > 0 {
+        let after_all = 1
+            + meta.codes_count
+            + meta.scales_count
+            + meta.ids_count
+            + meta.blocked_count
+            + meta.rotation_count
+            + meta.coarse_count
+            + meta.cell_dir_count
+            + meta.graph_count
+            + meta.bq_mean_count;
+        meta.tombstone_first = after_all;
+        meta.tombstone_bytes = tombstones.len() as u64;
+        meta.tombstone_count = MetaPageData::byte_pages_needed(meta.tombstone_bytes);
     }
 
     // Make room for every chain before writing any of them, so the meta
@@ -797,6 +928,44 @@ pub(crate) unsafe fn write_full_bq(
             crate::index::page::PAYLOAD_BYTES as u32,
             mean_bytes.len() as u64,
         );
+        // IVF: coarse centroids (rotated space) + cell directory, same
+        // flat-byte chain shape `write_full_inner` uses.
+        if let Some(iv) = &ivf {
+            if iv.lists > 0 && !iv.coarse_centroids.is_empty() {
+                let coarse_buf: &[u8] = std::slice::from_raw_parts(
+                    iv.coarse_centroids.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(iv.coarse_centroids),
+                );
+                write_chain_at(
+                    rel,
+                    meta.coarse_first,
+                    coarse_buf,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    coarse_buf.len() as u64,
+                );
+            }
+            if iv.lists > 0 && !iv.cell_dir_bytes.is_empty() {
+                write_chain_at(
+                    rel,
+                    meta.cell_dir_first,
+                    iv.cell_dir_bytes,
+                    1,
+                    crate::index::page::PAYLOAD_BYTES as u32,
+                    iv.cell_dir_bytes.len() as u64,
+                );
+            }
+        }
+        if meta.tombstone_count > 0 {
+            write_chain_at(
+                rel,
+                meta.tombstone_first,
+                tombstones,
+                1,
+                crate::index::page::PAYLOAD_BYTES as u32,
+                meta.tombstone_bytes,
+            );
+        }
     } else {
         // Empty build: no chains, but the meta page must still exist so
         // later inserts have stable state to extend.

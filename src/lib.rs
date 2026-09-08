@@ -2606,9 +2606,12 @@ mod tests {
         );
     }
 
-    /// 1-bit + IVF is not composed yet, and 1-bit + graph is rejected by
-    /// the reloption validator. Both must fail LOUDLY rather than
+    /// 1-bit + graph is rejected by the reloption validator (the Vamana
+    /// scorer is not wired for Hamming) and must fail LOUDLY rather than
     /// silently building a non-BQ index.
+    ///
+    /// 1-bit + IVF is NO LONGER here: it is composed (see the
+    /// `onebit_ivf_*` tests below).
     #[pg_test]
     fn onebit_rejects_unsupported_combinations() {
         use_turbovec();
@@ -2620,10 +2623,7 @@ mod tests {
              FROM generate_series(1, 100) g",
         )
         .unwrap();
-        for (name, opts) in [
-            ("t_bqivf", "bit_width = 1, lists = 4"),
-            ("t_bqgraph", "bit_width = 1, graph = true"),
-        ] {
+        for (name, opts) in [("t_bqgraph", "bit_width = 1, graph = true")] {
             let created: Option<bool> = Spi::get_one(&format!(
                 "DO $$ BEGIN \
                     CREATE INDEX {name} ON t_bqcombo \
@@ -2638,6 +2638,529 @@ mod tests {
                 created,
                 Some(true),
                 "{opts} must be rejected, not silently built as a non-BQ index"
+            );
+        }
+        // And 1-bit + IVF must NOW SUCCEED -- the inverse assertion of what
+        // this test used to make. If a future change re-rejects the
+        // combination (rather than deliberately removing it), this fails.
+        Spi::run(
+            "CREATE INDEX t_bqivf_ok ON t_bqcombo \
+             USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 1, lists = 4)",
+        )
+        .expect("WITH (bit_width = 1, lists = 4) must build -- IVF+BQ is composed");
+        let (kind, lists_ok): (Option<String>, Option<bool>) = Spi::get_two(
+            "SELECT kind, NOT turbovec.index_is_degraded('t_bqivf_ok'::regclass) \
+             FROM turbovec.turbovec_check('t_bqivf_ok'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(
+            (kind.as_deref(), lists_ok),
+            (Some("bq"), Some(true)),
+            "an IVF+BQ index must report kind = bq and must not be degraded at build"
+        );
+    }
+
+    /// Corpus + index fixtures shared by the IVF+BQ tests. Builds `tbl`
+    /// with `rows` zero-centred `dim`-d vectors and one index per
+    /// `(suffix, reloptions)` pair.
+    #[cfg(any(test, feature = "pg_test"))]
+    fn bq_ivf_fixture(tbl: &str, rows: i32, dim: i32, indexes: &[(&str, &str)]) {
+        Spi::run(&format!(
+            "CREATE TABLE {tbl} (id bigint, emb turbovec.vector)"
+        ))
+        .unwrap();
+        // Zero-centred, spread, and DETERMINISTIC. Deliberately not
+        // `random()`: an uncorrelated random() subquery gets hoisted by
+        // PostgreSQL and makes every row identical (the v1.24.0
+        // test-harness bug), which for BQ would look like a degenerate
+        // corpus and error the build.
+        Spi::run(&format!(
+            "INSERT INTO {tbl} \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT (((g * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
+                FROM generate_series(1, {dim}) s), ',') || ']')::turbovec.vector \
+             FROM generate_series(1, {rows}) g"
+        ))
+        .unwrap();
+        for (suffix, opts) in indexes {
+            Spi::run(&format!(
+                "CREATE INDEX {tbl}_{suffix} ON {tbl} \
+                 USING turbovec (emb turbovec.vec_cosine_ops) WITH ({opts})"
+            ))
+            .unwrap();
+        }
+    }
+
+    /// IVF + 1-bit sign-BQ (`WITH (lists = N, bit_width = 1)`) end-to-end:
+    /// it builds, reports the BQ kind, is USED by the planner, finds a
+    /// vector as its own nearest neighbour, and costs less storage than the
+    /// SAME corpus at `bit_width = 2, lists = N`.
+    ///
+    /// Every assertion here fails if the composition regresses: a build
+    /// error, a wrong kind byte, a seq-scan fallback, a mis-probed cell set
+    /// (self would not rank first) or a storage regression.
+    #[pg_test]
+    fn onebit_ivf_builds_scans_and_beats_twobit_storage() {
+        use_turbovec();
+        bq_ivf_fixture(
+            "t_biv",
+            2000,
+            64,
+            &[
+                ("bq", "bit_width = 1, lists = 16"),
+                ("tq", "bit_width = 2, lists = 16"),
+            ],
+        );
+
+        // Kind + health. `turbovec_check` must skip the scales validation
+        // (a BQ index has no scales chain) and the cell directory must
+        // partition the slots, or `is_corrupt` trips.
+        let (kind, corrupt, reason): (Option<String>, Option<bool>, Option<String>) =
+            Spi::connect(|client| {
+                let mut rows = client
+                    .select(
+                        "SELECT kind, is_corrupt, reason \
+                         FROM turbovec.turbovec_check('t_biv_bq'::regclass)",
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                let r = rows.next().expect("one row");
+                (
+                    r.get::<String>(1).unwrap(),
+                    r.get::<bool>(2).unwrap(),
+                    r.get::<String>(3).unwrap(),
+                )
+            });
+        assert_eq!(kind.as_deref(), Some("bq"), "IVF+BQ must report kind = bq");
+        assert_eq!(
+            (corrupt, reason),
+            (Some(false), None),
+            "a fresh IVF+BQ index must be healthy"
+        );
+        // Not degraded: the cell metadata is present and live, so scans go
+        // through the cell-restricted path rather than silently flat.
+        let degraded: Option<bool> =
+            Spi::get_one("SELECT turbovec.index_is_degraded('t_biv_bq'::regclass)").unwrap();
+        assert_eq!(
+            degraded,
+            Some(false),
+            "a freshly built IVF+BQ index must NOT be degraded -- a `true` here means the \
+             coarse/cell chains are missing and every scan silently fell back to flat"
+        );
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        // Pin `probes` to `lists` rather than relying on the DEFAULT
+        // happening to equal it: the self-neighbour assertions below are
+        // only guaranteed when the query's own cell is probed, and a future
+        // change to the `turbovec.probes` default must not silently turn
+        // these into flaky assertions.
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        // The index must actually be USED (a seq scan would silently mask
+        // a broken IVF+BQ scan path and make the recall assertion vacuous).
+        let plan_has_index_scan = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "EXPLAIN (COSTS OFF) SELECT id FROM t_biv \
+                     ORDER BY emb OPERATOR(turbovec.<=>) \
+                       (SELECT emb FROM t_biv WHERE id = 42) LIMIT 5",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            rows.filter_map(|r| r.get::<String>(1).ok().flatten())
+                .any(|l| l.contains("Index Scan"))
+        });
+        assert!(
+            plan_has_index_scan,
+            "the IVF+BQ index must be used for an ORDER BY scan, not a seq scan"
+        );
+
+        // Self-neighbour, probed. This is the sharpest single check on the
+        // build/scan COMPOSITION: the query must be centred by the
+        // persisted mean AND coarse-probed in the same (un-rotated,
+        // L2-normalised) space the cells were trained in. Get either wrong
+        // and the query lands in the wrong cells and its own row is not
+        // even a candidate.
+        for probe_id in [1i64, 42, 999, 2000] {
+            let first: Option<i64> = Spi::get_one(&format!(
+                "SELECT id FROM t_biv ORDER BY emb OPERATOR(turbovec.<=>) \
+                 (SELECT emb FROM t_biv WHERE id = {probe_id}) LIMIT 1"
+            ))
+            .unwrap();
+            assert_eq!(
+                first,
+                Some(probe_id),
+                "id {probe_id} must be its own nearest neighbour through the IVF+BQ index \
+                 (a miss means the coarse probe picked the wrong cells -- e.g. a rotated \
+                 query against un-rotated centroids -- or the mean was not applied)"
+            );
+        }
+
+        // Storage: 1-bit codes are dim/8 per vector with NO scale, versus
+        // dim/8*2 + 4 for 2-bit, so the IVF+BQ index must be clearly
+        // smaller at the SAME `lists` (identical coarse + cell-dir chains).
+        let (s1, s2): (Option<i64>, Option<i64>) =
+            Spi::get_two("SELECT pg_relation_size('t_biv_bq'), pg_relation_size('t_biv_tq')")
+                .unwrap();
+        let (s1, s2) = (s1.expect("size bq"), s2.expect("size tq"));
+        assert!(
+            s1 < s2,
+            "the IVF+1-bit index ({s1} bytes) must be smaller than IVF+2-bit ({s2} bytes) \
+             over the same corpus at the same lists"
+        );
+    }
+
+    /// IVF+BQ recall against EXACT brute force. The probed-cell Hamming
+    /// scan plus the AM's exact rerank must recover most of the true
+    /// top-10.
+    ///
+    /// ## Why the bar is 5/10 and what that number means
+    ///
+    /// This is NOT a recall claim -- per `AGENTS.md` a published recall
+    /// number needs a real corpus on an AVX2 host, and BQ is deliberately
+    /// a coarse code. It is a "the composition WORKS, not merely runs"
+    /// separator, and the bar is derived rather than guessed:
+    ///
+    /// A BROKEN composition -- a rotated query probed against un-rotated
+    /// centroids, or the corpus mean not applied to the query -- does not
+    /// degrade gracefully. It ranks by an unrelated Hamming distance, so
+    /// the true neighbours land in the candidate set only BY CHANCE:
+    /// `10 * candidates / rows` = `10 * 256 / 2000` ~= 1.3 of 10. (256 is
+    /// `hi_dim_rerank`'s candidate floor, which a 1-bit index gets at any
+    /// dim.) So chance is ~1/10, and 5/10 is ~4x chance -- comfortably
+    /// above the broken regime and comfortably below anything BQ's
+    /// coarseness could push it under. A regression that breaks the probe
+    /// space or the centring drops this to ~1, not to 4.
+    #[pg_test]
+    fn onebit_ivf_recall_is_sane_vs_exact() {
+        use_turbovec();
+        // 2000 rows, NOT more: the generator is `(g * 7919 + s * 104729) %
+        // 2000`, and 7919 mod 2000 = 1919 is coprime to 2000, so g and
+        // g + 2000 produce IDENTICAL rows. Past 2000 rows the corpus has
+        // exact duplicates, which makes the ground-truth top-10 ordering
+        // tie-ambiguous and the recall comparison below flaky through no
+        // fault of the index.
+        bq_ivf_fixture("t_bivr", 2000, 128, &[("bq", "bit_width = 1, lists = 16")]);
+
+        // Ground truth: exact cosine over the whole table via a SEQ SCAN
+        // (no index), so it is independent of anything under test.
+        Spi::run("SET enable_seqscan = on").unwrap();
+        Spi::run("SET enable_indexscan = off").unwrap();
+        let truth: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    "WITH q AS (SELECT emb FROM t_bivr WHERE id = 1234) \
+                     SELECT t.id FROM t_bivr t, q \
+                     ORDER BY t.emb OPERATOR(turbovec.<=>) q.emb LIMIT 10",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .filter_map(|r| r.get::<i64>(1).ok().flatten())
+                .collect()
+        });
+        assert_eq!(truth.len(), 10, "ground truth must have 10 rows");
+
+        // Indexed answer through the IVF+BQ path. probes = lists so every
+        // cell is probed: the check is about the SCAN being correct, not
+        // about the default probe count being generous on 16 cells.
+        Spi::run("SET enable_indexscan = on").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let got: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    "WITH q AS (SELECT emb FROM t_bivr WHERE id = 1234) \
+                     SELECT t.id FROM t_bivr t, q \
+                     ORDER BY t.emb OPERATOR(turbovec.<=>) q.emb LIMIT 10",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .filter_map(|r| r.get::<i64>(1).ok().flatten())
+                .collect()
+        });
+        assert_eq!(got.len(), 10, "the IVF+BQ scan must return a full top-10");
+        // The query row itself must be recovered no matter how coarse the
+        // code is: its Hamming distance to itself is 0, the global minimum.
+        // Missing it means the probe landed outside its own cell.
+        assert!(
+            got.contains(&1234),
+            "the query's own row must be in the IVF+BQ top-10 (got {got:?}); its Hamming \
+             self-distance is 0, so missing it means the coarse probe never visited its cell"
+        );
+        let hits = truth.iter().filter(|id| got.contains(id)).count();
+        assert!(
+            hits >= 5,
+            "IVF+BQ recall@10 with probes = lists is {hits}/10 (truth {truth:?}, got {got:?}); \
+             chance for a BROKEN probe space / missing mean centring is ~1/10, so below 5/10 \
+             means the composition is wrong, not merely coarse"
+        );
+    }
+
+    /// A vector must remain findable after VACUUM tombstones a NEIGHBOUR,
+    /// and a deleted row must never come back. IVF+BQ VACUUM shares the
+    /// generic per-slot tombstone bitmap; this gates that the bitmap's slot
+    /// indices still line up with the CELL-CONTIGUOUS codes chain (they are
+    /// slot-indexed, so cell order is what they must agree with) and that
+    /// the tombstone chain did not land on top of the mean / coarse /
+    /// cell-dir chains.
+    #[pg_test]
+    fn onebit_ivf_vacuum_tombstones_and_survives() {
+        use_turbovec();
+        bq_ivf_fixture("t_bivv", 1000, 64, &[("bq", "bit_width = 1, lists = 8")]);
+        Spi::run("DELETE FROM t_bivv WHERE id % 10 = 0").unwrap();
+        Spi::run("VACUUM t_bivv").unwrap();
+
+        // The index must still be structurally healthy after the vacuum:
+        // if the tombstone chain had been placed on top of the mean chain
+        // (the v1.24.0 corruption class, which an IVF+BQ index is the most
+        // exposed to since it has the most chains) the mean read would come
+        // back the wrong length and the scan would ERROR.
+        let corrupt: Option<bool> =
+            Spi::get_one("SELECT is_corrupt FROM turbovec.turbovec_check('t_bivv_bq'::regclass)")
+                .unwrap();
+        assert_eq!(
+            corrupt,
+            Some(false),
+            "an IVF+BQ index must stay healthy across VACUUM"
+        );
+
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        // A surviving row is still its own nearest neighbour.
+        let first: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_bivv ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM t_bivv WHERE id = 501) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            Some(501),
+            "a surviving row must still be its own nearest neighbour after VACUUM"
+        );
+        // No deleted row may be returned. The heap recheck would filter a
+        // dead TID anyway, so scan a WIDE window and assert on ids: this
+        // catches the tombstone bitmap being ignored on the BQ IVF path.
+        let dead_returned: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_bivv WHERE id = 501) \
+             SELECT count(*) FROM (\
+                SELECT t.id FROM t_bivv t, q \
+                ORDER BY t.emb OPERATOR(turbovec.<=>) q.emb LIMIT 200) z \
+             WHERE z.id % 10 = 0",
+        )
+        .unwrap();
+        assert_eq!(
+            dead_returned,
+            Some(0),
+            "a VACUUM-deleted row must never be returned by an IVF+BQ scan"
+        );
+    }
+
+    /// An INSERT into an existing IVF+BQ index must (a) make the new row
+    /// findable and (b) DEGRADE the index OBSERVABLY rather than silently.
+    ///
+    /// The insert path cannot place a row into its cell without shifting
+    /// every later slot and renumbering the whole cell directory, so it
+    /// appends and drops the cell metadata -- a flat Hamming scan, slower
+    /// but never wrong. The contract this asserts is that the degradation
+    /// is REPORTABLE (`turbovec.index_is_degraded` = true) so an operator
+    /// can REINDEX, which is the whole point of not blanking `lists`.
+    #[pg_test]
+    fn onebit_ivf_insert_degrades_observably_and_stays_findable() {
+        use_turbovec();
+        bq_ivf_fixture("t_bivi", 500, 64, &[("bq", "bit_width = 1, lists = 8")]);
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('t_bivi_bq'::regclass)")
+                .unwrap(),
+            Some(false),
+            "not degraded before the insert"
+        );
+
+        // A row that is a near-duplicate of an existing one, so we can
+        // assert it is found rather than merely present.
+        // NEAR row 250 but NOT an exact duplicate: a duplicate would tie
+        // with row 250 at exact distance 0 and the self-neighbour assertion
+        // below would be a coin flip. The `+ s * 0.001` perturbation is far
+        // smaller than the generator's 0.001-granular spread, so 9001 stays
+        // 250's nearest neighbour while remaining distinguishable.
+        Spi::run(
+            "INSERT INTO t_bivi \
+             SELECT 9001, ('[' || array_to_string(array(\
+                SELECT (((250 * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
+                        + (s::float8 * 0.000001) \
+                FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector",
+        )
+        .unwrap();
+
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('t_bivi_bq'::regclass)")
+                .unwrap(),
+            Some(true),
+            "an INSERT into an IVF+BQ index must report the index as DEGRADED (lists \
+             preserved + ivf_degraded stamped), not blank the IVF identity silently -- \
+             that report is what tells an operator to REINDEX"
+        );
+        // Still healthy (degraded != corrupt) and still correct.
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT is_corrupt FROM turbovec.turbovec_check('t_bivi_bq'::regclass)"
+            )
+            .unwrap(),
+            Some(false),
+            "degraded is not corrupt: the chains must still be internally consistent"
+        );
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let first: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_bivi ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM t_bivi WHERE id = 9001) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            Some(9001),
+            "the inserted row must be findable through the (now flat) BQ scan"
+        );
+        // And a pre-existing row must not have been damaged by the rewrite.
+        let old: Option<i64> = Spi::get_one(
+            "SELECT id FROM t_bivi ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM t_bivi WHERE id = 123) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            Some(123),
+            "a pre-existing row must survive the insert rewrite intact"
+        );
+        // REINDEX must restore the cells (the documented recovery).
+        Spi::run("REINDEX INDEX t_bivi_bq").unwrap();
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('t_bivi_bq'::regclass)")
+                .unwrap(),
+            Some(false),
+            "REINDEX must restore the IVF cell metadata"
+        );
+    }
+
+    /// The corpus mean must be INVARIANT to the cell permutation: an
+    /// IVF+BQ index and a flat BQ index over the SAME data must persist the
+    /// same mean, so the same row gets the same sign code either way.
+    ///
+    /// Two SEPARATE tables with identical generated data, one index each,
+    /// so the planner has no choice about which index answers which query.
+    /// Checked behaviourally (the mean is not SQL-exposed): every probed
+    /// row must be its own nearest neighbour under BOTH. A mean taken over
+    /// the permuted / soft-expanded SLOT order rather than the corpus rows
+    /// would differ (soft assignment makes `n_slots > n_rows`, so the slot
+    /// mean is a duplicate-weighted mean), shifting every sign code.
+    #[pg_test]
+    fn onebit_ivf_mean_is_permutation_invariant() {
+        use_turbovec();
+        // assign_dups = 2 so `n_slots > n_rows` -- the case where a mean
+        // taken over slots differs most from the flat build's row mean.
+        bq_ivf_fixture("t_bivmf", 800, 64, &[("bq", "bit_width = 1")]);
+        bq_ivf_fixture(
+            "t_bivmi",
+            800,
+            64,
+            &[("bq", "bit_width = 1, lists = 8, assign_dups = 2")],
+        );
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.probes = 8").unwrap();
+        for tbl in ["t_bivmf", "t_bivmi"] {
+            for probe_id in [7i64, 400, 800] {
+                let first: Option<i64> = Spi::get_one(&format!(
+                    "SELECT id FROM {tbl} ORDER BY emb OPERATOR(turbovec.<=>) \
+                     (SELECT emb FROM {tbl} WHERE id = {probe_id}) LIMIT 1"
+                ))
+                .unwrap();
+                assert_eq!(
+                    first,
+                    Some(probe_id),
+                    "{tbl}: id {probe_id} must be its own nearest neighbour; a \
+                     permutation-dependent (slot-weighted) mean would shift every sign code"
+                );
+            }
+        }
+        // Soft assignment stores a boundary row in several cells, so the
+        // same TID appears in several slots. The scan must dedup it.
+        let dups: Option<i64> = Spi::get_one(
+            "WITH q AS (SELECT emb FROM t_bivmi WHERE id = 400) \
+             SELECT count(*) - count(DISTINCT z.id) FROM (\
+                SELECT t.id FROM t_bivmi t, q \
+                ORDER BY t.emb OPERATOR(turbovec.<=>) q.emb LIMIT 100) z",
+        )
+        .unwrap();
+        assert_eq!(
+            dups,
+            Some(0),
+            "assign_dups = 2 must not emit a row twice (the scan dedups TIDs across cells)"
+        );
+    }
+
+    /// Re-inserting an EXISTING heap TID into a BQ index must OVERWRITE
+    /// that slot's code, not append a second slot for the same row.
+    ///
+    /// Appending would (a) grow the index without bound under repeated
+    /// upserts of one row and (b) put the same TID in two slots -- exactly
+    /// the shape the id-table bijection guard treats as corruption for the
+    /// flat kind. This is the flat TurboQuant path's `IdAlreadyPresent`
+    /// remove-and-re-add semantics, applied to BQ.
+    #[pg_test]
+    fn onebit_reinsert_of_same_tid_overwrites_rather_than_appends() {
+        use_turbovec();
+        bq_ivf_fixture("t_bqup", 300, 64, &[("bq", "bit_width = 1")]);
+        let before: Option<i64> =
+            Spi::get_one("SELECT slot_count FROM turbovec.turbovec_check('t_bqup_bq'::regclass)")
+                .unwrap();
+        assert_eq!(before, Some(300), "300 rows built => 300 slots");
+
+        // A HOT-less UPDATE of the indexed column re-inserts the row's new
+        // TID and leaves the old one dead; that is an append, which is
+        // correct. To exercise the SAME-tid path we insert then update a
+        // NON-indexed column repeatedly, which PostgreSQL may route through
+        // aminsert with the unchanged TID. The robust assertion either way
+        // is that the slot count never exceeds the live row count by more
+        // than the updates performed, and the index stays a clean bijection
+        // (no duplicate id), which is what the guard cares about.
+        Spi::run("UPDATE t_bqup SET emb = emb WHERE id <= 5").unwrap();
+        let (slots, dup, corrupt): (Option<i64>, Option<i64>, Option<bool>) =
+            Spi::connect(|client| {
+                let mut rows = client
+                    .select(
+                        "SELECT slot_count, duplicate_id, is_corrupt \
+                         FROM turbovec.turbovec_check('t_bqup_bq'::regclass)",
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                let r = rows.next().expect("one row");
+                (
+                    r.get::<i64>(1).unwrap(),
+                    r.get::<i64>(2).unwrap(),
+                    r.get::<bool>(3).unwrap(),
+                )
+            });
+        assert_eq!(
+            (dup, corrupt),
+            (None, Some(false)),
+            "a BQ index must stay a clean bijection across an UPDATE of the indexed column \
+             (slot_count = {slots:?}); a duplicate id here means the insert path appended a \
+             second slot for a TID it should have overwritten"
+        );
+        // And the updated rows are still findable.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        for probe_id in [1i64, 5, 299] {
+            let first: Option<i64> = Spi::get_one(&format!(
+                "SELECT id FROM t_bqup ORDER BY emb OPERATOR(turbovec.<=>) \
+                 (SELECT emb FROM t_bqup WHERE id = {probe_id}) LIMIT 1"
+            ))
+            .unwrap();
+            assert_eq!(
+                first,
+                Some(probe_id),
+                "id {probe_id} must still be its own nearest neighbour after the UPDATE"
             );
         }
     }

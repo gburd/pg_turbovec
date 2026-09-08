@@ -160,35 +160,85 @@ pub fn codes_stride(dim: usize) -> usize {
 
 /// Hamming distance between two packed sign-code rows of equal length.
 ///
+/// Folds 8 bytes at a time through `u64::count_ones` (one `POPCNT` per
+/// 8 bytes instead of per byte), with a byte-wise tail for the trailing
+/// `len % 8` bytes. That tail loop IS the original scalar kernel and is
+/// the ONLY path for codes shorter than 8 bytes (`dim < 64`), so it stays
+/// live and covered.
+///
+/// ## Why wide words and NOT hand-written SIMD intrinsics
+///
+/// This is a **deliberately CPU-feature-INDEPENDENT** kernel: no
+/// `is_x86_feature_detected!`, no `target_feature`, no `unsafe`, no
+/// runtime dispatch. Every machine executes the same instruction
+/// sequence over the same word decomposition, so it cannot become a
+/// second v1.7.3 (where a mis-specialised kernel returned WRONG ANN
+/// results on pre-AVX2 CPUs). An AVX2 `pshufb`-nibble-LUT variant WAS
+/// written, proven bit-identical, and benchmarked; it captured only the
+/// remaining ~27% of the achievable latency reduction and only above
+/// `dim >= 512`, losing to this function below that. It was declined.
+/// The measurements and the condition that would justify revisiting it
+/// are in `docs/ONEBIT_BQ.md` §7.
+///
+/// ## Why this is bit-identical to the byte-wise count
+///
+/// Hamming is `popcount(a XOR b)` — a sum over independent bits, so any
+/// partition of the bytes into groups gives the same total. `from_ne_bytes`
+/// applies the SAME byte permutation to both operands, and XOR is
+/// element-wise, so the multiset of XORed bits per word is identical on
+/// big- and little-endian alike: the count is endianness-independent.
+/// `hamming_agrees_with_bitwise_reference_across_dims` asserts this
+/// against a bit-by-bit reference over 5720 random pairs at 143 dims.
+///
 /// No tail masking is needed: [`pack_signs`] zeroes the unused trailing
 /// bits of the last byte (unit-asserted by `tail_bits_are_zero`), so
 /// equal-length codes agree on those bits and they contribute 0 to the
 /// XOR. This is the same MSB-first convention as `bitvec.rs` and
 /// Postgres's `bit` type, so the SQL popcount kernels and this scorer
 /// cannot disagree.
+///
+/// Mismatched lengths (a `debug_assert` violation) truncate to the
+/// shorter operand, exactly as the previous `zip`-based kernel did.
 #[inline]
 pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
     debug_assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x ^ y).count_ones())
-        .sum()
+    let mut acc = 0u32;
+    let mut aw = a.chunks_exact(8);
+    let mut bw = b.chunks_exact(8);
+    for (x, y) in aw.by_ref().zip(bw.by_ref()) {
+        // `chunks_exact(8)` yields exactly 8 bytes, so the conversion
+        // cannot fail.
+        let xv = u64::from_ne_bytes(x.try_into().unwrap());
+        let yv = u64::from_ne_bytes(y.try_into().unwrap());
+        acc += (xv ^ yv).count_ones();
+    }
+    // Scalar byte tail: the sole path when `len < 8`.
+    for (x, y) in aw.remainder().iter().zip(bw.remainder().iter()) {
+        acc += (x ^ y).count_ones();
+    }
+    acc
 }
 
 /// Top-`k` nearest slots to `query_code` by Hamming distance over a flat
 /// chain of `n` packed codes, returned as `(distance, slot)` ascending.
 ///
-/// Deliberately SCALAR. The v1.7.3 incident — where pre-AVX2 CPUs
-/// returned WRONG ANN results from a mis-specialised kernel — is the
-/// reason: `u8::count_ones` lowers to `POPCNT` on any modern x86_64 and
-/// to the equivalent elsewhere, and a hand-vectorised version must be
-/// proven bit-identical against THIS function before it can replace it.
-/// A wide-SIMD popcount is a follow-up, not a prerequisite.
+/// The distance is [`hamming`] (wide-word `POPCNT`, CPU-feature
+/// INDEPENDENT); the top-k SELECTION stays scalar on purpose. Vectorising
+/// the selection would put the tie-break — which decides the visible
+/// result order, since Hamming over `dim` bits has only `dim + 1` distinct
+/// values and ties are therefore the common case — inside a lane-shuffle,
+/// and the distance loop is where all the measured time goes anyway
+/// (`docs/ONEBIT_BQ.md` §7).
+///
+/// The v1.7.3 incident — where pre-AVX2 CPUs returned WRONG ANN results
+/// from a mis-specialised kernel — is why there is no runtime feature
+/// dispatch anywhere in this module: every machine runs the identical
+/// instruction sequence. See [`hamming`] for why the AVX2 variant that
+/// was written and proven bit-identical was still declined.
 ///
 /// Ties break toward the lower slot so results are deterministic (the
-/// same reason `partition::rank_nearest` does). Hamming over `dim` bits
-/// has only `dim + 1` distinct values, so ties are COMMON — which is
-/// exactly why the caller must rerank exactly: see
+/// same reason `partition::rank_nearest` does). Since ties are common,
+/// the caller must rerank exactly: see
 /// `guc::hi_dim_rerank_candidate_count`, which treats a 1-bit index as
 /// high-dim at any `dim` so `hi_dim_rerank = auto` widens the exact
 /// rerank window for BQ.
@@ -207,8 +257,24 @@ pub fn topk_hamming(query_code: &[u8], codes: &[u8], n: usize, k: usize) -> Vec<
         if heap.len() < k {
             heap.push((d, slot as u32));
         } else if let Some(&(worst, worst_slot)) = heap.peek() {
-            // Strictly-better OR equal-distance-but-lower-slot, so the
-            // tie-break is deterministic rather than heap-order-dependent.
+            // This condition is exactly "`(d, slot)` is lexicographically
+            // smaller than the heap's lexicographic max" — the textbook
+            // bounded-max-heap top-k, so the result is the k smallest by
+            // `(distance, slot)` for ANY visit order.
+            //
+            // Under the CURRENT ascending order the `d == worst` half
+            // never actually fires (measured: 0 firings in 4.2M
+            // evaluations over tie-saturated corpora), because a tie is
+            // already resolved by arriving later — `heap.peek()` on a
+            // `BinaryHeap<(u32, u32)>` is the lexicographic max, so
+            // `worst_slot` is the highest slot at distance `worst`, and
+            // every slot already in the heap is below the current one.
+            // It is kept because it is what makes the tie-break a
+            // property of the COMPARISON rather than of the loop order:
+            // `topk_tie_break_prefers_the_lower_slot` still passes if the
+            // loop is reversed, and fails if either the clause or the
+            // order is broken alone. A future chunked/parallel scan can
+            // therefore reorder safely.
             if d < worst || (d == worst && (slot as u32) < worst_slot) {
                 heap.pop();
                 heap.push((d, slot as u32));
@@ -428,6 +494,294 @@ mod tests {
             let onebit = codes_stride(dim);
             let twobit = dim / 8 * 2;
             assert_eq!(twobit, onebit * 2, "dim {dim}: 2-bit must be 2x 1-bit");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Wide-word Hamming: exact-agreement proof.
+    //
+    // `hamming` folds 8 bytes at a time through `u64::count_ones`. That
+    // is a pure refactor of the byte-wise count — but "pure refactor" is
+    // exactly what was believed about the kernel that shipped WRONG ANN
+    // results on pre-AVX2 CPUs in v1.7.3. So it is PROVEN here, not
+    // asserted: against an independent bit-by-bit reference, over
+    // thousands of random pairs, at dims that are and are not multiples
+    // of 8 and of 64, including every dim below one word.
+    //
+    // These are plain `#[test]`s (no cluster), so they run in CI under
+    // `cargo pgrx test` on every matrix lane and under a bare
+    // `cargo test --lib`.
+    // -----------------------------------------------------------------
+
+    /// xorshift64* — deterministic, dependency-free, and far better
+    /// distributed than the LCG-high-byte trick used above (which only
+    /// varies the top 8 bits per step).
+    struct Xs(u64);
+    impl Xs {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn fill(&mut self, buf: &mut [u8]) {
+            for c in buf.chunks_mut(8) {
+                let v = self.next_u64().to_le_bytes();
+                let len = c.len();
+                c.copy_from_slice(&v[..len]);
+            }
+        }
+    }
+
+    /// The reference: count differing bits ONE AT A TIME, MSB-first,
+    /// reading each bit exactly the way [`unpack_signs`] does. Shares no
+    /// code and no word decomposition with [`hamming`], so an error in
+    /// either cannot hide in the other.
+    fn hamming_bitwise_reference(a: &[u8], b: &[u8], dim: usize) -> u32 {
+        (0..dim)
+            .map(|i| {
+                let m = 0x80u8 >> (i % 8);
+                u32::from((a[i / 8] & m) != (b[i / 8] & m))
+            })
+            .sum()
+    }
+
+    /// The byte-wise count this kernel used to be, kept as a second
+    /// independent oracle (it decomposes into 1-byte words where
+    /// `hamming` uses 8-byte words).
+    fn hamming_bytewise(a: &[u8], b: &[u8]) -> u32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x ^ y).count_ones())
+            .sum()
+    }
+
+    /// Dims spanning every alignment case: 1..=130 covers sub-byte,
+    /// sub-word, and every `dim % 8` / `dim % 64` residue; the tail
+    /// covers realistic embedding widths on both sides of a word
+    /// boundary.
+    fn agreement_dims() -> Vec<usize> {
+        (1usize..=130)
+            .chain([
+                255, 256, 257, 383, 384, 511, 512, 768, 960, 1000, 1024, 1536, 3072,
+            ])
+            .collect()
+    }
+
+    /// THE PROOF: `hamming` equals a bit-by-bit count, exactly, on
+    /// thousands of random code pairs across 143 dims.
+    #[test]
+    fn hamming_agrees_with_bitwise_reference_across_dims() {
+        let mut rng = Xs(0x9E37_79B9_7F4A_7C15);
+        let mut trials = 0usize;
+        for dim in agreement_dims() {
+            let stride = codes_stride(dim);
+            for _ in 0..40 {
+                let mut a = vec![0u8; stride];
+                let mut b = vec![0u8; stride];
+                rng.fill(&mut a);
+                rng.fill(&mut b);
+                // Zero the unused tail bits, exactly as `pack_signs`
+                // does, so the fixtures are shaped like real codes.
+                let used = dim % 8;
+                if used != 0 {
+                    let mask = !0u8 << (8 - used);
+                    a[stride - 1] &= mask;
+                    b[stride - 1] &= mask;
+                }
+                let want = hamming_bitwise_reference(&a, &b, dim);
+                assert_eq!(hamming(&a, &b), want, "wide-word != bitwise, dim={dim}");
+                assert_eq!(
+                    hamming_bytewise(&a, &b),
+                    want,
+                    "bytewise != bitwise, dim={dim}"
+                );
+                // Symmetry and self-distance, for free, on every fixture.
+                assert_eq!(hamming(&b, &a), want, "asymmetric, dim={dim}");
+                assert_eq!(hamming(&a, &a), 0, "self-distance nonzero, dim={dim}");
+                trials += 1;
+            }
+        }
+        assert!(trials >= 5000, "expected thousands of trials, ran {trials}");
+    }
+
+    /// Degenerate operands the random fixtures will essentially never
+    /// draw: all-zero vs all-ones must be exactly `dim`, and the answer
+    /// must not depend on where the word boundary falls.
+    #[test]
+    fn hamming_extremes_agree_at_every_word_boundary() {
+        for dim in [
+            1usize, 7, 8, 9, 15, 16, 17, 63, 64, 65, 71, 72, 127, 128, 129,
+        ] {
+            let stride = codes_stride(dim);
+            let zero = vec![0u8; stride];
+            let ones = pack_signs(&vec![1.0f32; dim]);
+            assert_eq!(
+                hamming(&zero, &ones) as usize,
+                dim,
+                "all-ones vs all-zero must be dim, dim={dim}"
+            );
+            assert_eq!(
+                hamming(&zero, &ones),
+                hamming_bitwise_reference(&zero, &ones, dim)
+            );
+            assert_eq!(hamming(&zero, &zero), 0);
+            assert_eq!(hamming(&ones, &ones), 0);
+        }
+    }
+
+    /// `topk_hamming` must return the identical `(distance, slot)`
+    /// sequence — INCLUDING tie order — as a brute-force sort scored by
+    /// the independent bit-by-bit reference. Ties are the whole risk
+    /// here: Hamming over `dim` bits has only `dim + 1` distinct values,
+    /// so an all-zero query at low dim collides constantly (asserted
+    /// separately by `topk_fixtures_really_are_tie_dense`).
+    #[test]
+    fn topk_hamming_agrees_with_bitwise_brute_force_including_ties() {
+        let mut rng = Xs(0xDEAD_BEEF_CAFE_1234);
+        let mut cases = 0usize;
+        for &dim in &[3usize, 8, 12, 16, 31, 64, 65, 100, 128, 768, 1536] {
+            let stride = codes_stride(dim);
+            let used = dim % 8;
+            let mask = if used == 0 {
+                0xffu8
+            } else {
+                !0u8 << (8 - used)
+            };
+            for &n in &[1usize, 2, 7, 50, 333] {
+                let mut codes = vec![0u8; n * stride];
+                rng.fill(&mut codes);
+                for s in 0..n {
+                    codes[(s + 1) * stride - 1] &= mask;
+                }
+                // Queries: a corpus member (guarantees a distance-0 hit),
+                // a fresh random code, and the all-zero code (maximally
+                // tie-saturated, since the distance is then just the
+                // row's own popcount).
+                let mut queries: Vec<Vec<u8>> = vec![codes[..stride].to_vec()];
+                let mut fresh = vec![0u8; stride];
+                rng.fill(&mut fresh);
+                fresh[stride - 1] &= mask;
+                queries.push(fresh);
+                queries.push(vec![0u8; stride]);
+                for q in &queries {
+                    let mut want: Vec<(u32, u32)> = (0..n)
+                        .map(|s| {
+                            (
+                                hamming_bitwise_reference(
+                                    q,
+                                    &codes[s * stride..(s + 1) * stride],
+                                    dim,
+                                ),
+                                s as u32,
+                            )
+                        })
+                        .collect();
+                    want.sort_unstable_by_key(|&(d, s)| (d, s));
+                    for &k in &[1usize, 3, 10, 64, 400] {
+                        let mut expect = want.clone();
+                        expect.truncate(k);
+                        assert_eq!(
+                            topk_hamming(q, &codes, n, k),
+                            expect,
+                            "topk != bitwise brute force, dim={dim} n={n} k={k}"
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert!(cases >= 500, "expected many top-k cases, ran {cases}");
+    }
+
+    /// Guard against the test above passing vacuously: confirm the
+    /// all-zero-query fixtures really are saturated with ties, so the
+    /// lower-slot tie-break is genuinely under test.
+    #[test]
+    fn topk_fixtures_really_are_tie_dense() {
+        let dim = 16usize;
+        let stride = codes_stride(dim);
+        let n = 333usize;
+        let mut rng = Xs(7);
+        let mut codes = vec![0u8; n * stride];
+        rng.fill(&mut codes);
+        let q = vec![0u8; stride];
+        let mut d: Vec<u32> = (0..n)
+            .map(|s| hamming(&q, &codes[s * stride..(s + 1) * stride]))
+            .collect();
+        d.sort_unstable();
+        d.dedup();
+        assert!(
+            d.len() <= dim + 1 && d.len() * 10 < n,
+            "expected heavy ties: {} distinct distances over {n} rows",
+            d.len()
+        );
+    }
+
+    /// The tie-break contract, isolated: on an ALL-EQUAL-distance corpus
+    /// every slot ties, so the `k` returned slots must be exactly the
+    /// `k` LOWEST, in ascending order. This is the property the scan's
+    /// determinism rests on, and it holds for ANY visit order because the
+    /// heap condition is a full lexicographic `(distance, slot)`
+    /// comparison — verified by mutation: reversing the loop alone still
+    /// passes, while dropping the tie clause or flipping its direction
+    /// fails here.
+    #[test]
+    fn topk_tie_break_prefers_the_lower_slot() {
+        let dim = 64usize;
+        let stride = codes_stride(dim);
+        let n = 200usize;
+        // Every row identical => every distance identical => total ties.
+        let codes = vec![0xA5u8; n * stride];
+        let q = vec![0x5Au8; stride];
+        for k in [1usize, 2, 7, 50, 199, 200] {
+            let got = topk_hamming(&q, &codes, n, k);
+            let want: Vec<(u32, u32)> = (0..k as u32).map(|s| (dim as u32, s)).collect();
+            assert_eq!(got, want, "all-ties must yield the k lowest slots, k={k}");
+        }
+        // Same, with a distinct better row planted at a HIGH slot: it must
+        // come first, then the lowest of the tied remainder.
+        let mut codes2 = codes.clone();
+        codes2[190 * stride..191 * stride].copy_from_slice(&q);
+        let got = topk_hamming(&q, &codes2, n, 3);
+        assert_eq!(got, vec![(0, 190), (dim as u32, 0), (dim as u32, 1)]);
+    }
+
+    /// End-to-end at the shape the scan path actually uses: pack real
+    /// centered f32 vectors, then confirm the packed-code Hamming equals
+    /// a direct sign-disagreement count on the f32s. This ties the kernel
+    /// back to the *semantics* (how many coordinates disagree in sign),
+    /// not just to another bit-counting loop.
+    #[test]
+    fn hamming_counts_sign_disagreements_on_real_vectors() {
+        let mut rng = Xs(0x0BAD_C0DE_0BAD_C0DE);
+        for dim in [1usize, 5, 8, 63, 64, 65, 100, 768] {
+            for _ in 0..50 {
+                let mk = |rng: &mut Xs| -> Vec<f32> {
+                    (0..dim)
+                        .map(|_| {
+                            // Values in [-1, 1), including exact 0.0 often
+                            // enough to exercise the `> 0.0` rule.
+                            let r = (rng.next_u64() >> 40) as i64 - 8_388_608;
+                            (r / 4096) as f32 / 512.0
+                        })
+                        .collect()
+                };
+                let x = mk(&mut rng);
+                let y = mk(&mut rng);
+                let want: u32 = x
+                    .iter()
+                    .zip(&y)
+                    .map(|(&p, &q)| u32::from((p > 0.0) != (q > 0.0)))
+                    .sum();
+                assert_eq!(
+                    hamming(&pack_signs(&x), &pack_signs(&y)),
+                    want,
+                    "packed Hamming != sign-disagreement count, dim={dim}"
+                );
+            }
         }
     }
 }

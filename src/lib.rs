@@ -2910,8 +2910,38 @@ mod tests {
     fn onebit_ivf_vacuum_tombstones_and_survives() {
         use_turbovec();
         bq_ivf_fixture("t_bivv", 1000, 64, &[("bq", "bit_width = 1, lists = 8")]);
+        // Collect the ctids to be deleted BEFORE deleting them, then drive
+        // `ambulkdelete` directly: SQL `VACUUM` cannot run inside a
+        // `#[pg_test]`'s implicit transaction ("VACUUM cannot run inside a
+        // transaction block"). This is the same workaround
+        // `ivf_survives_vacuum` and the graph vacuum test already use.
+        let dead_set: std::collections::HashSet<u64> = {
+            let mut set = std::collections::HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM t_bivv WHERE id % 10 = 0", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        assert!(!dead_set.is_empty(), "fixture must delete some rows");
         Spi::run("DELETE FROM t_bivv WHERE id % 10 = 0").unwrap();
-        Spi::run("VACUUM t_bivv").unwrap();
+        let bivv_indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_bivv_bq'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe extern "C-unwind" fn bivv_dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const std::collections::HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(bivv_indexrelid, &dead_set, Some(bivv_dead_cb));
+        crate::cache::invalidate_all();
 
         // The index must still be structurally healthy after the vacuum:
         // if the tombstone chain had been placed on top of the mean chain

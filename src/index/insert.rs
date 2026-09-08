@@ -392,7 +392,19 @@ unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64
         }
     };
 
-    let dim = meta.dim as usize;
+    // An EMPTY BQ build stamps `dim = 0` (no rows and no reloption-pinned
+    // dim), just like the flat path's empty meta page. The flat path copes
+    // because it takes `dim` from the INCOMING ROW rather than from the meta
+    // page; this path read it from meta, so `CREATE TABLE` -> `CREATE INDEX`
+    // (on the empty table) -> `INSERT` failed with "index expects 0, row has
+    // N". Found on a real 1024-d corpus host, not by a unit test: every
+    // in-tree BQ fixture happened to index an already-populated table.
+    let empty_unpinned = meta.dim == 0 && meta.n_vectors == 0;
+    let dim = if empty_unpinned {
+        value.dim()
+    } else {
+        meta.dim as usize
+    };
     if value.dim() != dim {
         relfile::unlock_relfile_write(index_relation);
         error!(
@@ -402,7 +414,15 @@ unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64
         );
     }
 
-    let mean = relfile::read_bq_mean(index_relation, &meta);
+    // A 0-row index has no persisted mean yet; this row's own centring is
+    // the identity (a 1-row corpus mean IS that row, so every centred
+    // coordinate is 0). Seed the mean from the first row so the codes stay
+    // self-consistent, matching what a rebuild over one row would produce.
+    let mean = if empty_unpinned {
+        vec![0.0f32; dim]
+    } else {
+        relfile::read_bq_mean(index_relation, &meta)
+    };
     if mean.len() != dim {
         relfile::unlock_relfile_write(index_relation);
         error!(

@@ -2534,6 +2534,68 @@ mod tests {
         );
     }
 
+    /// A 1-bit index created on an EMPTY table must accept the first insert.
+    ///
+    /// Found on a real 1024-d corpus host while setting up the BQ frontier
+    /// bench, NOT by a unit test: every other in-tree BQ fixture indexes an
+    /// already-populated table, so all of them missed it. The empty build
+    /// stamps `dim = 0` (no rows, no reloption-pinned dim) and `insert_bq_row`
+    /// read the dim from the meta page, so the first INSERT died with
+    /// "index expects 0, row has 1024". The flat path never had this bug
+    /// because it takes the dim from the incoming row.
+    #[pg_test]
+    fn onebit_insert_into_index_built_on_empty_table() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_bqempty (id bigint, emb turbovec.vector)").unwrap();
+        // Index the table while it is still EMPTY (the failing order).
+        Spi::run(
+            "CREATE INDEX t_bqempty_idx ON t_bqempty \
+             USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 1)",
+        )
+        .unwrap();
+        // First insert must succeed and adopt the row's dim.
+        Spi::run(
+            "INSERT INTO t_bqempty \
+             SELECT 1, ('[' || array_to_string(array(\
+                SELECT ((s % 13)::float8 / 13.0) - 0.5 \
+                FROM generate_series(1, 32) s), ',') || ']')::turbovec.vector",
+        )
+        .unwrap();
+        // ...and so must subsequent ones, now that the dim is pinned.
+        Spi::run(
+            "INSERT INTO t_bqempty \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT (((g * 5 + s) % 17)::float8 / 17.0) - 0.5 \
+                FROM generate_series(1, 32) s), ',') || ']')::turbovec.vector \
+             FROM generate_series(2, 40) g",
+        )
+        .unwrap();
+
+        let (corrupt, reason): (Option<bool>, Option<String>) = Spi::get_two(
+            "SELECT is_corrupt, reason FROM turbovec.turbovec_check('t_bqempty_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(
+            (corrupt.expect("is_corrupt"), reason),
+            (false, None),
+            "an empty-built BQ index must stay healthy after inserts"
+        );
+        let n: Option<i64> = Spi::get_one(
+            "SELECT n_vectors FROM turbovec.turbovec_check('t_bqempty_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(n, Some(40), "every inserted row must be indexed");
+
+        // A wrong-dim row must still be rejected once the dim IS pinned.
+        let bad = std::panic::catch_unwind(|| {
+            Spi::run("INSERT INTO t_bqempty SELECT 99, '[1,0,0,0,0,0,0,0]'::turbovec.vector")
+        });
+        assert!(
+            bad.is_err(),
+            "a dim mismatch must still be rejected after the dim is pinned"
+        );
+    }
+
     /// The documented 1-bit footgun: on dense-positive data the naive
     /// sign-at-zero rule sets EVERY bit, so every code is identical and
     /// Hamming carries no signal (measured R@10 = 0.0 on GIST). Mean-

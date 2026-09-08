@@ -1,0 +1,39 @@
+-- 2.7.0 — IVF + 1-bit sign-BQ composition; wide-word Hamming kernel;
+--         two shipped-in-2.6.0 BQ insert bugs fixed.
+--
+-- 1. WITH (lists = N, bit_width = 1) now works: cell-contiguous sign codes +
+--    coarse centroids + cell directory, so a scan probes only the nearest
+--    `turbovec.probes` cells and runs Hamming within them. Wire version stays
+--    8 -- the shape is kind = KIND_BQ plus the existing v4 IVF chain fields,
+--    so no bump was needed and no existing index is affected. BQ cells live in
+--    the RAW L2-normalised space, NOT the rotated space TurboQuant IVF uses:
+--    a BQ code is the sign of the centred raw coordinate, so there is nothing
+--    to align to, and rotating the query against un-rotated centroids would
+--    silently probe the wrong cells.
+--
+-- 2. TWO CORRUPTION-CLASS BUGS in code shipped by 2.6.0, both fixed here:
+--    * `MetaPageData::set_ivf_chains` omitted `bq_mean_count` from its
+--      running chain sum, so an IVF+BQ build would have written the
+--      coarse-centroid chain ON TOP of the corpus mean -- destroying the
+--      centring vector every sign code and every query depends on. This is
+--      the FOURTH occurrence of this bug class (v1.24.0 omitted graph_count;
+--      2.6.0 fixed three sites). `set_graph_chain` had the same omission
+--      (unreachable today, graph+1-bit is rejected) and is fixed too.
+--    * Flat-BQ `aminsert` did not re-persist the tombstone bitmap, so every
+--      INSERT after a VACUUM silently RESURRECTED every deleted row -- the
+--      same M2 bug the graph kind fixed in v2.1.0. It also appended
+--      unconditionally, so re-inserting an existing heap TID added a second
+--      slot for the same row (unbounded growth under upserts + a duplicate
+--      id). Both fixed; the write path now carries tombstones through a
+--      single meta write.
+--
+-- 3. The Hamming kernel counts 8 bytes at a time instead of one (measured
+--    4.4-4.8x at embedding dims, up to 5.4x at 1M vectors). No unsafe, no
+--    runtime CPU dispatch, so every machine and architecture runs the
+--    identical instruction sequence -- the v1.7.3 lesson (a mis-specialised
+--    kernel returned WRONG results on pre-AVX2 CPUs). An AVX2 intrinsics
+--    kernel was written and PROVEN bit-identical but DECLINED on
+--    measurements: only ~1.8x further above dim 512 and a net LOSS below it.
+--
+-- No wire-format change (stays v8), no REINDEX, no SQL surface change.
+-- This migration is intentionally empty.

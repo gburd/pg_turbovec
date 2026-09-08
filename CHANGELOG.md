@@ -4,6 +4,109 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.0] — 2026-09-08
+
+**IVF + 1-bit sign-BQ compose**, the Hamming kernel gets ~4.4× faster, and
+**two corruption-class bugs shipped by v2.6.0 are fixed**. No wire-format
+change (stays v8), no REINDEX, no SQL surface change.
+
+### Two bugs in v2.6.0's BQ code — fix these by upgrading
+
+Found by an audit while composing IVF with BQ, not by a field report:
+
+- **`MetaPageData::set_ivf_chains` omitted `bq_mean_count`** from its
+  running chain-offset sum. An IVF+BQ build would have written the
+  coarse-centroid chain **on top of the corpus mean** — destroying the
+  centring vector that every sign code and every query depends on. This is
+  the **fourth** occurrence of this bug class (v1.24.0 omitted
+  `graph_count`; v2.6.0 found and fixed three sites). `set_graph_chain`
+  had the identical omission (unreachable today, since graph + 1-bit is
+  rejected) and is fixed too. Now guarded by an exhaustive pairwise
+  no-overlap test, verified to fail when the omission is reintroduced.
+- **Flat-BQ `aminsert` did not re-persist the tombstone bitmap**, so every
+  `INSERT` after a `VACUUM` silently **resurrected every deleted row** —
+  the same M2 bug the graph kind fixed in v2.1.0, reintroduced because the
+  BQ write path had no tombstone parameter. It also **appended
+  unconditionally**, so re-inserting an existing heap TID added a second
+  slot for the same row (unbounded growth under upserts, plus a duplicate
+  id — the shape the flat bijection guard calls corruption). Both fixed;
+  the write path now carries tombstones through a single meta write.
+
+Only `bit_width = 1` indexes were affected, and only on insert-after-VACUUM
+(resurrection) or re-insert (duplicate slots). 2/3/4-bit indexes were never
+affected. There is no on-disk format change, so upgrading is sufficient —
+but an existing 1-bit index that has taken inserts after a VACUUM should be
+`REINDEX`ed, since it may hold resurrected or duplicated slots.
+
+### `WITH (lists = N, bit_width = 1)`
+
+Previously rejected with a clear ERROR. Now builds and scans: sign codes are
+stored **cell-contiguous** (the permutation IVF already applies) alongside
+the coarse centroids and cell directory, so a scan probes only the nearest
+`turbovec.probes` cells and runs Hamming within them — the `dim/8` storage
+win combined with the probe-a-fraction scan win. Wire version stays 8: the
+shape is `kind = KIND_BQ` plus the existing v4 IVF chain fields.
+
+**BQ cells live in the raw L2-normalised space, not the rotated space
+TurboQuant IVF uses.** TurboQuant trains cells in the rotated space because
+that is where its fine quantizer encodes; a BQ code is the sign of the
+*centred raw* coordinate, so there is nothing to align to. Getting this
+asymmetric is the sharpest available silent failure — a rotated query
+against un-rotated centroids probes the wrong cells and collapses recall
+with no error — so the scan skips the rotation explicitly and the tests
+assert per-id self-neighbour recovery.
+
+An IVF+BQ `aminsert` **degrades the index to a flat BQ scan** (it appends
+and drops cell metadata). This is *observable*: `lists` is preserved and
+`ivf_degraded` is stamped, so `turbovec.index_is_degraded()` reports it —
+strictly better than the TurboQuant IVF insert path, which blanks `lists`
+and cannot be reported. Rebuild with `REINDEX` to restore cell-scoped
+scanning.
+
+### Hamming kernel: ~4.4× faster, and AVX2 measured then declined
+
+The kernel now counts 8 bytes at a time instead of one. **Measured 4.4–4.8×
+at embedding dims** (100k×768d: 6.13 ms → 1.28 ms; 1M×768d: 59.0 ms →
+13.7 ms; independently reproduced at 4.5–5.4× on a second machine). Stable
+from L3-resident to firmly-DRAM sizes, so the scan is not
+bandwidth-bound at these sizes.
+
+**No `unsafe`, no runtime CPU dispatch** — every machine and architecture
+runs the identical instruction sequence. An AVX2 intrinsics kernel *was*
+written and **proven bit-identical**, then **declined on measurements**: it
+buys only ~1.8× more above `dim = 512` and is a net **loss** below it (the
+32-byte loop never runs at `dim ≤ 256`), while costing a second `unsafe`
+block on the scan hot path, a dim-dependent dispatch threshold, and a code
+path CI cannot exercise both sides of — the exact blind spot that let the
+v1.7.3 wrong-results bug ship. `u64x4` was also measured and rejected (LLVM
+already extracts the ILP). Full numbers in `docs/ONEBIT_BQ.md` §7.
+
+Bit-identity is proven in-tree, not assumed: **5720 random code pairs across
+143 dims** against a bit-by-bit reference sharing no code with the kernel,
+**825 top-k cases** asserting the full sequence *including tie order*, a
+tie-density guard so that is not vacuous, and mutation testing (dropped
+tail, byte-swapped operand, `AND` for `XOR`, skipped last word,
+`count_zeros`) where each mutation fails 3–6 tests.
+
+### Benchmark harness for the unpublished BQ frontier
+
+`benches/scripts/bq/` plus `docs/BQ_RECALL_BENCH.md`: a sweep over
+`bit_width` ∈ {1, 2, 4} measuring R@10 against exact in-DB ground truth,
+storage, build time and — **only on an AVX2 host** — latency. **It has not
+been run; no numbers exist yet.** The AVX2 gate is structural: on a scalar
+host the driver does not time queries at all, rather than emitting a number
+that reads as fast. Ground truth uses the same operator the index serves
+(avoiding the cosine-vs-L2 trap), the re-rank window is recorded per row
+against a mirror of the Rust clamp, and iso-recall rows emit `null` when a
+`bit_width` never clears the target — that absence being the result.
+Predictions are written down in advance so a real run can falsify them.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.0';` — no REINDEX for
+2/3/4-bit indexes. **A 1-bit index that has taken inserts after a VACUUM
+should be `REINDEX`ed** (see the bug notes above).
+
 ## [2.6.0] — 2026-09-07
 
 **1-bit sign binary quantization (`WITH (bit_width = 1)`) works end to

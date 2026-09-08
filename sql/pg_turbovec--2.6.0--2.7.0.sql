@@ -1,0 +1,6 @@
+-- pg_turbovec 2.6.0 -> 2.7.0
+-- IVF + 1-bit sign-BQ composition (WITH (lists = N, bit_width = 1)), a
+-- wide-word Hamming kernel (~4.4x), and two BQ insert bugs fixed
+-- (tombstone resurrection after VACUUM; duplicate slot on re-insert).
+-- Code-only: no wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

@@ -72,8 +72,12 @@ pub fn unpack_signs(bytes: &[u8], dim: usize) -> Vec<f32> {
 /// header, negligible next to the `n * dim/8` codes) so the SAME shift
 /// is applied to query vectors at scan time. Returns all-zeros for an
 /// empty corpus (centering then a no-op).
+///
+/// Expressed in terms of [`accumulate_sums`] + [`finish_mean`] so the
+/// whole-corpus (flat build) and streamed-in-blocks (IVF build) paths are
+/// the SAME arithmetic in the same order, not two implementations that
+/// could drift (gated by `streamed_mean_matches_whole_corpus_mean`).
 pub fn corpus_mean(flat: &[f32], dim: usize) -> Vec<f32> {
-    let mut mean = vec![0.0f64; dim];
     if dim == 0 {
         return Vec::new();
     }
@@ -81,13 +85,37 @@ pub fn corpus_mean(flat: &[f32], dim: usize) -> Vec<f32> {
     if n == 0 {
         return vec![0.0f32; dim];
     }
+    let mut sums = vec![0.0f64; dim];
+    accumulate_sums(&mut sums, flat, dim);
+    finish_mean(&sums, n)
+}
+
+/// Add a row-major block's per-dimension values into `sums` (an f64
+/// accumulator of length `dim`), row by row in block order.
+///
+/// The streaming half of [`corpus_mean`]: an out-of-core build calls this
+/// once per spill block and [`finish_mean`] at the end, which sums the
+/// rows in exactly the same order (spill order) as a whole-corpus
+/// `corpus_mean` would, so the resulting mean is BIT-IDENTICAL.
+pub fn accumulate_sums(sums: &mut [f64], flat: &[f32], dim: usize) {
+    if dim == 0 || sums.len() != dim {
+        return;
+    }
     for row in flat.chunks_exact(dim) {
-        for (m, &x) in mean.iter_mut().zip(row) {
+        for (m, &x) in sums.iter_mut().zip(row) {
             *m += x as f64;
         }
     }
+}
+
+/// Divide accumulated [`accumulate_sums`] totals by `n` rows to get the
+/// per-dimension mean. `n == 0` yields all-zeros (centering a no-op).
+pub fn finish_mean(sums: &[f64], n: usize) -> Vec<f32> {
+    if n == 0 {
+        return vec![0.0f32; sums.len()];
+    }
     let inv = 1.0 / n as f64;
-    mean.iter().map(|&m| (m * inv) as f32).collect()
+    sums.iter().map(|&m| (m * inv) as f32).collect()
 }
 
 /// Subtract `mean` from `v` in place-free form, returning the centered
@@ -124,30 +152,30 @@ pub fn is_degenerate(flat: &[f32], dim: usize) -> bool {
         // hurts ranking (nothing to rank against).
         return false;
     }
-    // For each dimension, are ALL rows the same sign? If even one
-    // dimension splits the corpus, the codes are not all identical and
-    // Hamming ranking has signal — not degenerate.
-    'dim: for d in 0..dim {
-        let mut saw_pos = false;
-        let mut saw_nonpos = false;
-        for row in flat.chunks_exact(dim) {
-            if row[d] > 0.0 {
-                saw_pos = true;
-            } else {
-                saw_nonpos = true;
-            }
-            if saw_pos && saw_nonpos {
-                // This dim distinguishes some rows: signal exists.
-                continue 'dim;
-            }
-        }
-        // Reaching here means dim `d` did NOT split — keep checking.
-    }
-    // Degenerate iff NO dimension split the corpus (every code
-    // identical). We detect that by checking every row's packed code
-    // equals row 0's.
+    // Degenerate iff EVERY row's packed code equals row 0's (no
+    // dimension split the corpus, so Hamming is uniformly 0).
     let code0 = pack_signs(&flat[..dim]);
     flat.chunks_exact(dim).all(|row| pack_signs(row) == code0)
+}
+
+/// [`is_degenerate`] on ALREADY-PACKED codes: `true` iff every one of the
+/// `n` code rows equals row 0, so Hamming distance is uniformly 0 and the
+/// ranking would be arbitrary.
+///
+/// This is the streamable form the out-of-core (IVF) build needs — it
+/// never has the whole centered f32 corpus resident — and it is exactly
+/// equivalent to `is_degenerate` on the corresponding centered corpus,
+/// because `pack_signs` is a per-row pure function (gated by
+/// `packed_degeneracy_matches_centered_degeneracy`).
+///
+/// `n <= 1` returns `false`, matching `is_degenerate`: a 0- or 1-row
+/// corpus has nothing to rank against.
+pub fn codes_are_degenerate(codes: &[u8], stride: usize, n: usize) -> bool {
+    if stride == 0 || n <= 1 || codes.len() < n * stride {
+        return false;
+    }
+    let code0 = &codes[..stride];
+    (1..n).all(|s| &codes[s * stride..(s + 1) * stride] == code0)
 }
 
 /// On-disk / scan-side per-vector byte width for a 1-bit index:
@@ -222,62 +250,69 @@ pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
 /// Top-`k` nearest slots to `query_code` by Hamming distance over a flat
 /// chain of `n` packed codes, returned as `(distance, slot)` ascending.
 ///
-/// The distance is [`hamming`] (wide-word `POPCNT`, CPU-feature
-/// INDEPENDENT); the top-k SELECTION stays scalar on purpose. Vectorising
-/// the selection would put the tie-break — which decides the visible
-/// result order, since Hamming over `dim` bits has only `dim + 1` distinct
-/// values and ties are therefore the common case — inside a lane-shuffle,
-/// and the distance loop is where all the measured time goes anyway
-/// (`docs/ONEBIT_BQ.md` §7).
+/// Thin wrapper over [`topk_hamming_slots`] with the full slot range —
+/// ONE heap implementation shared by the flat scan and the IVF
+/// cell-restricted scan, so the two can never diverge on the tie-break
+/// (asserted by `topk_hamming_slots_full_range_matches_flat`).
+pub fn topk_hamming(query_code: &[u8], codes: &[u8], n: usize, k: usize) -> Vec<(u32, u32)> {
+    debug_assert!(query_code.is_empty() || codes.len() >= n * query_code.len());
+    topk_hamming_slots(query_code, codes, 0..(n as u32), k)
+}
+
+/// Top-`k` nearest slots to `query_code` by Hamming distance, considering
+/// ONLY the slots yielded by `slots`, returned as `(distance, slot)`
+/// ascending.
 ///
-/// The v1.7.3 incident — where pre-AVX2 CPUs returned WRONG ANN results
-/// from a mis-specialised kernel — is why there is no runtime feature
-/// dispatch anywhere in this module: every machine runs the identical
-/// instruction sequence. See [`hamming`] for why the AVX2 variant that
-/// was written and proven bit-identical was still declined.
+/// This is the IVF+BQ scan primitive: the caller yields exactly the slots
+/// belonging to the probed cells (minus tombstones), so the unprobed
+/// cells' codes are never scored — the scan win the cell-contiguous
+/// layout exists for. [`topk_hamming`] is this same function over `0..n`.
+///
+/// Deliberately SCALAR. The v1.7.3 incident — where pre-AVX2 CPUs
+/// returned WRONG ANN results from a mis-specialised kernel — is the
+/// reason: `u8::count_ones` lowers to `POPCNT` on any modern x86_64 and
+/// to the equivalent elsewhere, and a hand-vectorised version must be
+/// proven bit-identical against THIS function before it can replace it.
+/// A wide-SIMD popcount is a follow-up, not a prerequisite.
 ///
 /// Ties break toward the lower slot so results are deterministic (the
-/// same reason `partition::rank_nearest` does). Since ties are common,
-/// the caller must rerank exactly: see
-/// `guc::hi_dim_rerank_candidate_count`, which treats a 1-bit index as
-/// high-dim at any `dim` so `hi_dim_rerank = auto` widens the exact
-/// rerank window for BQ.
-pub fn topk_hamming(query_code: &[u8], codes: &[u8], n: usize, k: usize) -> Vec<(u32, u32)> {
+/// same reason `partition::rank_nearest` does), INDEPENDENT of the order
+/// `slots` yields them in. Hamming over `dim` bits has only `dim + 1`
+/// distinct values, so ties are COMMON — which is exactly why the caller
+/// must rerank exactly: see `guc::hi_dim_rerank_candidate_count`, which
+/// treats a 1-bit index as high-dim at any `dim` so `hi_dim_rerank =
+/// auto` widens the exact rerank window for BQ.
+///
+/// A slot whose code row would fall outside `codes` is SKIPPED rather
+/// than panicking: an IVF slot list is derived from the on-disk cell
+/// directory, which is only as trustworthy as the relfile, and a torn
+/// read must not abort the backend.
+pub fn topk_hamming_slots<I>(query_code: &[u8], codes: &[u8], slots: I, k: usize) -> Vec<(u32, u32)>
+where
+    I: IntoIterator<Item = u32>,
+{
     let stride = query_code.len();
-    if k == 0 || n == 0 || stride == 0 {
+    if k == 0 || stride == 0 {
         return Vec::new();
     }
-    debug_assert!(codes.len() >= n * stride);
-    // A bounded max-heap of the k best: O(n log k), no full sort of n.
+    // A bounded max-heap of the k best: O(candidates log k), no full sort.
     let mut heap: std::collections::BinaryHeap<(u32, u32)> =
         std::collections::BinaryHeap::with_capacity(k + 1);
-    for slot in 0..n {
-        let row = &codes[slot * stride..(slot + 1) * stride];
-        let d = hamming(query_code, row);
+    for slot in slots {
+        let start = (slot as usize) * stride;
+        let end = start + stride;
+        if end > codes.len() {
+            continue;
+        }
+        let d = hamming(query_code, &codes[start..end]);
         if heap.len() < k {
-            heap.push((d, slot as u32));
+            heap.push((d, slot));
         } else if let Some(&(worst, worst_slot)) = heap.peek() {
-            // This condition is exactly "`(d, slot)` is lexicographically
-            // smaller than the heap's lexicographic max" — the textbook
-            // bounded-max-heap top-k, so the result is the k smallest by
-            // `(distance, slot)` for ANY visit order.
-            //
-            // Under the CURRENT ascending order the `d == worst` half
-            // never actually fires (measured: 0 firings in 4.2M
-            // evaluations over tie-saturated corpora), because a tie is
-            // already resolved by arriving later — `heap.peek()` on a
-            // `BinaryHeap<(u32, u32)>` is the lexicographic max, so
-            // `worst_slot` is the highest slot at distance `worst`, and
-            // every slot already in the heap is below the current one.
-            // It is kept because it is what makes the tie-break a
-            // property of the COMPARISON rather than of the loop order:
-            // `topk_tie_break_prefers_the_lower_slot` still passes if the
-            // loop is reversed, and fails if either the clause or the
-            // order is broken alone. A future chunked/parallel scan can
-            // therefore reorder safely.
-            if d < worst || (d == worst && (slot as u32) < worst_slot) {
+            // Strictly-better OR equal-distance-but-lower-slot, so the
+            // tie-break is deterministic rather than heap-order-dependent.
+            if d < worst || (d == worst && slot < worst_slot) {
                 heap.pop();
-                heap.push((d, slot as u32));
+                heap.push((d, slot));
             }
         }
     }
@@ -497,291 +532,226 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Wide-word Hamming: exact-agreement proof.
-    //
-    // `hamming` folds 8 bytes at a time through `u64::count_ones`. That
-    // is a pure refactor of the byte-wise count — but "pure refactor" is
-    // exactly what was believed about the kernel that shipped WRONG ANN
-    // results on pre-AVX2 CPUs in v1.7.3. So it is PROVEN here, not
-    // asserted: against an independent bit-by-bit reference, over
-    // thousands of random pairs, at dims that are and are not multiples
-    // of 8 and of 64, including every dim below one word.
-    //
-    // These are plain `#[test]`s (no cluster), so they run in CI under
-    // `cargo pgrx test` on every matrix lane and under a bare
-    // `cargo test --lib`.
-    // -----------------------------------------------------------------
-
-    /// xorshift64* — deterministic, dependency-free, and far better
-    /// distributed than the LCG-high-byte trick used above (which only
-    /// varies the top 8 bits per step).
-    struct Xs(u64);
-    impl Xs {
-        fn next_u64(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            self.0 = x;
-            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    /// Deterministic pseudo-random packed-code chain for the slot-restricted
+    /// tests below. Same LCG the brute-force test uses.
+    fn synth_codes(n: usize, stride: usize, seed: u32) -> Vec<u8> {
+        let mut codes = vec![0u8; n * stride];
+        let mut x = seed;
+        for b in codes.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (x >> 24) as u8;
         }
-        fn fill(&mut self, buf: &mut [u8]) {
-            for c in buf.chunks_mut(8) {
-                let v = self.next_u64().to_le_bytes();
-                let len = c.len();
-                c.copy_from_slice(&v[..len]);
-            }
-        }
+        codes
     }
 
-    /// The reference: count differing bits ONE AT A TIME, MSB-first,
-    /// reading each bit exactly the way [`unpack_signs`] does. Shares no
-    /// code and no word decomposition with [`hamming`], so an error in
-    /// either cannot hide in the other.
-    fn hamming_bitwise_reference(a: &[u8], b: &[u8], dim: usize) -> u32 {
-        (0..dim)
-            .map(|i| {
-                let m = 0x80u8 >> (i % 8);
-                u32::from((a[i / 8] & m) != (b[i / 8] & m))
-            })
-            .sum()
-    }
-
-    /// The byte-wise count this kernel used to be, kept as a second
-    /// independent oracle (it decomposes into 1-byte words where
-    /// `hamming` uses 8-byte words).
-    fn hamming_bytewise(a: &[u8], b: &[u8]) -> u32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x ^ y).count_ones())
-            .sum()
-    }
-
-    /// Dims spanning every alignment case: 1..=130 covers sub-byte,
-    /// sub-word, and every `dim % 8` / `dim % 64` residue; the tail
-    /// covers realistic embedding widths on both sides of a word
-    /// boundary.
-    fn agreement_dims() -> Vec<usize> {
-        (1usize..=130)
-            .chain([
-                255, 256, 257, 383, 384, 511, 512, 768, 960, 1000, 1024, 1536, 3072,
-            ])
-            .collect()
-    }
-
-    /// THE PROOF: `hamming` equals a bit-by-bit count, exactly, on
-    /// thousands of random code pairs across 143 dims.
+    /// `topk_hamming` MUST be exactly `topk_hamming_slots` over the full
+    /// slot range. The flat BQ scan and the IVF+BQ cell-restricted scan
+    /// share one heap implementation precisely so the two can never
+    /// disagree on the tie-break; this gates that they are the same code.
     #[test]
-    fn hamming_agrees_with_bitwise_reference_across_dims() {
-        let mut rng = Xs(0x9E37_79B9_7F4A_7C15);
-        let mut trials = 0usize;
-        for dim in agreement_dims() {
-            let stride = codes_stride(dim);
-            for _ in 0..40 {
-                let mut a = vec![0u8; stride];
-                let mut b = vec![0u8; stride];
-                rng.fill(&mut a);
-                rng.fill(&mut b);
-                // Zero the unused tail bits, exactly as `pack_signs`
-                // does, so the fixtures are shaped like real codes.
-                let used = dim % 8;
-                if used != 0 {
-                    let mask = !0u8 << (8 - used);
-                    a[stride - 1] &= mask;
-                    b[stride - 1] &= mask;
-                }
-                let want = hamming_bitwise_reference(&a, &b, dim);
-                assert_eq!(hamming(&a, &b), want, "wide-word != bitwise, dim={dim}");
+    fn topk_hamming_slots_full_range_matches_flat() {
+        let dim = 40usize;
+        let stride = codes_stride(dim);
+        let n = 150usize;
+        let codes = synth_codes(n, stride, 0x0BAD_F00D);
+        for qi in [0usize, 7, 99] {
+            let q = &codes[qi * stride..(qi + 1) * stride];
+            for k in [1usize, 3, 25, 200] {
                 assert_eq!(
-                    hamming_bytewise(&a, &b),
-                    want,
-                    "bytewise != bitwise, dim={dim}"
+                    topk_hamming(q, &codes, n, k),
+                    topk_hamming_slots(q, &codes, 0..(n as u32), k),
+                    "query {qi}, k={k}"
                 );
-                // Symmetry and self-distance, for free, on every fixture.
-                assert_eq!(hamming(&b, &a), want, "asymmetric, dim={dim}");
-                assert_eq!(hamming(&a, &a), 0, "self-distance nonzero, dim={dim}");
-                trials += 1;
             }
         }
-        assert!(trials >= 5000, "expected thousands of trials, ran {trials}");
     }
 
-    /// Degenerate operands the random fixtures will essentially never
-    /// draw: all-zero vs all-ones must be exactly `dim`, and the answer
-    /// must not depend on where the word boundary falls.
+    /// The IVF+BQ scan primitive: restricting to a subset of slots must
+    /// return exactly the brute-force top-k OVER THAT SUBSET -- not the
+    /// global top-k filtered afterwards (which would under-fill k when the
+    /// global winners are all outside the probed cells). This is the
+    /// property that makes probing a fraction of cells CORRECT rather than
+    /// just cheap.
     #[test]
-    fn hamming_extremes_agree_at_every_word_boundary() {
-        for dim in [
-            1usize, 7, 8, 9, 15, 16, 17, 63, 64, 65, 71, 72, 127, 128, 129,
-        ] {
-            let stride = codes_stride(dim);
-            let zero = vec![0u8; stride];
-            let ones = pack_signs(&vec![1.0f32; dim]);
-            assert_eq!(
-                hamming(&zero, &ones) as usize,
-                dim,
-                "all-ones vs all-zero must be dim, dim={dim}"
-            );
-            assert_eq!(
-                hamming(&zero, &ones),
-                hamming_bitwise_reference(&zero, &ones, dim)
-            );
-            assert_eq!(hamming(&zero, &zero), 0);
-            assert_eq!(hamming(&ones, &ones), 0);
-        }
-    }
-
-    /// `topk_hamming` must return the identical `(distance, slot)`
-    /// sequence — INCLUDING tie order — as a brute-force sort scored by
-    /// the independent bit-by-bit reference. Ties are the whole risk
-    /// here: Hamming over `dim` bits has only `dim + 1` distinct values,
-    /// so an all-zero query at low dim collides constantly (asserted
-    /// separately by `topk_fixtures_really_are_tie_dense`).
-    #[test]
-    fn topk_hamming_agrees_with_bitwise_brute_force_including_ties() {
-        let mut rng = Xs(0xDEAD_BEEF_CAFE_1234);
-        let mut cases = 0usize;
-        for &dim in &[3usize, 8, 12, 16, 31, 64, 65, 100, 128, 768, 1536] {
-            let stride = codes_stride(dim);
-            let used = dim % 8;
-            let mask = if used == 0 {
-                0xffu8
-            } else {
-                !0u8 << (8 - used)
-            };
-            for &n in &[1usize, 2, 7, 50, 333] {
-                let mut codes = vec![0u8; n * stride];
-                rng.fill(&mut codes);
-                for s in 0..n {
-                    codes[(s + 1) * stride - 1] &= mask;
-                }
-                // Queries: a corpus member (guarantees a distance-0 hit),
-                // a fresh random code, and the all-zero code (maximally
-                // tie-saturated, since the distance is then just the
-                // row's own popcount).
-                let mut queries: Vec<Vec<u8>> = vec![codes[..stride].to_vec()];
-                let mut fresh = vec![0u8; stride];
-                rng.fill(&mut fresh);
-                fresh[stride - 1] &= mask;
-                queries.push(fresh);
-                queries.push(vec![0u8; stride]);
-                for q in &queries {
-                    let mut want: Vec<(u32, u32)> = (0..n)
-                        .map(|s| {
-                            (
-                                hamming_bitwise_reference(
-                                    q,
-                                    &codes[s * stride..(s + 1) * stride],
-                                    dim,
-                                ),
-                                s as u32,
-                            )
+    fn topk_hamming_slots_matches_brute_force_over_the_subset() {
+        let dim = 32usize;
+        let stride = codes_stride(dim);
+        let n = 200usize;
+        let codes = synth_codes(n, stride, 0x1234_5678);
+        // Three subsets: a contiguous "cell" range (what the IVF layout
+        // actually produces), a sparse stride, and a single slot.
+        let subsets: Vec<Vec<u32>> = vec![
+            (40u32..90).collect(),
+            (0u32..n as u32).filter(|s| s % 7 == 3).collect(),
+            vec![123],
+        ];
+        for (si, subset) in subsets.iter().enumerate() {
+            for qi in [0usize, 55, 140] {
+                let q = &codes[qi * stride..(qi + 1) * stride];
+                for k in [1usize, 4, 20, 500] {
+                    let got = topk_hamming_slots(q, &codes, subset.iter().copied(), k);
+                    let mut want: Vec<(u32, u32)> = subset
+                        .iter()
+                        .map(|&s| {
+                            let row = &codes[s as usize * stride..(s as usize + 1) * stride];
+                            (hamming(q, row), s)
                         })
                         .collect();
                     want.sort_unstable_by_key(|&(d, s)| (d, s));
-                    for &k in &[1usize, 3, 10, 64, 400] {
-                        let mut expect = want.clone();
-                        expect.truncate(k);
-                        assert_eq!(
-                            topk_hamming(q, &codes, n, k),
-                            expect,
-                            "topk != bitwise brute force, dim={dim} n={n} k={k}"
-                        );
-                        cases += 1;
-                    }
+                    want.truncate(k);
+                    assert_eq!(got, want, "subset {si}, query {qi}, k={k}");
                 }
             }
         }
-        assert!(cases >= 500, "expected many top-k cases, ran {cases}");
     }
 
-    /// Guard against the test above passing vacuously: confirm the
-    /// all-zero-query fixtures really are saturated with ties, so the
-    /// lower-slot tie-break is genuinely under test.
+    /// The tie-break must not depend on the ORDER the slot iterator yields
+    /// slots in. A probe set is built from `coarse_probe`'s
+    /// distance-ordered cell list, so slots arrive out of ascending order;
+    /// if the heap's tie-break were order-sensitive, the same query would
+    /// return different rows depending on which cell happened to be
+    /// nearest.
     #[test]
-    fn topk_fixtures_really_are_tie_dense() {
+    fn topk_hamming_slots_is_order_independent() {
+        // The sharpest case first: EVERY distance identical (an all-ties
+        // corpus), slots arriving in DESCENDING order. Ties must resolve to
+        // the lowest slots regardless. A bounded heap that evicts only on
+        // `d < worst` (dropping the `slot < worst_slot` half of the
+        // tie-break) returns the HIGHEST arriving slots here instead -- the
+        // exact non-determinism this asserts against. Verified to fail if
+        // that half is removed.
+        {
+            let stride = codes_stride(8);
+            let codes = vec![0u8; 6 * stride]; // all identical => all d = 0
+            let q = vec![0u8; stride];
+            assert_eq!(
+                topk_hamming_slots(&q, &codes, [5u32, 4, 3, 2, 1, 0], 2),
+                vec![(0, 0), (0, 1)],
+                "an all-ties corpus must resolve to the LOWEST slots, not the first-arriving"
+            );
+        }
+        let dim = 24usize; // few bits => MANY ties, the case that matters
+        let stride = codes_stride(dim);
+        let n = 120usize;
+        let codes = synth_codes(n, stride, 0xFEED_BEEF);
+        let ascending: Vec<u32> = (10u32..80).collect();
+        let mut shuffled = ascending.clone();
+        // Deterministic "shuffle": reverse then rotate, so the order is
+        // definitely not ascending and definitely not the heap's.
+        shuffled.reverse();
+        shuffled.rotate_left(17);
+        for qi in [0usize, 33] {
+            let q = &codes[qi * stride..(qi + 1) * stride];
+            for k in [1usize, 5, 30] {
+                assert_eq!(
+                    topk_hamming_slots(q, &codes, ascending.iter().copied(), k),
+                    topk_hamming_slots(q, &codes, shuffled.iter().copied(), k),
+                    "query {qi}, k={k}: tie-break must be slot-id based, not arrival-order based"
+                );
+            }
+        }
+    }
+
+    /// An out-of-range slot (a torn cell directory) must be SKIPPED, not
+    /// panic across the FFI boundary -- the same reasoning as
+    /// `ReadOnlyIndex::id_at_slot_checked`. A backend abort under load is
+    /// strictly worse than a short result.
+    #[test]
+    fn topk_hamming_slots_skips_out_of_range_slots() {
         let dim = 16usize;
         let stride = codes_stride(dim);
-        let n = 333usize;
-        let mut rng = Xs(7);
-        let mut codes = vec![0u8; n * stride];
-        rng.fill(&mut codes);
-        let q = vec![0u8; stride];
-        let mut d: Vec<u32> = (0..n)
-            .map(|s| hamming(&q, &codes[s * stride..(s + 1) * stride]))
-            .collect();
-        d.sort_unstable();
-        d.dedup();
-        assert!(
-            d.len() <= dim + 1 && d.len() * 10 < n,
-            "expected heavy ties: {} distinct distances over {n} rows",
-            d.len()
+        let n = 10usize;
+        let codes = synth_codes(n, stride, 42);
+        let q = codes[0..stride].to_vec();
+        // Slots 5, 9 are valid; 10, 999, u32::MAX are not.
+        let got = topk_hamming_slots(&q, &codes, [5u32, 10, 9, 999, u32::MAX], 5);
+        assert_eq!(
+            got.iter().map(|&(_, s)| s).collect::<Vec<_>>(),
+            {
+                let mut want = vec![
+                    (hamming(&q, &codes[5 * stride..6 * stride]), 5u32),
+                    (hamming(&q, &codes[9 * stride..10 * stride]), 9u32),
+                ];
+                want.sort_unstable_by_key(|&(d, s)| (d, s));
+                want.iter().map(|&(_, s)| s).collect::<Vec<_>>()
+            },
+            "only the in-range slots may be scored"
         );
     }
 
-    /// The tie-break contract, isolated: on an ALL-EQUAL-distance corpus
-    /// every slot ties, so the `k` returned slots must be exactly the
-    /// `k` LOWEST, in ascending order. This is the property the scan's
-    /// determinism rests on, and it holds for ANY visit order because the
-    /// heap condition is a full lexicographic `(distance, slot)`
-    /// comparison — verified by mutation: reversing the loop alone still
-    /// passes, while dropping the tie clause or flipping its direction
-    /// fails here.
+    /// The streamed (out-of-core / IVF) mean MUST be bit-identical to the
+    /// whole-corpus mean. `bq_ivf_build_and_write` accumulates per spill
+    /// block; `bq_build_and_write` computes over the resident corpus. If
+    /// they diverged, the same table would get different sign codes
+    /// depending on `maintenance_work_mem`, i.e. the on-disk bytes would
+    /// depend on a runtime knob.
     #[test]
-    fn topk_tie_break_prefers_the_lower_slot() {
-        let dim = 64usize;
-        let stride = codes_stride(dim);
-        let n = 200usize;
-        // Every row identical => every distance identical => total ties.
-        let codes = vec![0xA5u8; n * stride];
-        let q = vec![0x5Au8; stride];
-        for k in [1usize, 2, 7, 50, 199, 200] {
-            let got = topk_hamming(&q, &codes, n, k);
-            let want: Vec<(u32, u32)> = (0..k as u32).map(|s| (dim as u32, s)).collect();
-            assert_eq!(got, want, "all-ties must yield the k lowest slots, k={k}");
+    fn streamed_mean_matches_whole_corpus_mean() {
+        let dim = 12usize;
+        let n = 997usize; // prime, so blocks don't divide it evenly
+        let flat: Vec<f32> = (0..n * dim)
+            .map(|i| (((i * 37) % 211) as f32) * 0.031 - 3.0)
+            .collect();
+        let whole = corpus_mean(&flat, dim);
+        for block_rows in [1usize, 7, 64, 512, 997, 4096] {
+            let mut sums = vec![0.0f64; dim];
+            let mut start = 0usize;
+            while start < n {
+                let rows = (n - start).min(block_rows);
+                accumulate_sums(&mut sums, &flat[start * dim..(start + rows) * dim], dim);
+                start += rows;
+            }
+            let streamed = finish_mean(&sums, n);
+            assert_eq!(
+                whole.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                streamed.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                "block_rows={block_rows}: streamed mean must be BIT-identical"
+            );
         }
-        // Same, with a distinct better row planted at a HIGH slot: it must
-        // come first, then the lowest of the tied remainder.
-        let mut codes2 = codes.clone();
-        codes2[190 * stride..191 * stride].copy_from_slice(&q);
-        let got = topk_hamming(&q, &codes2, n, 3);
-        assert_eq!(got, vec![(0, 190), (dim as u32, 0), (dim as u32, 1)]);
     }
 
-    /// End-to-end at the shape the scan path actually uses: pack real
-    /// centered f32 vectors, then confirm the packed-code Hamming equals
-    /// a direct sign-disagreement count on the f32s. This ties the kernel
-    /// back to the *semantics* (how many coordinates disagree in sign),
-    /// not just to another bit-counting loop.
+    /// The packed-codes degeneracy check (what the streaming IVF build can
+    /// afford) must agree with the centered-corpus one (what the flat build
+    /// uses) on every case that matters: the rescued dense-positive corpus,
+    /// the unindexable constant corpus, and normal spread data.
     #[test]
-    fn hamming_counts_sign_disagreements_on_real_vectors() {
-        let mut rng = Xs(0x0BAD_C0DE_0BAD_C0DE);
-        for dim in [1usize, 5, 8, 63, 64, 65, 100, 768] {
-            for _ in 0..50 {
-                let mk = |rng: &mut Xs| -> Vec<f32> {
-                    (0..dim)
-                        .map(|_| {
-                            // Values in [-1, 1), including exact 0.0 often
-                            // enough to exercise the `> 0.0` rule.
-                            let r = (rng.next_u64() >> 40) as i64 - 8_388_608;
-                            (r / 4096) as f32 / 512.0
-                        })
-                        .collect()
-                };
-                let x = mk(&mut rng);
-                let y = mk(&mut rng);
-                let want: u32 = x
-                    .iter()
-                    .zip(&y)
-                    .map(|(&p, &q)| u32::from((p > 0.0) != (q > 0.0)))
-                    .sum();
-                assert_eq!(
-                    hamming(&pack_signs(&x), &pack_signs(&y)),
-                    want,
-                    "packed Hamming != sign-disagreement count, dim={dim}"
-                );
-            }
+    fn packed_degeneracy_matches_centered_degeneracy() {
+        let dim = 8usize;
+        let stride = codes_stride(dim);
+        let cases: Vec<(&str, Vec<f32>)> = vec![
+            // Dense-positive with spread: degenerate RAW, fine centered.
+            (
+                "all_positive_spread",
+                (0..5 * dim).map(|i| 10.0 + (i as f32) * 0.5).collect(),
+            ),
+            // Constant: degenerate even after centering.
+            ("constant", vec![7.0f32; 5 * dim]),
+            // Zero-centered spread: never degenerate.
+            (
+                "spread",
+                (0..5 * dim)
+                    .map(|i| if i % 3 == 0 { 1.0 } else { -0.5 })
+                    .collect(),
+            ),
+            // Single row: never "degenerate" (nothing to rank against).
+            ("one_row", vec![1.0f32; dim]),
+        ];
+        for (name, flat) in cases {
+            let n = flat.len() / dim;
+            let mean = corpus_mean(&flat, dim);
+            let centered: Vec<f32> = flat
+                .chunks_exact(dim)
+                .flat_map(|r| center(r, &mean))
+                .collect();
+            let codes: Vec<u8> = centered
+                .chunks_exact(dim)
+                .flat_map(|r| pack_signs(r))
+                .collect();
+            assert_eq!(
+                is_degenerate(&centered, dim),
+                codes_are_degenerate(&codes, stride, n),
+                "case {name}: the two degeneracy checks must agree"
+            );
         }
     }
 }

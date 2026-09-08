@@ -353,6 +353,25 @@ unsafe fn aminsert_relfile(
 /// the ranking of the whole index. The persisted build-time mean is
 /// therefore treated as fixed, and drift is a REINDEX concern -- the same
 /// build-then-serve model the reloption's guidance already sets out.
+///
+/// ## IVF + 1-bit (`WITH (lists = N, bit_width = 1)`) DEGRADES to flat
+///
+/// The new row's cell is unknown to this path (the coarse centroids are on
+/// disk, but a cell-contiguous insert would have to SHIFT every slot after
+/// the target cell and renumber the whole cell directory -- an O(n)
+/// rewrite that also invalidates the tombstone bitmap's slot indices).
+/// Rather than get that subtly wrong, the insert appends the row at the
+/// END and drops the cell metadata, so the index falls back to a flat
+/// Hamming scan over all slots: SLOWER, never wrong (a full scan can only
+/// improve recall) and never silently lost.
+///
+/// Crucially this is OBSERVABLE, not silent: `lists` is preserved and
+/// `ivf_degraded` is stamped, so `turbovec.index_is_degraded(rel)` reports
+/// `true` and `ambeginscan` emits the throttled degradation WARNING
+/// naming the index -- REINDEX restores the cells. (The TurboQuant IVF
+/// insert path degrades too, but blanks `lists` outright and is therefore
+/// NOT reportable; see the note in `xact::validate_flush_snapshot`.)
+/// Real cell-aware incremental insert is future work, not attempted here.
 unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64) -> bool {
     use crate::index::onebit;
 
@@ -391,7 +410,8 @@ unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64
         );
     }
 
-    // Read the current codes + ids, append this row, write it all back.
+    // Read the current codes + ids + tombstones, append this row, write it
+    // all back.
     let mut codes = relfile::read_chain(
         index_relation,
         meta.codes_first,
@@ -400,6 +420,24 @@ unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64
         meta.n_vectors,
     );
     let mut ids = relfile::read_ids_only(index_relation, &meta);
+    let tombstones = relfile::read_tombstones(index_relation, &meta);
+
+    // Hard guard, the same shape as the graph path's: the chains we just
+    // read must agree with the row count we are about to extend by one. A
+    // mismatch means the on-disk state is already torn, and reconciling
+    // onto it would ENTRENCH the corruption in a freshly written meta.
+    let n_disk = meta.n_vectors as usize;
+    let stride = meta.stride_bytes as usize;
+    if ids.len() != n_disk || (stride > 0 && codes.len() != n_disk * stride) {
+        relfile::unlock_relfile_write(index_relation);
+        error!(
+            "turbovec aminsert (1-bit): on-disk row count drift — meta says {} rows but the ids chain has {} and the codes chain has {} bytes ({} expected); the index appears corrupt. REINDEX INDEX to rebuild it from the heap",
+            n_disk,
+            ids.len(),
+            codes.len(),
+            n_disk * stride,
+        );
+    }
 
     let v = if normalise {
         kernels::normalise_to_vec(value.as_slice())
@@ -407,10 +445,52 @@ unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64
         value.as_slice().to_vec()
     };
     let centered = onebit::center(&v, &mean);
-    codes.extend_from_slice(&onebit::pack_signs(&centered));
-    ids.push(id);
+    let new_code = onebit::pack_signs(&centered);
 
-    relfile::write_full_bq(
+    // M2 (the graph kind's v2.1.0 lesson, applied here): the tombstone
+    // bitmap must be re-persisted in the SAME rewrite. `plan_bq` plans a
+    // fresh meta with the tombstone fields zeroed, so writing without
+    // carrying the bitmap forward would silently RESURRECT every
+    // VACUUM-deleted row.
+    let mut new_tombstones = tombstones;
+
+    // Re-insert of an EXISTING heap TID (what the flat TurboQuant path
+    // handles as `IdAlreadyPresent` via remove + re-add): overwrite that
+    // slot's code in place instead of appending a second slot for the same
+    // logical row. Appending would grow the index without bound under
+    // repeated upserts of the same row, and would put the same TID in two
+    // slots -- which is exactly the shape the id-table bijection guard
+    // treats as corruption for the flat kind.
+    //
+    // If that slot had been TOMBSTONED, clear its bit: the row is being
+    // written back, so it is live again. Leaving the bit set would make an
+    // upserted row permanently invisible.
+    //
+    // On an IVF-built (soft-assigned) index the SAME id can legitimately
+    // occupy several slots, so update EVERY one of them -- they all
+    // describe the same row and must not disagree.
+    let existing: Vec<usize> = ids
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &existing_id)| (existing_id == id).then_some(slot))
+        .collect();
+    if existing.is_empty() {
+        codes.extend_from_slice(&new_code);
+        ids.push(id);
+        if !new_tombstones.is_empty() {
+            // One more slot; the new row is live (bit 0).
+            new_tombstones.resize(ids.len().div_ceil(8), 0);
+        }
+    } else {
+        for &slot in &existing {
+            codes[slot * stride..(slot + 1) * stride].copy_from_slice(&new_code);
+            if let Some(byte) = new_tombstones.get_mut(slot / 8) {
+                *byte &= !(1u8 << (slot % 8));
+            }
+        }
+    }
+
+    relfile::write_full_bq_parts(
         index_relation,
         dim as u32,
         ids.len() as u64,
@@ -418,6 +498,17 @@ unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64
         &ids,
         &mean,
         meta.am_version + 1,
+        // No cell metadata: an APPENDED slot is not in any cell, so the
+        // directory can no longer partition the slots. See the doc above.
+        // (Even a pure in-place overwrite takes this path: a code change
+        // can move the row to a different cell, so the old directory would
+        // be describing a membership that no longer holds.)
+        None,
+        &new_tombstones,
+        // Preserve `lists` + stamp `ivf_degraded` so an IVF+BQ index's
+        // degradation is REPORTABLE rather than silent. `0` for a flat BQ
+        // index, which was never IVF and is not degraded by an insert.
+        meta.lists,
     );
     relfile::unlock_relfile_write(index_relation);
     crate::cache::invalidate_all();

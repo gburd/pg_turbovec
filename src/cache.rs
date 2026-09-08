@@ -735,6 +735,33 @@ impl BqIndex {
     /// high-dim at ANY dim so `hi_dim_rerank = auto` widens the exact
     /// window for BQ. Compose with that; do not try to fix ranking here.
     pub(crate) fn search(&self, query: &[f32], k: usize) -> (Vec<f32>, Vec<u64>) {
+        self.search_slots(query, k, None)
+    }
+
+    /// IVF cell-restricted top-`k`: identical to [`Self::search`] but only
+    /// slots whose `mask` entry is `true` are scored. `mask.len()` should
+    /// equal [`Self::len`]; a shorter mask simply bounds the scan (a slot
+    /// past its end is treated as masked out, so a stale/short mask can
+    /// never over-read the codes chain).
+    ///
+    /// This is what makes `WITH (lists = N, bit_width = 1)` an IVF scan
+    /// rather than a filtered flat one: the caller's mask covers exactly
+    /// the probed cells' CONTIGUOUS slot ranges (the build laid the codes
+    /// out cell-contiguous), so the unprobed cells' code rows are never
+    /// touched at all -- `topk_hamming_slots` only reads the slots it is
+    /// handed. Note this is a *skip*, not turbovec's blocked-kernel
+    /// block-skip: the BQ scorer has no 32-vector blocking to short
+    /// circuit, it just does not visit the slot.
+    pub(crate) fn search_masked(
+        &self,
+        query: &[f32],
+        k: usize,
+        mask: &[bool],
+    ) -> (Vec<f32>, Vec<u64>) {
+        self.search_slots(query, k, Some(mask))
+    }
+
+    fn search_slots(&self, query: &[f32], k: usize, mask: Option<&[bool]>) -> (Vec<f32>, Vec<u64>) {
         if self.len() == 0 || k == 0 || query.len() != self.dim {
             return (Vec::new(), Vec::new());
         }
@@ -742,13 +769,25 @@ impl BqIndex {
         let centered = crate::index::onebit::center(query, &self.mean);
         let qcode = crate::index::onebit::pack_signs(&centered);
         // Over-fetch when tombstones exist so dead slots can be dropped
-        // without under-filling k.
+        // without under-filling k. (On the masked path the caller has
+        // usually ANDed the tombstones in already -- over-fetching is then
+        // harmless, and the `is_dead` filter below stays as the backstop
+        // for a caller that did not.)
         let want = if self.tombstones.is_empty() {
             k
         } else {
             k.saturating_mul(2).max(k + 8).min(self.len())
         };
-        let hits = crate::index::onebit::topk_hamming(&qcode, &self.codes, self.len(), want);
+        let n = self.len() as u32;
+        let hits = match mask {
+            None => crate::index::onebit::topk_hamming(&qcode, &self.codes, self.len(), want),
+            Some(m) => crate::index::onebit::topk_hamming_slots(
+                &qcode,
+                &self.codes,
+                (0..n).filter(|&s| m.get(s as usize).copied().unwrap_or(false)),
+                want,
+            ),
+        };
         let mut scores = Vec::with_capacity(k);
         let mut ids = Vec::with_capacity(k);
         for (d, slot) in hits {
@@ -762,6 +801,17 @@ impl BqIndex {
             }
         }
         (scores, ids)
+    }
+
+    /// Build a by-slot allowlist mask (Phase C) from a set of EXTERNAL
+    /// ids, same contract as [`ReadOnlyIndex::allow_slot_mask`]. The scan
+    /// ANDs this into the probe/tombstone mask before
+    /// [`Self::search_masked`].
+    pub(crate) fn allow_slot_mask(&self, allowed: &HashSet<u64>) -> Vec<bool> {
+        self.slot_to_id
+            .iter()
+            .map(|id| allowed.contains(id))
+            .collect()
     }
 
     /// Unused-but-symmetric accessor kept for the stride assertion in
@@ -1261,9 +1311,19 @@ impl ScanHandle {
         }
     }
 
-    /// IVF cell-restricted search. Returns `Some((scores, ids))` only for
-    /// the [`ScanHandle::ReadOnly`] arm, where slot order matches the
-    /// on-disk cell directory the `mask` was derived from. Returns `None`
+    /// True when this handle is a 1-bit sign-BQ index. The IVF scan path
+    /// consults it to skip the query rotation: BQ coarse cells live in the
+    /// raw L2-normalised space, not the rotated one (see
+    /// `build::bq_ivf_build_and_write`).
+    pub(crate) fn is_bq(&self) -> bool {
+        matches!(self, ScanHandle::Bq(_))
+    }
+
+    /// IVF cell-restricted search. Returns `Some((scores, ids))` for the
+    /// [`ScanHandle::ReadOnly`] arm, where slot order matches the on-disk
+    /// cell directory the `mask` was derived from, and for the
+    /// [`ScanHandle::Bq`] arm (a BQ handle is likewise built straight
+    /// from the on-disk cell-contiguous chains). Returns `None`
     /// for the [`ScanHandle::Mutable`] arm (a post-insert / dirty-xact
     /// mirror), whose slot order has diverged from the build-time cell
     /// layout — the caller must fall back to the flat [`Self::search`].
@@ -1282,23 +1342,22 @@ impl ScanHandle {
             // The graph scan path routes through `graph()` /
             // `GraphIndex::search` instead of a slot mask.
             ScanHandle::Graph(_) => None,
-            ScanHandle::Bq(_) => None,
+            ScanHandle::Bq(a) => Some(a.search_masked(queries, k, mask)),
         }
     }
 
     /// Build a by-slot allowlist mask (Phase C) from a set of external
-    /// ids, for the [`ScanHandle::ReadOnly`] arm whose slot order
-    /// matches the on-disk layout. Returns `None` for the `Mutable`
-    /// arm (slot order diverged — the caller post-filters by the
-    /// allowlist instead) and the `Ooc` arm (which masks the compact
-    /// sub-index inside `search_ooc`).
+    /// ids, for the arms whose slot order matches the on-disk layout
+    /// ([`ScanHandle::ReadOnly`] and [`ScanHandle::Bq`]). Returns `None`
+    /// for the `Mutable` arm (slot order diverged — the caller
+    /// post-filters by the allowlist instead), the `Ooc` arm (which masks
+    /// the compact sub-index inside `search_ooc`) and the `Graph` arm
+    /// (which traverses rather than masking).
     pub(crate) fn allow_slot_mask(&self, allowed: &HashSet<u64>) -> Option<Vec<bool>> {
         match self {
             ScanHandle::ReadOnly(a) => Some(a.allow_slot_mask(allowed)),
-            ScanHandle::Mutable(_)
-            | ScanHandle::Ooc(_)
-            | ScanHandle::Graph(_)
-            | ScanHandle::Bq(_) => None,
+            ScanHandle::Bq(a) => Some(a.allow_slot_mask(allowed)),
+            ScanHandle::Mutable(_) | ScanHandle::Ooc(_) | ScanHandle::Graph(_) => None,
         }
     }
 }

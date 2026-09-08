@@ -673,7 +673,19 @@ impl MetaPageData {
             + self.rotation_count
             + self.coarse_count
             + self.cell_dir_count
-            + self.tombstone_count;
+            + self.tombstone_count
+            // MUST include the BQ mean chain, like every other
+            // chain-offset running sum in the tree (`total_blocks`,
+            // `set_ivf_chains`, `write_tombstones_and_meta`,
+            // `write_full_inner`'s tombstone placement). `0` for every
+            // non-BQ kind, so this is a no-op today: graph + bit_width = 1
+            // is rejected by the reloption validator, so no index can
+            // currently have both chains. It is here because omitting a
+            // chain from one of these sums is THE recurring corruption bug
+            // in this codebase (v1.24.0 omitted `graph_count`; v2.6.0
+            // found three sites omitting `bq_mean_count`), and a future
+            // graph+BQ build must not have to rediscover it.
+            + self.bq_mean_count;
         let total_bytes = offsets_bytes + neighbors_bytes;
         self.graph_first = after_every_prior_chain;
         self.graph_count = Self::byte_pages_needed(total_bytes);
@@ -695,6 +707,13 @@ impl MetaPageData {
     /// the packed cell-directory (`lists * CellEntry::ENCODED_BYTES`).
     /// Pass `lists = 0` (the default after `plan_with_blocked`) to
     /// leave the index flat — in that case this is a no-op.
+    ///
+    /// Also valid on a meta planned by [`Self::plan_bq`] (an IVF + 1-bit
+    /// sign-BQ index, `WITH (lists = N, bit_width = 1)`): a BQ meta has
+    /// `scales_count = blocked_count = rotation_count = 0` and a non-zero
+    /// `bq_mean_count`, and the running sum below counts the mean chain,
+    /// so the coarse chain lands immediately AFTER the mean chain rather
+    /// than on top of it.
     pub fn set_ivf_chains(&mut self, lists: u32, coarse_bytes: u64, cell_dir_bytes: u64) {
         self.lists = lists;
         if lists == 0 {
@@ -711,7 +730,15 @@ impl MetaPageData {
             + self.scales_count
             + self.ids_count
             + self.blocked_count
-            + self.rotation_count;
+            + self.rotation_count
+            // MUST include the BQ mean chain (`plan_bq` places it right
+            // after the ids chain, where blocked/rotation would sit for a
+            // TurboQuant index). `0` for every non-BQ kind, so a
+            // TurboQuant IVF index's layout is byte-identical to before.
+            // Omitting it would put the coarse-centroid chain ON TOP of
+            // the corpus mean for every IVF + 1-bit index — the v1.24.0
+            // corruption class exactly.
+            + self.bq_mean_count;
         let coarse_count = Self::byte_pages_needed(coarse_bytes);
         let cell_dir_count = Self::byte_pages_needed(cell_dir_bytes);
         self.coarse_count = coarse_count;
@@ -2035,5 +2062,177 @@ mod tests {
         assert!(back.is_colbert());
         assert!(!back.is_graph());
         assert!(back.is_legacy_v6(), "a v5 colbert index is legacy under v7");
+    }
+
+    /// IVF + 1-bit sign-BQ (`WITH (lists = N, bit_width = 1)`) chain
+    /// layout. THE test for the corruption class this project has hit three
+    /// times (v1.24.0 omitted `graph_count`; v2.6.0 found three sites
+    /// omitting `bq_mean_count`): every chain-offset running sum must count
+    /// every preceding chain. An IVF+BQ index has codes + ids + mean +
+    /// coarse + cell_dir all at once, which is the most chains any single
+    /// kind carries.
+    #[test]
+    fn plan_bq_with_ivf_chains_never_overlap() {
+        let dim: u32 = 64;
+        let n: u64 = 20_000;
+        for &lists in &[1u32, 16, 512] {
+            let mut meta = MetaPageData::plan_bq(dim, n, 3);
+            let coarse_bytes = u64::from(lists) * u64::from(dim) * 4;
+            let cell_dir_bytes = u64::from(lists) * 12;
+            meta.set_ivf_chains(lists, coarse_bytes, cell_dir_bytes);
+
+            // Kind + BQ shape survive `set_ivf_chains`.
+            assert!(meta.is_bq(), "lists={lists}: must stay KIND_BQ");
+            assert!(meta.has_ivf(), "lists={lists}: must report IVF");
+            assert_eq!(meta.bit_width, 1);
+            assert_eq!(meta.scales_count, 0, "BQ has no scales chain");
+            assert_eq!(meta.blocked_count, 0, "BQ has no blocked chain");
+            assert_eq!(meta.rotation_count, 0, "BQ has no TQ+/rotation chain");
+            assert!(meta.bq_mean_count > 0, "BQ must carry the mean chain");
+
+            // The coarse chain must start AFTER the mean chain. If
+            // `set_ivf_chains` forgot `bq_mean_count`, coarse_first would
+            // land ON the mean -- silently corrupting the centring vector
+            // that every sign code and every query depends on.
+            assert_eq!(
+                meta.coarse_first,
+                1 + meta.codes_count + meta.scales_count + meta.ids_count + meta.bq_mean_count,
+                "lists={lists}: coarse chain must follow the mean chain"
+            );
+            assert_eq!(
+                meta.cell_dir_first,
+                meta.coarse_first + meta.coarse_count,
+                "lists={lists}: cell dir must follow the coarse chain"
+            );
+
+            // Exhaustive pairwise no-overlap over every present chain.
+            let chains: Vec<(&str, u32, u32)> = vec![
+                ("codes", meta.codes_first, meta.codes_count),
+                ("ids", meta.ids_first, meta.ids_count),
+                ("mean", meta.bq_mean_first, meta.bq_mean_count),
+                ("coarse", meta.coarse_first, meta.coarse_count),
+                ("cell_dir", meta.cell_dir_first, meta.cell_dir_count),
+            ];
+            for (i, &(na, fa, ca)) in chains.iter().enumerate() {
+                if ca == 0 {
+                    continue;
+                }
+                assert!(
+                    fa >= 1,
+                    "lists={lists}: {na} must not start on the meta page"
+                );
+                assert!(
+                    fa + ca <= meta.total_blocks(),
+                    "lists={lists}: {na} [{fa}..{}) runs past total_blocks {}",
+                    fa + ca,
+                    meta.total_blocks()
+                );
+                for &(nb, fb, cb) in chains.iter().skip(i + 1) {
+                    if cb == 0 {
+                        continue;
+                    }
+                    assert!(
+                        fa + ca <= fb || fb + cb <= fa,
+                        "lists={lists}: {na} [{fa}..{}) overlaps {nb} [{fb}..{})",
+                        fa + ca,
+                        fb + cb
+                    );
+                }
+            }
+
+            // Round-trips through the wire format unchanged.
+            let buf = meta.encode();
+            assert_eq!(buf[4], VERSION, "IVF+BQ must NOT bump the wire version");
+            assert_eq!(buf[6], KIND_BQ);
+            let back = MetaPageData::decode(&buf).expect("decode");
+            assert_eq!(meta, back, "lists={lists}: IVF+BQ meta must round-trip");
+            assert!(back.is_bq() && back.has_ivf());
+            assert!(!back.is_legacy_v7(), "a fresh IVF+BQ index is not legacy");
+        }
+    }
+
+    /// `set_graph_chain`'s running sum must count `bq_mean_count` too.
+    /// No build produces graph + BQ today (the reloption validator rejects
+    /// it), so this is a REGRESSION GUARD, not a live path: it fails if a
+    /// future graph+BQ build reintroduces the v1.24.0 omission.
+    #[test]
+    fn set_graph_chain_counts_the_bq_mean_chain() {
+        let dim: u32 = 64;
+        let n: u64 = 5_000;
+        let mut meta = MetaPageData::plan_bq(dim, n, 1);
+        let mean_count = meta.bq_mean_count;
+        assert!(mean_count > 0);
+        meta.set_graph_chain((n + 1) * 4, n * 16 * 4, 0);
+        assert_eq!(
+            meta.graph_first,
+            1 + meta.codes_count + meta.scales_count + meta.ids_count + mean_count,
+            "the graph chain must be placed after the BQ mean chain"
+        );
+    }
+
+    /// Where the TOMBSTONE chain goes, for the IVF+BQ shape (the most
+    /// chains any kind carries).
+    ///
+    /// Both writers that place it -- `relfile::write_tombstones_and_meta`
+    /// (VACUUM) and `relfile::write_full_bq_parts` (build/insert) -- compute
+    /// "first free block after every other chain" as a running sum over the
+    /// same nine `*_count` fields. That sum is exactly `total_blocks()` of
+    /// the tombstone-free layout, so THIS is the invariant worth pinning:
+    /// if a future chain is added to `total_blocks` but forgotten in one of
+    /// those two sums, the two writers place the chain at different blocks
+    /// and a VACUUM-then-INSERT cycle silently moves it (the v1.24.0
+    /// corruption shape). Asserting against `total_blocks()` catches that
+    /// without restating either writer's expression.
+    #[test]
+    fn tombstone_chain_starts_at_the_end_of_the_tombstone_free_layout() {
+        for &lists in &[0u32, 8, 256] {
+            let mut meta = MetaPageData::plan_bq(64, 20_000, 1);
+            if lists > 0 {
+                meta.set_ivf_chains(lists, u64::from(lists) * 64 * 4, u64::from(lists) * 12);
+            }
+            assert_eq!(meta.tombstone_count, 0, "fresh layout has no tombstones");
+            let after_every_chain = 1
+                + meta.codes_count
+                + meta.scales_count
+                + meta.ids_count
+                + meta.blocked_count
+                + meta.rotation_count
+                + meta.coarse_count
+                + meta.cell_dir_count
+                + meta.graph_count
+                + meta.bq_mean_count;
+            assert_eq!(
+                after_every_chain,
+                meta.total_blocks(),
+                "lists={lists}: the running sum both tombstone writers use must equal \
+                 total_blocks() -- a chain counted by one and not the other is the \
+                 v1.24.0 corruption shape"
+            );
+        }
+    }
+
+    /// A flat BQ meta page must be byte-identical whether or not
+    /// `set_ivf_chains(0, ..)` is called on it -- i.e. composing IVF with
+    /// BQ did not perturb the FLAT BQ layout that v2.6.0 already ships.
+    #[test]
+    fn plan_bq_flat_layout_is_unchanged_by_ivf_composition() {
+        let dim: u32 = 128;
+        let n: u64 = 3_000;
+        let plain = MetaPageData::plan_bq(dim, n, 5);
+        let mut with_zero_lists = MetaPageData::plan_bq(dim, n, 5);
+        with_zero_lists.set_ivf_chains(0, 0, 0);
+        assert_eq!(
+            plain, with_zero_lists,
+            "lists = 0 must leave a BQ meta byte-identical to the flat plan"
+        );
+        assert!(!plain.has_ivf());
+        // And the flat chain order is still codes -> ids -> mean.
+        assert_eq!(plain.codes_first, 1);
+        assert_eq!(plain.ids_first, 1 + plain.codes_count);
+        assert_eq!(plain.bq_mean_first, plain.ids_first + plain.ids_count);
+        assert_eq!(
+            plain.total_blocks(),
+            1 + plain.codes_count + plain.ids_count + plain.bq_mean_count
+        );
     }
 }

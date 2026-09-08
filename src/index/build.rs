@@ -498,30 +498,14 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
 
     let (cfg_bit_width, cfg_dim, cfg_lists, cfg_assign_dups, cfg_graph) =
         options::read(index_relation);
-    // bit_width = 1 (sign binary quantization / BQ) is accepted by the
-    // reloption validator (the user-facing CREATE INDEX knob), but the
-    // build+scan encode path for it is not yet wired: turbovec's
-    // IdMapIndex::new hard-rejects bit_width < 2, so a 1-bit build must
-    // take a distinct sign-BQ + Hamming code path (see
-    // src/index/onebit.rs and docs/ONEBIT_BQ.md). Until that lands,
-    // ERROR clearly here rather than let IdMapIndex::new panic the
-    // backend with an opaque expect() message. (Guarding at the single
-    // ambuild entry point covers every kind; aminsert re-checks below.)
     // bit_width = 1 (sign binary quantization / BQ) takes a distinct
     // code path: turbovec's IdMapIndex hard-rejects bit_width < 2, so BQ
     // is its own scheme (sign bits + Hamming), not TurboQuant-at-1-bit.
     // Dispatched below, after the corpus has been spilled, by
-    // `bq_build_and_write`. `graph = true` with bit_width = 1 is rejected
+    // `bq_build_and_write` (flat) or `bq_ivf_build_and_write`
+    // (`WITH (lists = N)`). `graph = true` with bit_width = 1 is rejected
     // by the reloption validator (the Vamana scorer is not wired for
-    // Hamming), and IVF + BQ is not yet composed, so reject that here
-    // rather than silently building a non-BQ index.
-    if cfg_bit_width == 1 && cfg_lists > 0 {
-        error!(
-            "turbovec: bit_width = 1 (binary quantization) is not yet supported with lists > 0 \
-             (IVF); use bit_width = 1 without lists for a flat BQ index, or bit_width >= 2 \
-             for an IVF index"
-        );
-    }
+    // Hamming).
     let indexrelid = (*index_relation).rd_id;
     let normalise = guc::NORMALIZE_ON_INSERT.get();
     let lists = cfg_lists.max(0) as usize;
@@ -619,18 +603,19 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // rotation matrix -- the graph is built in the raw
         // L2-normalised vector space, not the IVF clustering space
         // (see the module doc on `graph.rs`).
-        if state.lists > 0 {
-            state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(d));
+        //
+        // An IVF + 1-bit BQ build needs the spill but NOT the rotation
+        // either: its coarse cells live in the raw L2-normalised space
+        // (see `bq_ivf_build_and_write`), because a BQ index has no
+        // rotated fine-quantizer space to match.
+        if state.lists > 0 || state.graph || state.bq {
             // Phase B-4: open the disk spill now that the record
             // stride (8 + d*4) is known. The heap scan streams every
             // accepted vector into it instead of `ivf_flat`.
             state.ivf_spill = Some(CorpusSpill::new(d));
-        } else if state.graph || state.bq {
-            // Same streamed-spill pattern for the graph and 1-bit BQ
-            // builds: both read the whole corpus back after the scan (the
-            // graph to build adjacency, BQ to compute the corpus mean
-            // before it can take signs), and neither needs a rotation.
-            state.ivf_spill = Some(CorpusSpill::new(d));
+        }
+        if state.lists > 0 && !state.bq {
+            state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(d));
         }
     }
 
@@ -697,8 +682,14 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // 1-bit sign-BQ build path. Must come BEFORE the IVF/graph
     // branches: it is a distinct encode scheme (sign bits + Hamming),
     // not a variant of the TurboQuant quantize+pack those paths run.
+    // `lists > 0` composes the two: cell-contiguous sign codes plus the
+    // coarse-centroid + cell-directory chains.
     if cfg_bit_width == 1 {
-        let n_built = bq_build_and_write(index_relation, &mut state, dim);
+        let n_built = if state.lists > 0 {
+            bq_ivf_build_and_write(index_relation, &mut state, dim, build_pool.as_ref())
+        } else {
+            bq_build_and_write(index_relation, &mut state, dim)
+        };
         let _ = indexrelid;
         (*result).heap_tuples = state.heap_seen as f64;
         (*result).index_tuples = n_built as f64;
@@ -1342,6 +1333,230 @@ unsafe fn bq_build_and_write(
     n_vectors
 }
 
+/// IVF + 1-bit sign-BQ build (`WITH (lists = N, bit_width = 1)`).
+///
+/// Composes the two: train coarse centroids on the bounded reservoir
+/// sample, assign every vector to its cell(s) in a streamed sweep over
+/// the disk spill, compute the stable cell-contiguous permutation, then
+/// pack SIGN CODES in cell order. Persists the cell-contiguous codes +
+/// ids + the corpus mean + the coarse centroids + the cell directory.
+/// The scan probes only `turbovec.probes` cells and runs Hamming within
+/// them (`cache::BqIndex::search_masked`).
+///
+/// ## Two deliberate differences from [`ivf_build_and_write`]
+///
+/// 1. **No rotation.** A TurboQuant IVF index trains its cells in the
+///    ROTATED space because that is the space its per-vector fine
+///    quantizer encodes in, and the coarse and fine spaces must agree. A
+///    BQ index has no rotated fine space — its code is the sign of the
+///    centred raw coordinate — so rotating would be pure cost (an
+///    O(dim^2) materialize + a GEMM per block + a `rotate_query` per
+///    scan) with nothing to align to. Cells therefore live in the raw
+///    L2-normalised space, and `scan::ivf_setup_and_search` skips the
+///    rotation for a BQ handle to match. `state.ivf_rotation` is never
+///    built for this path (see the two sites in `ambuild` /
+///    `build_callback`).
+/// 2. **No `IdMapIndex`.** turbovec hard-rejects `bit_width < 2`, so
+///    there is no quantizer to feed and no synthetic-slot-id dance: the
+///    persisted ids ARE `perm_ids` (with soft-assign duplicates), and the
+///    codes come straight from `onebit::pack_signs`.
+///
+/// The corpus mean is accumulated during the assign sweep (free — the
+/// same blocks are already resident) over the spill in SPILL order, so it
+/// is BIT-IDENTICAL to what `bq_build_and_write` would compute for the
+/// same corpus: the cell permutation cannot change the mean.
+///
+/// Returns the number of SLOTS written (`>= n_vectors` under soft
+/// assignment). Consumes `state.ivf_spill` and `state.ivf_sample`.
+///
+/// # Safety
+/// `index_relation` is a valid, exclusively-held index relation.
+unsafe fn bq_ivf_build_and_write(
+    index_relation: pg_sys::Relation,
+    state: &mut BuildState,
+    dim: usize,
+    build_pool: Option<&rayon::ThreadPool>,
+) -> usize {
+    use crate::index::onebit;
+
+    let spill = state
+        .ivf_spill
+        .take()
+        .expect("bq_ivf_build_and_write: spill not opened");
+    let n_vectors = spill.rows;
+    if n_vectors == 0 {
+        // Empty build: a BQ-shaped meta page with no chains (and no IVF
+        // chains — there are no cells over zero rows), so later inserts
+        // have stable state to extend. Same convention as every other
+        // kind's empty-build case.
+        relfile::write_full_bq(index_relation, dim as u32, 0, &[], &[], &[], 1);
+        return 0;
+    }
+
+    // Never train more centroids than we have points.
+    let lists = state.lists.min(n_vectors).max(1);
+    let assign_dups = state.assign_dups.clamp(1, lists);
+
+    // 1. Train coarse centroids on the reservoir sample. The reservoir
+    //    stored L2-NORMALISED, UNROTATED rows (`ivf_reservoir_push`), and
+    //    unlike the TurboQuant path we do NOT rotate them — see the doc
+    //    comment. Deterministic: seeded k-means++ + Lloyd's.
+    let sample = std::mem::take(&mut state.ivf_sample);
+    let sample_count = state.ivf_sample_count;
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    let model = super::build_pool::install(build_pool, || {
+        ivf::train_kmeans(&sample, sample_count, lists, dim)
+    });
+    drop(sample);
+
+    // 2. Streamed assign sweep + corpus-mean accumulation in ONE pass.
+    //    Only a bounded row-block is resident; the corpus lives on the
+    //    spill. The mean is accumulated from the SPILLED values (which is
+    //    what the codes are taken relative to), while the ASSIGNMENT uses
+    //    the always-L2-normalised block — exactly the split the
+    //    TurboQuant IVF path uses, and what the scan mirrors (the coarse
+    //    probe always normalises; the query centring follows the
+    //    `normalize_on_insert` GUC).
+    let block_rows = ivf_assign_block_rows(dim);
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    let mut mean_sums = vec![0.0f64; dim];
+    let assignments: Vec<Vec<u32>> = {
+        let mut assignments: Vec<Vec<u32>> = Vec::with_capacity(n_vectors);
+        let mut raw_block = vec![0.0f32; block_rows * dim];
+        let mut id_sink = vec![0u64; block_rows];
+        let mut start = 0usize;
+        while start < n_vectors {
+            let rows = (n_vectors - start).min(block_rows);
+            spill.read_block(
+                start,
+                rows,
+                &mut id_sink[..rows],
+                &mut raw_block[..rows * dim],
+            );
+            let raw = &raw_block[..rows * dim];
+            // Mean: accumulate in spill order so the result is
+            // bit-identical to the flat BQ build's whole-corpus mean.
+            onebit::accumulate_sums(&mut mean_sums, raw, dim);
+            let model_centroids = &model.centroids;
+            let par_chunk_rows = ivf_par_chunk_rows(dim);
+            let chunk_starts: Vec<usize> = (0..rows).step_by(par_chunk_rows).collect();
+            let block_assign: Vec<Vec<Vec<u32>>> = super::build_pool::install(build_pool, || {
+                use rayon::prelude::*;
+                chunk_starts
+                    .par_iter()
+                    .map(|&chunk_start| {
+                        let chunk_rows = par_chunk_rows.min(rows - chunk_start);
+                        let chunk_raw = &raw[chunk_start * dim..(chunk_start + chunk_rows) * dim];
+                        let mut norm = vec![0.0f32; chunk_rows * dim];
+                        for r in 0..chunk_rows {
+                            let src = &chunk_raw[r * dim..(r + 1) * dim];
+                            kernels::normalise_into(&mut norm[r * dim..(r + 1) * dim], src);
+                        }
+                        // No rotation: cells live in the normalised space.
+                        ivf::batched_assign_soft(
+                            &norm,
+                            model_centroids,
+                            chunk_rows,
+                            lists,
+                            dim,
+                            assign_dups,
+                        )
+                    })
+                    .collect()
+            });
+            for chunk in block_assign {
+                assignments.extend(chunk);
+            }
+            start += rows;
+        }
+        assignments
+    };
+    let mean = onebit::finish_mean(&mean_sums, n_vectors);
+
+    // 3. Stable cell-contiguous permutation + cell directory.
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    let (permutation, directory) = ivf::build_permutation_soft(&assignments, lists);
+    let n_slots = permutation.len();
+    debug_assert!(directory.validate_partition(n_slots as u64).is_ok());
+    debug_assert!(n_slots >= n_vectors, "soft expansion never shrinks");
+    drop(assignments);
+
+    // 4. Pack sign codes in CELL ORDER, streaming the permuted reads back
+    //    off the spill in bounded chunks. Only the codes buffer
+    //    (`n_slots * dim/8`) and one chunk of f32 are resident; the codes
+    //    buffer is the thing we must persist regardless.
+    let stride = onebit::codes_stride(dim);
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    let mut codes = Vec::with_capacity(n_slots * stride);
+    let mut perm_ids = vec![0u64; n_slots];
+    {
+        let chunk_rows = block_rows;
+        let mut chunk_flat = vec![0.0f32; chunk_rows * dim];
+        let mut slot = 0usize;
+        while slot < n_slots {
+            let rows = (n_slots - slot).min(chunk_rows);
+            for r in 0..rows {
+                let old_idx = permutation[slot + r] as usize;
+                let mut id = 0u64;
+                spill.read_one(old_idx, &mut id, &mut chunk_flat[r * dim..(r + 1) * dim]);
+                perm_ids[slot + r] = id;
+            }
+            for r in 0..rows {
+                let centered = onebit::center(&chunk_flat[r * dim..(r + 1) * dim], &mean);
+                codes.extend_from_slice(&onebit::pack_signs(&centered));
+            }
+            slot += rows;
+        }
+    }
+    debug_assert_eq!(codes.len(), n_slots * stride);
+    drop(spill);
+    drop(permutation);
+
+    // The footgun guard, on the PACKED codes (the streamable form — this
+    // path never has the whole centered f32 corpus resident). Exactly
+    // equivalent to `is_degenerate` on the centered corpus, since
+    // `pack_signs` is a per-row pure function. See `bq_build_and_write`
+    // for why the check must be on the CENTERED data.
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    if onebit::codes_are_degenerate(&codes, stride, n_slots) {
+        error!(
+            "turbovec: bit_width = 1 (binary quantization) cannot index this corpus -- \
+             every vector has the same sign pattern even after mean-centering, so Hamming \
+             distance carries no signal (a constant or near-constant corpus). \
+             Use bit_width = 2, 3, or 4 instead."
+        );
+    }
+
+    let cell_dir_bytes = directory.encode();
+    let ivf_parts = relfile::IvfParts {
+        lists: lists as u32,
+        // Coarse centroids are in the raw L2-normalised space (NOT
+        // rotated) for a BQ index -- the scan's coarse probe must use the
+        // same space. See the doc comment.
+        coarse_centroids: &model.centroids,
+        cell_dir_bytes: &cell_dir_bytes,
+        // A ColBERT index is never 1-bit: `kind` carries one
+        // discriminator and KIND_COLBERT / KIND_BQ are exclusive.
+        colbert: false,
+    };
+    pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    relfile::write_full_bq_ivf(
+        index_relation,
+        dim as u32,
+        // The persisted codes/ids are n_slots long (>= distinct
+        // n_vectors under soft assignment); the meta's n_vectors field is
+        // the on-disk row count the scan validates against, so it must be
+        // n_slots -- same convention as `ivf_build_and_write`.
+        n_slots as u64,
+        &codes,
+        &perm_ids,
+        &mean,
+        1,
+        ivf_parts,
+    );
+    n_slots
+}
+
 unsafe fn graph_build_and_write(
     index_relation: pg_sys::Relation,
     state: &mut BuildState,
@@ -1655,17 +1870,19 @@ unsafe extern "C-unwind" fn build_callback(
                 );
             }
             state.chunk_rows = BuildState::compute_chunk_rows(row_dim);
-            // IVF: build the rotation matrix now that dim is pinned,
-            // so reservoir samples land in the clustering space.
-            if state.lists > 0 && state.ivf_rotation.is_none() {
+            // IVF / graph / 1-bit BQ: open the disk spill now that the
+            // record stride (8 + dim*4) is known. Mirrors the eager
+            // (dim-pinned-by-reloptions) site in `ambuild`.
+            if (state.lists > 0 || state.graph || state.bq) && state.ivf_spill.is_none() {
+                state.ivf_spill = Some(CorpusSpill::new(row_dim));
+            }
+            // The IVF rotation matrix puts reservoir samples in the
+            // clustering space -- needed only for a TurboQuant IVF build.
+            // A graph build works in the raw L2-normalised space (see the
+            // module doc on `graph.rs`), and so does an IVF + 1-bit BQ
+            // build (see `bq_ivf_build_and_write`).
+            if state.lists > 0 && !state.bq && state.ivf_rotation.is_none() {
                 state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
-                // Phase B-4: open the disk spill (stride needs dim).
-                state.ivf_spill = Some(CorpusSpill::new(row_dim));
-            } else if (state.graph || state.bq) && state.ivf_spill.is_none() {
-                // Phase G-2a / 1-bit BQ: same streamed-spill pattern, no
-                // rotation matrix needed (see the module doc on
-                // `graph.rs`, and `bq_build_and_write`).
-                state.ivf_spill = Some(CorpusSpill::new(row_dim));
             }
         }
         _ => {}
@@ -1759,9 +1976,22 @@ pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Rela
     // which our reader handles as "empty index".
     let dim_u32 = if dim > 0 { dim as u32 } else { 0 };
     if dim_u32 % 8 == 0 {
-        let meta = crate::index::page::MetaPageData::plan(
-            bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
-        );
+        // A 1-bit sign-BQ index must get a BQ-SHAPED meta page here, for the
+        // same reason `ambuild`'s empty-heap path does: `plan` stamps
+        // `kind = KIND_SINGLE`, and after a crash PG copies this init fork
+        // over the main fork -- so the first `aminsert` would then take the
+        // TurboQuant path, whose `IdMapIndex::new(dim, 1)` turbovec rejects.
+        // (Latent since v2.6.0, reachable only for an UNLOGGED 1-bit index
+        // after a crash, which is why no test caught it.)
+        let meta = if bw == 1 {
+            crate::index::page::MetaPageData::plan_bq(
+                dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
+            )
+        } else {
+            crate::index::page::MetaPageData::plan(
+                bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
+            )
+        };
         relfile::write_meta_in_fork(index_relation, pg_sys::ForkNumber::INIT_FORKNUM, &meta);
     }
     // If dim was supplied as a non-multiple-of-8 we silently

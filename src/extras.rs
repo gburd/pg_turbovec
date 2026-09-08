@@ -373,6 +373,44 @@ fn turbovec_check(
         } else {
             crate::index::relfile::validate_scales(rel, &meta_consistent).err()
         };
+        // A 1-bit sign-BQ index's mean vector is scan-FATAL if missing or
+        // the wrong length: the scan path ERRORs rather than serve uncentred
+        // results (the documented R@10 = 0.0 footgun), so reporting such an
+        // index clean would be the same blind spot the 2026-09-05 field
+        // report exposed for scales. And for an IVF+BQ index the cell
+        // directory must still PARTITION the slots: an IVF+BQ index carries
+        // the most chains of any kind (codes + ids + mean + coarse +
+        // cell_dir + tombstones), so it is the most exposed to a
+        // chain-offset collision, and a torn directory silently mis-probes
+        // rather than failing. Read INSIDE the same ShareLock as the
+        // meta/ids/scales reads so every observation is one snapshot (the
+        // v1.29.1 monitor-consistency invariant).
+        let bq_problem = if meta_consistent.is_bq() && meta_consistent.n_vectors > 0 {
+            let mean = crate::index::relfile::read_bq_mean(rel, &meta_consistent);
+            if mean.len() != meta_consistent.dim as usize {
+                Some(format!(
+                    "1-bit (BQ) index is missing its corpus-mean vector (read {} f32, expected {}); every scan against it errors",
+                    mean.len(),
+                    meta_consistent.dim
+                ))
+            } else if meta_consistent.has_ivf() && !meta_consistent.is_degraded() {
+                match crate::index::relfile::read_cell_directory(rel, &meta_consistent) {
+                    None => {
+                        Some("IVF+BQ index reports lists > 0 but has no cell directory".to_string())
+                    }
+                    Some(dir) => dir
+                        .validate_partition(meta_consistent.n_vectors)
+                        .err()
+                        .map(|e| {
+                            format!("IVF+BQ cell directory does not partition the slots: {e}")
+                        }),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         crate::index::relfile::unlock_relfile_read(rel);
         let meta = meta_consistent;
         let slot_count = ids.len() as i64;
@@ -426,6 +464,11 @@ fn turbovec_check(
             if reason.is_none() {
                 reason = graph_reason;
             }
+        }
+        // A 1-bit sign-BQ index's mean + IVF cell directory: validated
+        // above, inside the same ShareLock as the meta/ids/scales reads.
+        if meta.is_bq() && reason.is_none() {
+            reason = bq_problem;
         }
         // Scan-fatality check for EVERY kind (the field-report index was
         // IVF/"single", not graph): a scales value that `from_parts`

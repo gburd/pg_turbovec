@@ -3,7 +3,8 @@
 **Status: SHIPPED in v2.6.0 — `bit_width = 1` builds, scans, inserts and
 vacuums.** The foundation (reloption + rerank default + pure-Rust sign-BQ
 core) landed earlier; v2.6.0 wired the encode path, the Hamming scan
-kernel, `aminsert`, VACUUM and `turbovec_check`.
+kernel, `aminsert`, VACUUM and `turbovec_check`. **IVF + 1-bit
+(`WITH (lists = N, bit_width = 1)`) is composed after v2.6.0 — see §7.**
 
 Two corrections to what this doc originally specified, both recorded
 below in place:
@@ -15,10 +16,10 @@ below in place:
   indexes keep `kind = SINGLE/COLBERT/GRAPH` and decode byte-identically
   — **no REINDEX**. The `bq_mean_*` fields sit at page offset 316, which
   was reserved-and-zero on every prior version.
-- **IVF + 1-bit is not composed yet.** §5's closing line said IVF
-  "composes"; it is currently rejected with a clear ERROR
-  (`bit_width = 1` with `lists > 0`), because the cell-contiguous layout
-  and per-cell Hamming path are not wired. Flat BQ works.
+- **IVF + 1-bit composes** (§7). It was rejected in v2.6.0 (the
+  cell-contiguous layout and per-cell Hamming scan were unwired); it is
+  now implemented, still at wire version **8** with `kind = KIND_BQ` plus
+  the existing v4 IVF chain fields. No wire bump was needed.
 
 Prior offline study: `.agent/notes/BQ_HNSW_FEASIBILITY.md` (measured
 recall + storage; findings respected here, not re-derived).
@@ -191,8 +192,8 @@ that can't be validated end-to-end in the shared-cluster sandbox, and
 5. Wire bump + migration + `UPGRADING.md` row (§4).
 
 IVF `WITH (lists = N, bit_width = 1)` composes (cell-contiguous sign
-codes + Hamming per-cell); the graph kind is explicitly excluded for now
-(rejected in `options.rs`).
+codes + Hamming per-cell) — implemented after v2.6.0, see §7; the graph
+kind is explicitly excluded (rejected in `options.rs`).
 
 ---
 
@@ -262,15 +263,146 @@ What differed from the spec above, and the bugs found wiring it:
 
 ### Still open
 
-- **IVF + 1-bit** (`lists > 0` with `bit_width = 1`) — rejected with a
-  clear ERROR; the cell-contiguous sign layout and per-cell Hamming scan
-  are unwired.
 - **Graph + 1-bit** — rejected in `options.rs` (and the graph kind is
   deprecated as of v2.5.0, so this will not be pursued).
 - **Recall at scale.** The `#[pg_test]`s prove correctness, storage and
   end-to-end scan behaviour on synthetic corpora. The published
   recall/latency frontier for BQ still needs a real-corpus run on an
   AVX2 host (per `AGENTS.md`, latency numbers may only come from
+  `arnold`). This applies to IVF+BQ too: no recall/latency/QPS number is
+  claimed for it.
+- **Cell-aware incremental INSERT for IVF+BQ** — `aminsert` appends and
+  degrades to a flat Hamming scan (§7 note 4). A real cell-aware insert
+  needs slot insertion + cell-directory renumbering + tombstone-index
+  remapping.
+- **Out-of-core IVF+BQ** — the BQ scan is RAM-resident
+  (`cache::BqIndex` holds the whole codes chain). The TurboQuant IVF path
+  has an OOC variant (`OocIvfIndex`, per-cell gather off the buffer
+  manager); BQ does not. This matters less than for TurboQuant — 1-bit
+  codes are `dim/8` bytes, so the resident set is 2-4× smaller than the
+  equivalent 2/4-bit index — but it is the reason a >RAM corpus should
+  still use `bit_width >= 2`.
+
+---
+
+## 7. IVF + 1-bit (`WITH (lists = N, bit_width = 1)`) — as built
+
+Composed after v2.6.0. Wire version stays **8**; the shape is
+`kind = KIND_BQ` plus the existing v4 IVF chain fields, so no bump was
+needed and no existing index is affected.
+
+**On-disk shape.** Codes (`dim/8` per slot, CELL-CONTIGUOUS) → ids
+(cell order, with soft-assign duplicates) → corpus mean (`dim` f32) →
+coarse centroids (`lists * dim` f32) → cell directory
+(`lists * 12` bytes) → tombstone bitmap (after a VACUUM). Six chains —
+more than any other kind carries — which is why the chain-offset work
+below was the riskiest part.
+
+1. **Chain offsets: `bq_mean_count` added to two more running sums.**
+   `MetaPageData::set_ivf_chains` and `set_graph_chain` each summed the
+   preceding chains' page counts WITHOUT `bq_mean_count`. For
+   `set_ivf_chains` that is live corruption on an IVF+BQ index: the
+   coarse-centroid chain would be placed ON TOP of the corpus mean, so
+   the centring vector every sign code and every query depends on would
+   be overwritten by centroid bytes. For `set_graph_chain` it is a
+   regression guard only (graph + 1-bit is rejected in `options.rs`, so
+   no index has both chains). This is the FOURTH occurrence of this
+   class: v1.24.0 omitted `graph_count`, v2.6.0 found three sites
+   omitting `bq_mean_count`, and these two were the remaining ones.
+   `plan_bq_with_ivf_chains_never_overlap` asserts pairwise no-overlap
+   over every present chain and was verified to FAIL when the omission
+   is reintroduced.
+
+2. **No rotation, deliberately.** A TurboQuant IVF index trains its
+   coarse cells in the ROTATED space because that is the space its
+   per-vector fine quantizer encodes in — coarse and fine must agree. A
+   BQ index has no rotated fine space (its code is the sign of the
+   *centred raw* coordinate), so rotating would cost an O(dim²)
+   `materialize_rotation_matrix`, a GEMM per build block and a
+   `rotate_query` per scan, and align to nothing. Cells therefore live in
+   the raw L2-normalised space, and `scan::ivf_setup_and_search` skips
+   the rotation for a BQ handle (`ScanHandle::is_bq()`) to match. Getting
+   this asymmetric is the sharpest failure mode: a rotated query against
+   un-rotated centroids probes the wrong cells and collapses recall
+   silently — which is what the per-id self-neighbour assertions in
+   `onebit_ivf_builds_scans_and_beats_twobit_storage` are there to catch.
+
+3. **The mean is permutation-invariant, and computed for free.** It is
+   accumulated during the assign sweep (`onebit::accumulate_sums` per
+   spill block, `finish_mean` at the end) over the spill in SPILL order,
+   so it is BIT-IDENTICAL to the flat build's whole-corpus mean — the
+   cell permutation cannot change it, and neither can
+   `maintenance_work_mem` (block size). Note the mean must be over ROWS,
+   not slots: soft assignment makes `n_slots > n_rows`, so a slot-order
+   mean would be duplicate-weighted. `streamed_mean_matches_whole_corpus_mean`
+   gates the block-size invariance.
+
+4. **`aminsert` DEGRADES to flat, observably.** Placing a row in its cell
+   would mean shifting every later slot and renumbering the whole cell
+   directory (and remapping every tombstone bit, which is slot-indexed).
+   Rather than get that subtly wrong, the insert appends and drops the
+   cell metadata: the index falls back to a flat Hamming scan — slower,
+   never wrong (a full scan can only improve recall), never silently
+   lost. Crucially `lists` is PRESERVED and `ivf_degraded` stamped, so
+   `turbovec.index_is_degraded()` returns `true` and `ambeginscan` emits
+   the throttled degradation WARNING naming the index. REINDEX restores
+   the cells. (The TurboQuant IVF insert path degrades too but blanks
+   `lists` outright, so it is NOT reportable — this path is strictly
+   better on that axis.)
+
+5. **Two bugs found in the EXISTING flat-BQ `aminsert`**, both fixed
+   here because the IVF work runs through the same function:
+   - It did not re-persist the tombstone bitmap. `plan_bq` plans a fresh
+     meta with the tombstone fields zeroed, so every insert after a
+     VACUUM silently RESURRECTED every deleted row. This is the M2 bug
+     the graph kind fixed in v2.1.0 via
+     `write_full_with_prepared_graph_and_tombstones`; the BQ path shipped
+     without the equivalent.
+   - It appended unconditionally, so re-inserting an existing heap TID
+     (an UPDATE of the indexed column that reuses the TID) added a SECOND
+     slot for the same row — unbounded growth under repeated upserts, and
+     a duplicate id, which is the exact shape the flat kind's bijection
+     guard treats as corruption. It now overwrites the existing slot(s)
+     in place and clears any tombstone bit on them.
+   It also gained the graph path's row-count drift guard (chains must
+   agree with `meta.n_vectors` before being extended).
+
+6. **VACUUM needed no change.** `vacuum.rs` already routes
+   `meta.is_graph() || meta.is_bq()` to the kind-agnostic
+   `graph_tombstone_dead` (pure slot-index bitmap arithmetic), and
+   tombstone bits are slot-indexed, which is exactly what the
+   cell-contiguous layout is ordered by. `write_tombstones_and_meta`
+   already counted `bq_mean_count` (fixed in v2.6.0) and counts
+   `coarse_count`/`cell_dir_count`.
+
+7. **`turbovec_check` gained two BQ validations**, both inside the same
+   ShareLock as the meta/ids read (the v1.29.1 monitor-consistency
+   invariant): the corpus mean must be `dim` f32 (a missing mean is
+   scan-FATAL — the scan ERRORs rather than serve uncentred results), and
+   an IVF+BQ cell directory must PARTITION the slots. Without the second,
+   a torn directory silently mis-probes instead of failing — the same
+   blind-spot class as the 2026-09-05 scales field report.
+
+8. **One Hamming heap, two callers.** `onebit::topk_hamming_slots` takes
+   an arbitrary slot iterator; `topk_hamming` is that function over
+   `0..n`. The flat and cell-restricted scans therefore cannot diverge on
+   the tie-break, and the tie-break is slot-id based rather than
+   arrival-order based — load-bearing because `coarse_probe` yields cells
+   in distance order, so slots arrive out of ascending order. An
+   out-of-range slot (torn cell directory) is skipped, not panicked on.
+
+### Not verified
+
+The `#[pg_test]`s in this change were **written but not run**: pgrx
+binds a fixed port with a shared data dir and sibling agents were using
+it, and this box's rustc miscompiles the turbovec crate
+(`llvm.x86.avx512.vpdpbusd.512` intrinsic signature mismatch) so
+`cargo pgrx test` cannot build here at all. What WAS run: `cargo check
+--features "pg18 pg_test"` (clean), the pure-Rust `onebit` (19) and
+`page` (25) unit tests extracted into standalone crates (all pass), and
+fail-before verification that the new chain-offset and tie-break tests
+genuinely fail when the bug they guard is reintroduced. CI is the real
+gate for the `#[pg_test]`s.
   `arnold`). **The harness for that run is built and validated but has
   NOT been run — no numbers exist yet.** See
   [`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md) for the runbook, the

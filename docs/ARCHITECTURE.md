@@ -395,8 +395,10 @@ Validation in `amoptions`:
   scan path (Hamming coarse + exact heap rerank), NOT TurboQuant —
   turbovec hard-rejects `bit_width < 2`. See `docs/ONEBIT_BQ.md`.
   `bit_width = 1` is rejected with `graph = true` (the BQ scan kernel is
-  flat/IVF only). The GUC *default* (`turbovec.bit_width_default`) stays
-  `2..=4` — BQ is opt-in, never a default.
+  flat/IVF only); it COMPOSES with `lists = N` (cell-contiguous sign
+  codes + per-cell Hamming; see `docs/ONEBIT_BQ.md` §7). The GUC *default*
+  (`turbovec.bit_width_default`) stays `2..=4` — BQ is opt-in, never a
+  default.
 - `dim == 0` or (`dim > 0` and `dim % 8 == 0`) — turbovec requires
   dim be a multiple of 8 internally.
 

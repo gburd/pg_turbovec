@@ -1,0 +1,6 @@
+-- pg_turbovec 2.7.2 -> 2.7.3
+-- Fixes: a bit_width = 1 index built on an EMPTY table now accepts its first
+-- INSERT (previously "dim mismatch -- index expects 0"). Plus the measured
+-- 1-bit recall/storage/latency frontier in docs + benches/results.
+-- No wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

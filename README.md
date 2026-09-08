@@ -181,7 +181,7 @@ and there is no reason to use pg_turbovec instead.
 | RAG / semantic search, R@10 ≥ 0.95 acceptable | **`bit_width = 4` (default)** | 780 B | 1.000 |
 | Memory pressure dominates, R@10 ≥ 0.85 acceptable | `bit_width = 2` | 396 B | 1.000 |
 | Replacing `binary_quantize() + bit_hamming_ops` | `bit_width = 2` (strictly better) | 396 B | 1.000 (vs 0.65-0.75) |
-| Absolute minimum storage, recall matters less | `bit_width = 1` (sign BQ, opt-in) | 192 B | not yet published |
+| Absolute minimum storage, latency has slack | `bit_width = 1` (sign BQ, opt-in) | 192 B | 0.967 @ w=256 (measured, 1024-d) |
 
 **`bit_width = 1`** (new in v2.6.0) is a different scheme from the 2/3/4-bit
 TurboQuant path: it keeps only each coordinate's sign (after subtracting the
@@ -191,8 +191,14 @@ and deliberately **opt-in, never a default**: it is lossy enough that
 `turbovec.hi_dim_rerank` widens the exact-rerank window for it at any
 dimension. A corpus whose vectors all share one sign pattern even after
 centering is rejected at build rather than silently returning arbitrary rows.
-Its recall/latency frontier on real corpora is not yet published; the
-correctness, storage and scan behaviour are covered by tests. It composes
+**Measured** on 250k x 1024-d Cohere-wiki (AVX2 host, 100 held-out queries,
+exact ground truth): storage is **3.98x smaller** than 4-bit and **2.02x**
+smaller than 2-bit, but at matched recall it costs **2.7-6.1x the latency**
+and needs a **25x wider** exact-rerank window than 2-bit to clear
+R@10 >= 0.99 (window 800 vs 32). Use it where storage is the binding
+constraint and latency has slack -- never as a default. Full curve, caveats
+and the pre-registered predictions:
+[`docs/BQ_RECALL_BENCH.md`](docs/BQ_RECALL_BENCH.md) § 0. It composes
 with `lists = N` (IVF): `WITH (lists = N, bit_width = 1)` stores the sign
 codes cell-contiguous and probes only `turbovec.probes` cells, combining
 the storage win with the scan win. Note an `INSERT` into an existing

@@ -1,0 +1,34 @@
+-- 2.7.3 — 1-bit BQ frontier MEASURED + an empty-table insert fix.
+--
+-- 1. BUG FIX (real, found on a corpus host, not by a test): a bit_width = 1
+--    index created on an EMPTY table rejected its first INSERT with
+--    "dim mismatch -- index expects 0, row has N". The empty build stamps
+--    dim = 0 (no rows, no reloption-pinned dim) and insert_bq_row read the dim
+--    from the meta page. The flat path never had this because it takes the dim
+--    from the incoming row; the BQ path now does too, seeding the mean as
+--    zeros for the 0-row case (a 1-row corpus mean IS that row, so every
+--    centred coordinate is 0 -- what a rebuild would produce). Every in-tree
+--    BQ fixture indexed an already-populated table, which is why all of them
+--    missed it. Regression test covers the exact failing order AND asserts a
+--    wrong-dim row is still rejected once the dim is pinned.
+--
+-- 2. The 1-bit sign-BQ recall/storage/latency frontier is now MEASURED and
+--    published, closing the last "not yet published" claim in the README.
+--    arnold (AVX2, latency-publishable per AGENTS.md), PG 17.9, 250k x 1024-d
+--    Cohere-wiki, 100 held-out queries, exact in-DB ground truth, postmaster
+--    and driver pinned to P-cores 2-5, all 24 configs verified to use a real
+--    Index Scan.
+--
+--    Storage: 1-bit is 3.98x smaller than 4-bit, 2.02x smaller than 2-bit.
+--    Cost: at matched recall it is 2.7-6.1x slower and needs a 25x WIDER
+--    exact-rerank window than 2-bit to clear R@10 >= 0.99 (800 vs 32).
+--    All four predictions registered BEFORE the run held, including P2, whose
+--    falsification condition would have meant the hi_dim_rerank 1-bit
+--    special-case was unnecessary -- the data justifies it.
+--
+--    Also found: R@100 for 1-bit tops out at 0.981 and is 0.948 at the auto
+--    default, so 1-bit degrades faster at DEPTH than at k=10 -- budget a
+--    wider window if you paginate past the top 10.
+--
+-- No wire-format change (stays v8), no SQL surface change, no REINDEX.
+-- This migration is intentionally empty.

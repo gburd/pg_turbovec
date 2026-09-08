@@ -4,6 +4,82 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.3] — 2026-09-08
+
+**The 1-bit sign-BQ frontier is measured and published**, and a real
+insert-path bug found while running it is fixed. No wire-format change
+(stays v8), no SQL surface change, no REINDEX.
+
+### Fixed: a 1-bit index built on an EMPTY table rejected its first insert
+
+`CREATE TABLE` → `CREATE INDEX ... WITH (bit_width = 1)` (while empty) →
+`INSERT` failed with `dim mismatch — index expects 0, row has 1024`. The
+empty build stamps `dim = 0` (no rows, no reloption-pinned dim) and
+`insert_bq_row` read the dim from the meta page. The flat path never had
+this bug because it takes the dim from the **incoming row**; the BQ path now
+does the same, seeding the mean as zeros for the 0-row case (a one-row corpus
+mean *is* that row, so every centred coordinate is 0 — exactly what a rebuild
+would produce).
+
+Found on a real 1024-d corpus host while setting up the benchmark, **not by
+a test**: every in-tree BQ fixture happened to index an already-populated
+table, so all of them missed it. The regression test covers the exact failing
+order and also asserts a wrong-dim row is *still* rejected once the dim is
+pinned, so the fix does not paper over dim checking.
+
+### Measured: the 1-bit recall / storage / latency frontier
+
+Closes the last "not yet published" claim in the README. `arnold`
+(i9-12900H, **AVX2** — latency is only publishable on an AVX2 host per
+`AGENTS.md`), PostgreSQL 17.9, pg_turbovec 2.7.2, 250 000 × 1024-d
+Cohere-wiki as a native `turbovec.vector` column, **100 held-out queries**
+(zero corpus overlap, verified), exact top-100 in-DB ground truth using the
+*same* operator the index serves, postmaster and driver pinned to P-cores
+2-5, and all 24 configs confirmed to run a real `Index Scan`.
+
+| `bit_width` | bytes/vector | vs 4-bit | R@10 ≥ 0.99 needs | p50 there |
+|---|---:|---:|---:|---:|
+| **1** | **142.3** | **3.98× smaller** | window **800** | 36.7 ms |
+| 2 | 280.5 | 2.02× smaller | window 32 | 6.0 ms |
+| 4 | 565.7 | 1.00× | window 32 | 9.2 ms |
+
+**1-bit trades latency for storage, steeply**: twice the storage saving of
+2-bit, for 2.7–6.1× the latency at matched recall and a **25× wider**
+exact-rerank window to reach R@10 ≥ 0.99. That is a
+storage-constrained-workload option, not a default — which is how the
+reloption was already documented, now with numbers behind it.
+
+All four predictions registered *before* the run held. P2's falsification
+condition was "1-bit crosses at a comparable window, which would mean the
+`hi_dim_rerank` 1-bit special-case is unnecessary" — it did not, so the data
+**justifies** that special-case rather than merely tolerating it.
+
+Two further findings:
+
+- **1-bit degrades faster at depth than at k=10.** R@100 tops out at 0.981
+  (window 2000) and is 0.948 at the `auto` default, while 2-bit reaches
+  1.000 by window 800. Budget a wider window if you paginate or re-rank past
+  the top 10.
+- **Harness cost trap, documented.** `--vec-expr` accepts any SQL
+  expression, and a cast like `(emb::real[]::turbovec.vector)` is evaluated
+  **per row per query** — 200 M casts for a 1M × 200-query ground-truth
+  build, ~53 s *per query*. Materialising a native `turbovec.vector` column
+  first took one query from **53 s → 2.7 s (20×)**. The 1M arm was abandoned
+  for this reason, not for anything about turbovec.
+
+Caveats are stated in `docs/BQ_RECALL_BENCH.md` § 0.5 and not glossed: one
+corpus, one dim, one shared host (load ≈ 2 at start, so treat absolute
+milliseconds as indicative and the *ratios* as the result), and no IVF arm.
+This corpus also cannot separate 2-bit from 4-bit on recall — both sit at
+≈1.000 nearly everywhere; it separates 1-bit from both, which is what it was
+run for.
+
+Artefact: `benches/results/bq_frontier_20260908/` (24 configs + sweep log).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.3';` — no REINDEX.
+
 ## [2.7.2] — 2026-09-08
 
 **BUG#6 is now reported upstream.** Documentation-only: the binary is

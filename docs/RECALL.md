@@ -502,36 +502,46 @@ Observations carry over:
 
 Full machine-readable history under [`benches/results/`](../benches/results/).
 
-### 2.1.5 `bit_width = 1` (sign-BQ) — NOT YET MEASURED
+### 2.1.5 `bit_width = 1` (sign-BQ) — MEASURED 2026-09-08
 
-Every `bit_width` table in this document covers 2, 3 and 4 bits only.
-`bit_width = 1` (sign binary quantization, new in v2.6.0) has **no
-recall or latency numbers here, on purpose**: none have been measured.
-Its correctness, `dim/8`-bytes-per-vector storage and end-to-end scan
-behaviour are covered by `#[pg_test]`s; the recall/storage/latency
-frontier is not published, and the README's "Choose your `bit_width`"
-table correctly reads *not yet published* for that row.
+Every other `bit_width` table in this document covers 2, 3 and 4 bits.
+This section covers `bit_width = 1` (sign binary quantization, v2.6.0).
 
-The harness that would close the gap is built and self-validated but
-**has not been run**: `benches/scripts/bq/bq_frontier.py` (+
-`run_bq_frontier.sh`), documented in
-[`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md). It is consistent with
-the methodology above (R@10 against exact ground truth, `pg_relation_
-size` for storage, warm p50 from `EXPLAIN (ANALYZE)`) and adds three
-things this section's older runs did not control for:
+**Setup.** `arnold` (i9-12900H, AVX2 — latency is only publishable on an
+AVX2 host, see `docs/BENCHMARKS.md` § Caveats), PostgreSQL 17.9,
+pg_turbovec 2.7.2, postmaster + driver pinned to P-cores 2-5. 250 000 ×
+1024-d Cohere-wiki vectors as a native `turbovec.vector` column. 100
+**held-out** queries (zero overlap with the corpus, verified). Ground truth
+is an exact top-100 in-DB seqscan using the *same* operator the index serves.
+All 24 configs confirmed to run a real `Index Scan`.
 
-1. **Latency is gated on AVX2.** A pre-AVX2 host takes turbovec's
-   scalar fallback, so the driver refuses to emit a warm p50 there at
-   all (see `docs/BENCHMARKS.md` § Caveats for why that matters).
-2. **The exact-rerank window is swept and recorded per row.**
-   `turbovec.hi_dim_rerank = auto` widens the window for a 1-bit index
-   at *any* dim, so a "default settings" 1-bit-vs-2-bit comparison
-   compares two different windows.
-3. **The headline is iso-recall, not iso-knob** — the distinction that
-   decided the graph kind's fate in `docs/GRAPH_EF_BENCH.md` § 5.2.
+| `bit_width` | bytes/vector | vs 4-bit | R@10 ≥ 0.99 needs | p50 there |
+|---|---:|---:|---:|---:|
+| **1** | **142.3** | **3.98× smaller** | window **800** | 36.7 ms |
+| 2 | 280.5 | 2.02× smaller | window 32 | 6.0 ms |
+| 4 | 565.7 | 1.00× | window 32 | 9.2 ms |
 
-When a run lands, its results belong in this section and its artefact
-in `benches/results/`.
+**1-bit trades latency for storage, and the trade is steep**: 2× the
+storage saving of 2-bit, for 2.7–6.1× the latency at matched recall and a
+**25× wider** exact-rerank window to reach R@10 ≥ 0.99. It is a
+storage-constrained-workload option, not a default — which is how the
+reloption is documented.
+
+R@10 across the window sweep (1-bit): 0.744 @ 32, 0.899 @ 100, 0.967 @ 256,
+0.981 @ 400, 0.994 @ 800, 1.000 @ 2000. 2-bit is already 0.993 at window 32,
+so **this corpus cannot separate 2-bit from 4-bit on recall** (both are
+≈1.000 nearly everywhere) — it separates 1-bit from both, which is what it
+was run for.
+
+**Depth matters more than k=10 suggests.** R@100 for 1-bit tops out at 0.981
+(window 2000) and is only 0.948 at the `auto` default, while 2-bit reaches
+1.000 by window 800. If you paginate or re-rank past the top 10, budget a
+wider window than the R@10 numbers imply.
+
+Full curve, the four predictions registered *before* the run (all four
+held), and the caveats — single corpus, single dim, shared host, no IVF arm
+— are in [`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md) § 0. Artefact:
+`benches/results/bq_frontier_20260908/`.
 
 ## 2.2 Real-world recall on dbpedia-entities-openai-1M (1 M × 1536-d)
 

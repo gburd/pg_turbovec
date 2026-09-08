@@ -265,11 +265,14 @@ What differed from the spec above, and the bugs found wiring it:
 
 - **Graph + 1-bit** — rejected in `options.rs` (and the graph kind is
   deprecated as of v2.5.0, so this will not be pursued).
-- **Recall at scale.** The `#[pg_test]`s prove correctness, storage and
-  end-to-end scan behaviour on synthetic corpora. The published
-  recall/latency frontier for BQ still needs a real-corpus run on an
-  AVX2 host (per `AGENTS.md`, latency numbers may only come from
-  `arnold`). This applies to IVF+BQ too: no recall/latency/QPS number is
+- ~~**Recall at scale.**~~ **DONE 2026-09-08.** Measured on `arnold`
+  (AVX2) over 250k x 1024-d Cohere-wiki with 100 held-out queries and exact
+  ground truth: 3.98x smaller than 4-bit, 2.02x smaller than 2-bit, but
+  2.7-6.1x the latency at matched recall and a 25x wider rerank window
+  needed to clear R@10 >= 0.99. All four pre-registered predictions held.
+  See `docs/BQ_RECALL_BENCH.md` § 0 and
+  `benches/results/bq_frontier_20260908/`. Still unswept: a dim sweep, 1M+
+  scale, and the IVF+BQ arm. This applies to IVF+BQ too: no recall/latency/QPS number is
   claimed for it.
 - **Cell-aware incremental INSERT for IVF+BQ** — `aminsert` appends and
   degrades to a flat Hamming scan (§7 note 4). A real cell-aware insert

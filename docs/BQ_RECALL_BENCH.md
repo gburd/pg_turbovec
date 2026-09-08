@@ -1,6 +1,114 @@
-# 1-bit sign-BQ recall / storage / latency frontier — methodology
+# 1-bit sign-BQ recall / storage / latency frontier — methodology + RESULTS
 
-**Status: HARNESS ONLY. NOTHING HAS BEEN MEASURED.**
+**Status: MEASURED 2026-09-08 on `arnold` (AVX2). See § 0 for the results.**
+The methodology below is what the run followed; § 7's predictions were
+recorded *before* it and are scored in § 0.4.
+
+---
+
+## 0. Results — Cohere-wiki 250k × 1024-d, `arnold`, 2026-09-08
+
+Artefact: `benches/results/bq_frontier_20260908/bq_frontier_arnold_20260908.json`
+(24 configs, 3 indexes, plus the sweep log).
+
+**Provenance.** `arnold`, i9-12900H, `kernel_tier = avx2`,
+`latency_publishable = true` (per § 2, latency is only valid on an AVX2
+host). PostgreSQL 17.9, pg_turbovec 2.7.2, `shared_buffers = 2GB`,
+postmaster and driver pinned to P-cores 2-5. 250 000 × 1024-d Cohere-wiki
+vectors stored as a native `turbovec.vector` column; **100 held-out
+queries** (verified zero overlap with the indexed corpus); ground truth is
+an exact top-100 in-DB seqscan using the *same* operator the index serves
+(860 s). Every one of the 24 configs was confirmed to run a real
+`Index Scan`, not a masked seqscan.
+
+### 0.1 Storage — the reason to consider 1-bit at all
+
+| `bit_width` | index size | bytes/vector | vs 4-bit | build |
+|---|---:|---:|---:|---:|
+| **1** | 33.9 MiB | **142.3** | **3.98× smaller** | 7.4 s |
+| 2 | 66.9 MiB | 280.5 | 2.02× smaller | 6.8 s |
+| 4 | 134.9 MiB | 565.7 | 1.00× | 7.8 s |
+
+### 0.2 The full curve — R@10 and R@100 vs the exact-rerank window
+
+Read this **as a function of the window**, not of the mode name (§ 3).
+`p50` is server-side `Execution Time`.
+
+| window | bw1 R@10 | bw1 R@100 | bw1 p50 | bw2 R@10 | bw2 R@100 | bw2 p50 | bw4 R@10 | bw4 p50 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 0.744 | 0.244 | 5.5 ms | 0.993 | 0.319 | 6.0 ms | 1.000 | 9.2 ms |
+| 100 | 0.899 | 0.531 | 10.4 ms | 1.000 | 0.834 | 11.1 ms | 1.000 | 14.2 ms |
+| 256 | 0.967 | 0.762 | 16.2 ms | 1.000 | 0.995 | 17.2 ms | 1.000 | 20.6 ms |
+| 400 | 0.981 | 0.845 | 21.8 ms | 1.000 | 0.999 | 23.2 ms | 1.000 | 26.7 ms |
+| 800 | 0.994 | 0.929 | 36.7 ms | 1.000 | 1.000 | 40.9 ms | 1.000 | 44.2 ms |
+| 1024 | 0.994 | 0.948 | 44.8 ms | 1.000 | 1.000 | 51.3 ms | 1.000 | 55.0 ms |
+| 2000 | 1.000 | 0.981 | 81.5 ms | 1.000 | 1.000 | 103.6 ms | 1.000 | 106.2 ms |
+| **`auto`** (1024) | 0.994 | 0.948 | 45.4 ms | 1.000 | 1.000 | 51.7 ms | 1.000 | 54.9 ms |
+
+### 0.3 Iso-recall — the headline
+
+Cheapest config per `bit_width` that clears each target:
+
+| target | bw1 | bw2 | bw4 |
+|---|---|---|---|
+| R@10 ≥ 0.90 | w=256, 16.2 ms, 142 B/vec | w=32, **6.0 ms**, 281 B/vec | w=32, 9.2 ms, 566 B/vec |
+| R@10 ≥ 0.95 | w=256, 16.2 ms, 142 B/vec | w=32, **6.0 ms**, 281 B/vec | w=32, 9.2 ms, 566 B/vec |
+| R@10 ≥ 0.99 | w=800, 36.7 ms, 142 B/vec | w=32, **6.0 ms**, 281 B/vec | w=32, 9.2 ms, 566 B/vec |
+
+**1-bit buys 2× the storage saving of 2-bit and pays 2.7–6.1× the
+latency for it.** At R@10 ≥ 0.99 it needs a **25× wider** rerank window
+than 2-bit (800 vs 32) to get there. So the honest positioning is: 1-bit is
+for workloads where **storage is the binding constraint and latency has
+slack** — not a general-purpose default, which is exactly how the reloption
+is documented.
+
+The R@100 column sharpens this. 1-bit never reaches R@100 = 1.0 within the
+swept range (0.981 at w=2000), while 2-bit hits 1.000 by w=800 and 4-bit by
+w=256. **1-bit degrades faster at depth than at k=10** — if you re-rank or
+paginate beyond the top-10, budget a wider window than the R@10 table
+suggests.
+
+### 0.4 The recorded predictions, scored
+
+§ 7 was written before the run. All four held:
+
+| | prediction | outcome |
+|---|---|---|
+| **P1** | 1-bit far below 2-bit at a narrow window; rerank closes it | **CONFIRMED.** w=32: 0.744 vs 0.993. w=2000: both 1.000. |
+| **P2** | 1-bit needs a materially wider window for equal recall | **CONFIRMED.** R@10 ≥ 0.99 first cleared at w=800 (bw1) vs w=32 (bw2) — 25×. |
+| **P3** | storage ≈ exactly 2× / 4× | **CONFIRMED.** 2.02× and 3.98×. |
+| **P4** | 1-bit will not win latency at matched recall | **CONFIRMED.** 36.7 ms vs 6.0 ms at R@10 ≥ 0.99 (6.1× slower). |
+
+P2's falsification condition was "1-bit crosses at a comparable window,
+which would mean the `hi_dim_rerank` 1-bit special-case is unnecessary".
+It did not: the special-case is **justified** by this data.
+
+### 0.5 Caveats — what this run does NOT license
+
+- **250k × 1024-d, one corpus, one host.** Not 1M, not a dim sweep. The
+  1M-row table on the same host was tried first and abandoned: exact GT over
+  13 GB of pgvector-typed data with a per-row cast cost ~53 s **per query**
+  (~3 h for GT alone) on a 31 GB box. That is a harness-cost finding, not a
+  turbovec result — see § 0.6.
+- **`arnold` is a shared desktop** (load ≈ 1.7–2.2 at start). Cores 2-5
+  were pinned, but absolute p50s carry that noise. The *ratios* are the
+  result; treat the absolute milliseconds as indicative.
+- **No IVF arm.** `bit_width = 1` with `lists > 0` composes as of 2.7.0 but
+  was not swept here; this is the flat-BQ frontier only.
+- **R@10 = 1.000 for 2-bit and 4-bit at almost every window** means this
+  corpus/query set is *easy* at those widths — it cannot separate 2-bit from
+  4-bit on recall. It separates 1-bit from both, which is what it was for.
+
+### 0.6 Harness finding worth keeping
+
+The driver's `--vec-expr` accepts an arbitrary SQL expression, and a cast
+like `(emb::real[]::turbovec.vector)` is evaluated **per row per query** —
+200 M casts for a 1M × 200-query GT build. Materialising a native
+`turbovec.vector` column first took one query from **53 s → 2.7 s (20×)**.
+If you run this on a pgvector-typed corpus, materialise first; do not pass a
+cast as the vec-expr.
+
+---
 
 v2.6.0 shipped `WITH (bit_width = 1)` (sign binary quantization: `dim/8`
 bytes per vector, no per-vector scale, Hamming coarse ranking + exact

@@ -1,0 +1,45 @@
+-- 2.7.1 — BUG#6 root-cause verification. Documentation + upstream patch only.
+--
+-- NO shippable code change: the binary is byte-identical to 2.7.0 (no wire
+-- change, no SQL surface change, no REINDEX). The only src/ edit is an
+-- expanded doc comment on the existing tripwire test.
+--
+-- BUG#6 ("SELECT ctid ... ORDER BY emb <=> q" projects the invalid-tid
+-- sentinel (4294967295,0)) was root-caused to PostgreSQL CORE, not to this
+-- extension, and that has now been PROVEN end to end rather than argued:
+--
+--  * Reproduced on stock PostgreSQL 18.4 using ONLY core GiST, with zero
+--    turbovec code loaded (thin diagonal polygons -> bbox distance
+--    under-estimates -> was_exact false -> tuples routed through
+--    nodeIndexscan.c's reorder queue).
+--  * Traced line by line in stock source: indexam.c sets xs_recheckorderby ->
+--    nodeIndexscan.c queues the tuple -> reorderqueue_pop calls
+--    ExecForceStoreHeapTuple, whose TTS_IS_BUFFERTUPLE branch calls
+--    ExecClearTuple (which does ItemPointerSetInvalid(&slot->tts_tid)) and
+--    never restores tts_tid from tuple->t_self -> tuptable.h's
+--    slot_getsysattr returns &slot->tts_tid for the ctid system column.
+--    The sibling tts_heap_store_tuple DOES set tts_tid, so it is an
+--    asymmetry, not a design choice.
+--  * FIX PROVEN: built PostgreSQL both ways on one machine, ran one script.
+--    Unpatched vs patched: ctid self-join 1 -> 5; UPDATE ... WHERE ctid
+--    1 -> 5 rows; sentinel ctids at LIMIT 50: 49/50 -> 0/50.
+--  * The affected function body is byte-identical across the 13.23, 14.22,
+--    15.17, 16.14, 17.9 and 18.3 trees (hashed), so the one-line fix applies
+--    unchanged to every supported branch.
+--  * NO query-level workaround exists (verified): WITH ... AS MATERIALIZED,
+--    a text cast inside a subquery, and extra subquery nesting all still
+--    yield the sentinel; only abandoning the index scan avoids it. So the
+--    documented guidance (chain on your own key column, or use
+--    turbovec.knn()) is the only real answer.
+--  * New finding: turbovec sees this on 100% of rows while core GiST loses
+--    only some, because IndexNextWithReorder skips the queue when the AM's
+--    advertised ORDER BY value compares EXACTLY equal to the recomputed one
+--    (was_exact). turbovec advertises -inf, which never compares equal. That
+--    is a difference in exposure, not in cause -- advertising a real lower
+--    bound would make the fault intermittent, which is harder to diagnose,
+--    not safer.
+--
+-- Ships docs/upstream/bug6-pgsql-hackers-DRAFT.md (a submission prepared for
+-- review, NOT sent) alongside the existing patch file.
+--
+-- This migration is intentionally empty.

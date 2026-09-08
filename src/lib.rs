@@ -8915,6 +8915,27 @@ mod tests {
     /// patch restoring `tts_tid` in that branch fixes BOTH turbovec
     /// and GiST. See docs/FILTERING.md "Do not harvest ctid".
     ///
+    /// Verified end-to-end (2026-09-08) by building PostgreSQL both ways
+    /// on one machine and running one script: stock 18.4 vs an 18.3 tree
+    /// with only that hunk applied. Unpatched, a ctid self-join returned
+    /// 1 of 5, `UPDATE ... WHERE ctid` updated 1 of 5 rows (silently, no
+    /// error), and 49 of 50 ctids were sentinels. Patched: 5, 5, and 0.
+    /// The affected function body is byte-identical across the 13.23,
+    /// 14.22, 15.17, 16.14, 17.9 and 18.3 trees (hashed), so the fix
+    /// applies unchanged to every supported branch.
+    ///
+    /// Why turbovec sees this on EVERY row while GiST loses only some:
+    /// `IndexNextWithReorder` sets `was_exact = (cmp == 0)`, i.e. a tuple
+    /// SKIPS the queue when the AM's advertised ORDER BY value compares
+    /// exactly equal to the recomputed one. We advertise
+    /// `f64::NEG_INFINITY` (deliberately -- see `amgettuple`: a tighter
+    /// bound is legal but buys nothing, because the recheck is
+    /// unconditional), which never equals a real distance, so 100% of our
+    /// tuples are queued and 100% hit the core bug. That is a difference
+    /// in EXPOSURE, not in cause: advertising a real lower bound would
+    /// only make the corruption intermittent, which is worse to diagnose,
+    /// not better.
+    ///
     /// The AM has no lever. `xs_heaptid` is already correct, and
     /// everything downstream (`reorderqueue_push/pop`,
     /// `ExecForceStoreHeapTuple`) is core-internal and runs after

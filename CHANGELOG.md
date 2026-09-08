@@ -4,6 +4,74 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.1] — 2026-09-08
+
+**BUG#6 root cause proven against stock PostgreSQL, and the one-line core
+fix verified.** Documentation + upstream-patch release: the binary is
+byte-identical to 2.7.0 (no wire change, no SQL surface change, no
+REINDEX). The only `src/` edit is an expanded doc comment on the existing
+tripwire test.
+
+BUG#6 is the one where `SELECT ctid ... ORDER BY emb <=> q LIMIT k`
+projects the invalid-item-pointer sentinel `(4294967295,0)`. It was
+previously *argued* to be a core bug; it is now **demonstrated**:
+
+- **Reproduced on stock PostgreSQL 18.4 using only core GiST, with zero
+  turbovec loaded** — thin diagonal polygons, where the bounding-box
+  distance under-estimates the true polygon distance, so `was_exact` comes
+  out false and tuples are routed through `nodeIndexscan.c`'s reorder
+  queue.
+- **Traced line by line in stock source.** `indexam.c:983` sets
+  `xs_recheckorderby` for any AM that asks; `nodeIndexscan.c:290` queues
+  the tuple; `reorderqueue_pop` calls `ExecForceStoreHeapTuple`, whose
+  `TTS_IS_BUFFERTUPLE` branch calls `ExecClearTuple` (which does
+  `ItemPointerSetInvalid(&slot->tts_tid)`) and never restores `tts_tid`
+  from `tuple->t_self`; `tuptable.h:420`'s `slot_getsysattr` returns
+  `&slot->tts_tid` for the ctid system column. The sibling
+  `tts_heap_store_tuple` **does** set `tts_tid`, so it is an asymmetry,
+  not a design choice.
+- **The fix is proven, not proposed.** PostgreSQL built both ways on one
+  machine, one script:
+
+  | | unpatched | patched |
+  |---|---:|---:|
+  | ctid self-join, expect 5 | **1** | **5** |
+  | `UPDATE ... WHERE ctid`, expect 5 rows | **1** | **5** |
+  | sentinel ctids at `LIMIT 50` | **49/50** | **0/50** |
+
+  The `UPDATE` line is the dangerous one: no error, it just affects one row
+  instead of five.
+- **Byte-identical across branches**: the affected function body hashes the
+  same in the 13.23, 14.22, 15.17, 16.14, 17.9 and 18.3 trees, so the
+  one-line fix applies unchanged to every supported major.
+- **No query-level workaround exists** (verified, not assumed): `WITH ... AS
+  MATERIALIZED`, casting to `text` inside a subquery, and extra subquery
+  nesting *all* still return the sentinel, because it is already in the slot
+  before any of them run. Only abandoning the index scan avoids it. So the
+  documented guidance — chain on your own key column, or use
+  `turbovec.knn()` — is the only real answer, and now it is known to be
+  rather than assumed to be.
+
+**New finding.** turbovec sees this on **100%** of rows while core GiST
+loses only some. `IndexNextWithReorder` sets `was_exact = (cmp == 0)`, so a
+tuple *skips* the queue when the AM's advertised ORDER BY value compares
+exactly equal to the recomputed one. turbovec advertises
+`f64::NEG_INFINITY`, which never compares equal to a real distance, so
+every one of its tuples is queued. That is a difference in **exposure, not
+in cause** — advertising a real lower bound would only make the fault
+intermittent, which is harder to diagnose, not safer, so the `-inf` choice
+stands.
+
+Ships `docs/upstream/bug6-pgsql-hackers-DRAFT.md`, a submission prepared
+for review and **not sent**, alongside the existing patch file (now
+carrying the A/B table).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.1';` — no REINDEX. Nothing in
+the extension's behaviour changes; the fix this release documents is a
+PostgreSQL core patch, not something pg_turbovec can apply.
+
 ## [2.7.0] — 2026-09-08
 
 **IVF + 1-bit sign-BQ compose**, the Hamming kernel gets ~4.4× faster, and

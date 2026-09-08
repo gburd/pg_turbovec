@@ -56,9 +56,28 @@ nothing.
 With the fix, all five rows report their true ctid and the self-join
 returns 5.
 
+Verified by building both ways on one machine and running the identical
+script (stock 18.4 vs a 18.3 tree with only this hunk applied):
+
+                                    unpatched   patched
+    ctid self-join, expect 5              1         5
+    UPDATE ... WHERE ctid, expect 5       1         5
+    sentinel ctids at LIMIT 50        49/50      0/50
+
+The UPDATE case is the one worth emphasising: it does not error, it
+silently updates one row instead of five.
+
+Note the sentinel count is 49 of 50, not 50: the single tuple whose
+index-returned distance happened to compare equal to the recomputed one
+sets was_exact and is returned without queueing, so it keeps its real
+ctid.  An access method that cannot bound its ORDER BY value usefully and
+advertises -inf therefore has 100% of its tuples queued, which is why
+this is more visible for a quantised-distance AM than for core GiST.
+
 Present in all supported branches (REL_13_STABLE .. master); the
 affected code in ExecForceStoreHeapTuple() is byte-identical across
-them.
+them -- verified by hashing the function body in the 13.23, 14.22,
+15.17, 16.14, 17.9 and 18.3 trees: all six are identical.
 
 diff --git a/src/backend/executor/execTuples.c b/src/backend/executor/execTuples.c
 --- a/src/backend/executor/execTuples.c

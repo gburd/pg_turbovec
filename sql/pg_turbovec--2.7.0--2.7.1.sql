@@ -1,0 +1,6 @@
+-- pg_turbovec 2.7.0 -> 2.7.1
+-- Documentation-only release: BUG#6 root cause proven against stock
+-- PostgreSQL (reproduced with core GiST alone; the one-line core fix
+-- verified by an A/B build). Binary byte-identical to 2.7.0.
+-- No wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

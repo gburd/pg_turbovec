@@ -268,6 +268,34 @@ intersects a *set of physical rows*, identified by TID.)
 > both. Tracked by the `knn_scan_ctid_projection_upstream_limitation`
 > regression test, which doubles as a tripwire for the upstream fix.
 >
+> Verified by building PostgreSQL both ways on one machine and running
+> one script (stock 18.4 vs an 18.3 tree with only that hunk applied):
+>
+> | | unpatched | patched |
+> |---|---:|---:|
+> | ctid self-join, expect 5 | **1** | **5** |
+> | `UPDATE ... WHERE ctid`, expect 5 rows | **1** | **5** |
+> | sentinel ctids at `LIMIT 50` | **49/50** | **0/50** |
+>
+> The `UPDATE` row is the dangerous one: it raises no error, it just
+> updates one row instead of five. The patch is in
+> `docs/upstream/bug6-execForceStoreHeapTuple-tts_tid.patch`.
+>
+> **There is no query-level workaround** — verified against stock 18.4:
+> `WITH ... AS MATERIALIZED`, casting to `text` inside a subquery, and
+> extra subquery nesting all still yield the sentinel, because it is
+> already baked into the slot before any of them run. Forcing a
+> sequential scan does return correct ctids, but that abandons the index
+> and is O(n). Chain on your own key column instead (or use
+> `turbovec.knn()`).
+>
+> Note 49 of 50, not 50: `IndexNextWithReorder` skips the queue for a
+> tuple whose advertised ORDER BY value compares *exactly equal* to the
+> recomputed one (`was_exact`). turbovec advertises `-inf`, which never
+> compares equal, so **every** turbovec row is queued and every one is
+> affected. Advertising a real lower bound would only make this
+> intermittent — harder to diagnose, not safer.
+>
 > **Use instead:** your own key column, or `turbovec.knn(rel, id_col,
 > vec_col, query, k)`, which returns `(id, score)` and never involves
 > the executor's reorder queue.

@@ -67,6 +67,31 @@ Notes:
   unit-norm input, so recall is unaffected. pgvector sees the
   un-padded data.
 
+## `bq/` — 1-bit sign-BQ frontier
+
+`bq/bq_frontier.py` sweeps `bit_width` in {1, 2, 4} over one corpus and
+reports R@k vs exact in-DB ground truth, `pg_relation_size`, bytes/vector,
+build wall-clock and — **only on an AVX2+ host** — warm p50/p95/p99 + QPS.
+`bq/run_bq_frontier.sh` is the phase runner (`preflight` / `queryset` /
+`sweep`); `bq/smoke_stub.sql` is a plumbing-only fixture that measures
+nothing.
+
+The latency gate is structural, not a convention: on a pre-AVX2 host
+(`meh`) turbovec takes its scalar fallback (~1000× slower full-corpus scan)
+and the driver **will not emit a latency number at all**. Read
+[`docs/BQ_RECALL_BENCH.md`](../../docs/BQ_RECALL_BENCH.md) before running it
+— it has the runbook, the host rules, the re-rank-window controls, and the
+predictions the run is meant to confirm or falsify.
+
+No-database self-checks:
+
+```bash
+python3 benches/scripts/bq/bq_frontier.py --self-check     # pure logic
+python3 benches/scripts/bq/bq_frontier.py --print-schema   # output shape
+python3 benches/scripts/bq/bq_frontier.py --dry-run-sql \
+    --dsn x --out /tmp/x.json --dim 1536 --query-provenance held_out
+```
+
 ## Installing pgvector into the pgrx cluster
 
 The pgrx-managed cluster doesn't ship pgvector by default. On

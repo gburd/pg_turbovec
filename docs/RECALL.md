@@ -502,6 +502,37 @@ Observations carry over:
 
 Full machine-readable history under [`benches/results/`](../benches/results/).
 
+### 2.1.5 `bit_width = 1` (sign-BQ) — NOT YET MEASURED
+
+Every `bit_width` table in this document covers 2, 3 and 4 bits only.
+`bit_width = 1` (sign binary quantization, new in v2.6.0) has **no
+recall or latency numbers here, on purpose**: none have been measured.
+Its correctness, `dim/8`-bytes-per-vector storage and end-to-end scan
+behaviour are covered by `#[pg_test]`s; the recall/storage/latency
+frontier is not published, and the README's "Choose your `bit_width`"
+table correctly reads *not yet published* for that row.
+
+The harness that would close the gap is built and self-validated but
+**has not been run**: `benches/scripts/bq/bq_frontier.py` (+
+`run_bq_frontier.sh`), documented in
+[`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md). It is consistent with
+the methodology above (R@10 against exact ground truth, `pg_relation_
+size` for storage, warm p50 from `EXPLAIN (ANALYZE)`) and adds three
+things this section's older runs did not control for:
+
+1. **Latency is gated on AVX2.** A pre-AVX2 host takes turbovec's
+   scalar fallback, so the driver refuses to emit a warm p50 there at
+   all (see `docs/BENCHMARKS.md` § Caveats for why that matters).
+2. **The exact-rerank window is swept and recorded per row.**
+   `turbovec.hi_dim_rerank = auto` widens the window for a 1-bit index
+   at *any* dim, so a "default settings" 1-bit-vs-2-bit comparison
+   compares two different windows.
+3. **The headline is iso-recall, not iso-knob** — the distinction that
+   decided the graph kind's fate in `docs/GRAPH_EF_BENCH.md` § 5.2.
+
+When a run lands, its results belong in this section and its artefact
+in `benches/results/`.
+
 ## 2.2 Real-world recall on dbpedia-entities-openai-1M (1 M × 1536-d)
 
 This is the canonical real-embedding head-to-head referenced from the

@@ -264,4 +264,8 @@ What differed from the spec above, and the bugs found wiring it:
   end-to-end scan behaviour on synthetic corpora. The published
   recall/latency frontier for BQ still needs a real-corpus run on an
   AVX2 host (per `AGENTS.md`, latency numbers may only come from
-  `arnold`).
+  `arnold`). **The harness for that run is built and validated but has
+  NOT been run — no numbers exist yet.** See
+  [`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md) for the runbook, the
+  host rules, the re-rank-window controls, and the predictions recorded
+  in advance; the driver is `benches/scripts/bq/bq_frontier.py`.

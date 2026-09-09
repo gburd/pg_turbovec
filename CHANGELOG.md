@@ -4,6 +4,99 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.5] — 2026-09-09
+
+**The 1-bit dimension sweep is measured, and it produces the sharpest
+practical guidance the BQ work has yielded: 1-bit is a high-dimension
+technique.** Also corrects a `hi_dim_rerank` documentation error. No shippable
+code change — binary byte-identical to 2.7.4. No wire change (v8), no SQL
+surface change, no REINDEX.
+
+### The penalty collapses as dimension rises
+
+256/512/1024-d, 250 000 rows and 100 held-out queries per dim, matching § 0's
+setup. Artefacts: `benches/results/bq_dimsweep_20260909/`.
+
+1-bit R@10 at a **fixed** rerank window rises with dim at **all seven** swept
+windows, no exception:
+
+| window | 256-d | 512-d | 1024-d |
+|---:|---:|---:|---:|
+| 32 | 0.394 | 0.581 | 0.744 |
+| 256 | 0.729 | 0.888 | 0.967 |
+| 800 | 0.866 | 0.966 | 0.994 |
+| 2000 | 0.933 | 0.990 | 1.000 |
+
+At **matched recall** the window penalty versus 2-bit collapses:
+
+| dim | 1-bit window for R@10 ≥ 0.95 | 2-bit | penalty |
+|---:|---:|---:|---:|
+| 256 | **4000** | 100 | **125×** |
+| 512 | 800 | 32 | 25× |
+| 1024 | 256 | 32 | **8×** |
+
+At 256-d, reaching R@10 ≥ 0.99 requires a window of **16 000** — reranking
+6.4 % of the whole corpus. **1-bit is effectively unusable at 256-d and
+below; prefer it at 768-d and up.** Storage moves the same way (1.902× →
+1.946× → 1.971× versus 2-bit) because 1-bit's fixed per-index overhead
+amortises away as dim grows: 30 % overhead over the `dim/8` ideal at 256-d,
+11 % at 1024-d. Both axes favour 1-bit more strongly at higher dimension.
+
+Depth confirms it: R@100 at the `auto` default is 0.455 (256-d), 0.737
+(512-d), 0.948 (1024-d) — at 256-d the default loses more than half the true
+top-100.
+
+**Validation.** The 1024-d arm was re-run from a fresh database on a
+re-sliced corpus and reproduced § 0's published recall **bit-identically at
+all seven windows**, p50s within 1–3 %. Independently re-verified against the
+published artefact. That validates the published figures *and* the rebuilt,
+isolated harness.
+
+> **Caveat that bounds this.** The 256-d and 512-d corpora are **prefix
+> slices** of the 1024-d Cohere-wiki embedding, not natively-trained
+> embeddings of those dimensions. A native 256-d model concentrates its
+> information into 256 coordinates; a truncated 1024-d vector keeps only the
+> first quarter of a representation spread across all of them. That likely
+> makes the sliced low dims look worse than a native model would, so the trend
+> is an **upper bound** on dim-sensitivity — directionally sound, magnitude not
+> transferable. Nothing was padded to fabricate a higher dim.
+
+Same contention caveat as § 0: recall and storage stand; absolute p50s are
+indicative.
+
+### Correction: the 1-bit `hi_dim_rerank` special case is a no-op at dim ≥ 256
+
+`docs/ONEBIT_BQ.md` and `docs/BQ_RECALL_BENCH.md` said `hi_dim_rerank` treats
+a 1-bit index as high-dim "at **any** dim", implying it widens BQ's rerank
+window generally. That is literally true of the code and **misleading about
+the effect.** The `auto` window is `clamp(effective_dim, 256..=1024)`, and
+since `effective_dim = max(dim, 256)` for 1-bit but `dim` for 2/3/4-bit, the
+two are **identical for every `dim >= 256`**. The special case only widens the
+window below 256-d.
+
+This *strengthens* the published results rather than weakening them: a
+1-bit-vs-2-bit comparison at `dim >= 256` with default settings compares
+**equal** windows, so § 0 and § 0.6c are quantizer-vs-quantizer, not
+knob-vs-knob. Both docs now carry a table showing exactly where the special
+case bites.
+
+Found by re-deriving the clamp independently against the Rust source while
+chasing down why the sweep's pre-registered prediction P-D3 had named the
+wrong mechanism.
+
+### On pre-registration
+
+Three of the sweep's four predictions were wrong in some respect — the storage
+direction was backwards, the `hi_dim_rerank` mechanism was misnamed (which is
+what surfaced the doc error above), and the latency-vs-dim shape was
+non-linear. Only the central hypothesis was confirmed, and it was understated.
+Recording predictions before the run is what made all of that visible instead
+of being quietly rationalised afterwards.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.5';` — no REINDEX.
+
 ## [2.7.4] — 2026-09-09
 
 **Documentation accuracy and benchmark-harness isolation.** No shippable code

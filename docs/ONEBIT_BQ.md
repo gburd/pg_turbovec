@@ -66,15 +66,38 @@ measured.
    Vamana, yet). The GUC *default* stays `2..=4` — BQ is opt-in per the
    study ("never a default"; unusable on non-zero-centered data).
 
-2. **Rerank default auto-widens for 1-bit**
+2. **Rerank default auto-widens for 1-bit — but only below 256-d.**
    (`src/guc.rs::hi_dim_rerank_candidate_count`): gained a `bit_width`
-   param. A 1-bit index is treated as `effective_dim >=
-   HI_DIM_RERANK_MIN_DIM (256)` at ANY dim, so `hi_dim_rerank = auto`
-   engages the wider exact-heap-rerank floor for BQ regardless of dim
-   (BQ is lossy even at low dim; the study needed a rerank window of a
-   few hundred). Reuses the EXISTING `xs_recheckorderby` / `search_k` /
-   `oversample` machinery — no new rerank mechanism. A user override
-   past the floor still wins.
+   param, so a 1-bit index computes `effective_dim = max(dim, 256)`
+   instead of `dim`.
+
+   **Read the consequence carefully, because an earlier version of this
+   doc overstated it.** The `auto` window is
+   `clamp(effective_dim, 256..=1024)`. For a 1-bit index that is
+   `clamp(max(dim,256), 256..=1024)`; for 2/3/4-bit it is
+   `clamp(dim, 256..=1024)`. Those are **the same value for every
+   `dim >= 256`** — so the 1-bit special case is a **no-op at 256-d and
+   above**, and only widens the window for `dim < 256`:
+
+   | dim | 1-bit `auto` window | 2-bit `auto` window | special case does |
+   |---:|---:|---:|---|
+   | 64 | 256 | 32 | **widens 8×** |
+   | 128 | 256 | 32 | **widens 8×** |
+   | 192 | 256 | 32 | **widens 8×** |
+   | 256 | 256 | 256 | nothing |
+   | 768 | 768 | 768 | nothing |
+   | 1536 | 1024 | 1024 | nothing |
+
+   So a 1-bit-vs-2-bit comparison at `dim >= 256` and default settings
+   compares **equal** windows, and any recall or latency difference there
+   is the quantizer, not the knob. Below 256-d the windows differ and the
+   comparison must control for it. (Verified against the driver's mirror
+   of the Rust clamp during the 2026-09-09 dim sweep, which is what
+   caught the overstatement.)
+
+   Reuses the EXISTING `xs_recheckorderby` / `search_k` / `oversample`
+   machinery — no new rerank mechanism. A user override past the floor
+   still wins (`user_count.max(floor)`).
 
 3. **Pure-Rust sign-BQ core** (`src/index/onebit.rs`, fully unit-tested,
    no pgrx cluster needed):
@@ -259,7 +282,8 @@ What differed from the spec above, and the bugs found wiring it:
    in §7 below. Ties break toward the lower slot, and since Hamming over
    `dim` bits has only `dim + 1` distinct values, ties are the common case
    — which is why the AM's exact rerank does the fine ranking and
-   `hi_dim_rerank` treats a 1-bit index as high-dim at any `dim`.
+   `hi_dim_rerank` treats a 1-bit index as high-dim at any `dim` (which
+   only changes the window below 256-d — see item 2).
 
 ### Still open
 
@@ -283,8 +307,16 @@ What differed from the spec above, and the bugs found wiring it:
   2000), whereas flat reaches 0.994. That is a scale-dependent result — 250k
   is below where IVF's scan-cost advantage pays — so it is a documented
   boundary, not a verdict.
-- **Dimension sweep** — still open. Attempted 2026-09-09 and invalidated by a
-  harness collision (since fixed with `--run-id`); needs re-running.
+- ~~**Dimension sweep.**~~ **DONE 2026-09-09** (`docs/BQ_RECALL_BENCH.md`
+  § 0.6c, `benches/results/bq_dimsweep_20260909/`). 1-bit's penalty shrinks
+  monotonically with dim: the window it needs versus 2-bit for R@10 ≥ 0.95 goes
+  125× (256-d) → 25× (512-d) → 8× (1024-d), and storage improves too
+  (1.90× → 1.97× vs 2-bit, since fixed per-index overhead amortises away).
+  **1-bit is a high-dimension technique** — at 256-d it needs to rerank 6.4 %
+  of the corpus for R@10 ≥ 0.99 and is effectively unusable. The 1024-d arm
+  reproduced the published § 0 recall bit-identically at all 7 windows, which
+  validates both. Caveat: low dims are prefix slices, not native embeddings,
+  so the trend is an upper bound on dim-sensitivity.
 - **Real 1M+ scale** — still open. A synthetic 1M attempt produced
   unusable recall because the generated corpus was statistically unrankable
   (nn1→nn100 spread 6.6–10.4 % vs 37–268 % on a real corpus); discarded with a

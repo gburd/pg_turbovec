@@ -190,16 +190,89 @@ Incidental but operationally sharp: `bit_width = 4` + `lists = 512` at 1024-d
 3 GB times parallel workers is enough to get a backend killed, which presents
 to an operator as an unexplained termination.
 
-### 0.6b Still open: dimension sweep and real 1M scale
+### 0.6c Dimension sweep (2026-09-09) — the 1-bit penalty shrinks sharply with dim
+
+Artefacts: `benches/results/bq_dimsweep_20260909/` (256-d, 512-d, 1024-d, plus
+a 256-d wide-window extension to w=32000). 250 000 rows and 100 held-out
+queries per dim, matching § 0. Same contention caveat as § 0 — recall and
+storage stand, absolute p50s are indicative.
+
+**Validation first.** The 1024-d arm was re-measured from a fresh database and
+a re-sliced corpus, and reproduced § 0's recall **bit-identically at all seven
+windows** (0.744 / 0.899 / 0.967 / 0.981 / 0.994 / 0.994 / 1.000; p50s within
+1–3 %). Independently re-verified by the lead against the published artefact.
+That validates both the published numbers and the rebuilt, isolated harness.
+
+**The hypothesis held, monotonically.** 1-bit R@10 at a *fixed* rerank window,
+across dim:
+
+| window | 256-d | 512-d | 1024-d |
+|---:|---:|---:|---:|
+| 32 | 0.394 | 0.581 | 0.744 |
+| 100 | 0.577 | 0.771 | 0.899 |
+| 256 | 0.729 | 0.888 | 0.967 |
+| 400 | 0.782 | 0.925 | 0.981 |
+| 800 | 0.866 | 0.966 | 0.994 |
+| 1024 | 0.890 | 0.977 | 0.994 |
+| 2000 | 0.933 | 0.990 | 1.000 |
+
+Rises at **all seven** windows, no exception. More dimensions means more sign
+bits, which means better 1-bit retrieval at equal rerank effort.
+
+**Iso-recall: the window penalty collapses as dim rises.** Window needed to
+clear R@10 ≥ 0.95, and the ratio against 2-bit:
+
+| dim | 1-bit window | 2-bit window | penalty |
+|---:|---:|---:|---:|
+| 256 | **4000** | 100 | **125×** |
+| 512 | 800 | 32 | 25× |
+| 1024 | 256 | 32 | **8×** |
+
+At 256-d, reaching R@10 ≥ 0.99 needs a window of **16 000** — reranking 6.4 %
+of the entire 250k corpus. **1-bit is effectively unusable at 256-d and below.**
+At 1024-d the penalty is 8×, which is a real trade rather than a
+disqualification. This is the sharpest practical guidance the BQ work has
+produced: **1-bit is a high-dimension technique.**
+
+**Storage advantage also grows with dim** — the opposite of the sweep's own
+prediction:
+
+| dim | 1-bit B/vec | vs 2-bit | vs 4-bit | `dim/8` ideal | overhead |
+|---:|---:|---:|---:|---:|---:|
+| 256 | 41.65 | 1.902× | 3.513× | 32.0 | 30 % |
+| 512 | 75.20 | 1.946× | 3.730× | 64.0 | 18 % |
+| 1024 | 142.31 | 1.971× | 3.975× | 128.0 | 11 % |
+
+1-bit carries fixed per-index overhead (the corpus mean, ids, meta) that
+dilutes its `dim/8` edge at small dim and amortises away as dim grows. So both
+axes — recall *and* storage — favour 1-bit more strongly at higher dimension.
+
+**Depth degrades worse at low dim.** R@100 at the `auto` default: 0.455
+(256-d), 0.737 (512-d), 0.948 (1024-d). At 256-d the default loses **more than
+half** the true top-100.
+
+> **⚠ Caveat that bounds all of the above: the 256-d and 512-d corpora are
+> PREFIX SLICES of the 1024-d Cohere-wiki embedding, not natively-trained
+> embeddings of those dimensions.** A native 256-d model concentrates its
+> information into 256 coordinates; truncating a 1024-d vector keeps only the
+> first quarter of a representation that was spread across all of them. That
+> almost certainly makes the sliced low dims look **worse** than a native model
+> would. So the measured trend is an **upper bound** on the penalty's
+> dim-sensitivity — directionally sound, magnitude not transferable to native
+> low-dim models. Nothing was padded to fabricate a higher dim.
+
+Prediction scoring, recorded before the run: the hypothesis (P-D2) was
+confirmed and understated, but **three of four predictions were wrong in some
+respect** — the storage direction was backwards (P-D1), the `hi_dim_rerank`
+mechanism was misnamed (P-D3, which surfaced the § 3 documentation error), and
+the latency-vs-dim shape was non-linear rather than linear (P-D4). Pre-registration
+earned its keep here precisely by being wrong in public.
+
+### 0.6b Still open: real 1M scale
 
 Both were attempted on 2026-09-09 and neither produced usable recall numbers.
 Recorded here so the gap is not mistaken for a result:
 
-- **Dimension sweep** — dispatched, then invalidated by a harness collision
-  (two concurrent arms sharing `bq_query_set` / `bq_gt` / the `bqbench_` index
-  prefix in one database). Fixed at the source: the harness now takes
-  `--run-id` / `BQ_RUN_ID` to namespace all three. The sweep itself still
-  needs re-running.
 - **1M scale** — ran to completion on a *synthetic* 1 M × 768-d corpus and the
   recall numbers are **discarded as a corpus artefact**, not published. The
   synthetic corpus was statistically unrankable: 1st vs 100th nearest
@@ -313,7 +386,8 @@ block says which is which.
 ## 3. The re-rank window is a swept variable, not a hidden default
 
 `src/guc.rs::hi_dim_rerank_candidate_count` treats a 1-bit index as high-dim
-at **any** `dim`:
+at **any** `dim` — though note the *effect* is confined to `dim < 256`
+(see below):
 
 ```rust
 let effective_dim = if bit_width == 1 { dim.max(HI_DIM_RERANK_MIN_DIM) } else { dim };
@@ -322,12 +396,25 @@ let floor = effective_dim.clamp(HI_DIM_RERANK_MIN_DIM /*256*/, 1024);
 user_count.max(floor)
 ```
 
-So `hi_dim_rerank = auto` (the shipped default) silently widens BQ's exact
-re-rank window to `clamp(max(dim,256), 256..=1024)` candidates — 256 even at
-SIFT-128, 1024 at 1536-d — whereas a 2-bit index at `dim < 256` gets no
-widening at all. **Comparing 1-bit and 2-bit at "default settings" therefore
-compares two different re-rank windows, and any latency difference is partly
-that, not the quantizer.**
+So `hi_dim_rerank = auto` (the shipped default) widens BQ's exact re-rank
+window to `clamp(max(dim,256), 256..=1024)` candidates — 256 even at
+SIFT-128 — whereas a 2-bit index at `dim < 256` gets no widening at all.
+
+**Corrected 2026-09-09, and the correction changes how to read § 0.** That
+asymmetry exists **only below 256-d**. At `dim >= 256` the 1-bit and 2-bit
+`auto` windows are *identical* (`clamp(dim, 256..=1024)` either way), so the
+1-bit special case is a **no-op** there. Consequences:
+
+- A 1-bit-vs-2-bit comparison at `dim >= 256` and default settings compares
+  **equal** windows — the § 0 (1024-d) and § 0.6c (512/1024-d) results are
+  therefore quantizer-vs-quantizer, not knob-vs-knob. That makes them
+  *stronger* than originally claimed, not weaker.
+- Below 256-d the windows genuinely differ and any such comparison must
+  control for it explicitly.
+
+This was found by re-deriving the clamp against the driver's mirror of
+`guc.rs` during the dim sweep. The sweep's own prediction P-D3 named the
+wrong mechanism, and chasing that down is what surfaced the doc error.
 
 This is exactly the v2.2.0 failure mode: the graph kind's beam was
 `(candidate_count * 4).max(64)`, so `hi_dim_rerank = auto` bought it a

@@ -547,6 +547,14 @@ was run for.
 1.000 by window 800. If you paginate or re-rank past the top 10, budget a
 wider window than the R@10 numbers imply.
 
+**Dimension matters more than anything else for 1-bit.** A 256/512/1024-d
+sweep on the same corpus (`docs/BQ_RECALL_BENCH.md` § 0.6c) shows the rerank
+window 1-bit needs versus 2-bit for R@10 ≥ 0.95 collapsing **125× → 25× → 8×**
+as dim rises, and its storage edge improving (1.90× → 1.97×). At 256-d it needs
+to rerank 6.4 % of the corpus for R@10 ≥ 0.99 — unusable. **Prefer 1-bit at
+768-d and above.** (Caveat: the low dims are prefix slices of the 1024-d
+embedding, not native models, so that is an upper bound on the penalty.)
+
 Full curve, the four predictions registered *before* the run (all four
 held), and the caveats — single corpus, single dim, shared host, no IVF arm
 — are in [`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md) § 0. Artefact:

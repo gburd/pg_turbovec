@@ -1,0 +1,416 @@
+{
+  "benchmark": "pg_turbovec 1-bit sign-BQ vs 2-bit vs 4-bit: recall / storage / latency frontier",
+  "meta": {
+    "host": "arnold",
+    "uname": "Linux-7.1.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "cpu_model": "12th Gen Intel(R) Core(TM) i9-12900H",
+    "logical_cpus": 20,
+    "simd": {
+      "avx": true,
+      "avx2": true,
+      "avx512f": false,
+      "kernel_tier": "avx2",
+      "latency_publishable": true
+    },
+    "latency_publishable": true,
+    "latency_gate": "AVX2+ required. Per AGENTS.md a pre-AVX2 host takes turbovec's scalar fallback (~1000x slower full-corpus scan); its warm p50 is not a publishable number. Recall/storage/build are CPU-independent and valid on any host.",
+    "pg_version": "17.9",
+    "pg_turbovec_version": "2.7.2",
+    "shared_buffers": "2GB",
+    "guc_defaults_observed": {
+      "turbovec.search_k": "<unavailable: unrecognized configuration parameter \"turbovec.search_k\">",
+      "turbovec.probes": "<unavailable: unrecognized configuration parameter \"turbovec.probes\">",
+      "turbovec.oversample": "<unavailable: unrecognized configuration parameter \"turbovec.oversample\">",
+      "turbovec.hi_dim_rerank": "<unavailable: unrecognized configuration parameter \"turbovec.hi_dim_rerank\">",
+      "turbovec.iterative_scan": "<unavailable: unrecognized configuration parameter \"turbovec.iterative_scan\">",
+      "turbovec.out_of_core": "<unavailable: unrecognized configuration parameter \"turbovec.out_of_core\">",
+      "turbovec.scan_parallelism": "<unavailable: unrecognized configuration parameter \"turbovec.scan_parallelism\">",
+      "turbovec.bit_width_default": "<unavailable: unrecognized configuration parameter \"turbovec.bit_width_default\">",
+      "turbovec.normalize_on_insert": "<unavailable: unrecognized configuration parameter \"turbovec.normalize_on_insert\">"
+    },
+    "corpus": {
+      "table": "d256c",
+      "vec_expr": "emb",
+      "dim": 256,
+      "rows": 250000,
+      "opclass": "vec_cosine_ops",
+      "operator": "turbovec.<=>",
+      "label": "cohere-wiki-1024 sliced to 256d (prefix slice, NOT a natively-trained 256d embedding)"
+    },
+    "query_set": {
+      "table": "bqd_qs_256",
+      "n_queries": 100,
+      "provenance": "held_out",
+      "caveat": "queries are held out of the indexed corpus"
+    },
+    "ground_truth": {
+      "method": "exact top-100 in-DB seqscan (enable_indexscan/bitmapscan off) using the SAME operator the index serves (turbovec.<=>), so the GT metric cannot drift from the index metric",
+      "depth": 100,
+      "rows": 10000,
+      "seconds": 53.4
+    },
+    "build_settings": {
+      "maintenance_work_mem": "2GB",
+      "max_parallel_maintenance_workers": 0
+    },
+    "protocol": {
+      "k": 10,
+      "n_warm": 5,
+      "latency_basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+      "scan_parallelism": 0,
+      "load_gate": 1.5
+    },
+    "start_loadavg": "2.60 3.09 3.31 3/1243 3035109",
+    "ts": "2026-09-09T09:48:13-0400",
+    "driver": "benches/scripts/bq/bq_frontier.py"
+  },
+  "indexes": [
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "build_sql": "CREATE INDEX bqbench_b1 ON d256c USING turbovec (emb turbovec.vec_cosine_ops) WITH (bit_width = 1)",
+      "build_error": null,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "idx_total_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "n_vectors": 250000,
+      "index": "bqbench_b1"
+    }
+  ],
+  "configs": [
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "rerank_mode": "off",
+      "search_k": 2000,
+      "search_k_effective": 2000,
+      "oversample": 1.0,
+      "probes": null,
+      "rerank_window_predicted": 2000,
+      "k": 10,
+      "n_queries_scored": 100,
+      "recall_at_k": 0.933,
+      "recall_at_100": 0.8116,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "plan": {
+        "index_scan": true,
+        "plan_first_line": "Limit",
+        "warning": null
+      },
+      "latency": {
+        "measured": true,
+        "basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+        "n": 100,
+        "min_ms": 7.007,
+        "p50_ms": 7.725,
+        "p95_ms": 8.398,
+        "p99_ms": 8.96,
+        "max_ms": 9.016,
+        "mean_ms": 7.751,
+        "trimmed_mean_ms": 7.733,
+        "qps_1conn": 129.01,
+        "wall_s": 1.62,
+        "contention": {
+          "loadavg_1m_before": 3.51,
+          "loadavg_1m_after": 3.51,
+          "mem_avail_mib_before": 21753,
+          "cpu_busy_pct": 17.05,
+          "cpu_iowait_pct": 0.09,
+          "cpu_steal_pct": 0.0,
+          "contended_flag": true,
+          "load_gate": 1.5
+        }
+      },
+      "p50_ms": 7.725
+    },
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "rerank_mode": "off",
+      "search_k": 4000,
+      "search_k_effective": 4000,
+      "oversample": 1.0,
+      "probes": null,
+      "rerank_window_predicted": 4000,
+      "k": 10,
+      "n_queries_scored": 100,
+      "recall_at_k": 0.966,
+      "recall_at_100": 0.8951,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "plan": {
+        "index_scan": true,
+        "plan_first_line": "Limit",
+        "warning": null
+      },
+      "latency": {
+        "measured": true,
+        "basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+        "n": 100,
+        "min_ms": 13.187,
+        "p50_ms": 14.326,
+        "p95_ms": 15.323,
+        "p99_ms": 16.282,
+        "max_ms": 16.83,
+        "mean_ms": 14.367,
+        "trimmed_mean_ms": 14.337,
+        "qps_1conn": 69.6,
+        "wall_s": 2.95,
+        "contention": {
+          "loadavg_1m_before": 3.51,
+          "loadavg_1m_after": 3.47,
+          "mem_avail_mib_before": 21788,
+          "cpu_busy_pct": 16.28,
+          "cpu_iowait_pct": 0.0,
+          "cpu_steal_pct": 0.0,
+          "contended_flag": true,
+          "load_gate": 1.5
+        }
+      },
+      "p50_ms": 14.326
+    },
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "rerank_mode": "off",
+      "search_k": 8000,
+      "search_k_effective": 8000,
+      "oversample": 1.0,
+      "probes": null,
+      "rerank_window_predicted": 8000,
+      "k": 10,
+      "n_queries_scored": 100,
+      "recall_at_k": 0.987,
+      "recall_at_100": 0.9509,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "plan": {
+        "index_scan": true,
+        "plan_first_line": "Limit",
+        "warning": null
+      },
+      "latency": {
+        "measured": true,
+        "basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+        "n": 100,
+        "min_ms": 27.794,
+        "p50_ms": 30.011,
+        "p95_ms": 32.373,
+        "p99_ms": 32.829,
+        "max_ms": 32.963,
+        "mean_ms": 30.058,
+        "trimmed_mean_ms": 30.008,
+        "qps_1conn": 33.27,
+        "wall_s": 6.08,
+        "contention": {
+          "loadavg_1m_before": 3.47,
+          "loadavg_1m_after": 3.43,
+          "mem_avail_mib_before": 21832,
+          "cpu_busy_pct": 16.6,
+          "cpu_iowait_pct": 0.02,
+          "cpu_steal_pct": 0.0,
+          "contended_flag": true,
+          "load_gate": 1.5
+        }
+      },
+      "p50_ms": 30.011
+    },
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "rerank_mode": "off",
+      "search_k": 16000,
+      "search_k_effective": 16000,
+      "oversample": 1.0,
+      "probes": null,
+      "rerank_window_predicted": 16000,
+      "k": 10,
+      "n_queries_scored": 100,
+      "recall_at_k": 0.996,
+      "recall_at_100": 0.9818,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "plan": {
+        "index_scan": true,
+        "plan_first_line": "Limit",
+        "warning": null
+      },
+      "latency": {
+        "measured": true,
+        "basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+        "n": 100,
+        "min_ms": 50.72,
+        "p50_ms": 56.481,
+        "p95_ms": 63.168,
+        "p99_ms": 64.61,
+        "max_ms": 64.83,
+        "mean_ms": 57.232,
+        "trimmed_mean_ms": 57.151,
+        "qps_1conn": 17.47,
+        "wall_s": 11.49,
+        "contention": {
+          "loadavg_1m_before": 3.43,
+          "loadavg_1m_after": 3.44,
+          "mem_avail_mib_before": 21789,
+          "cpu_busy_pct": 15.67,
+          "cpu_iowait_pct": 0.02,
+          "cpu_steal_pct": 0.0,
+          "contended_flag": true,
+          "load_gate": 1.5
+        }
+      },
+      "p50_ms": 56.481
+    },
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "rerank_mode": "off",
+      "search_k": 32000,
+      "search_k_effective": 32000,
+      "oversample": 1.0,
+      "probes": null,
+      "rerank_window_predicted": 32000,
+      "k": 10,
+      "n_queries_scored": 100,
+      "recall_at_k": 0.998,
+      "recall_at_100": 0.9959,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "plan": {
+        "index_scan": true,
+        "plan_first_line": "Limit",
+        "warning": null
+      },
+      "latency": {
+        "measured": true,
+        "basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+        "n": 100,
+        "min_ms": 102.382,
+        "p50_ms": 108.419,
+        "p95_ms": 117.757,
+        "p99_ms": 122.542,
+        "max_ms": 122.831,
+        "mean_ms": 109.185,
+        "trimmed_mean_ms": 108.847,
+        "qps_1conn": 9.16,
+        "wall_s": 21.91,
+        "contention": {
+          "loadavg_1m_before": 3.44,
+          "loadavg_1m_after": 3.23,
+          "mem_avail_mib_before": 21721,
+          "cpu_busy_pct": 16.09,
+          "cpu_iowait_pct": 0.04,
+          "cpu_steal_pct": 0.0,
+          "contended_flag": true,
+          "load_gate": 1.5
+        }
+      },
+      "p50_ms": 108.419
+    },
+    {
+      "bit_width": 1,
+      "lists": 0,
+      "rerank_mode": "auto",
+      "search_k": null,
+      "search_k_effective": 32,
+      "oversample": 1.0,
+      "probes": null,
+      "rerank_window_predicted": 256,
+      "k": 10,
+      "n_queries_scored": 100,
+      "recall_at_k": 0.729,
+      "recall_at_100": 0.455,
+      "build_s": 0.86,
+      "idx_bytes": 10412032,
+      "bytes_per_vector": 41.65,
+      "plan": {
+        "index_scan": true,
+        "plan_first_line": "Limit",
+        "warning": null
+      },
+      "latency": {
+        "measured": true,
+        "basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+        "n": 100,
+        "min_ms": 1.868,
+        "p50_ms": 2.096,
+        "p95_ms": 2.376,
+        "p99_ms": 2.621,
+        "max_ms": 3.24,
+        "mean_ms": 2.125,
+        "trimmed_mean_ms": 2.107,
+        "qps_1conn": 470.69,
+        "wall_s": 0.49,
+        "contention": {
+          "loadavg_1m_before": 3.23,
+          "loadavg_1m_after": 3.23,
+          "mem_avail_mib_before": 21460,
+          "cpu_busy_pct": 16.08,
+          "cpu_iowait_pct": 0.0,
+          "cpu_steal_pct": 0.0,
+          "contended_flag": true,
+          "load_gate": 1.5
+        }
+      },
+      "p50_ms": 2.096
+    }
+  ],
+  "derived": {
+    "iso_recall_flat": {
+      "recall_at_k>=0.9": {
+        "1": {
+          "rerank_mode": "off",
+          "search_k": 2000,
+          "probes": null,
+          "rerank_window_predicted": 2000,
+          "recall_at_k": 0.933,
+          "p50_ms": 7.725,
+          "idx_bytes": 10412032,
+          "bytes_per_vector": 41.65,
+          "cost_basis": "p50_ms"
+        }
+      },
+      "recall_at_k>=0.95": {
+        "1": {
+          "rerank_mode": "off",
+          "search_k": 4000,
+          "probes": null,
+          "rerank_window_predicted": 4000,
+          "recall_at_k": 0.966,
+          "p50_ms": 14.326,
+          "idx_bytes": 10412032,
+          "bytes_per_vector": 41.65,
+          "cost_basis": "p50_ms"
+        }
+      },
+      "recall_at_k>=0.99": {
+        "1": {
+          "rerank_mode": "off",
+          "search_k": 16000,
+          "probes": null,
+          "rerank_window_predicted": 16000,
+          "recall_at_k": 0.996,
+          "p50_ms": 56.481,
+          "idx_bytes": 10412032,
+          "bytes_per_vector": 41.65,
+          "cost_basis": "p50_ms"
+        }
+      }
+    },
+    "storage_per_vector": {
+      "1": 41.65
+    },
+    "notes": [
+      "iso_recall_flat picks the CHEAPEST config per bit_width that clears each target; null means that bit_width never cleared it on this corpus -- that absence IS the result.",
+      "cost_basis is warm p50 when latency was publishable, else the predicted exact-rerank window (CPU-independent work proxy).",
+      "matched-STORAGE comparison is a separate run: 1-bit stores dim/8 B/vec vs 2-bit's dim/4 + 4 B, so an equal byte budget holds ~2x the rows at 1-bit. Run this driver against a 2n-row table at bit_width=1 and an n-row table at bit_width=2 and compare at equal idx_bytes; see docs/BQ_RECALL_BENCH.md."
+    ]
+  }
+}

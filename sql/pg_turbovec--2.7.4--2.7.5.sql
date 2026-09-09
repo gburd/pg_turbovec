@@ -1,0 +1,7 @@
+-- pg_turbovec 2.7.4 -> 2.7.5
+-- Documentation/benchmark release; binary byte-identical to 2.7.4. Publishes
+-- the 1-bit dimension sweep (penalty collapses 125x -> 25x -> 8x as dim rises;
+-- 1-bit is a high-dimension technique) and corrects a hi_dim_rerank doc error
+-- (the 1-bit special case is a no-op at dim >= 256).
+-- No wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

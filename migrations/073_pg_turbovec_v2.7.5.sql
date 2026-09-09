@@ -1,0 +1,36 @@
+-- 2.7.5 — 1-bit dimension sweep measured; a hi_dim_rerank doc error corrected.
+-- No shippable code change: binary byte-identical to 2.7.4.
+--
+-- 1. DIMENSION SWEEP (256/512/1024-d, 250k rows, 100 held-out queries each).
+--    The hypothesis held monotonically at all 7 swept windows: 1-bit's recall
+--    at a FIXED rerank window rises with dim at every window, no exception.
+--    The iso-recall window penalty vs 2-bit for R@10 >= 0.95 collapses
+--    125x (256-d) -> 25x (512-d) -> 8x (1024-d), and 1-bit's storage edge
+--    also IMPROVES with dim (1.902x -> 1.946x -> 1.971x vs 2-bit) because its
+--    fixed per-index overhead amortises away. Practical guidance: 1-bit is a
+--    HIGH-DIMENSION technique; at 256-d it must rerank 6.4% of the corpus to
+--    reach R@10 >= 0.99 and is effectively unusable. Prefer 768-d and up.
+--
+--    Validation: the 1024-d arm, run from a fresh database on a re-sliced
+--    corpus, reproduced the published 2026-09-08 recall BIT-IDENTICALLY at all
+--    7 windows (independently re-verified). That validates both the published
+--    figures and the rebuilt isolated harness.
+--
+--    Caveat carried prominently: the 256-d and 512-d corpora are PREFIX SLICES
+--    of the 1024-d embedding, not natively-trained embeddings of those dims, so
+--    the measured trend is an UPPER BOUND on dim-sensitivity.
+--
+-- 2. DOCUMENTATION CORRECTION. docs/ONEBIT_BQ.md and docs/BQ_RECALL_BENCH.md
+--    stated that hi_dim_rerank treats a 1-bit index as high-dim "at ANY dim",
+--    implying it widens BQ's rerank window generally. Literally true of the
+--    code, but misleading about the effect: the auto window is
+--    clamp(effective_dim, 256..=1024), and since effective_dim = max(dim,256)
+--    for 1-bit and dim for 2/3/4-bit, the two are IDENTICAL for every
+--    dim >= 256. The special case is a NO-OP at 256-d and above and only
+--    widens below it. Consequence, and it strengthens the published results:
+--    a 1-bit-vs-2-bit comparison at dim >= 256 with default settings compares
+--    EQUAL windows, so those results are quantizer-vs-quantizer rather than
+--    knob-vs-knob. Re-derived independently against the Rust clamp.
+--
+-- No wire-format change (stays v8), no SQL surface change, no REINDEX.
+-- This migration is intentionally empty.

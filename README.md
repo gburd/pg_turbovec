@@ -198,6 +198,13 @@ and needs a **25x wider** exact-rerank window than 2-bit to clear
 R@10 >= 0.99 (window 800 vs 32). Use it where storage is the binding
 constraint and latency has slack -- never as a default.
 
+**1-bit is a HIGH-DIMENSION technique.** A dim sweep (256/512/1024-d, same
+corpus) shows the penalty collapsing as dimension rises: the rerank window it
+needs versus 2-bit for R@10 >= 0.95 goes **125x (256-d) -> 25x (512-d) -> 8x
+(1024-d)**, and its storage edge improves too (1.90x -> 1.97x vs 2-bit). At
+256-d it needs to rerank 6.4% of the corpus to reach R@10 >= 0.99, which makes
+it **effectively unusable at 256-d and below**. Prefer it at 768-d and up.
+
 The **storage and recall** figures are solid; the **latency ratios are
 indicative, not precise** -- the bench host could not get under the harness's
 load gate (an unrelated stuck process pins its idle loadavg near 2.0), so

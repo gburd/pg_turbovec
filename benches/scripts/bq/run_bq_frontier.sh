@@ -41,6 +41,20 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 : "${BQ_N_QUERIES:=200}"
 : "${BQ_IVF_LISTS:=0}"
 : "${BQ_EXTRA:=}"
+# Namespace this run's shared state. Index names are SCHEMA-scoped and the
+# query-set / GT tables have fixed default names, so two concurrent arms in
+# one database silently corrupt each other (2026-09-09: one arm's 256-d
+# query set replaced another's 1024-d one mid-sweep, and a DROP TABLE
+# bq_gt destroyed 860s of ground truth). Set BQ_RUN_ID per arm -- or better,
+# give each arm its own database.
+: "${BQ_RUN_ID:=}"
+if [ -n "$BQ_RUN_ID" ]; then
+    : "${BQ_QUERY_TABLE:=bq_query_set_${BQ_RUN_ID}}"
+    : "${BQ_GT_TABLE:=bq_gt_${BQ_RUN_ID}}"
+else
+    : "${BQ_QUERY_TABLE:=bq_query_set}"
+    : "${BQ_GT_TABLE:=bq_gt}"
+fi
 : "${BQ_LOG:=/tmp/bq_frontier.log}"
 : "${BQ_HELDOUT_TABLE:=}"
 
@@ -100,28 +114,28 @@ members, set BQ_QUERY_PROVENANCE=in_corpus -- the caveat is then recorded in
 the artefact."
         log "queryset: $BQ_N_QUERIES held-out queries from $BQ_HELDOUT_TABLE"
         psql_q <<SQL
-DROP TABLE IF EXISTS bq_query_set;
-CREATE TABLE bq_query_set AS
+DROP TABLE IF EXISTS "$BQ_QUERY_TABLE";
+CREATE TABLE "$BQ_QUERY_TABLE" AS
 SELECT row_number() OVER (ORDER BY id)::int AS qid,
        ${BQ_VEC_EXPR} AS qvec
 FROM ${BQ_HELDOUT_TABLE}
 ORDER BY id
 LIMIT ${BQ_N_QUERIES};
-CREATE INDEX ON bq_query_set (qid);
-SELECT count(*) AS n_queries FROM bq_query_set;
+CREATE INDEX ON "$BQ_QUERY_TABLE" (qid);
+SELECT count(*) AS n_queries FROM "$BQ_QUERY_TABLE";
 SQL
     else
         log "queryset: $BQ_N_QUERIES IN-CORPUS queries from $BQ_TABLE (R@k has a 1/k floor)"
         psql_q <<SQL
-DROP TABLE IF EXISTS bq_query_set;
-CREATE TABLE bq_query_set AS
+DROP TABLE IF EXISTS "$BQ_QUERY_TABLE";
+CREATE TABLE "$BQ_QUERY_TABLE" AS
 SELECT row_number() OVER (ORDER BY id)::int AS qid,
        ${BQ_VEC_EXPR} AS qvec
 FROM ${BQ_TABLE}
 ORDER BY id
 LIMIT ${BQ_N_QUERIES};
-CREATE INDEX ON bq_query_set (qid);
-SELECT count(*) AS n_queries FROM bq_query_set;
+CREATE INDEX ON "$BQ_QUERY_TABLE" (qid);
+SELECT count(*) AS n_queries FROM "$BQ_QUERY_TABLE";
 SQL
     fi
 }
@@ -141,7 +155,9 @@ sweep() {
         --dim "$BQ_DIM" \
         --opclass "$BQ_OPCLASS" \
         --operator "$BQ_OPERATOR" \
-        --query-table bq_query_set \
+        --query-table "$BQ_QUERY_TABLE" \
+        --gt-table "$BQ_GT_TABLE" \
+        ${BQ_RUN_ID:+--run-id "$BQ_RUN_ID"} \
         --query-provenance "$BQ_QUERY_PROVENANCE" \
         --ivf-lists "$BQ_IVF_LISTS" \
         --out "$BQ_OUT" \

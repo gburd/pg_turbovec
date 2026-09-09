@@ -279,6 +279,19 @@ def ident(name, what):
 IDX_PREFIX = "bqbench_"
 
 
+def idx_prefix(args):
+    """Index-name prefix, namespaced by --run-id.
+
+    Index names are SCHEMA-scoped, not table-scoped, so two concurrent runs
+    in one schema collide on `bqbench_b1` even when they use different corpus
+    tables -- which is exactly what happened on 2026-09-09: one arm's
+    `CREATE INDEX bqbench_b1 ON <its own table>` failed with "already
+    exists" because a sibling arm owned that name, silently costing that arm
+    its entire bit_width=1 leg. Pass --run-id to namespace.
+    """
+    return IDX_PREFIX if not args.run_id else f"{IDX_PREFIX}{args.run_id}_"
+
+
 def connect(dsn):
     if psycopg is None:
         raise SystemExit("psycopg (v3) is required: pip install 'psycopg[binary]'")
@@ -288,11 +301,15 @@ def connect(dsn):
     return conn
 
 
-def drop_bench_indexes(cur, table):
-    """Drop only indexes THIS harness created (never a PK/user index)."""
+def drop_bench_indexes(cur, table, prefix=IDX_PREFIX):
+    """Drop only indexes THIS harness created (never a PK/user index).
+
+    `prefix` is run-scoped (see `idx_prefix`) so a run never drops a
+    concurrent sibling run's indexes out from under it.
+    """
     cur.execute("SELECT indexname FROM pg_indexes WHERE tablename = %s", (table,))
     for (name,) in cur.fetchall():
-        if name.startswith(IDX_PREFIX):
+        if name.startswith(prefix):
             cur.execute(f"DROP INDEX IF EXISTS {name}")
 
 
@@ -392,7 +409,7 @@ def build_ground_truth(conn, args):
         # --skip-build the index IS the thing being swept, so we rely on the
         # planner GUCs alone.
         if not args.skip_build:
-            drop_bench_indexes(cur, args.table)
+            drop_bench_indexes(cur, args.table, idx_prefix(args))
         cur.execute("SET enable_indexscan = off")
         cur.execute("SET enable_bitmapscan = off")
         cur.execute("SET max_parallel_workers_per_gather = %s" % args.gt_workers)
@@ -433,7 +450,7 @@ def load_gt(conn, args):
 
 def build_index(conn, args, bit_width, lists):
     """Build ONE index (all others dropped, so the planner has no choice)."""
-    name = f"{IDX_PREFIX}b{bit_width}" + (f"_L{lists}" if lists else "")
+    name = f"{idx_prefix(args)}b{bit_width}" + (f"_L{lists}" if lists else "")
     with_opts = [f"bit_width = {bit_width}"]
     if lists:
         with_opts.append(f"lists = {lists}")
@@ -461,7 +478,7 @@ def build_index(conn, args, bit_width, lists):
                 "bytes_per_vector": round(rel / n, 2) if n else None,
                 "n_vectors": int(n),
             }
-        drop_bench_indexes(cur, args.table)
+        drop_bench_indexes(cur, args.table, idx_prefix(args))
         cur.execute(f"SET maintenance_work_mem = '{args.maintenance_work_mem}'")
         cur.execute(f"SET max_parallel_maintenance_workers = {args.build_workers}")
         t0 = time.time()
@@ -851,7 +868,7 @@ def dry_run_sql(args):
     if args.ivf_lists:
         arms += [(bw, args.ivf_lists) for bw in args.bit_widths]
     for bw, lists in arms:
-        name = f"{IDX_PREFIX}b{bw}" + (f"_L{lists}" if lists else "")
+        name = f"{idx_prefix(args)}b{bw}" + (f"_L{lists}" if lists else "")
         opts = f"bit_width = {bw}" + (f", lists = {lists}" if lists else "")
         print(f"CREATE INDEX {name} ON {args.table} "
               f"USING turbovec ({args.vec_expr} turbovec.{args.opclass}) "
@@ -929,6 +946,11 @@ def main():
                     help="REQUIRED for a real run: whether the query vectors "
                          "are corpus members. Recorded in the artefact.")
     ap.add_argument("--gt-table", default="bq_gt")
+    ap.add_argument("--run-id", default="",
+                    help="namespace this run's index names (and, via the "
+                         "runner, its query-set/GT tables) so two concurrent "
+                         "arms in one schema cannot collide. Plain "
+                         "identifier chars only.")
     ap.add_argument("--gt-depth", type=int, default=100)
     ap.add_argument("--gt-workers", type=int, default=8)
     ap.add_argument("--k", type=int, default=10, help="R@k headline (default 10)")
@@ -979,6 +1001,8 @@ def main():
                  ", ".join("--" + m.replace("_", "-") for m in missing))
 
     ident(args.table, "table")
+    if args.run_id:
+        ident(args.run_id, "run-id")
     ident(args.query_table, "query-table")
     ident(args.gt_table, "gt-table")
     args.bit_widths = [int(x) for x in args.bit_widths.split(",")]

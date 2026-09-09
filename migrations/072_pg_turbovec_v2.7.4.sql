@@ -1,0 +1,51 @@
+-- 2.7.4 — documentation accuracy + benchmark-harness isolation. No shippable
+-- code change: the binary is byte-identical to 2.7.3.
+--
+-- 1. CORRECTION to the v2.7.3 release notes. The 1-bit BQ latency figures were
+--    published without disclosing that the harness had flagged every one of
+--    them: all 24 rows carry latency.contention.contended_flag = true (1-min
+--    loadavg 3.16-4.64 against the harness's gate of 1.5). The artefact
+--    recorded it correctly; the write-up did not surface it. The gate is
+--    UNREACHABLE on that host -- a stuck systemd --user spinning at 77-86% CPU
+--    for 31 days pins its idle loadavg near 2.0 -- so any run there is
+--    flagged. Mitigating measurement: cpu_busy_pct on the pinned cores was
+--    only 16-26%, i.e. noise rather than saturation, so the RATIOS stand and
+--    the absolute milliseconds are indicative. Recall, storage, bytes/vector
+--    and build time are CPU-independent and unaffected. README, RECALL.md,
+--    ONEBIT_BQ.md, UPGRADING.md and BQ_RECALL_BENCH.md all now carry the
+--    caveat.
+--
+-- 2. IVF + 1-bit BQ MEASURED (BQ_RECALL_BENCH.md 0.6a). It builds and scans;
+--    storage overhead over flat BQ is +6.0% (a fixed ~8.5 B/vector of IVF
+--    metadata, proportionally worst for the smallest codes). Finding: IVF
+--    imposes a per-probe-count recall CEILING that a wider rerank window
+--    cannot break (probes=8 saturates at R@10 0.846 from window 256 through
+--    2000) whereas flat BQ reaches 0.994. This is the MIRROR IMAGE of Gap-B
+--    (v1.25.0): there the loss was not retrieval-bound and a wider window
+--    fixed it; here it is retrieval-bound and the window is irrelevant. Same
+--    symptom, opposite cause. At 250k, flat BQ dominates IVF+BQ -- a
+--    scale-dependent boundary, deliberately NOT a verdict.
+--
+-- 3. A synthetic 1M-scale arm was DISCARDED, not published: the generated
+--    corpus was statistically unrankable (1st vs 100th neighbour differed by
+--    only 6.6-10.4% in cosine distance, versus 37-268% on a real corpus), so
+--    its low recall measured the corpus, not the quantizer. Post-mortem plus
+--    the resolvability probe to run before trusting any generated corpus:
+--    benches/results/bq_scale_20260909/DISCARDED.md.
+--
+-- 4. Harness isolation (--run-id / BQ_RUN_ID). Two concurrent arms in one
+--    database silently corrupted each other three ways: a shared
+--    bq_query_set, a DROP TABLE bq_gt destroying 860s of ground truth, and a
+--    schema-scoped hardcoded bqbench_ index prefix that made one arm's
+--    CREATE INDEX fail against a sibling's index on a DIFFERENT table, costing
+--    it an entire bit_width leg. All three are now namespaced.
+--
+-- 5. Stale docs corrected: test counts (334/334 and 341/346 -> the actual
+--    427 passed / 8 ignored, uniform across pg13-19), AGENTS.md's migration
+--    matrix (was stuck at v1.27.1) and wire version (said 7, is 8), and ~160
+--    lines of v1.x release prose that duplicated CHANGELOG.md replaced with
+--    current state. Added the high-dim IVF maintenance_work_mem OOM note to
+--    PRODUCTION.md.
+--
+-- No wire-format change (stays v8), no SQL surface change, no REINDEX.
+-- This migration is intentionally empty.

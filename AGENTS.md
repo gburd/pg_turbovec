@@ -120,200 +120,71 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v1.27.1, 2026-07-11)
+### Current (as of v2.7.3, 2026-09-08)
 
-| From               | To       | Action            |
-|--------------------|----------|-------------------|
-| 1.0.x / 1.1.x      | 1.27.1   | `REINDEX INDEX` once |
-| 1.2.x              | 1.27.1   | `REINDEX INDEX` once |
-| 1.3.x              | 1.27.1   | `REINDEX INDEX` once |
-| 1.4.x → 1.26.x     | 1.27.1   | `ALTER EXTENSION` **then `REINDEX INDEX` once** (wire v6→v7, codes-dedup in v1.27.0) |
-| 1.27.0             | 1.27.1   | `ALTER EXTENSION` only (no-op — v1.27.1 is a build-speed-only patch, byte-identical IVF output) |
+`docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
+it is updated every release and drift-check enforces that. The summary:
 
-**v1.27.1 (Phase Q-4a) parallelizes the IVF k-means build** — a
-build-speed-only patch (measured ~1.91×, bit-identical IVF bytes, no
-wire/SQL change, no REINDEX). The first step against the scale/
-heavy-load build blocker; the serial
-empty-cell/reseed remainder + a 10M→100M build validation are the
-follow-ups.
+| From        | To     | Action |
+|-------------|--------|--------|
+| any 1.x     | 2.7.3  | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.7.2 | 2.7.3  | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 
-**v1.27.0 (Phase Q-0) de-duplicates the on-disk quantized-codes
-storage, roughly HALVING the per-vector index footprint** — the
-storage blocker cleared for large single-node indexes.
-Prior
-versions persisted each vector's codes TWICE: the row-major bit-plane
-`packed_codes` chain AND the SIMD-`blocked` chain (`pack::repack`
-output). Since the blocked layout is a pure function of the packed
-codes, v7 drops the blocked chain from disk and recomputes it once per
-backend at index-open via `pack::repack` (per-query latency unchanged;
-scan results bit-identical). **This IS a wire change** (`MetaPageData::
-version` 6→7) and, unlike the additive v4→v5→v6 per-kind bumps, is NOT
-additive: a v7 relfile has no blocked chain, so EVERY kind (single,
-ColBERT, IVF, graph) now emits v7 and every pre-v7 index needs a
-**REINDEX**. A pre-v7 index is detected by `MetaPageData::
-is_legacy_v6()` and `ambeginscan` ERRORs with `HINT: REINDEX INDEX
-<name>;` at first scan (never silent corruption). No SQL-surface
-change. Option A chosen (persist only packed, recompute blocked on
-open) over Option B (persist blocked, recompute packed via the new
-`pack::unblock`) because `repack` is the forward already-used
-direction and the OOC path never touches blocked. Per-vector on-disk
-codes: `dim/8 * bit_width` stored ONCE. 100M projection: 768d/4-bit
-78GB→39.6GB (now fits), 1536d/2-bit 78GB→39.6GB (now fits), 768d/2-bit
-39.6GB→19.8GB.
+One exception worth knowing: a **`bit_width = 1`** index created before
+v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
+a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
+affected.
 
-**v1.26.0 (Phase G-2d(a)) adds a partitioned/merge PARALLEL build for
-the graph kind** so it scales past the single-pass serial ceiling
-(which didn't complete at 5M). Partition into P shards → build each in
-parallel → stitch via a parallel cross-shard refinement + reverse-edge
-pass. New GUC `turbovec.graph_build_partitions` (int, default auto).
-**No wire change** (identical v6 CSR), no REINDEX — only changes how
-NEW graph indexes are built. Verified: recall parity (partitioned
-MATCHES/BEATS single-pass, 0.958→0.996 R@10 findable regime), ~8×
-build speedup (P=16, 200k, 8-core), bit-identical determinism across
-(corpus, seed, P) and pool sizes. Unblocks the 5M/10M a cloud VM gate re-run.
+### Where the project actually is (v2.7.3)
 
-**v1.25.1 is a release-tooling + docs/benchmark patch** — no shippable
-code change (binary byte-identical to v1.25.0; no wire/SQL change, no
-REINDEX). It adds the tag-triggered PGXN + pgsql-announce publish
-pipeline (first release to exercise it) and the Qdrant/ANN-Benchmarks
-competitive benchmark that validated v1.25.0's `hi_dim_rerank` at
-scale (GIST-960-1M recall 0.876→0.953; vs Qdrant we lose latency
-3–18×, win storage 5–8×).
+Per-release detail lives in `CHANGELOG.md`; this section is only what an
+agent needs to orient. Do not add release blurbs here — they go stale and
+CHANGELOG is authoritative.
 
-**v1.25.0 adds `turbovec.hi_dim_rerank`** (enum off/auto/on, default
-auto) — the Gap-B fix. An offline investigation
- established the
-high-dim recall gap (GIST-1M/960d ~0.86) is NOT retrieval-bound (the
-true NNs DO land in the probed cells — cell recall 0.98-0.996 at
-probes 64-128) but an in-cell quantized-RANKING loss, curable
-scan-side by a wider exact-L2 rerank window (measured: an SQ4 analog
-goes R@10 0.666→0.978 at 960d by reranking ~800 vs ~64 candidates).
-`auto` applies a `clamp(dim, 256..=1024)` candidate floor only for
-`dim >= 256` (SIFT-128 untouched; explicit `search_k`/`oversample`
-override wins), so it's a smarter default, not a new mechanism
-— identical result set to setting the candidate count by hand. One
-new GUC, additive; no wire change (v6), no REINDEX. This also
-CORRECTS the earlier "retrieval-recall ceiling" root-cause claim.
+**Index kinds.** `flat` (default) · `IVF` (`WITH (lists = N)`, out-of-core
+end-to-end since v1.13.0) · `ColBERT` (multivector) · `1-bit sign-BQ`
+(`WITH (bit_width = 1)`, v2.6.0, composable with IVF since v2.7.0) ·
+**`graph` — DEPRECATED in v2.5.0**, build-path removal scheduled. The graph
+kind emits a deprecation WARNING; measured at *matched recall* it lost on
+every user-visible axis at every scale reached, so do not invest in it. Its
+techniques were kept: `turbovec.graph_ef`, `pack::repack`, and the
+`coarse_graph` centroid navigation IVF relies on.
 
-**v1.24.0 adds VACUUM + incremental INSERT for the graph kind**
-(Phase G-2b). Both previously raised a clear `ERROR` (v1.23.0 was
-build+scan only); they now work. **No wire change** — wire format
-stays v6, byte-identical to v1.23.0, no REINDEX. VACUUM reuses the
-generic per-slot tombstone bitmap IVF already uses; `aminsert` is a
-deliberate O(n)-per-row whole-relfile rewrite (build-then-serve
-model; heavy churn should still REINDEX). Two real bugs fixed en
-route: a tombstone-chain/graph-adjacency-chain block-offset collision
-that corrupted a graph index on insert-after-VACUUM (`write_
-tombstones_and_meta` omitted `+ graph_count`, a no-op for every
-non-graph kind), and a VACUUM entry-point fallback that missed the
-"entry point survives but all its out-neighbors got tombstoned"
-dead-end. Also caught + fixed a **test-harness** data-generation bug
-(not shipped code): an uncorrelated `random()` subquery PostgreSQL
-hoisted, making every graph-test row identical (`n_distinct=1`) and
-producing spurious "recall collapse" failures; correlating the inner
-`generate_series` to the outer row fixed it, and confirmed the
-insert/vacuum/quantization paths were correct all along. Still
-deferred: G-2c (SIMD traversal + build parallelism), G-2d (the
-5M-scale AVX2 HNSW-latency gate).
+**Which to recommend:** flat below ~1M vectors, `WITH (lists = N)` at scale.
+It is IVF, not the graph, that beats flat's O(n) wall. For 1-bit: only when
+storage is the binding constraint and latency has slack (measured 3.98×
+smaller than 4-bit but 2.7–6.1× slower at matched recall, and at 250k flat BQ
+dominates IVF+BQ).
 
-**v1.23.0 adds `WITH (graph = true)`** — Phase G-2a, a new opt-in
-Vamana-style navigable-graph index kind, the first step toward
-matching HNSW's query latency while keeping TurboQuant's storage
-compression. Wire format v6,
-ADDITIVE per kind: existing v4/v5 indexes decode byte-identical, no
-REINDEX. Determinism is relaxed for this kind ONLY (fixed-seed/one-
-machine, not byte-identical cross-machine — an explicit, documented
-trade-off, not an oversight). **Correctness-first scope**: real
-Vamana build (greedy search + RobustPrune) + real beam-search scan,
-verified recall against exact linear scan, but VACUUM/`aminsert`
-against a graph index raise a clear `ERROR` (not yet supported) and
-the real 5M-scale HNSW-latency gate has NOT been measured — no
-latency/recall-vs-HNSW claim is made by this release. See
- for the sub-phase breakdown
-(G-2b VACUUM, G-2c SIMD/parallelism, G-2d the gate measurement, all
-follow-up work).
+**Corruption history — read before touching persist/scan code.** Five
+distinct root causes have been found and fixed (counter-drift, VACUUM
+lost-update, interrupted-flush torn write, graph unlocked RMW, BQ tombstone
+resurrection). The recurring one is a **chain-offset running sum that omits a
+chain** — it has bitten four times (`graph_count` in v1.24.0, three sites
+missing `bq_mean_count` in v2.6.0, two more in v2.7.0). If you add a chain,
+grep every running sum in `page.rs` and `relfile.rs` and add it to all of
+them. Meta page is always written **LAST**, after every chain.
 
-**v1.22.2 raises `turbovec.probes`'s default from 8 to 16** — the
-old default capped out-of-the-box recall at R@10=0.796 (SIFT-1M) /
-R@10=0.407 (GIST-1M), measured during the v1.22.1 a cloud VM competitive
-re-benchmark. `probes=16` reaches R@10=0.918 / 0.557 for ~1.5-1.6×
-the latency — the better point on the curve for a default most users
-never tune. Scan-side default only, no wire change, no SQL surface
-change, no REINDEX.
+**Known upstream bug.** `SELECT ctid ... ORDER BY <vec-op>` projects
+`(4294967295,0)` — a PostgreSQL core defect in
+`ExecForceStoreHeapTuple` (reproduces with core GiST and no turbovec
+loaded), reported upstream 2026-09-08 with a verified one-line fix. The
+`knn_scan_ctid_projection_upstream_limitation` test asserts today's broken
+behaviour on purpose and will FAIL when a fixed PG lands — that failure is
+the signal to flip it, not a regression. See
+`docs/upstream/bug6-pgsql-hackers-FILED.md`.
 
-**v1.22.1 closes a real fraction of the IVF build-cliff gap** —
-`gemm_lloyd_assign`'s Lloyd-loop cross-term GEMM (the dominant
-k-means training cost at high `lists`, ~26-112× the FLOPs of the
-row-blocked stages v1.20.0/v1.21.0 already parallelized) now runs
-`Parallelism::Rayon(0)` instead of `Parallelism::None`. Bit-identical
-output confirmed empirically (`gemm`'s own tiling never reduces
-across threads for a given output element). **Measured on real
-GIST-1M-scale k-means training (16-core AVX-512 a cloud VM): 2686.6s →
-768.4s, a 3.50× speedup.** Scan/build-path only, no wire change, no
-SQL surface change, no REINDEX. See CHANGELOG.md for the full
-investigation writeup, including two dead-end findings (a test-
-harness stride bug that looked like a `gemm` crate bug; a test-
-harness thread-pool-scoping bug that overstated the problem) caught
-and retracted before being reported.
+`MetaPageData::version` is **8** as of v2.0.0 (was **7** for
+v1.27.0–v1.29.x, **6** for v1.23.0–v1.26.x, **5** for v1.17.0–v1.22.x,
+**4** for v1.10.0–v1.16.x). v8 adopted turbovec 1.0.0's TQ+ calibration and
+block-Hadamard rotation; like v7 it is NOT additive, so every pre-v8 index
+needs a REINDEX, detected by `MetaPageData::is_legacy_v7()` (`version < 8`)
+with `ambeginscan` raising a clear `HINT: REINDEX INDEX <name>;`.
 
-**v1.22.0 is a repo-cleanup release, no functional change.**
-
-`turbovec.mmap_static_blocked` (deprecated no-op since v1.19.0) is
-removed after a three-minor deprecation window — `SET
-turbovec.mmap_static_blocked = ...` now errors like any unknown GUC.
-Also: `cargo fmt`'d the whole tree (244 pre-existing violations;
-`fmt-check` was never wired into the real CI, only into an
-already-dead `.woodpecker/ci.yaml`, now also removed and replaced
-with a `fmt-check` job in `.github/workflows/test.yml` +
-`.githooks/pre-push`), fixed literal `\uXXXX` escape-sequence
-artifacts in several doc files, deleted a test made meaningless by
-the mmap removal, fixed a stale dead-code warning. No wire change,
-no REINDEX.
-
-**v1.21.0 (Phase G-1) adds an in-memory centroid graph** for
-sublinear IVF coarse-cell selection (`lists >= 4096`, gated by the
-new `turbovec.coarse_graph` GUC, default `auto`). Computed in-memory
-at index-open from the already-persisted coarse centroids — no wire
-change, no REINDEX. **Correction to the v1.20.0 CHANGELOG entry**:
-that release's "sublinear two-level coarse quantizer" claim was
-aspirational and was never actually implemented; v1.20.0 shipped
-only parallel k-means seeding/build and `turbovec.scan_parallelism`.
-`coarse_probe` stayed the plain O(lists·dim) linear scan through
-v1.20.1. v1.21.0 is the first release to ship real sublinear
-coarse-cell selection. and
-`CHANGELOG.md`.
-
-**v1.20.1 is a critical perf fix, not a wire/feature change** —
-`turbovec.iterative_scan` default flipped `relaxed_order` → `off`
-(PostgreSQL's reorder queue can never pop a tuple early when we
-advertise `NEG_INFINITY`, so the old default drove the AM's full
-iterative-refill schedule to completion on every `ORDER BY ...
-LIMIT` query regardless of `LIMIT` size — measured ~450x tax,
-SIFT-1M/128d ~2ms vs ~900ms). Upgrade via `ALTER EXTENSION
-pg_turbovec UPDATE`, no REINDEX. See `CHANGELOG.md` and
-`docs/UPGRADING.md`.
-
-`MetaPageData::version` is **7** as of v1.27.0 (was **6** for
-v1.23.0–v1.26.x, **5** for v1.17.0–v1.22.x, **4** for
-v1.10.0–v1.16.x). The v4→v5→v6 bumps were **strictly additive per
-index kind** (single-vector emitted v4, ColBERT v5, graph v6, all
-byte-identical to their predecessors for existing indexes — no
-REINDEX). **v7 (Phase Q-0) BREAKS that additivity on purpose**: it
-de-duplicates the on-disk codes storage by dropping the persisted
-SIMD-blocked chain (recomputed once per backend at index-open via
-`pack::repack`), which every prior version DID persist. A v7 relfile
-is therefore NOT byte-compatible with any pre-v7 index for ANY kind,
-so **every kind now emits wire version 7** (the `kind` byte still
-discriminates single/colbert/graph) and **every pre-v7 index needs a
-REINDEX**. A pre-v7 index (v1..v6) is detected by the genuinely-
-tripping `MetaPageData::is_legacy_v6()` (`version < 7`); `ambeginscan`
-ERRORs with `HINT: REINDEX INDEX <name>;` naming the index. (The
-older `is_legacy_v3/v4/v5` predicates stay deliberately-`false`; the
-single runtime gate is now `is_legacy_v6`.) IVF is opt-in via `WITH
-(lists = N)`; as of v1.13.0 IVF is out-of-core end-to-end (build AND
-query), so a >RAM IVF index can be built and served on a
-RAM-constrained host. The graph kind is NOT out-of-core (RAM-resident
-by design, per 's explicit trade-off).
+New index KINDS since then have been additive via the `kind` byte rather
+than a version bump — `KIND_BQ = 3` (1-bit sign-BQ, v2.6.0) is the current
+example: existing indexes keep their kind and decode byte-identically. That
+is the pattern to follow; prefer a new `kind` over a wire bump.
 
 **v1.7.3+ is the recommended floor for all x86_64 users** — it
 fixes a kernel bug where pre-AVX2 CPUs returned wrong ANN results.
@@ -424,7 +295,8 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 334/334).
+3. Pass `cargo pgrx test pg16` cleanly (current count: 427 passed,
+   8 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`
    (mirror). Use `git push origin vX.Y.Z` and `git push github vX.Y.Z`.
@@ -447,6 +319,9 @@ format unchanged from X.Y.Z; no REINDEX needed." preamble.
 - Pgvector parity: `docs/PARITY_GAPS.md`, `docs/MIGRATING_FROM_PGVECTOR.md`
 - CI: `docs/CI.md`, `.github/workflows/`, `.forgejo/workflows/`
 - Bench results archive: `benches/results/`
+- BQ (1-bit) design + measured frontier: `docs/ONEBIT_BQ.md`,
+  `docs/BQ_RECALL_BENCH.md` (§ 0 = results, § 0.5 = what they do NOT license)
+- Upstream bug reports we filed: `docs/upstream/`
 - Drift checker: `scripts/drift-check.sh`, `.pi/skills/drift-check/SKILL.md`
 - Heartbeat protocol: `.pi/skills/long-running-bench/SKILL.md`
 

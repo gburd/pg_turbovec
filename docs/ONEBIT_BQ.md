@@ -268,12 +268,29 @@ What differed from the spec above, and the bugs found wiring it:
 - ~~**Recall at scale.**~~ **DONE 2026-09-08.** Measured on `arnold`
   (AVX2) over 250k x 1024-d Cohere-wiki with 100 held-out queries and exact
   ground truth: 3.98x smaller than 4-bit, 2.02x smaller than 2-bit, but
-  2.7-6.1x the latency at matched recall and a 25x wider rerank window
+  2.7-6.1x the latency at matched recall (timings are contention-flagged;
+  ratios defensible, absolute ms indicative -- see BQ_RECALL_BENCH.md 0)
+  and a 25x wider rerank window
   needed to clear R@10 >= 0.99. All four pre-registered predictions held.
   See `docs/BQ_RECALL_BENCH.md` § 0 and
-  `benches/results/bq_frontier_20260908/`. Still unswept: a dim sweep, 1M+
-  scale, and the IVF+BQ arm. This applies to IVF+BQ too: no recall/latency/QPS number is
-  claimed for it.
+  `benches/results/bq_frontier_20260908/`.
+- ~~**IVF + 1-bit.**~~ **MEASURED 2026-09-09** (`docs/BQ_RECALL_BENCH.md`
+  § 0.6a, `benches/results/bq_ivf_20260909/`). It builds and scans; storage
+  overhead over flat BQ is +6.0 % (a fixed ~8.5 B/vector of IVF metadata,
+  proportionally worst for the smallest codes). **At 250k, flat BQ dominates
+  it**: IVF imposes a per-probe-count recall CEILING a wider rerank window
+  cannot break (probes=8 saturates at R@10 0.846 from window 256 through
+  2000), whereas flat reaches 0.994. That is a scale-dependent result — 250k
+  is below where IVF's scan-cost advantage pays — so it is a documented
+  boundary, not a verdict.
+- **Dimension sweep** — still open. Attempted 2026-09-09 and invalidated by a
+  harness collision (since fixed with `--run-id`); needs re-running.
+- **Real 1M+ scale** — still open. A synthetic 1M attempt produced
+  unusable recall because the generated corpus was statistically unrankable
+  (nn1→nn100 spread 6.6–10.4 % vs 37–268 % on a real corpus); discarded with a
+  post-mortem in `benches/results/bq_scale_20260909/DISCARDED.md`. Needs a
+  REAL 1M corpus. The open question is whether the rerank window needed for a
+  given recall grows with `n`.
 - **Cell-aware incremental INSERT for IVF+BQ** — `aminsert` appends and
   degrades to a flat Hamming scan (§7 note 4). A real cell-aware insert
   needs slot insertion + cell-directory renumbering + tombstone-index

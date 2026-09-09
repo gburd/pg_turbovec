@@ -505,6 +505,41 @@ or index-AM change). Full guide with worked CTEs:
 
 ---
 
+## Bound `maintenance_work_mem` for high-dim IVF builds
+
+A high-dimension, many-list IVF build can get the backend **killed by the
+OOM killer**, which presents to an operator as an unexplained backend
+termination rather than an error.
+
+Measured: `bit_width = 4, lists = 512` at **1024-d** over 250k rows reached
+**20.3 GB anon-RSS** on a 31 GB host with `maintenance_work_mem = 3GB` and
+default parallel workers, and was killed (`Out of memory: Killed process ...
+(postgres)`, signal 9 — not a crash in pg_turbovec). The same build finished
+in **50.6 s** with:
+
+```sql
+SET maintenance_work_mem = '1GB';
+SET max_parallel_maintenance_workers = 2;
+CREATE INDEX ... USING turbovec (emb turbovec.vec_cosine_ops)
+  WITH (bit_width = 4, lists = 512);
+```
+
+The k-means training set scales with `lists × dim`, and each parallel
+maintenance worker gets its own allocation — so the effective ceiling is
+roughly `maintenance_work_mem × (1 + max_parallel_maintenance_workers)`, not
+`maintenance_work_mem`. Budget accordingly: for `dim ≥ 768` with
+`lists ≥ 512`, start at 1 GB and two workers rather than raising
+`maintenance_work_mem` to speed the build up.
+
+If a `CREATE INDEX` dies with the client seeing "server closed the connection
+unexpectedly", check the kernel log for an OOM kill before suspecting a bug:
+
+```
+journalctl -k | grep -i "killed process"
+```
+
+---
+
 ## WAL cost of inserts — batch your writes
 
 **`pg_turbovec` WAL scales with the number of COMMITS, not just the

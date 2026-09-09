@@ -4,6 +4,109 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.4] — 2026-09-09
+
+**Documentation accuracy and benchmark-harness isolation.** No shippable code
+change — the binary is byte-identical to 2.7.3. No wire change (v8), no SQL
+surface change, no REINDEX.
+
+### Correction to v2.7.3's latency figures
+
+v2.7.3 published the 1-bit BQ p50s **without disclosing that the harness had
+flagged every one of them.** All 24 rows carry
+`latency.contention.contended_flag = true` — 1-minute loadavg 3.16–4.64
+against the harness's gate of 1.5. The artefact recorded this correctly; the
+write-up did not surface it. That was my error and this is the correction.
+
+The gate is **unreachable on that host** and not because of the benchmark: a
+stuck `systemd --user` spinning at 77–86 % CPU for 31 days pins its idle
+loadavg near 2.0, so *any* run there is flagged. Mitigating measurement,
+taken rather than assumed: `cpu_busy_pct` on the pinned cores was only
+**16–26 %** — the load is runnable-elsewhere processes, not saturation of the
+bench cores. So the **ratios and the shape of the window-vs-recall curve
+stand**, and the absolute milliseconds are indicative. Recall, storage,
+bytes/vector and build time are CPU-independent and unaffected.
+
+`README.md`, `docs/RECALL.md`, `docs/ONEBIT_BQ.md`, `docs/UPGRADING.md` and
+`docs/BQ_RECALL_BENCH.md` now all carry the caveat. Found by a sub-agent
+checking its own contention flags; I had not been checking mine.
+
+### Measured: IVF + 1-bit BQ
+
+`docs/BQ_RECALL_BENCH.md` § 0.6a, artefact
+`benches/results/bq_ivf_20260909/`. `WITH (lists = N, bit_width = 1)` builds
+and scans correctly. Storage overhead over flat BQ is **+6.0 %** — a fixed
+~8.5 B/vector of coarse centroids and cell directory, so proportionally worst
+for the smallest codes.
+
+**The finding: IVF imposes a per-probe-count recall ceiling that a wider
+rerank window cannot break.** At `probes = 8`, 1-bit saturates at R@10 = 0.846
+and stays there from window 256 through 2000 — the true neighbours are not in
+the probed cells, and exact re-ranking cannot invent them. Flat BQ reaches
+0.994 with no probe tuning.
+
+This is the **mirror image of Gap-B (v1.25.0)**, and the distinction is the
+useful part: there, high-dim recall loss was *not* retrieval-bound (cell
+recall 0.98–0.996) and a wider window fixed it; here it *is* retrieval-bound
+and the window is irrelevant. Same symptom, opposite cause — diagnose which
+one you have before reaching for a knob.
+
+**At 250k, flat BQ dominates IVF+BQ.** That is a *scale-dependent* boundary,
+deliberately not a verdict: IVF's whole value is bounding scan cost as `n`
+grows, and 250k is below the crossover. Recording it as a boundary is what
+the graph kind's early iso-beam numbers should have done.
+
+### A 1M-scale arm was discarded, not published
+
+A synthetic 1 M × 768-d run produced R@10 = 0.031 at window 32, which looks
+like catastrophic scale collapse. It isn't — **the generated corpus was
+statistically unrankable.** Resolvability probe: 1st vs 100th nearest
+neighbour differed by only **6.6–10.4 %** in cosine distance, versus
+**37–268 %** on the real Cohere-wiki corpus. When the top-100 is effectively a
+tie, no quantizer can rank it and "recall" measures the tie-break order.
+Cause: 200 iid Gaussian centres with σ = 0.35 per coordinate at d = 768
+re-created distance concentration *inside* each cluster.
+
+Discarded with a full post-mortem, including the probe to run before trusting
+any generated corpus, in `benches/results/bq_scale_20260909/DISCARDED.md`.
+Storage *did* confirm the `dim/8` stride and an exact 2.00× 1-bit:2-bit ratio
+at 1 M rows. Note a synthetic corpus can pass `is_degenerate()` and still be
+unrankable — different checks, and only the second predicts whether recall
+means anything.
+
+### Harness: `--run-id` so concurrent arms cannot corrupt each other
+
+Two arms running in one database silently corrupted each other three ways:
+a shared `bq_query_set` (one arm's 256-d query set replaced another's 1024-d
+one mid-sweep), `DROP TABLE IF EXISTS bq_gt` destroying 860 s of ground truth,
+and a hardcoded `bqbench_` index prefix — index names are **schema**-scoped,
+so one arm's `CREATE INDEX` failed against a sibling's index on a *different
+table*, silently costing it an entire `bit_width` leg. All three are now
+namespaced by `--run-id` / `BQ_RUN_ID`, validated by the existing identifier
+guard. Default behaviour without `--run-id` is byte-identical.
+
+### Stale documentation corrected
+
+- Test counts: `334/334` (AGENTS.md) and `341/346` in six rows of
+  `PG_VERSION_SUPPORT.md` → the actual **427 passed / 8 ignored**, uniform
+  across all seven CI legs pg13–19.
+- `AGENTS.md`: migration matrix was stuck at **v1.27.1** and the wire version
+  said **7** when it has been **8** since v2.0.0. Both corrected, and ~160
+  lines of v1.x release prose that duplicated `CHANGELOG.md` replaced with
+  current state (kinds, which to recommend, the corruption-history warning for
+  anyone touching persist/scan code, and the upstream ctid bug).
+- `docs/PRODUCTION.md`: new section on bounding `maintenance_work_mem` for
+  high-dim IVF builds. Measured: `bit_width = 4, lists = 512` at 1024-d
+  reached **20.3 GB anon-RSS** and was **OOM-killed** at
+  `maintenance_work_mem = 3GB`, then completed in 50.6 s at 1 GB with two
+  parallel workers. The effective ceiling is
+  `maintenance_work_mem × (1 + max_parallel_maintenance_workers)`, and an
+  operator sees this as an unexplained backend termination.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.4';` — no REINDEX.
+
 ## [2.7.3] — 2026-09-08
 
 **The 1-bit sign-BQ frontier is measured and published**, and a real

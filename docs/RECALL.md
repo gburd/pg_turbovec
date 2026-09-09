@@ -522,10 +522,19 @@ All 24 configs confirmed to run a real `Index Scan`.
 | 4 | 565.7 | 1.00× | window 32 | 9.2 ms |
 
 **1-bit trades latency for storage, and the trade is steep**: 2× the
-storage saving of 2-bit, for 2.7–6.1× the latency at matched recall and a
+storage saving of 2-bit, for 2.7–6.1× the latency at matched recall (see the
+contention caveat below) and a
 **25× wider** exact-rerank window to reach R@10 ≥ 0.99. It is a
 storage-constrained-workload option, not a default — which is how the
 reloption is documented.
+
+> **Latency caveat.** Every timing row in this run is flagged
+> `contended_flag = true`: `arnold` cannot reach the harness's 1.5 loadavg gate
+> because an unrelated stuck process pins its idle floor near 2.0. Measured CPU
+> busy on the pinned cores was 16–26 %, so this is noise rather than
+> saturation — the **ratios** are the defensible result and the absolute
+> milliseconds are indicative. Recall, storage and build time are unaffected
+> (CPU-independent). Detail: `docs/BQ_RECALL_BENCH.md` § 0.
 
 R@10 across the window sweep (1-bit): 0.744 @ 32, 0.899 @ 100, 0.967 @ 256,
 0.981 @ 400, 0.994 @ 800, 1.000 @ 2000. 2-bit is already 0.993 at window 32,

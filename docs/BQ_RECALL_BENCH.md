@@ -13,7 +13,38 @@ Artefact: `benches/results/bq_frontier_20260908/bq_frontier_arnold_20260908.json
 
 **Provenance.** `arnold`, i9-12900H, `kernel_tier = avx2`,
 `latency_publishable = true` (per § 2, latency is only valid on an AVX2
-host). PostgreSQL 17.9, pg_turbovec 2.7.2, `shared_buffers = 2GB`,
+host).
+
+> ### ⚠ Correction (2026-09-09): every latency row here is `contended_flag = true`
+>
+> The v2.7.3 release presented the p50s below without this caveat. That was
+> wrong, and this is the correction. **All 24 rows carry
+> `latency.contention.contended_flag = true`** — 1-minute loadavg 3.16–4.64
+> against the harness's gate of 1.5. The harness flagged it correctly in the
+> artefact; the write-up did not surface it.
+>
+> The gate is **unreachable on `arnold`** and not because of this benchmark.
+> Two pre-existing processes pin the idle floor near 2.0: a stuck
+> `systemd --user` spinning at 77–86 % CPU for 31 days, and an unrelated
+> long-running agent process at ~100 %. Idle loadavg is 2.0–2.4 before any
+> bench starts, so *any* run on this host is flagged.
+>
+> **How much does it matter?** Less than the flag alone implies, and this is
+> measured rather than assumed: `cpu_busy_pct` across the 24 rows is only
+> **16.3–26.0 %**. The load is runnable-elsewhere processes, not saturation of
+> the pinned cores 2-5 — the noise processes have affinity 0-19, so the kernel
+> migrates them off the bench cores. The absolute milliseconds are therefore
+> *indicative but noisy*, and the **ratios and the shape of the
+> window-vs-recall curve are the defensible result** — which is the stance
+> § 0.5 already takes and the reason the headline is expressed as ratios.
+>
+> Nothing about recall, storage, bytes/vector or build time is affected;
+> those are CPU-independent or honestly host-specific.
+>
+> For genuinely clean absolute latency, that stuck `systemd --user` has to be
+> dealt with first. Until then, treat every p50 from `arnold` as carrying this
+> caveat, and check `latency.contention.contended_flag` in any artefact before
+> quoting a number from it. PostgreSQL 17.9, pg_turbovec 2.7.2, `shared_buffers = 2GB`,
 postmaster and driver pinned to P-cores 2-5. 250 000 × 1024-d Cohere-wiki
 vectors stored as a native `turbovec.vector` column; **100 held-out
 queries** (verified zero overlap with the indexed corpus); ground truth is
@@ -98,6 +129,90 @@ It did not: the special-case is **justified** by this data.
 - **R@10 = 1.000 for 2-bit and 4-bit at almost every window** means this
   corpus/query set is *easy* at those widths — it cannot separate 2-bit from
   4-bit on recall. It separates 1-bit from both, which is what it was for.
+
+### 0.6a IVF + 1-bit BQ (2026-09-09) — it works, and it does NOT pay at 250k
+
+Artefact: `benches/results/bq_ivf_20260909/`. Same corpus, same 100 held-out
+queries, isolated `bq_ivf` database, `lists = 512`, probes swept 8→128.
+**Same contention caveat as § 0** — recall and storage stand, the p50s carry
+the flag.
+
+`WITH (lists = N, bit_width = 1)` builds and scans correctly. Storage
+overhead over flat BQ is small, and is a fixed ~8.5 B/vector of coarse
+centroids + cell directory regardless of `bit_width` — so it is proportionally
+worst for the smallest codes:
+
+| arm | bytes/vec | vs flat, same bw | build |
+|---|---:|---:|---:|
+| bw1 flat | 142.3 | — | 7.3 s |
+| bw1 + lists=512 | 150.8 | **+6.0 %** | 76.3 s |
+| bw2 + lists=512 | 289.0 | +3.0 % | 89.0 s |
+| bw4 + lists=512 | 574.2 | +1.5 % | 50.6 s |
+
+**The finding: IVF imposes a recall CEILING that a wider rerank window cannot
+break.** Recall at the `auto` window (1024), where a default user lands:
+
+| | bw1 R@10 | bw1 R@100 |
+|---|---:|---:|
+| flat | **0.994** | **0.948** |
+| ivf512 probes=8 | 0.846 | 0.784 |
+| ivf512 probes=16 | 0.906 | 0.852 |
+| ivf512 probes=32 | 0.954 | 0.905 |
+| ivf512 probes=64 | 0.978 | 0.933 |
+| ivf512 probes=128 | 0.984 | 0.945 |
+
+At `probes = 8`, bw1 saturates at R@10 = 0.846 and stays there from window 256
+all the way to 2000: the true neighbours are not in the probed cells, and no
+amount of exact re-ranking invents them. Each probe count has its own hard
+ceiling (0.846 / 0.906 / 0.955 / 0.981 / 0.989 for 8/16/32/64/128).
+
+**This is the mirror image of Gap-B (v1.25.0), and the distinction is the
+useful part.** There, high-dim recall loss was *not* retrieval-bound — cell
+recall was 0.98–0.996 and a wider exact window fixed it. Here it *is*
+retrieval-bound: the window is already wide and the cells bind. Same symptom,
+opposite cause. Diagnose which one you have before reaching for a knob — the
+probes count and the rerank window are not interchangeable.
+
+**Guidance: at 250k, flat BQ dominates IVF+BQ.** Flat reaches 0.994 with no
+probe tuning at all; IVF needs `probes = 128` to reach 0.984 and never
+catches up. IVF's whole value is bounding scan cost as `n` grows, so this is a
+**scale-dependent** answer and 250k is below the crossover. It is *not* a
+verdict that IVF+BQ is useless — that is precisely the error the graph kind's
+early iso-beam numbers invited. The honest deliverable is a documented
+boundary: **below ~1M, prefer flat BQ**; above it, unmeasured.
+
+Incidental but operationally sharp: `bit_width = 4` + `lists = 512` at 1024-d
+**OOM-killed the backend** at 20.3 GB anon-RSS on a 31 GB host with
+`maintenance_work_mem = 3GB` (kernel `Out of memory: Killed process ...
+(postgres)`, signal 9 — not a crash in our code). It completed in 50.6 s with
+`maintenance_work_mem = 1GB` and `max_parallel_maintenance_workers = 2`. High-dim
+× many-lists k-means wants a bounded `maintenance_work_mem`; the default-ish
+3 GB times parallel workers is enough to get a backend killed, which presents
+to an operator as an unexplained termination.
+
+### 0.6b Still open: dimension sweep and real 1M scale
+
+Both were attempted on 2026-09-09 and neither produced usable recall numbers.
+Recorded here so the gap is not mistaken for a result:
+
+- **Dimension sweep** — dispatched, then invalidated by a harness collision
+  (two concurrent arms sharing `bq_query_set` / `bq_gt` / the `bqbench_` index
+  prefix in one database). Fixed at the source: the harness now takes
+  `--run-id` / `BQ_RUN_ID` to namespace all three. The sweep itself still
+  needs re-running.
+- **1M scale** — ran to completion on a *synthetic* 1 M × 768-d corpus and the
+  recall numbers are **discarded as a corpus artefact**, not published. The
+  synthetic corpus was statistically unrankable: 1st vs 100th nearest
+  neighbour differed by only 6.6–10.4 % in cosine distance, versus 37–268 % on
+  the real Cohere-wiki corpus. Full post-mortem, including the resolvability
+  probe you should run before trusting any generated corpus, in
+  `benches/results/bq_scale_20260909/DISCARDED.md`. Storage *did* confirm the
+  `dim/8` stride and an exact 2.00× 1-bit:2-bit ratio at 1 M rows.
+
+The open question both arms were meant to answer — **does the rerank window
+needed for a given recall grow with `n`?** — remains unanswered. It needs a
+real 1 M-row corpus (the 1 M × 1024-d Cohere-wiki table on `arnold` is the
+obvious candidate) with § 0.6's per-row-cast trap avoided.
 
 ### 0.6 Harness finding worth keeping
 

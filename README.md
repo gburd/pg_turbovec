@@ -196,8 +196,15 @@ exact ground truth): storage is **3.98x smaller** than 4-bit and **2.02x**
 smaller than 2-bit, but at matched recall it costs **2.7-6.1x the latency**
 and needs a **25x wider** exact-rerank window than 2-bit to clear
 R@10 >= 0.99 (window 800 vs 32). Use it where storage is the binding
-constraint and latency has slack -- never as a default. Full curve, caveats
-and the pre-registered predictions:
+constraint and latency has slack -- never as a default.
+
+The **storage and recall** figures are solid; the **latency ratios are
+indicative, not precise** -- the bench host could not get under the harness's
+load gate (an unrelated stuck process pins its idle loadavg near 2.0), so
+every timing row is flagged contended. Measured CPU busy on the pinned cores
+was only 16-26%, so the effect is noise rather than saturation, but treat the
+milliseconds accordingly. Full curve, that caveat in detail, and the
+pre-registered predictions:
 [`docs/BQ_RECALL_BENCH.md`](docs/BQ_RECALL_BENCH.md) § 0. It composes
 with `lists = N` (IVF): `WITH (lists = N, bit_width = 1)` stores the sign
 codes cell-contiguous and probes only `turbovec.probes` cells, combining

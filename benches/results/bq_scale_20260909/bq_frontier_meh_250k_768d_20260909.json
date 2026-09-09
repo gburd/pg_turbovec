@@ -1,0 +1,68 @@
+{
+  "benchmark": "pg_turbovec 1-bit sign-BQ vs 2-bit vs 4-bit: recall / storage / latency frontier",
+  "meta": {
+    "host": "meh",
+    "uname": "Linux-6.18.49-x86_64-with-glibc2.42",
+    "cpu_model": "Intel(R) Xeon(R) CPU E5-2697 v2 @ 2.70GHz",
+    "logical_cpus": 24,
+    "simd": {
+      "avx": true,
+      "avx2": false,
+      "avx512f": false,
+      "kernel_tier": "scalar",
+      "latency_publishable": false
+    },
+    "latency_publishable": false,
+    "latency_gate": "AVX2+ required. Per AGENTS.md a pre-AVX2 host takes turbovec's scalar fallback (~1000x slower full-corpus scan); its warm p50 is not a publishable number. Recall/storage/build are CPU-independent and valid on any host.",
+    "pg_version": "17.9",
+    "pg_turbovec_version": "2.7.3",
+    "shared_buffers": "32GB",
+    "guc_defaults_observed": {
+      "turbovec.search_k": "32",
+      "turbovec.probes": "16",
+      "turbovec.oversample": "1",
+      "turbovec.hi_dim_rerank": "auto",
+      "turbovec.iterative_scan": "off",
+      "turbovec.out_of_core": "auto",
+      "turbovec.scan_parallelism": "0",
+      "turbovec.bit_width_default": "4",
+      "turbovec.normalize_on_insert": "on"
+    },
+    "corpus": {
+      "table": "docs250k",
+      "vec_expr": "embt",
+      "dim": 768,
+      "rows": 250000,
+      "opclass": "vec_cosine_ops",
+      "operator": "turbovec.<=>",
+      "label": "synthetic-clustered-250k-768d-200centres-sigma0.35"
+    },
+    "query_set": {
+      "table": "bq_query_set",
+      "n_queries": 100,
+      "provenance": "held_out",
+      "caveat": "queries are held out of the indexed corpus"
+    },
+    "ground_truth": {
+      "method": "exact top-100 in-DB seqscan (enable_indexscan/bitmapscan off) using the SAME operator the index serves (turbovec.<=>), so the GT metric cannot drift from the index metric",
+      "depth": 100
+    },
+    "build_settings": {
+      "maintenance_work_mem": "8GB",
+      "max_parallel_maintenance_workers": 8
+    },
+    "protocol": {
+      "k": 10,
+      "n_warm": 5,
+      "latency_basis": "server-side Execution Time from EXPLAIN (ANALYZE)",
+      "scan_parallelism": 0,
+      "load_gate": 1.5
+    },
+    "start_loadavg": "0.58 1.05 1.30 1/571 370219",
+    "ts": "2026-09-09T16:48:56-0400",
+    "driver": "benches/scripts/bq/bq_frontier.py"
+  },
+  "indexes": [],
+  "configs": [],
+  "derived": {}
+}

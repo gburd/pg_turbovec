@@ -1,0 +1,7 @@
+-- pg_turbovec 2.7.3 -> 2.7.4
+-- Documentation-accuracy and benchmark-harness release; binary byte-identical
+-- to 2.7.3. Corrects the v2.7.3 latency figures to disclose that they were
+-- contention-flagged, publishes the IVF+BQ measurements, and namespaces the
+-- bench harness's shared state (--run-id).
+-- No wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

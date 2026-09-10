@@ -1,0 +1,42 @@
+-- 2.7.6 — documentation consistency pass. No shippable code change: binary
+-- byte-identical to 2.7.5.
+--
+-- The BQ docs had accumulated self-contradictions across the 2.7.3-2.7.5 runs:
+-- BQ_RECALL_BENCH.md still opened by describing itself as containing "no
+-- measurements" and pointing at a README row that "correctly reads not yet
+-- published" (both untrue since 2.7.3), and ONEBIT_BQ.md carried an orphaned
+-- fragment, stranded mid-paragraph by an earlier merge, asserting the harness
+-- "has NOT been run - no numbers exist yet". Swept every doc for claims the
+-- measurements contradict; all now consistent.
+--
+-- Also narrows the discarded-1M root cause. A competing diagnosis was raised
+-- (the generator's uncorrelated ARRAY(SELECT randn() ...) subquery being
+-- hoisted, making all 200 centres identical - the v1.24.0 harness-bug class)
+-- and was TESTED rather than accepted: the SQL genuinely invites that hoist
+-- (reproduced minimally - 1 distinct vector across 5 rows uncorrelated, 5 when
+-- correlated), but it did NOT happen here, because randn()'s volatility forced
+-- per-row evaluation. Measured on the loaded corpus: 200 DISTINCT centres,
+-- 5000 distinct vectors per cid, same-cluster distance 0.108 vs cross-cluster
+-- 0.990. So the clustering worked and the earlier "distance concentration"
+-- diagnosis was right in substance but imprecise about location: the tie is
+-- INSIDE each cluster, where a member's 100 nearest span only 7.22% because
+-- 5000 iid Gaussian points at d=768 concentrate (relative spread ~1/sqrt(2d)
+-- ~= 2.6%). Cluster separation is NOT sufficient for rankability.
+--
+-- Salvaged and published from that arm, both corpus-geometry-independent:
+--   * 1M x 768d storage/build: bw2/bw1 = 2.000 EXACTLY, confirming the dim/8
+--     sign-code stride at scale. bw1 has the HIGHEST peak build RSS (8.98 GiB)
+--     despite the smallest output, because the corpus is read back resident to
+--     compute the mean before signs can be taken.
+--   * A harness plan pathology: the GT query puts row_number() OVER
+--     (ORDER BY <dist>) in a Sort ABOVE the Gather, so workers ship raw vectors
+--     to the leader and the leader recomputes distances single-threaded --
+--     23,084 s (6.4 h) for 100 queries at 1M rows.
+--
+-- New BQ_RECALL_BENCH 0.6d makes the resolvability probe MANDATORY pre-flight
+-- for any synthetic corpus, with measured reference values (real corpus
+-- 37-268% nn1->nn100 spread vs the discarded 6.6-10.4%) and an explicit note
+-- that is_degenerate() and rankability are DIFFERENT checks.
+--
+-- No wire-format change (stays v8), no SQL surface change, no REINDEX.
+-- This migration is intentionally empty.

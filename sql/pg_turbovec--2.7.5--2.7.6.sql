@@ -1,0 +1,7 @@
+-- pg_turbovec 2.7.5 -> 2.7.6
+-- Documentation-consistency release; binary byte-identical to 2.7.5. Removes
+-- stale "not yet measured" self-references from the BQ docs, narrows the
+-- discarded-1M root cause with measurement, publishes the valid 1M storage
+-- numbers, and makes the synthetic-corpus resolvability probe mandatory.
+-- No wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

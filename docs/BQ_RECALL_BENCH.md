@@ -359,11 +359,14 @@ cast as the vec-expr.
 v2.6.0 shipped `WITH (bit_width = 1)` (sign binary quantization: `dim/8`
 bytes per vector, no per-vector scale, Hamming coarse ranking + exact
 re-rank). Its correctness, storage ratio and end-to-end scan behaviour are
-covered by `#[pg_test]`s. Its **recall/latency frontier on a real corpus is
-not published**, `README.md` says so explicitly ("not yet published"), and
-`docs/ONEBIT_BQ.md` §6 "Still open" names the gap.
+covered by `#[pg_test]`s.
 
-This document is the runbook for closing it. It contains **no measurements**.
+**Its frontier is now measured — see § 0 above, which supersedes the
+"unmeasured" framing this section was originally written with.** The sections
+from § 1 onward are the *runbook*: the methodology a run must follow, retained
+because it is what § 0's numbers were produced by and what any re-run should
+repeat. Read § 0 for results, § 1–6 for how to get them, and § 0.5 / § 0.6d for
+what they do and do not license.
 Every number-shaped thing below is either an input you set, a formula, or a
 labelled *prediction* recorded in advance (§7) so a real run confirms or
 falsifies something written down rather than being interpreted after the fact.
@@ -645,8 +648,9 @@ Copy the artefact to `benches/results/bq_frontier_<host>_<YYYYMMDD>.json` (or
 a `bq_frontier_<date>/` directory with a `scripts/` copy, the convention
 `benches/results/q1_real_20260711/` and `competitive_gist_2.0.0_20260827/`
 use), then append a results section to `docs/RECALL.md` and update the
-`bit_width = 1` row of the README's "Choose your `bit_width`" table — which
-currently and correctly reads **"not yet published"**.
+`bit_width = 1` row of the README's "Choose your `bit_width`" table. (Both were
+done for the 2026-09-08/09 runs; a future re-run should update them in place
+rather than appending a second set of numbers.)
 
 ### 6.4 Plumbing smoke test (proves the driver runs; measures nothing)
 

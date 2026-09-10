@@ -4,6 +4,94 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.6] — 2026-09-09
+
+**Documentation consistency pass**, plus a narrowed root cause and salvaged
+numbers from the discarded 1M arm. No shippable code change — binary
+byte-identical to 2.7.5. No wire change (v8), no SQL surface change, no
+REINDEX.
+
+### The BQ docs contradicted themselves
+
+Across the 2.7.3–2.7.5 runs the docs accumulated claims the measurements had
+already falsified. `docs/BQ_RECALL_BENCH.md` still *opened* by stating it
+"contains **no measurements**" and pointing at a README row that "currently and
+correctly reads **not yet published**" — both untrue since 2.7.3.
+`docs/ONEBIT_BQ.md` carried an orphaned fragment, stranded mid-paragraph by an
+earlier merge, asserting the harness "has **NOT** been run — no numbers exist
+yet". Every doc was swept for claims the measurements contradict; all are now
+consistent. The runbook sections are retained and relabelled as *how to
+reproduce* rather than *not yet done*.
+
+### The discarded 1M root cause, narrowed — and a competing diagnosis ruled out
+
+A plausible alternative was raised: that the generator's uncorrelated
+`ARRAY(SELECT randn() ...)` subquery had been hoisted, making all 200 cluster
+centres identical — the same v1.24.0 test-harness bug class `AGENTS.md` warns
+about. It was **tested rather than accepted or dismissed**, and both halves
+matter:
+
+- **The hazard is real.** The subquery never references the outer `c`.
+  Reproduced minimally: uncorrelated gives **1 distinct vector across 5 rows**;
+  adding a correlating `WHERE c = c` gives **5**. Worth recording, because the
+  behaviour is plan-dependent.
+- **It did not happen here.** Measured on the loaded corpus: **200 distinct
+  centres**, 5000 distinct vectors per `cid`, same-cluster distance **0.108** vs
+  cross-cluster **0.990**. `randn()`'s volatility forced per-row evaluation.
+
+So the earlier "distance concentration" diagnosis was right in substance but
+imprecise about *where*. Narrowed by measurement: **the clustering worked; the
+tie is inside each cluster.** Within one cluster a member's 100 nearest
+neighbours span just **7.22 %**, because 5000 iid Gaussian points at d = 768
+concentrate — pairwise separation norm has relative spread ≈ `1/sqrt(2d)`
+≈ 2.6 %. **Cluster separation is not sufficient for rankability**, which is the
+non-obvious part and the reason the original prompt's "make it clustered"
+instruction was not enough.
+
+### Salvaged from that arm: valid 1M storage/build numbers
+
+Corpus geometry doesn't affect these — per-vector codes are
+`dim/8 * bit_width` and the flat build is a fixed `O(n·dim)` pass:
+
+| 1M × 768-d | build | bytes/vec | peak build RssAnon |
+|---|---:|---:|---:|
+| bw1 | 167.3 s | 104.87 | 8.98 GiB |
+| bw2 | 152.0 s | 209.72 | 5.95 GiB |
+| bw4 | 161.0 s | 404.76 | 6.18 GiB |
+
+`bw2/bw1 = 2.000` **exactly**, confirming the `dim/8` sign-code stride holds at
+1M rows. Note bw1 has the **highest** peak build RSS despite the smallest
+output: BQ reads the corpus back resident to compute the corpus mean before it
+can take signs, so its build memory tracks `n · dim · 4` regardless of bit
+width. Worth knowing before building a 1-bit index on a RAM-constrained host.
+
+### Harness defect: the ground-truth query serialises on the leader
+
+The GT query puts `row_number() OVER (ORDER BY <distance>)` in a Sort **above**
+the Gather, so parallel workers ship raw vectors to the leader and the leader
+recomputes every distance single-threaded. That is why ground truth took
+**23 084 s (6.4 h)** for 100 queries at 1M rows — a plan pathology in the
+harness, not a turbovec cost, and the main thing making a real 1M arm
+expensive.
+
+### New: mandatory pre-flight for synthetic corpora
+
+`docs/BQ_RECALL_BENCH.md` § 0.6d. Before trusting any recall number from
+generated data, run the resolvability probe and require the nn1→nn100 spread to
+be comparable to a real corpus:
+
+| corpus | spread | verdict |
+|---|---:|---|
+| real Cohere-wiki 1024-d | **37–268 %** | rankable |
+| the discarded synthetic 768-d | **6.6–10.4 %** | unusable |
+
+With an explicit warning that `is_degenerate()` and rankability are **different
+checks** — a corpus can pass the first and still be statistically unrankable.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.7.6';` — no REINDEX.
+
 ## [2.7.5] — 2026-09-09
 
 **The 1-bit dimension sweep is measured, and it produces the sharpest

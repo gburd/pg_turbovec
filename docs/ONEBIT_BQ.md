@@ -455,11 +455,13 @@ it, and this box's rustc miscompiles the turbovec crate
 fail-before verification that the new chain-offset and tie-break tests
 genuinely fail when the bug they guard is reintroduced. CI is the real
 gate for the `#[pg_test]`s.
-  `arnold`). **The harness for that run is built and validated but has
-  NOT been run — no numbers exist yet.** See
-  [`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md) for the runbook, the
-  host rules, the re-rank-window controls, and the predictions recorded
-  in advance; the driver is `benches/scripts/bq/bq_frontier.py`.
+
+The recall / storage / latency frontier **has since been measured** — see
+[`docs/BQ_RECALL_BENCH.md`](BQ_RECALL_BENCH.md) § 0 for the results (flat at
+1024-d, the IVF+BQ arm, and the 256/512/1024-d dimension sweep), § 0.5 for
+what they do not license, and § 0.6d for the mandatory pre-flight probe before
+trusting any synthetic corpus. The driver is
+`benches/scripts/bq/bq_frontier.py`; artefacts are under `benches/results/`.
 
 ---
 

@@ -1,0 +1,7 @@
+-- pg_turbovec 2.8.0 -> 2.8.1
+-- Documentation-only: corrects v2.8.0's cross-scale comparisons (the 1M corpus
+-- is a different model than the 250k one, since the older dataset is now
+-- gated), records a trap in the contention-filtering verification method, and
+-- restores the ground-truth-fix section lost to an earlier rewrite.
+-- Binary byte-identical to 2.8.0. No wire change (v8), no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

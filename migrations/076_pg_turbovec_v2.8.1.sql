@@ -1,0 +1,48 @@
+-- 2.8.1 — corrections to v2.8.0's benchmark write-up. Documentation only:
+-- the binary is byte-identical to 2.8.0. No wire change (v8), no SQL surface
+-- change, no REINDEX.
+--
+-- All three came from the 1M benchmark agent's final report and were verified
+-- before being accepted.
+--
+-- 1. CROSS-SCALE CAVEAT. v2.8.0 presented 1M-vs-250k deltas (IVF's storage
+--    overhead "halving", the per-probe ceilings "landing close to" the 250k
+--    figures) as if both scales shared a corpus. They do not.
+--    Cohere/wikipedia-22-12-en-embeddings is now GATED (confirmed HTTP 401), so
+--    the 1M arm used CohereLabs/wikipedia-2023-11-embed-multilingual-v3 -- same
+--    publisher and dimensionality, DIFFERENT model and snapshot. The 250k
+--    artefacts carry no corpus label at all, corroborating that they came from
+--    a different pre-existing table. Every cross-scale delta is now labelled
+--    suggestive rather than measured. The WITHIN-run flat-vs-IVF comparisons,
+--    which the conclusions actually rest on, are unaffected: both arms of each
+--    run share one corpus.
+--
+-- 2. A TRAP IN THE VERIFICATION METHOD USED FOR v2.8.0'S HEADLINE. The 47%/38%
+--    IVF wins were validated by re-checking on contention-unflagged rows only.
+--    That is unsound whenever the BASELINE does not survive the filter -- and on
+--    the lists=4096 arm it does not: all 8 bw1 flat rows are flagged (they ran
+--    first, while loadavg was still decaying from the k-means build) and ZERO
+--    survive, so a filtered comparison there would "prove" IVF wins against an
+--    empty set. Re-verified: the lists=1024 arm used for the headline keeps all
+--    8 flat rows unflagged, so that check WAS valid -- but partly by luck of
+--    execution order. The rule ("assert the filtered baseline is non-empty") is
+--    now in docs/TESTING.md beside the existing control-arm rule.
+--
+-- 3. RESTORED the ground-truth-fix documentation, now BQ_RECALL_BENCH 0.6f. An
+--    earlier rewrite of 0.6b had overwritten it and a later edit's assert masked
+--    the loss; found by grepping for the measured numbers and getting nothing.
+--    The CODE fix was never affected. The restored section also records the
+--    accidental 1M validation: the run's two arms straddled the fix, giving
+--    3755.7s (INSERT path) vs 275.4s (CTAS path) = 13.6x, with the 16 flat
+--    configs shared by both arms reproducing BIT-IDENTICALLY across the two GT
+--    implementations -- independent confirmation the fix changes no measured
+--    number.
+--
+-- Also: 1M build-memory figures are relabelled LOWER BOUNDS rather than peaks
+-- (the sampler polled every 2s and was stopped before the second arm, so the
+-- lists=4096 build has no RSS measurement at all), and the contention cause is
+-- named -- loadavg decay after each parallel build plus an RSS sampler forking
+-- python every 2s, with cpu_busy_pct of only 3.1-3.2% confirming it was never
+-- saturation.
+--
+-- This migration is intentionally empty.

@@ -4,6 +4,74 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.8.1] — 2026-09-10
+
+**Corrections to v2.8.0's benchmark write-up.** Documentation only — the binary
+is byte-identical to 2.8.0. No wire change (v8), no SQL surface change, no
+REINDEX. All three items came from the 1M benchmark agent's final report and
+were verified before being accepted.
+
+### The 1M corpus is not the same corpus as the 250k runs
+
+v2.8.0 presented 1M-versus-250k deltas — IVF's storage overhead "halving", the
+per-probe ceilings "landing within a hair" of the 250k figures — as though both
+scales shared a corpus. **They do not.**
+`Cohere/wikipedia-22-12-en-embeddings` is now **gated** (confirmed HTTP 401), so
+the 1M arm used `CohereLabs/wikipedia-2023-11-embed-multilingual-v3`: same
+publisher and dimensionality, but a **different model and snapshot**. The 250k
+artefacts carry no corpus label at all, corroborating that they came from a
+different pre-existing table.
+
+Every cross-scale delta is now labelled **suggestive, not measured**. The
+**within-run flat-versus-IVF comparisons are unaffected** — both arms of each
+run share one corpus, and those are what the conclusions rest on.
+
+### A trap in the method used to validate v2.8.0's headline
+
+The 47 % / 38 % IVF wins were validated by re-checking on
+contention-unflagged rows only. That is unsound whenever the **baseline** does
+not survive the filter — and on the `lists = 4096` arm it does not: all 8 bw1
+*flat* rows are flagged (they ran first, while loadavg was still decaying from
+the k-means build) and **zero survive**, so a filtered comparison there would
+"prove" IVF wins against an empty set.
+
+Re-verified: the `lists = 1024` arm used for the headline keeps **all 8 flat
+rows unflagged**, so that check *was* valid — but partly by luck of execution
+order. The rule is now in `docs/TESTING.md` beside the existing control-arm
+rule: **assert the filtered baseline is non-empty before trusting a filtered
+comparison.**
+
+### Restored: the ground-truth-fix documentation (now § 0.6f)
+
+An earlier rewrite of § 0.6b had overwritten it, and a later edit's assertion
+masked the loss — found by grepping for the measured numbers and getting
+nothing. **The code fix was never affected.** The restored section also records
+an accidental validation at 1M scale: the run's two arms straddled the fix,
+giving **3755.7 s** (pre-fix `INSERT` path) versus **275.4 s** (CTAS path) —
+**13.6×**, matching the 12× predicted from the plan shape — and the **16 flat
+configs shared by both arms reproduce bit-identically** across the two GT
+implementations, independent confirmation the fix changes no measured number.
+
+### Also
+
+- 1M **build-memory figures relabelled as lower bounds**, not peaks: the
+  sampler polled every 2 s and was stopped before the second arm, so the
+  `lists = 4096` build has **no RSS measurement at all**.
+- The **contention cause is named**: loadavg decaying after each parallel
+  k-means build (a monotonic decline across consecutive rows) plus an RSS
+  sampler forking a Python interpreter every 2 s. `cpu_busy_pct` of only
+  **3.1–3.2 %** with `cpu_steal ≤ 0.01` confirms it was never saturation.
+- **All 160 configs across both 1M arms ran a real `Index Scan`** — zero masked
+  sequential scans.
+- Recorded honestly: held-out queries are **id-disjoint** from the corpus (join
+  count 0), but **value-disjointness was not proven** — the 100 × 1M text
+  comparison was abandoned as too slow. A duplicate would require the dataset
+  itself to contain duplicate embeddings.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.8.1';` — no REINDEX.
+
 ## [2.8.0] — 2026-09-10
 
 **The 1M IVF+BQ crossover, measured on a real corpus** — plus a parallelised

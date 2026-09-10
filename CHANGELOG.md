@@ -261,12 +261,18 @@ centres are distinct.
 Discarded with a full post-mortem, including the probe to run before trusting
 any generated corpus, in `benches/results/bq_scale_20260909/DISCARDED.md`.
 
-Also surfaced by that arm, and worth fixing independently: the harness's
-ground-truth query puts `row_number() OVER (ORDER BY <distance>)` in a Sort
-**above** the Gather, so parallel workers ship raw vectors to the leader and
-the leader recomputes every distance single-threaded. That is why GT took
-**23 084 s (6.4 h)** for 100 queries at 1 M rows. A plan pathology in the
-harness, not in turbovec.
+Also surfaced by that arm: the harness's ground-truth query wraps
+`row_number() OVER (ORDER BY <distance>)` around the per-query scan, forcing a
+`WindowAgg → Sort → Gather` shape where workers ship rows to the leader and the
+leader sorts the whole corpus (confirmed by `EXPLAIN ANALYZE`: `Gather (actual
+rows=200000, loops=5)` with a 4.3 MB external disk merge, versus per-worker
+top-N heapsort in 31 kB with a constant query vector). A real defect — but
+**not** the reason GT took 23 084 s, which the v2.7.6 notes over-credited it
+for. Restructuring measures **1.00× narrow / 1.25× on 3 KB-wide rows**, and
+6.4 h over 100M comparisons is 231 µs each against a 154 GFLOP job: the cost is
+per-row overhead across five full sorts of a 1 M-row wide table on a pre-AVX2
+host, not the plan. Left unapplied pending validation at 1 M scale on an AVX2
+host.
 Storage *did* confirm the `dim/8` stride and an exact 2.00× 1-bit:2-bit ratio
 at 1 M rows. Note a synthetic corpus can pass `is_degenerate()` and still be
 unrankable — different checks, and only the second predicts whether recall

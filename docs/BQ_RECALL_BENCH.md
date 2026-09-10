@@ -297,12 +297,32 @@ Recorded here so the gap is not mistaken for a result:
   corpus mean before signs can be taken, so BQ's build memory tracks
   `n * dim * 4` regardless of bit width.
 
-  A second finding from that arm, independent of the corpus problem: the
-  harness's GT query puts `row_number() OVER (ORDER BY <distance>)` in a Sort
-  **above** the Gather, so parallel workers ship raw vectors to the leader and
-  the leader recomputes every distance single-threaded. GT took **23 084 s
-  (6.4 h)** for 100 queries at 1 M rows. That is a harness plan pathology, not
-  a turbovec cost, and it is the main thing making a real 1 M arm expensive.
+  A second finding from that arm, independent of the corpus problem, **with a
+  correction to how much it explains.** The harness's GT query wraps
+  `row_number() OVER (ORDER BY <distance>)` around the per-query scan, which
+  forces a `WindowAgg → Sort → Gather` shape: workers ship rows to the leader
+  and the leader sorts the whole corpus. Verified on a local cluster
+  (`EXPLAIN ANALYZE`): `Gather (actual rows=200000, loops=5)` with a **4.3 MB
+  external disk merge**, versus per-worker **top-N heapsort in 31 kB** when the
+  query vector is a constant.
+
+  That is a genuine defect, but **it is not why the 1M arm took 23 084 s
+  (6.4 h)**, and the earlier claim that it was "the main thing" is withdrawn.
+  Measured: restructuring to per-query constant-vector statements is **1.00× on
+  narrow rows and 1.25× on realistic 3 KB-wide rows** — real, but nowhere near
+  the ~1000× the runtime would require. Arithmetic that settles it: 6.4 h over
+  100M comparisons is **231 µs per comparison**, while the whole job is only
+  154 GFLOP (0.04 h even at 1 GFLOP/s). So the time went to **per-row overhead
+  repeated across five full sorts of a 1 M-row wide table on a pre-AVX2 host**
+  — detoast + palloc per comparison, plus spilling to disk — not to the plan
+  shape and not to the distance math.
+
+  Practical consequence: fixing the plan alone would **not** have made that arm
+  affordable on `meh`. A real 1 M arm needs an AVX2 host, and the plan fix is a
+  worthwhile secondary optimisation rather than the blocker. The fix is
+  deliberately **not applied yet** — a 1.25× change to the GT path is not worth
+  touching the code that produces every recall number until it can be validated
+  at 1 M scale on the host that will actually run it.
 
 The open question both arms were meant to answer — **does the rerank window
 needed for a given recall grow with `n`?** — remains unanswered. It needs a

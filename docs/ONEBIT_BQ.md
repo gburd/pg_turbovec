@@ -292,9 +292,10 @@ What differed from the spec above, and the bugs found wiring it:
 - ~~**Recall at scale.**~~ **DONE 2026-09-08.** Measured on `arnold`
   (AVX2) over 250k x 1024-d Cohere-wiki with 100 held-out queries and exact
   ground truth: 3.98x smaller than 4-bit, 2.02x smaller than 2-bit, but
-  2.7-6.1x the latency at matched recall (timings are contention-flagged;
-  ratios defensible, absolute ms indicative -- see BQ_RECALL_BENCH.md 0)
-  and a 25x wider rerank window
+  2.7-6.1x the latency at matched recall (ratios CONFIRMED by a clean re-run
+  on 2026-09-10 after the host's load problem was fixed: 2.75x / 6.09x, with
+  recall reproducing exactly and the original absolute ms ~15% pessimistic --
+  see BQ_RECALL_BENCH.md 0) and a 25x wider rerank window
   needed to clear R@10 >= 0.99. All four pre-registered predictions held.
   See `docs/BQ_RECALL_BENCH.md` § 0 and
   `benches/results/bq_frontier_20260908/`.

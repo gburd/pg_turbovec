@@ -15,7 +15,7 @@ Artefact: `benches/results/bq_frontier_20260908/bq_frontier_arnold_20260908.json
 `latency_publishable = true` (per § 2, latency is only valid on an AVX2
 host).
 
-> ### ⚠ Correction (2026-09-09): every latency row here is `contended_flag = true`
+> ### ⚠ Correction (2026-09-09), RESOLVED (2026-09-10): the original rows were contended; a clean re-run confirms the ratios
 >
 > The v2.7.3 release presented the p50s below without this caveat. That was
 > wrong, and this is the correction. **All 24 rows carry
@@ -41,10 +41,27 @@ host).
 > Nothing about recall, storage, bytes/vector or build time is affected;
 > those are CPU-independent or honestly host-specific.
 >
-> For genuinely clean absolute latency, that stuck `systemd --user` has to be
-> dealt with first. Until then, treat every p50 from `arnold` as carrying this
-> caveat, and check `latency.contention.contended_flag` in any artefact before
-> quoting a number from it. PostgreSQL 17.9, pg_turbovec 2.7.2, `shared_buffers = 2GB`,
+> **RESOLVED 2026-09-10.** The stuck `systemd --user` was fixed on the host, its
+> idle load floor dropped from ~2.0 to **0.46**, and the whole sweep was re-run
+> on the same corpus. Artefact: `benches/results/bq_retime_20260910/`.
+>
+> - **18 of 24 rows now come back clean** (was 0 of 24). The 6 still flagged
+>   drifted over the gate as the sweep itself warmed the box — self-inflicted
+>   load, not foreign.
+> - **Recall reproduced EXACTLY** at every window for all three bit widths —
+>   the third independent confirmation of § 0's recall numbers.
+> - **The contended p50s were uniformly 14–16 % pessimistic** (e.g. bw1 at
+>   window 800: 36.75 → 30.93 ms). Uniform, not erratic, which is exactly what
+>   "noise, not saturation" predicts and is why the ratios survived.
+> - **The published ratios hold to two decimal places**: 1-bit vs 2-bit at
+>   matched recall was 2.70× / 6.13× contended and is **2.75× / 6.09×** clean.
+>   The headline **2.7–6.1×** range is unchanged.
+>
+> So the § 0 tables below are correct as ratios and ~15 % pessimistic in
+> absolute milliseconds. The absolute numbers are left as originally published
+> rather than silently restated, with this correction pointing at the clean
+> artefact — the honest record is more useful than a tidy one. Still check
+> `latency.contention.contended_flag` in any artefact before quoting a p50. PostgreSQL 17.9, pg_turbovec 2.7.2, `shared_buffers = 2GB`,
 postmaster and driver pinned to P-cores 2-5. 250 000 × 1024-d Cohere-wiki
 vectors stored as a native `turbovec.vector` column; **100 held-out
 queries** (verified zero overlap with the indexed corpus); ground truth is

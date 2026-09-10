@@ -528,13 +528,14 @@ contention caveat below) and a
 storage-constrained-workload option, not a default — which is how the
 reloption is documented.
 
-> **Latency caveat.** Every timing row in this run is flagged
-> `contended_flag = true`: `arnold` cannot reach the harness's 1.5 loadavg gate
-> because an unrelated stuck process pins its idle floor near 2.0. Measured CPU
-> busy on the pinned cores was 16–26 %, so this is noise rather than
-> saturation — the **ratios** are the defensible result and the absolute
-> milliseconds are indicative. Recall, storage and build time are unaffected
-> (CPU-independent). Detail: `docs/BQ_RECALL_BENCH.md` § 0.
+> **Latency caveat, now resolved.** Every timing row in this run was flagged
+> `contended_flag = true` (the host could not reach the harness's 1.5 load gate
+> — an unrelated stuck process pinned its idle floor near 2.0). That was fixed
+> and the sweep re-run on 2026-09-10: **recall reproduced exactly**, the
+> contended p50s were uniformly **14–16 % pessimistic**, and the matched-recall
+> **ratios held to two decimal places** (2.70 → 2.75× and 6.13 → 6.09×). So the
+> milliseconds below are ~15 % conservative and the ratios are confirmed.
+> Detail and the clean artefact: `docs/BQ_RECALL_BENCH.md` § 0.
 
 R@10 across the window sweep (1-bit): 0.744 @ 32, 0.899 @ 100, 0.967 @ 256,
 0.981 @ 400, 0.994 @ 800, 1.000 @ 2000. 2-bit is already 0.993 at window 32,

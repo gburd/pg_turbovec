@@ -205,13 +205,13 @@ needs versus 2-bit for R@10 >= 0.95 goes **125x (256-d) -> 25x (512-d) -> 8x
 256-d it needs to rerank 6.4% of the corpus to reach R@10 >= 0.99, which makes
 it **effectively unusable at 256-d and below**. Prefer it at 768-d and up.
 
-The **storage and recall** figures are solid; the **latency ratios are
-indicative, not precise** -- the bench host could not get under the harness's
-load gate (an unrelated stuck process pins its idle loadavg near 2.0), so
-every timing row is flagged contended. Measured CPU busy on the pinned cores
-was only 16-26%, so the effect is noise rather than saturation, but treat the
-milliseconds accordingly. Full curve, that caveat in detail, and the
-pre-registered predictions:
+The **storage, recall and latency ratios** are all confirmed: the original
+timings were taken on a host that could not reach the harness's load gate, so
+the sweep was re-run after that was fixed. Recall reproduced exactly, the
+contended p50s proved uniformly 14-16% pessimistic, and **the ratios held to
+two decimal places** (2.70 -> 2.75x and 6.13 -> 6.09x). Absolute milliseconds
+quoted below are therefore ~15% conservative. Full curve, the resolution, and
+the pre-registered predictions:
 [`docs/BQ_RECALL_BENCH.md`](docs/BQ_RECALL_BENCH.md) § 0. It composes
 with `lists = N` (IVF): `WITH (lists = N, bit_width = 1)` stores the sign
 codes cell-contiguous and probes only `turbovec.probes` cells, combining

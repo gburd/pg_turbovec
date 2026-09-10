@@ -299,6 +299,13 @@ What differed from the spec above, and the bugs found wiring it:
   needed to clear R@10 >= 0.99. All four pre-registered predictions held.
   See `docs/BQ_RECALL_BENCH.md` § 0 and
   `benches/results/bq_frontier_20260908/`.
+- ~~**IVF + 1-bit at 1M.**~~ **MEASURED 2026-09-10** (`BQ_RECALL_BENCH.md`
+  § 0.6e, `benches/results/bq_1m_20260910/`). On a real 1M x 1024-d Cohere
+  corpus the crossover EXISTS but is narrow: IVF beats flat by 47% at
+  R@10 >= 0.90 and 38% at >= 0.95, loses by 12% at >= 0.98, and cannot reach
+  >= 0.99 at all (per-probe ceiling 0.986). For bit_width >= 2 flat wins at
+  every target. IVF storage overhead halves at 1M (+3.1% vs +6.0% at 250k).
+  Two-axis rule: 1-bit + n >= ~1M + target <= ~0.95 -> lists = N; else flat.
 - ~~**IVF + 1-bit.**~~ **MEASURED 2026-09-09** (`docs/BQ_RECALL_BENCH.md`
   § 0.6a, `benches/results/bq_ivf_20260909/`). It builds and scans; storage
   overhead over flat BQ is +6.0 % (a fixed ~8.5 B/vector of IVF metadata,

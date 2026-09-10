@@ -215,7 +215,16 @@ the pre-registered predictions:
 [`docs/BQ_RECALL_BENCH.md`](docs/BQ_RECALL_BENCH.md) § 0. It composes
 with `lists = N` (IVF): `WITH (lists = N, bit_width = 1)` stores the sign
 codes cell-contiguous and probes only `turbovec.probes` cells, combining
-the storage win with the scan win. Note an `INSERT` into an existing
+the storage win with the scan win.
+
+**When IVF actually pays for 1-bit** (measured on a real 1M x 1024-d Cohere
+corpus, AVX-512): at **1M rows** IVF beats flat by **47% at R@10 >= 0.90** and
+**38% at R@10 >= 0.95** -- but it CANNOT reach R@10 >= 0.99 at all, because
+cell-restricted search caps recall per probe count (0.986 max at probes=128).
+At 250k rows flat wins at every target. And for `bit_width >= 2` flat wins
+everywhere up to 1M, because 2-bit only needs a 32-wide rerank window so its
+full scan is already cheap. So: **1-bit + n >= ~1M + target <= ~0.95 -> use
+lists = N; otherwise flat.** Note an `INSERT` into an existing
 IVF+BQ index appends rather than placing the row in its cell, which
 degrades that index to a flat Hamming scan until the next `REINDEX` —
 reportable via `turbovec.index_is_degraded()`.

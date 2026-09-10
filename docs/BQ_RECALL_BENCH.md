@@ -285,115 +285,102 @@ mechanism was misnamed (P-D3, which surfaced the § 3 documentation error), and
 the latency-vs-dim shape was non-linear rather than linear (P-D4). Pre-registration
 earned its keep here precisely by being wrong in public.
 
-### 0.6b Still open: real 1M scale
+### 0.6e 1M REAL corpus (2026-09-10) — the IVF+BQ crossover EXISTS, and it is 1-bit-only
 
-Both were attempted on 2026-09-09 and neither produced usable recall numbers.
-Recorded here so the gap is not mistaken for a result:
+Artefacts: `benches/results/bq_1m_20260910/`. Corpus:
+**CohereLabs/wikipedia-2023-11-embed-multilingual-v3 (en), 1 000 000 × 1024-d**
+— a real embedding corpus, not synthetic. 100 held-out queries. AWS
+`r7i.8xlarge` (32 vCPU, 247 GB, **AVX-512**), so latency is publishable.
 
-- **1M scale** — ran to completion on a *synthetic* 1 M × 768-d corpus and the
-  recall numbers are **discarded as a corpus artefact**, not published. The
-  synthetic corpus was statistically unrankable: 1st vs 100th nearest
-  neighbour differed by only 6.6–10.4 % in cosine distance, versus 37–268 % on
-  the real Cohere-wiki corpus. Full post-mortem, including the resolvability
-  probe you should run before trusting any generated corpus, in
+**Resolvability gate passed** (§ 0.6d): nn1→nn100 spread **154–203 %** across
+5 queries, versus 6.6–10.4 % for the synthetic corpus that had to be discarded.
+This corpus is rankable and the recall numbers mean something.
+
+#### Storage: IVF's overhead halves at 1M
+
+| arm | bytes/vec | index | build |
+|---|---:|---:|---:|
+| bw1 flat | 140.5 | 141 MB | 17.6 s |
+| bw1 + `lists=1024` | 144.8 | 145 MB | 94.2 s |
+| bw2 flat | 278.9 | 279 MB | 14.2 s |
+| bw2 + `lists=1024` | 283.2 | 283 MB | 100.2 s |
+
+**+3.1 %** at 1M, against +6.0 % at 250k — the fixed coarse-centroid and
+cell-directory cost amortises over 4× the rows.
+
+#### The per-probe recall ceiling is structural, not a small-corpus artefact
+
+max R@10 for bw1: flat **1.000**; `lists=1024` at probes 8/16/32/64/128 =
+0.846 / 0.904 / 0.944 / 0.971 / **0.986**. Essentially identical for bw2. These
+are within a hair of the 250k ceilings (0.846/0.906/0.955/0.981/0.989), so
+cell-restricted search caps recall by construction at both scales.
+
+#### THE ANSWER: yes at 1M, but only for 1-bit and only up to R@10 ≈ 0.95
+
+| target | bw1 flat | bw1 IVF (`lists=1024`) | verdict |
+|---|---|---|---|
+| R@10 ≥ 0.90 | 25.6 ms (w=100) | **13.7 ms** (p=64, w=100) | **IVF wins 47 %** |
+| R@10 ≥ 0.95 | 33.2 ms (w=256) | **20.7 ms** (p=128, w=256) | **IVF wins 38 %** |
+| R@10 ≥ 0.98 | **39.3 ms** (w=400) | 44.2 ms (p=128, w=800) | IVF loses 12 % |
+| R@10 ≥ 0.99 | **56.8 ms** (w=800) | unreachable | flat only |
+
+**Verified robust to contention:** re-computing using only rows *without*
+`contended_flag` gives the identical 47 % and 38 % wins, so this is not a load
+artefact. (46 of 96 rows are flagged — the sweep's own parallel workers push
+loadavg over the 1.5 gate on a box that is otherwise idle.)
+
+**For 2-bit the answer is a clean no.** Flat is 4.8 ms at *every* target and IVF
+never gets closer than 16 ms. 2-bit's coarse ranking is accurate enough to need
+only `w=32`, so its full scan is already cheap and cell-restriction is pure
+overhead.
+
+#### Why, mechanically
+
+At 250k, flat dominated IVF+BQ at every target (§ 0.6a). The crossover appears
+at 1M only where **both** conditions hold: flat's `O(n)` scan has grown
+expensive, **and** the quantizer is lossy enough to need a wide rerank window.
+1-bit at 1M needs w=100–256 evaluated over 1M rows; restricting that to 64–128
+cells of ~1000 rows each is a real saving. 2-bit needs only w=32, so there is
+nothing to save.
+
+So the guidance is **two-axis**, not one:
+
+- `bit_width = 1`, n ≳ 1M, recall target ≲ 0.95 → **use `lists = N`**
+- `bit_width = 1`, recall target ≳ 0.98 → **flat** (IVF cannot reach it at all)
+- `bit_width ≥ 2` → **flat**, at least to 1M
+
+Caveats: one corpus, one dimension, `lists = 1024` (a `lists = 4096` arm was
+still running when this was written; if it lands it goes here). The 250k
+boundary in § 0.6a stands — this refines it rather than replacing it.
+
+### 0.6b Answered: real 1M scale (see § 0.6e)
+
+The "does the trade hold at 1M?" question is **closed** — § 0.6e measured it on
+a real 1M × 1024-d Cohere corpus. Retained here only for the negative result
+that preceded it:
+
+- A **synthetic** 1M attempt was discarded, not published, because the generated
+  corpus was statistically unrankable (nn1→nn100 spread 6.6–10.4 % versus
+  37–268 % on a real corpus). Post-mortem, and the resolvability probe that now
+  gates every synthetic corpus, in
   `benches/results/bq_scale_20260909/DISCARDED.md`.
 
-  **Storage and build at 1 M rows ARE valid** and are the salvage — they do not
-  depend on corpus geometry (per-vector codes are `dim/8 * bit_width`, and the
-  flat build is a fixed `O(n * dim)` centre-and-pack pass):
+  **Storage and build from that arm ARE valid** (they do not depend on corpus
+  geometry) and were the salvage:
 
-  | | build | bytes/vec | peak build RssAnon |
+  | 1M × 768-d | build | bytes/vec | peak build RssAnon |
   |---|---:|---:|---:|
   | bw1 | 167.3 s | 104.87 | 8.98 GiB |
   | bw2 | 152.0 s | 209.72 | 5.95 GiB |
   | bw4 | 161.0 s | 404.76 | 6.18 GiB |
 
-  `bw2/bw1 = 2.000` **exactly** at 1 M × 768-d, confirming the `dim/8` sign-code
-  stride holds at scale. Note bw1's peak RSS is the *highest* of the three
-  despite the smallest output — the corpus is read back resident to compute the
-  corpus mean before signs can be taken, so BQ's build memory tracks
-  `n * dim * 4` regardless of bit width.
+  `bw2/bw1 = 2.000` **exactly**, confirming the `dim/8` sign-code stride at 1M.
+  Note bw1 has the **highest** peak build RSS despite the smallest output: BQ
+  reads the corpus back resident to compute the corpus mean before it can take
+  signs, so build memory tracks `n · dim · 4` regardless of bit width.
 
-  A second finding from that arm, independent of the corpus problem, **with a
-  correction to how much it explains.** The harness's GT query wraps
-  `row_number() OVER (ORDER BY <distance>)` around the per-query scan, which
-  forces a `WindowAgg → Sort → Gather` shape: workers ship rows to the leader
-  and the leader sorts the whole corpus. Verified on a local cluster
-  (`EXPLAIN ANALYZE`): `Gather (actual rows=200000, loops=5)` with a **4.3 MB
-  external disk merge**, versus per-worker **top-N heapsort in 31 kB** when the
-  query vector is a constant.
-
-  That is a genuine defect, but **it is not why the 1M arm took 23 084 s
-  (6.4 h)**, and the earlier claim that it was "the main thing" is withdrawn.
-  Measured: restructuring to per-query constant-vector statements is **1.00× on
-  narrow rows and 1.25× on realistic 3 KB-wide rows** — real, but nowhere near
-  the ~1000× the runtime would require. Arithmetic that settles it: 6.4 h over
-  100M comparisons is **231 µs per comparison**, while the whole job is only
-  154 GFLOP (0.04 h even at 1 GFLOP/s). So the time went to **per-row overhead
-  repeated across five full sorts of a 1 M-row wide table on a pre-AVX2 host**
-  — detoast + palloc per comparison, plus spilling to disk — not to the plan
-  shape and not to the distance math.
-
-  **FIXED 2026-09-10, and the win is larger than the first estimate.** My
-  earlier 1.25× figure came from a local test using a `float8` stand-in, which
-  understated the leader-side cost. Re-measured on **real 1024-d
-  `turbovec.vector` data, 250k rows × 20 queries** on a now-quiet `arnold`:
-
-  | | plan | time |
-  |---|---|---:|
-  | correlated LATERAL + `row_number()` | `Gather (actual rows=250000, loops=20)` → **13.9 MB leader quicksort** per query | **148.2 s** |
-  | per-query InitPlan constant | `Gather Merge` → per-worker **top-N heapsort, 33 kB** × 7 workers | **76.8 s** |
-
-  **1.93× faster, and it no longer spills.** 5 M rows stop crossing the
-  Gather boundary.
-
-  **Ground truth is unchanged, verified row-for-row.** GT is what every recall
-  number in § 0 is measured against, so equality was the gate, not a nicety:
-  over 10 queries × top-100, `old EXCEPT new` and `new EXCEPT old` on
-  `(qid, hit_id, rk)` are **both 0**, and membership ignoring rank is also 0.
-  **No published recall figure moves.**
-
-  Two deliberate choices in the fix: it orders by `(distance, id)` rather than
-  distance alone, so tie order is **deterministic** instead of plan-dependent
-  (distances tie often at 1-bit, and an arbitrary tie order would let recall
-  depend on planner choice); and `rk` is assigned by `row_number() OVER ()` over
-  that ordered subquery rather than by a window function inside the scan, which
-  is what let the sort push down into the workers.
-
-  **Second half of the fix, and it is not optional: use `CREATE TABLE AS`, never
-  `INSERT INTO ... SELECT`.** PostgreSQL generates **no parallel plan** for any
-  statement that writes data; the only exemptions are `CREATE TABLE AS`,
-  `SELECT INTO` and `CREATE MATERIALIZED VIEW` (`doc/src/sgml/parallel.sgml`,
-  "The query writes any data"). The first version of this fix wrapped the
-  InitPlan-constant SELECT in an `INSERT`, which silently discarded the very
-  parallelism the fix exists to obtain:
-
-  | form | plan | time |
-  |---|---|---:|
-  | `INSERT INTO ... SELECT` | **serial** `Seq Scan on bqc` | **7.49 s** |
-  | `CREATE TABLE AS` | `Gather Merge`, 6 workers, top-N heapsort 33 kB | **3.99 s** |
-
-  1.88× at 250k — and a concurrent 1M run measured the `INSERT` form at **~36 s
-  per query against ~2.9 s** for the CTAS plan, a **12×** gap, because the
-  serial scan grows linearly with `n` while the parallel one does not. The
-  harness now CTASes each query's top-`gt_depth` into a temp table and then does
-  a cheap `INSERT ... SELECT` of those few rows.
-
-  Ground truth verified identical again after this second change: over
-  10 queries × top-100, the CTAS output matches **both** the original
-  correlated-LATERAL GT and the intermediate INSERT-form GT with **0 rows
-  differing** on `(qid, hit_id, rk)`.
-
-  Worth recording how this was caught: the 1.93× was measured on a bare
-  `SELECT` and then shipped as an `INSERT` — a different statement with a
-  different plan. The concurrent 1M run flagged the discrepancy from its own
-  `pg_stat_activity` (one backend at 99.9 % CPU, zero parallel workers). Measure
-  the statement you are going to ship, not a proxy for it.
-
-The open question both arms were meant to answer — **does the rerank window
-needed for a given recall grow with `n`?** — remains unanswered. It needs a
-real 1 M-row corpus (the 1 M × 1024-d Cohere-wiki table on `arnold` is the
-obvious candidate) with § 0.6's per-row-cast trap avoided.
+Still genuinely open: a **dimension sweep at 1M** (§ 0.6c covered 250k), and
+`lists = 4096` at 1M.
 
 ### 0.6d MANDATORY pre-flight for any synthetic corpus
 

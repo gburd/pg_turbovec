@@ -31,18 +31,58 @@ is essentially a tie and **no quantizer can rank it** — a lossy code has
 nothing to preserve. The measured "recall" is then mostly the tie-breaking
 order, which is exactly what a 1-bit code destroys first.
 
-## Why the generator did this
+## Why the generator did this — and one wrong diagnosis, ruled out
 
-`gen_corpus.sql`: 200 centres drawn iid from N(0,1)^768, then each point is
-`centre + 0.35 * N(0,1)` per coordinate. In 768 dimensions the per-point
-noise vector has norm ≈ `0.35 * sqrt(768)` ≈ 9.7, while inter-centre
-distances are ≈ `sqrt(2 * 768)` ≈ 39. The noise is large enough relative to
-the cluster geometry that ~5000 iid points per cluster concentrate onto a
-thin shell — **distance concentration**, the standard high-dimensional
-failure of iid synthetic data. The dispatch prompt explicitly warned that
-uniform-random high-dim vectors make every point nearly equidistant and
-asked for clustering to avoid it; clustering *was* implemented, but σ = 0.35
-per coordinate at d = 768 re-created the same condition inside each cluster.
+**The clustering worked.** Verified directly on the loaded corpus:
+
+- `centres`: 200 rows, **200 distinct** `cvec` (not 1).
+- `docs`: 200 distinct `cid`, **5000 distinct `embt` per cid**.
+- same-cluster mean distance **0.108** vs cross-cluster **0.990** — a ~9×
+  separation. A query's nearest centre is 0.056; its farthest, 1.079.
+
+**The defect is inside each cluster, not between them.** Within a single
+cluster, the 100 nearest neighbours of a member (excluding itself) span
+**0.089767 → 0.096247, a 7.22 % spread**. That is the tie. 5000 iid Gaussian
+points at d = 768 are mutually near-equidistant: the pairwise separation norm
+concentrates at ≈ `0.35 * sqrt(2 * 768)` ≈ 13.7 with a relative spread of only
+`1/sqrt(2d)` ≈ 2.6 %. Ranking inside that is ranking noise, and a 1-bit code
+is the first thing to lose it.
+
+So the dispatch prompt's warning was heeded at the level it was written —
+clustering *was* implemented — but σ = 0.35 per coordinate at d = 768
+re-created distance concentration **inside** each cluster, which is the same
+failure one level down.
+
+### Ruled out: the uncorrelated-subquery hoist
+
+A plausible alternative diagnosis was raised and is **disproven for this
+corpus**, but it is worth recording because the pattern really is present in
+the SQL:
+
+```sql
+-- gen_corpus.sql, the centres table: the inner subquery never references `c`
+CREATE TABLE centres AS
+SELECT c AS cid,
+       ARRAY(SELECT randn()::real FROM generate_series(1, 768)) AS cvec
+FROM generate_series(1, 200) c;
+```
+
+That is textbook uncorrelated-subquery shape — the same class as the v1.24.0
+test-harness bug in `AGENTS.md`, where an uncorrelated `random()` was hoisted
+and made every row identical. Confirmed minimally on the same cluster:
+
+| form | distinct vectors / rows |
+|---|---|
+| `ARRAY(SELECT random() FROM generate_series(1,4))` | **1 / 5** |
+| same, plus a correlating `WHERE c = c` | **5 / 5** |
+
+So the hazard is genuine and this SQL invites it. But the *loaded* `centres`
+table has 200 distinct rows, so PostgreSQL did **not** hoist it here — the
+volatility of `randn()` (a `VOLATILE` SQL function wrapping `random()`) forced
+per-row evaluation. **Do not "fix" the recall numbers by correlating the
+subquery; that is not what is wrong with them.** Correlate it anyway for
+safety, since the behaviour is plan-dependent and one PostgreSQL version's
+choice is not a guarantee.
 
 ## What IS salvageable from this arm
 

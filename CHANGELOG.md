@@ -157,11 +157,28 @@ statistically unrankable.** Resolvability probe: 1st vs 100th nearest
 neighbour differed by only **6.6–10.4 %** in cosine distance, versus
 **37–268 %** on the real Cohere-wiki corpus. When the top-100 is effectively a
 tie, no quantizer can rank it and "recall" measures the tie-break order.
-Cause: 200 iid Gaussian centres with σ = 0.35 per coordinate at d = 768
-re-created distance concentration *inside* each cluster.
+Cause, narrowed on 2026-09-09 with direct measurement: the **clustering
+worked** (200 distinct centres; same-cluster distance 0.108 vs cross-cluster
+0.990, a 9× separation) — the tie is **inside** each cluster. Within one
+cluster, a member's 100 nearest neighbours span only 7.22 %, because 5000 iid
+Gaussian points at d = 768 concentrate: the pairwise separation norm has a
+relative spread of ≈ `1/sqrt(2d)` ≈ 2.6 %. A plausible competing diagnosis —
+that the generator's uncorrelated `ARRAY(SELECT randn() ...)` subquery had been
+hoisted, making all 200 centres identical (the v1.24.0 harness-bug class) — was
+**tested and ruled out**: the SQL genuinely invites that hoist (reproduced
+minimally: 1 distinct vector across 5 rows uncorrelated, 5 when correlated),
+but `randn()`'s volatility forced per-row evaluation here and the loaded
+centres are distinct.
 
 Discarded with a full post-mortem, including the probe to run before trusting
 any generated corpus, in `benches/results/bq_scale_20260909/DISCARDED.md`.
+
+Also surfaced by that arm, and worth fixing independently: the harness's
+ground-truth query puts `row_number() OVER (ORDER BY <distance>)` in a Sort
+**above** the Gather, so parallel workers ship raw vectors to the leader and
+the leader recomputes every distance single-threaded. That is why GT took
+**23 084 s (6.4 h)** for 100 queries at 1 M rows. A plan pathology in the
+harness, not in turbovec.
 Storage *did* confirm the `dim/8` stride and an exact 2.00× 1-bit:2-bit ratio
 at 1 M rows. Note a synthetic corpus can pass `is_degenerate()` and still be
 unrankable — different checks, and only the second predicts whether recall

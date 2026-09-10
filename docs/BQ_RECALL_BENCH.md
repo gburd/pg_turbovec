@@ -279,13 +279,71 @@ Recorded here so the gap is not mistaken for a result:
   neighbour differed by only 6.6–10.4 % in cosine distance, versus 37–268 % on
   the real Cohere-wiki corpus. Full post-mortem, including the resolvability
   probe you should run before trusting any generated corpus, in
-  `benches/results/bq_scale_20260909/DISCARDED.md`. Storage *did* confirm the
-  `dim/8` stride and an exact 2.00× 1-bit:2-bit ratio at 1 M rows.
+  `benches/results/bq_scale_20260909/DISCARDED.md`.
+
+  **Storage and build at 1 M rows ARE valid** and are the salvage — they do not
+  depend on corpus geometry (per-vector codes are `dim/8 * bit_width`, and the
+  flat build is a fixed `O(n * dim)` centre-and-pack pass):
+
+  | | build | bytes/vec | peak build RssAnon |
+  |---|---:|---:|---:|
+  | bw1 | 167.3 s | 104.87 | 8.98 GiB |
+  | bw2 | 152.0 s | 209.72 | 5.95 GiB |
+  | bw4 | 161.0 s | 404.76 | 6.18 GiB |
+
+  `bw2/bw1 = 2.000` **exactly** at 1 M × 768-d, confirming the `dim/8` sign-code
+  stride holds at scale. Note bw1's peak RSS is the *highest* of the three
+  despite the smallest output — the corpus is read back resident to compute the
+  corpus mean before signs can be taken, so BQ's build memory tracks
+  `n * dim * 4` regardless of bit width.
+
+  A second finding from that arm, independent of the corpus problem: the
+  harness's GT query puts `row_number() OVER (ORDER BY <distance>)` in a Sort
+  **above** the Gather, so parallel workers ship raw vectors to the leader and
+  the leader recomputes every distance single-threaded. GT took **23 084 s
+  (6.4 h)** for 100 queries at 1 M rows. That is a harness plan pathology, not
+  a turbovec cost, and it is the main thing making a real 1 M arm expensive.
 
 The open question both arms were meant to answer — **does the rerank window
 needed for a given recall grow with `n`?** — remains unanswered. It needs a
 real 1 M-row corpus (the 1 M × 1024-d Cohere-wiki table on `arnold` is the
 obvious candidate) with § 0.6's per-row-cast trap avoided.
+
+### 0.6d MANDATORY pre-flight for any synthetic corpus
+
+Learned the expensive way (a 6.4-hour ground-truth build whose recall numbers
+were then unusable). **Before trusting a recall number from generated data, run
+this and require the spread to be comparable to a real corpus:**
+
+```sql
+-- Resolvability probe: is the top-100 actually rankable, or is it a tie?
+WITH q AS (SELECT qid, qvec FROM <query_table> ORDER BY qid LIMIT 5)
+SELECT q.qid,
+       round(min(d)::numeric, 5) AS nn1,
+       round(max(d)::numeric, 5) AS nn100,
+       round((100.0 * (max(d) - min(d)) / greatest(min(d), 1e-9))::numeric, 2)
+         AS spread_pct
+FROM q, LATERAL (SELECT (x.<vec> OPERATOR(<op>) q.qvec) AS d
+                 FROM <corpus> x ORDER BY 1 LIMIT 100) k
+GROUP BY q.qid ORDER BY q.qid;
+```
+
+Reference values, both measured:
+
+| corpus | nn1→nn100 spread | verdict |
+|---|---:|---|
+| real Cohere-wiki, 1024-d | **37–268 %** | rankable |
+| synthetic 200-cluster Gaussian, 768-d | **6.6–10.4 %** | **unusable** |
+
+Under ~10 % the top-100 is a statistical tie, no quantizer can order it, and
+"recall" measures tie-break order rather than retrieval quality.
+
+**Two checks, not one.** `is_degenerate()` (in `onebit.rs`) asks whether every
+sign code is identical — a corpus can pass that and still be unrankable. Only
+this probe predicts whether a recall number will mean anything. And note that
+cluster *separation* is not sufficient either: the discarded corpus had
+well-separated clusters (0.108 within vs 0.990 across) and still failed,
+because 5000 iid points *inside* each cluster concentrated at d = 768.
 
 ### 0.6 Harness finding worth keeping
 

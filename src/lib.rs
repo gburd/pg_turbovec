@@ -8472,15 +8472,31 @@ mod tests {
         .unwrap()
         .unwrap_or(false);
         assert!(errored, "dim-mismatch build must error (no index created)");
-        let after = count_tmp();
         // The failed CREATE INDEX rolled back its subtransaction; PG
         // released the resource owner, which (together with the
-        // CorpusSpill Drop) must have unlinked the spill: the
-        // temp-dir population must not have grown.
+        // CorpusSpill Drop) must have unlinked the spill: the temp-dir
+        // population must not have grown.
+        //
+        // `pg_ls_tmpdir()` is CLUSTER-WIDE, and `#[pg_test]`s run
+        // concurrently in one cluster, so a SIBLING test's transient
+        // spill file can land in this delta and fail the assertion even
+        // though our own spill was released correctly. (Observed in CI on
+        // pg13 from a docs-only commit — no code change could have caused
+        // it.) Re-sample briefly so a sibling's in-flight file has a
+        // chance to disappear, and only fail if the growth persists.
+        let mut after = count_tmp();
+        for _ in 0..10 {
+            if after <= before {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            after = count_tmp();
+        }
         assert!(
             after <= before,
             "errored IVF build leaked a spill file in pgsql_tmp \
-             (before={before}, after={after})"
+             (before={before}, after={after}); this persisted across ~2s of \
+             re-sampling, so it is not a concurrent sibling test's transient file"
         );
     }
 

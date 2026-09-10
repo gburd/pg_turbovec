@@ -183,6 +183,14 @@ Rules that follow:
 - **A wildly varying "before" number is a broken harness, not a flaky
   fix.** Investigate the measurement before relaxing the threshold;
   loosening it would have shipped a test that asserted nothing.
+- **If you filter rows to exclude noisy ones, assert the BASELINE survives the
+  filter.** Discarding contended rows and re-checking a ratio is a good habit,
+  but it silently becomes a lie when the filter removes every baseline row —
+  you then "prove" the treatment wins against an empty set. This actually
+  happened: on one benchmark arm all eight `flat` baseline rows were flagged
+  (they ran first, while load was still decaying) and zero survived, while the
+  IVF rows ran later and survived. The comparison would have looked
+  spectacular and meant nothing. Same shape as the control-arm rule above.
 
 The same reasoning applies to `pg_stat_*` views, checkpoint counters, and
 anything else that is cluster-global rather than backend-local.

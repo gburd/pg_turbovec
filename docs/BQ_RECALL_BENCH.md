@@ -296,6 +296,21 @@ Artefacts: `benches/results/bq_1m_20260910/`. Corpus:
 5 queries, versus 6.6–10.4 % for the synthetic corpus that had to be discarded.
 This corpus is rankable and the recall numbers mean something.
 
+> **⚠ Cross-scale caveat — this is NOT the same corpus as the 250k runs.** The
+> 250k arms (§ 0, § 0.6a, § 0.6c) used the pre-existing `bench_wiki` table on
+> `arnold`, an older Cohere wiki snapshot. `Cohere/wikipedia-22-12-en-embeddings`
+> is now **gated (HTTP 401)** and unreachable without credentials, so the 1M run
+> used `CohereLabs/wikipedia-2023-11-embed-multilingual-v3` — same publisher and
+> dimensionality, but a **different model** (`embed-multilingual-v3`) and
+> snapshot.
+>
+> So any 1M-versus-250k delta below **conflates scale with a corpus change** and
+> must not be read as a pure scale effect. The **within-run flat-versus-IVF
+> comparisons are unaffected**, because both arms of each run share one corpus —
+> and those are the comparisons the conclusions rest on. Where a cross-scale
+> number appears (e.g. IVF's storage overhead halving, or the per-probe ceilings
+> landing close to the 250k figures) treat it as suggestive, not measured.
+
 #### Storage: IVF's overhead halves at 1M
 
 | arm | bytes/vec | index | build |
@@ -326,8 +341,27 @@ cell-restricted search caps recall by construction at both scales.
 
 **Verified robust to contention:** re-computing using only rows *without*
 `contended_flag` gives the identical 47 % and 38 % wins, so this is not a load
-artefact. (46 of 96 rows are flagged — the sweep's own parallel workers push
-loadavg over the 1.5 gate on a box that is otherwise idle.)
+artefact. 46 of 96 rows are flagged, and the cause is benign and identified:
+`cpu_busy_pct` on flagged rows is only **3.1–3.2 %** with `cpu_steal ≤ 0.01`, so
+it is not saturation. Two sources — loadavg *decaying* after each parallel
+k-means build (visible as a monotonic decline across consecutive rows:
+3.96 → 3.72 → 3.50 → 3.30 → 2.95 → 2.65 → 2.26), and an RSS sampler that forked
+a Python interpreter every 2 s and pinned loadavg at exactly 1.00 for the whole
+of arm 1.
+
+> **⚠ A trap in that verification method, worth knowing before you reuse it.**
+> "Filter to unflagged rows and re-check" is only sound if the **baseline
+> survives the filter**. On the `lists = 4096` arm it does not: the bw1 *flat*
+> rows all ran first, while load was still decaying from the build, so **all 8
+> of them are flagged and 0 survive** — an unflagged-only comparison there would
+> silently drop the baseline entirely and "prove" IVF wins against nothing.
+>
+> The check *was* valid for the headline above: on the `lists = 1024` arm all 8
+> bw1 flat rows are unflagged (loadavg 1.0, busy 3.2 %), so both sides of the
+> comparison survived. That was partly luck of execution order. **Always assert
+> the filtered baseline is non-empty before trusting a filtered comparison** —
+> the same lesson as asserting the control arm is non-trivial in the WAL test
+> (`docs/TESTING.md`).
 
 **For 2-bit the answer is a clean no.** Flat is 4.8 ms at *every* target and IVF
 never gets closer than 16 ms. 2-bit's coarse ranking is accurate enough to need
@@ -348,6 +382,24 @@ So the guidance is **two-axis**, not one:
 - `bit_width = 1`, n ≳ 1M, recall target ≲ 0.95 → **use `lists = N`**
 - `bit_width = 1`, recall target ≳ 0.98 → **flat** (IVF cannot reach it at all)
 - `bit_width ≥ 2` → **flat**, at least to 1M
+
+#### Build memory at 1M — treat these as lower bounds
+
+`maintenance_work_mem = 4GB` with 4 parallel maintenance workers held every
+build comfortably inside 247 GB with **no OOM** (contrast the 250k run, where an
+unbounded `3GB` setting got a backend OOM-killed at 20.3 GB on a 31 GB box — see
+`docs/PRODUCTION.md`). Sampled peak anon-RSS:
+
+| arm | peak anon-RSS |
+|---|---:|
+| bw1 flat | ≥ 6.6 GiB |
+| bw2 + `lists = 1024` | ≥ 41.7 GiB |
+| bw1 + `lists = 4096` | **not measured** |
+
+Stated as **lower bounds on purpose**: the sampler polled every 2 s, so a
+shorter spike could have been missed entirely, and it was stopped before the
+second arm — so the 4096 build has no measurement at all. Do not quote these as
+peaks.
 
 #### `lists = 4096` is WORSE than `lists = 1024` — more lists is not better
 
@@ -400,6 +452,65 @@ that preceded it:
 
 Still genuinely open: a **dimension sweep at 1M** (§ 0.6c covered 250k), and
 `lists = 4096` at 1M.
+
+### 0.6f Ground-truth build: two plan defects, fixed and validated
+
+The harness's exact-GT query had two compounding parallelism defects. Both are
+fixed; ground truth is **byte-for-byte unchanged** at each step, so no published
+recall figure moves.
+
+**Defect 1 — the window function forced a leader-side sort.** The original used
+a `CROSS JOIN LATERAL` correlated on `q.qvec` with
+`row_number() OVER (ORDER BY <dist>)` inside, which forces
+`WindowAgg → Sort → Gather`: workers ship **every row** to the leader and the
+leader sorts the whole corpus single-threaded. Verified with `EXPLAIN ANALYZE`
+on real 1024-d data, 250k × 20 queries: `Gather (actual rows=250000, loops=20)`
+— 5 M rows crossing the Gather — with a **13.9 MB leader quicksort** per query,
+**148.2 s**. Replaced with one statement per query whose vector is a scalar
+subquery, making it an **InitPlan constant** so each worker top-N sorts its own
+share (`Gather Merge` → per-worker top-N heapsort, 33 kB): **76.8 s, 1.93×**.
+
+**Defect 2 — `INSERT` silently threw that away again.** My first version of the
+fix wrapped the corrected SELECT in `INSERT INTO ... SELECT`. PostgreSQL
+generates **no parallel plan for any statement that writes data**; the only
+exemptions are `CREATE TABLE AS`, `SELECT INTO` and `CREATE MATERIALIZED VIEW`
+(`doc/src/sgml/parallel.sgml`, "The query writes any data"). Measured, same
+inner query:
+
+| form | plan | time |
+|---|---|---:|
+| `INSERT INTO ... SELECT` | **serial** `Seq Scan` | **7.49 s** |
+| `CREATE TABLE AS` | `Gather Merge`, 6 workers, 33 kB top-N | **3.99 s** |
+
+The harness now CTASes each query's top-`gt_depth` into a temp table, then does
+a cheap `INSERT ... SELECT` of those few rows.
+
+**Validated at 1M scale by accident, which is the best kind.** The two arms of
+the 1M run straddled the fix: arm 1 built GT with the pre-fix `INSERT` path in
+**3755.7 s**, arm 2 with CTAS in **275.4 s** — **13.6×**, matching the 12×
+predicted from the plan shape. The **16 flat configs the two arms share
+reproduce bit-identically** across the two GT implementations (R@10 and R@100
+both, zero mismatches) — third-party confirmation the fix changes no measured
+number.
+
+**Correctness gate, applied at both steps.** GT is what every recall number is
+measured against, so equality was the requirement rather than a nicety: over
+10 queries × top-100, `old EXCEPT new` and `new EXCEPT old` on
+`(qid, hit_id, rk)` are **both 0**, and membership ignoring rank is 0 — checked
+for the InitPlan version *and* again for the CTAS version.
+
+Two deliberate properties: it orders by `(distance, id)` rather than distance
+alone, so tie order is **deterministic** instead of plan-dependent (distances
+tie often at 1-bit, and an arbitrary tie order would let recall depend on
+planner choice); and `rk` comes from `row_number() OVER ()` over the ordered
+subquery rather than a window function inside the scan, which is what lets the
+sort push into the workers.
+
+**The lesson, recorded because it was mine:** I measured a bare `SELECT`, got
+1.93×, then shipped an `INSERT` — a different statement with a different plan —
+and never re-timed. The 1M run caught it from `pg_stat_activity` (one backend at
+99.9 % CPU, zero parallel workers). **Benchmark the statement you are going to
+ship, not a proxy for it.**
 
 ### 0.6d MANDATORY pre-flight for any synthetic corpus
 

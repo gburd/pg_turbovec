@@ -360,6 +360,36 @@ Recorded here so the gap is not mistaken for a result:
   that ordered subquery rather than by a window function inside the scan, which
   is what let the sort push down into the workers.
 
+  **Second half of the fix, and it is not optional: use `CREATE TABLE AS`, never
+  `INSERT INTO ... SELECT`.** PostgreSQL generates **no parallel plan** for any
+  statement that writes data; the only exemptions are `CREATE TABLE AS`,
+  `SELECT INTO` and `CREATE MATERIALIZED VIEW` (`doc/src/sgml/parallel.sgml`,
+  "The query writes any data"). The first version of this fix wrapped the
+  InitPlan-constant SELECT in an `INSERT`, which silently discarded the very
+  parallelism the fix exists to obtain:
+
+  | form | plan | time |
+  |---|---|---:|
+  | `INSERT INTO ... SELECT` | **serial** `Seq Scan on bqc` | **7.49 s** |
+  | `CREATE TABLE AS` | `Gather Merge`, 6 workers, top-N heapsort 33 kB | **3.99 s** |
+
+  1.88× at 250k — and a concurrent 1M run measured the `INSERT` form at **~36 s
+  per query against ~2.9 s** for the CTAS plan, a **12×** gap, because the
+  serial scan grows linearly with `n` while the parallel one does not. The
+  harness now CTASes each query's top-`gt_depth` into a temp table and then does
+  a cheap `INSERT ... SELECT` of those few rows.
+
+  Ground truth verified identical again after this second change: over
+  10 queries × top-100, the CTAS output matches **both** the original
+  correlated-LATERAL GT and the intermediate INSERT-form GT with **0 rows
+  differing** on `(qid, hit_id, rk)`.
+
+  Worth recording how this was caught: the 1.93× was measured on a bare
+  `SELECT` and then shipped as an `INSERT` — a different statement with a
+  different plan. The concurrent 1M run flagged the discrepancy from its own
+  `pg_stat_activity` (one backend at 99.9 % CPU, zero parallel workers). Measure
+  the statement you are going to ship, not a proxy for it.
+
 The open question both arms were meant to answer — **does the rerank window
 needed for a given recall grow with `n`?** — remains unanswered. It needs a
 real 1 M-row corpus (the 1 M × 1024-d Cohere-wiki table on `arnold` is the

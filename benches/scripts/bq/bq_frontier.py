@@ -445,14 +445,31 @@ def build_ground_truth(conn, args):
         # distances tie often at 1-bit, so an arbitrary tie order would make
         # recall figures depend on plan choice. `rk` is assigned client-side
         # from that deterministic order rather than by a window function.
+        # CTAS PER QUERY, then move the rows -- NOT `INSERT INTO ... SELECT`.
+        #
+        # This is the second half of the fix and it is not optional. PostgreSQL
+        # generates NO parallel plan for a statement that writes data; the only
+        # exemptions are CREATE TABLE AS / SELECT INTO / CREATE MATERIALIZED
+        # VIEW (see doc/src/sgml/parallel.sgml, "The query writes any data").
+        # So wrapping the InitPlan-constant SELECT in an INSERT silently threw
+        # away the very parallelism this fix exists to obtain.
+        #
+        # Measured on real 1024-d data at 250k rows, same inner query:
+        #   INSERT INTO ... SELECT : serial `Seq Scan on bqc`,      7.49 s
+        #   CREATE TABLE AS        : `Gather Merge`, 6 workers,     3.99 s
+        # 1.88x, and at 1M scale a sibling run measured the INSERT form at
+        # ~36 s/query against ~2.9 s/query for the CTAS plan -- a 12x gap,
+        # because the serial scan grows linearly while the parallel one does
+        # not. The INSERT form was NOT what I benchmarked before shipping;
+        # catching that is owed to the 1M run flagging it.
         cur.execute(f"SELECT qid FROM {args.query_table} ORDER BY qid")
         qids = [r[0] for r in cur.fetchall()]
         for qid in qids:
+            cur.execute("DROP TABLE IF EXISTS _bq_gt_chunk")
+            # CTAS so the ORDER BY ... LIMIT runs in parallel workers.
             cur.execute(f"""
-                INSERT INTO {args.gt_table} (qid, hit_id, rk)
-                SELECT %s,
-                       t.id,
-                       row_number() OVER ()
+                CREATE TEMP TABLE _bq_gt_chunk AS
+                SELECT t.id AS hit_id, row_number() OVER () AS rk
                 FROM (
                     SELECT t2.id
                     FROM {args.table} t2
@@ -462,7 +479,13 @@ def build_ground_truth(conn, args):
                              t2.id
                     LIMIT {args.gt_depth}
                 ) t
-            """, (qid, qid))
+            """, (qid,))
+            # Cheap: gt_depth rows, no scan of the corpus.
+            cur.execute(f"""
+                INSERT INTO {args.gt_table} (qid, hit_id, rk)
+                SELECT %s, hit_id, rk FROM _bq_gt_chunk
+            """, (qid,))
+        cur.execute("DROP TABLE IF EXISTS _bq_gt_chunk")
         cur.execute(f"CREATE INDEX ON {args.gt_table} (qid)")
         cur.execute(f"SELECT count(*) FROM {args.gt_table}")
         n = cur.fetchone()[0]

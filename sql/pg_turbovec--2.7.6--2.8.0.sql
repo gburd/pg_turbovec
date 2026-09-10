@@ -1,0 +1,7 @@
+-- pg_turbovec 2.7.6 -> 2.8.0
+-- Benchmark/documentation release: the 1M IVF+BQ crossover measured on a real
+-- corpus, lists=4096 shown worse than lists=1024, the GT harness parallelised
+-- (ground truth verified row-for-row identical), and the v2.7.4 contended-
+-- latency caveat resolved with a clean re-run.
+-- No wire change (v8), no SQL surface change, no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

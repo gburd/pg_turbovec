@@ -1,0 +1,62 @@
+-- 2.8.0 — the 1M IVF+BQ crossover measured; GT harness parallelised.
+--
+-- MINOR rather than patch because the benchmark harness's ground-truth path
+-- changed shape (same output, different plan) and the operator-facing guidance
+-- for WITH (lists = N, bit_width = 1) is now materially different. No index
+-- wire-format change (stays v8), no SQL surface change, no REINDEX.
+--
+-- 1. THE 1M CROSSOVER EXISTS, AND IT IS 1-BIT-ONLY. Measured on a REAL corpus
+--    (CohereLabs wikipedia-2023-11-embed-multilingual-v3 en, 1,000,000 x 1024-d,
+--    100 held-out queries) on an AVX-512 host, with the 0.6d resolvability gate
+--    passing at 154-203% nn1->nn100 spread:
+--      R@10 >= 0.90: flat 25.6ms vs IVF 13.7ms (p=64)  -> IVF wins 47%
+--      R@10 >= 0.95: flat 33.2ms vs IVF 20.7ms (p=128) -> IVF wins 38%
+--      R@10 >= 0.98: flat 39.3ms vs IVF 44.2ms         -> IVF loses 12%
+--      R@10 >= 0.99: flat 56.8ms vs IVF UNREACHABLE
+--    Re-checked on contention-unflagged rows only: identical 47%/38%.
+--    For bit_width >= 2 it is a clean NO -- flat is 4.8ms at every target.
+--    Two-axis guidance: 1-bit + n >= ~1M + target <= ~0.95 -> lists = N;
+--    1-bit + target >= 0.98 -> flat; bit_width >= 2 -> flat, at least to 1M.
+--
+-- 2. lists = 4096 IS WORSE THAN lists = 1024 at 1M -- 8.7% more storage, 11x
+--    the build (1067s vs 94s), ~50% higher latency at matched recall. Each cell
+--    holds 4x fewer rows, so a given recall needs ~4x the probes (p=256 where
+--    1024 lists needed p=64). The lists ~ sqrt(n) rule is load-bearing; going
+--    above it is a pure loss for BQ.
+--
+-- 3. The per-probe recall CEILING is structural, not a small-corpus artefact:
+--    0.846/0.904/0.944/0.971/0.986 at probes 8/16/32/64/128 at 1M, within a
+--    hair of the 250k figures. IVF storage overhead HALVES at 1M (+3.1% vs
+--    +6.0%) as the fixed centroid/cell-dir cost amortises.
+--
+-- 4. GT HARNESS PARALLELISED, in two steps, both verified to leave ground truth
+--    row-for-row IDENTICAL (old EXCEPT new = 0 and new EXCEPT old = 0 on
+--    (qid, hit_id, rk), plus membership ignoring rank = 0):
+--      (a) the correlated LATERAL + row_number() forced WindowAgg -> Sort ->
+--          Gather, shipping every row to the leader for a single-threaded sort
+--          (250k x 20 queries: Gather actual rows=250000 loops=20, 13.9 MB
+--          leader quicksort, 148.2s). Replaced by a per-query InitPlan constant
+--          so each worker top-N sorts its own share: 76.8s, 1.93x.
+--      (b) my first version of (a) wrapped that SELECT in INSERT INTO ...
+--          SELECT, and PostgreSQL generates NO parallel plan for a data-writing
+--          statement -- only CTAS / SELECT INTO / CREATE MATVIEW are exempt --
+--          so it silently threw the parallelism away again (serial Seq Scan,
+--          7.49s vs 3.99s CTAS; ~36s vs ~2.9s per query at 1M, 12x). Now
+--          CTASes each query's top-k into a temp table then inserts those few
+--          rows. Caught by the 1M run's pg_stat_activity, not by me: I had
+--          benchmarked a bare SELECT and shipped an INSERT.
+--
+-- 5. The v2.7.4 contended-latency caveat is RESOLVED with data. The bench host's
+--    load problem was fixed and the 250k sweep re-run: 18/24 rows clean (was
+--    0/24), recall reproduced EXACTLY, the contended p50s were uniformly 14-16%
+--    pessimistic, and the published matched-recall ratios held to two decimal
+--    places (2.70x/6.13x -> 2.75x/6.09x). Absolute ms in the 0 tables are left
+--    as published, ~15% conservative, with the correction pointing at the clean
+--    artefact.
+--
+-- 6. Hardened ivf_streaming_build_temp_file_cleanup: it asserted on a
+--    CLUSTER-WIDE pg_ls_tmpdir() delta, so a concurrent #[pg_test]'s transient
+--    spill file failed it (observed on a docs-only commit). Now re-samples and
+--    fails only if the growth persists.
+--
+-- This migration is intentionally empty.

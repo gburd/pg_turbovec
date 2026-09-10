@@ -4,6 +4,105 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.8.0] — 2026-09-10
+
+**The 1M IVF+BQ crossover, measured on a real corpus** — plus a parallelised
+ground-truth path and the v2.7.4 latency caveat resolved with data. Minor
+rather than patch because the harness's GT path changed shape (same output,
+different plan) and the operator guidance for
+`WITH (lists = N, bit_width = 1)` is now materially different. No index
+wire-format change (stays v8), no SQL surface change, no REINDEX.
+
+### The crossover exists at 1M, and it is 1-bit-only
+
+Corpus: **CohereLabs/wikipedia-2023-11-embed-multilingual-v3 (en),
+1 000 000 × 1024-d** — real, not synthetic — with 100 held-out queries, on an
+AVX-512 host. The § 0.6d resolvability gate passed at **154–203 %** nn1→nn100
+spread (the discarded synthetic corpus was 6.6–10.4 %).
+
+| target | bw1 flat | bw1 IVF (`lists=1024`) | verdict |
+|---|---|---|---|
+| R@10 ≥ 0.90 | 25.6 ms | **13.7 ms** (p=64) | **IVF wins 47 %** |
+| R@10 ≥ 0.95 | 33.2 ms | **20.7 ms** (p=128) | **IVF wins 38 %** |
+| R@10 ≥ 0.98 | **39.3 ms** | 44.2 ms | IVF loses 12 % |
+| R@10 ≥ 0.99 | **56.8 ms** | unreachable | flat only |
+
+Re-computed using **only contention-unflagged rows**: identical 47 % / 38 %, so
+this is not a load artefact. **For `bit_width ≥ 2` it is a clean no** — flat is
+4.8 ms at every target and IVF never gets under 16 ms.
+
+Mechanically the crossover needs *both* conditions: flat's `O(n)` scan grown
+expensive **and** a quantizer lossy enough to need a wide rerank window. 1-bit
+at 1M needs w=100–256 over 1M rows, so restricting to 64–128 cells of ~1000
+rows is a real saving; 2-bit needs only w=32, so its scan is already cheap.
+
+**Two-axis guidance**, not one:
+- `bit_width = 1`, n ≳ 1M, target ≲ 0.95 → **`lists = N`**
+- `bit_width = 1`, target ≳ 0.98 → **flat** (IVF cannot reach it)
+- `bit_width ≥ 2` → **flat**, at least to 1M
+
+### `lists = 4096` is worse than `lists = 1024`
+
+A useful negative: quadrupling the list count made **every** axis worse —
+8.7 % more storage, **11×** the build (1067 s vs 94 s), and ~50 % higher
+latency at matched recall (21.5 vs 13.7 ms at R@10 ≥ 0.90). Each cell holds 4×
+fewer rows, so a given recall needs ~4× the probes (`p=256` where 1024 lists
+needed `p=64`). The `lists ≈ sqrt(n)` rule is load-bearing; exceeding it is a
+pure loss for BQ.
+
+Also confirmed: the **per-probe recall ceiling is structural**, not a
+small-corpus artefact (0.846/0.904/0.944/0.971/0.986 at probes 8/16/32/64/128
+at 1M, within a hair of the 250k figures), and IVF's **storage overhead halves
+at 1M** (+3.1 % vs +6.0 %) as the fixed centroid/cell-directory cost amortises.
+
+### Ground truth parallelised — in two steps, the second correcting the first
+
+Both verified to leave GT **row-for-row identical** (`old EXCEPT new` = 0,
+`new EXCEPT old` = 0 on `(qid, hit_id, rk)`, membership ignoring rank = 0), so
+**no published recall figure moves**:
+
+1. The correlated `LATERAL` + `row_number() OVER (ORDER BY dist)` forced
+   `WindowAgg → Sort → Gather`: every row shipped to the leader for a
+   single-threaded sort. At 250k × 20 queries, `Gather (actual rows=250000,
+   loops=20)` with a 13.9 MB leader quicksort, **148.2 s**. Replaced with a
+   per-query InitPlan constant so each worker top-N sorts its own share:
+   **76.8 s, 1.93×**.
+2. **My first version of that fix wrapped the SELECT in `INSERT INTO ...
+   SELECT`, which silently threw the parallelism away again.** PostgreSQL
+   generates no parallel plan for a data-writing statement — only
+   `CREATE TABLE AS` / `SELECT INTO` / `CREATE MATERIALIZED VIEW` are exempt.
+   Serial `Seq Scan` at 7.49 s versus 3.99 s for CTAS; **~36 s vs ~2.9 s per
+   query at 1M, a 12× gap**. Now CTASes each query's top-`k` into a temp table
+   and inserts those few rows.
+
+The second defect was **caught by the 1M benchmark run's `pg_stat_activity`**
+(one backend at 99.9 % CPU, zero parallel workers), not by me. Root cause worth
+naming: I benchmarked a bare `SELECT`, measured 1.93×, then shipped an
+`INSERT` — a different statement with a different plan — and never re-timed.
+**Benchmark the statement you are going to ship, not a proxy for it.**
+
+### The v2.7.4 contended-latency caveat is resolved with data
+
+The bench host's load problem was fixed, so the 250k sweep was re-run on the
+same corpus: **18 of 24 rows now clean** (was 0 of 24), **recall reproduced
+exactly**, the contended p50s were uniformly **14–16 % pessimistic**, and the
+published matched-recall ratios **held to two decimal places** (2.70× / 6.13×
+→ 2.75× / 6.09×). The absolute milliseconds in the § 0 tables are left as
+published — ~15 % conservative — with the correction pointing at the clean
+artefact. An honest record beats a tidy one.
+
+### Also
+
+`ivf_streaming_build_temp_file_cleanup` asserted on a **cluster-wide**
+`pg_ls_tmpdir()` delta, so a concurrent `#[pg_test]`'s transient spill file
+failed it — observed on a docs-only commit, which is definitionally not a
+regression. It now re-samples and fails only if the growth persists. Same
+shared-global-state class as the bench-harness collisions fixed in v2.7.4.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.8.0';` — no REINDEX.
+
 ## [2.7.6] — 2026-09-09
 
 **Documentation consistency pass**, plus a narrowed root cause and salvaged

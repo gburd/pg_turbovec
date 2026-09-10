@@ -349,9 +349,28 @@ So the guidance is **two-axis**, not one:
 - `bit_width = 1`, recall target ≳ 0.98 → **flat** (IVF cannot reach it at all)
 - `bit_width ≥ 2` → **flat**, at least to 1M
 
-Caveats: one corpus, one dimension, `lists = 1024` (a `lists = 4096` arm was
-still running when this was written; if it lands it goes here). The 250k
-boundary in § 0.6a stands — this refines it rather than replacing it.
+#### `lists = 4096` is WORSE than `lists = 1024` — more lists is not better
+
+The second arm landed, and it is a useful negative:
+
+| | `lists = 1024` | `lists = 4096` |
+|---|---:|---:|
+| bytes/vector | 144.8 | **157.4** |
+| build | 94.2 s | **1066.7 s** (11×) |
+| p50 at R@10 ≥ 0.90 | **13.7 ms** (p=64) | 21.5 ms (p=256) |
+| p50 at R@10 ≥ 0.95 | **20.7 ms** (p=128) | 27.9 ms (p=256) |
+| p50 at R@10 ≥ 0.98 | 44.2 ms | **103.6 ms** (flat is 38.3) |
+
+Quadrupling the list count made every axis worse: 8.7 % more storage, **11×**
+the build time, and ~50 % higher latency at matched recall. The reason is the
+per-probe ceiling again — at 4096 lists each cell holds ~4× fewer rows, so
+reaching a given recall needs ~4× the probes (`p=256` where 1024 lists needed
+`p=64`), and probing 256 cells costs more than probing 64 larger ones. The
+`lists ≈ sqrt(n)` rule of thumb (≈1000 at 1M) is doing real work here; going
+above it is a pure loss for BQ.
+
+Caveats: one corpus, one dimension, two list counts. The 250k boundary in
+§ 0.6a stands — this refines it rather than replacing it.
 
 ### 0.6b Answered: real 1M scale (see § 0.6e)
 

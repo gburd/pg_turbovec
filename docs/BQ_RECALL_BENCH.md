@@ -334,12 +334,31 @@ Recorded here so the gap is not mistaken for a result:
   — detoast + palloc per comparison, plus spilling to disk — not to the plan
   shape and not to the distance math.
 
-  Practical consequence: fixing the plan alone would **not** have made that arm
-  affordable on `meh`. A real 1 M arm needs an AVX2 host, and the plan fix is a
-  worthwhile secondary optimisation rather than the blocker. The fix is
-  deliberately **not applied yet** — a 1.25× change to the GT path is not worth
-  touching the code that produces every recall number until it can be validated
-  at 1 M scale on the host that will actually run it.
+  **FIXED 2026-09-10, and the win is larger than the first estimate.** My
+  earlier 1.25× figure came from a local test using a `float8` stand-in, which
+  understated the leader-side cost. Re-measured on **real 1024-d
+  `turbovec.vector` data, 250k rows × 20 queries** on a now-quiet `arnold`:
+
+  | | plan | time |
+  |---|---|---:|
+  | correlated LATERAL + `row_number()` | `Gather (actual rows=250000, loops=20)` → **13.9 MB leader quicksort** per query | **148.2 s** |
+  | per-query InitPlan constant | `Gather Merge` → per-worker **top-N heapsort, 33 kB** × 7 workers | **76.8 s** |
+
+  **1.93× faster, and it no longer spills.** 5 M rows stop crossing the
+  Gather boundary.
+
+  **Ground truth is unchanged, verified row-for-row.** GT is what every recall
+  number in § 0 is measured against, so equality was the gate, not a nicety:
+  over 10 queries × top-100, `old EXCEPT new` and `new EXCEPT old` on
+  `(qid, hit_id, rk)` are **both 0**, and membership ignoring rank is also 0.
+  **No published recall figure moves.**
+
+  Two deliberate choices in the fix: it orders by `(distance, id)` rather than
+  distance alone, so tie order is **deterministic** instead of plan-dependent
+  (distances tie often at 1-bit, and an arbitrary tie order would let recall
+  depend on planner choice); and `rk` is assigned by `row_number() OVER ()` over
+  that ordered subquery rather than by a window function inside the scan, which
+  is what let the sort push down into the workers.
 
 The open question both arms were meant to answer — **does the rerank window
 needed for a given recall grow with `n`?** — remains unanswered. It needs a

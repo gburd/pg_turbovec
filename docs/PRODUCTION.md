@@ -521,7 +521,7 @@ Measured guidance (`docs/BQ_RECALL_BENCH.md` § 0.6e, § 0.6g):
 |---|---|
 | `bit_width = 1`, n ≳ 1M, target ≲ R@10 0.95 | **use `lists = N`** — measured 38–47 % faster |
 | `bit_width = 1`, target ≳ R@10 0.98 | **flat** — IVF cannot reach it at any `probes` |
-| `bit_width ≥ 2`, up to ~1M | **flat** — the scan is already cheap (2-bit measured a clean loss) |
+| `bit_width ≥ 2`, up to ~1M | **flat** — the scan is already cheap. Measured for both 2-bit *and* 4-bit at 1M: 4-bit flat is 6.08 ms at R@10 = **1.000** (window 32), while IVF cannot reach R@10 ≥ 0.98 at any `probes` and is 62 % slower where it does reach. |
 | n well below ~1M | **flat** — measured to win at every target at 250k |
 
 **Two costs to weigh before enabling it on a production index:**

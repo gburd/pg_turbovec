@@ -537,28 +537,39 @@ composes with every `bit_width`. 4-bit IVF is the *original* IVF path
 `bit_width`/kind combination the code rejects is `bit_width = 1` with
 `graph = true`. There is nothing to enable and nothing to wait for.
 
-**2. Will it make your queries faster?** **Probably not, and here is why —
-though this specific combination has NOT been measured.** Be clear about the
-gap: `bit_width = 4` + `lists = N` **was never swept** at either scale. The
-artefacts contain bw1 and bw2 IVF at 1M, and bw1/bw2 IVF at 250k, but bw4 only
-ever appears *flat*.
+**2. Will it make your queries faster?** **No — now measured, not predicted.**
+`bit_width = 4` + `lists = 1024` was swept at 1M on 2026-09-11
+(`benches/results/bq_1m_bw4ivf_20260911/`, 48 configs, AVX-512, all confirmed
+`Index Scan`). Flat wins at every target:
 
-What the mechanism predicts, and why the prediction is well-grounded: the
-crossover needs **two** conditions at once — flat's `O(n)` scan grown expensive
-**and** a quantizer lossy enough to require a wide exact-rerank window. 4-bit
-fails the second:
+| target | bw4 flat | bw4 `lists = 1024` | |
+|---|---|---|---|
+| R@10 ≥ 0.90 | **6.08 ms** (w=32) | 16.04 ms (p=64) | flat by 62 % |
+| R@10 ≥ 0.95 | **6.08 ms** (w=32) | 16.13 ms (p=128) | flat by 62 % |
+| R@10 ≥ 0.98 | **6.08 ms** (w=32) | **unreachable** | flat only |
+| R@10 ≥ 0.99 | **6.08 ms** (w=32) | **unreachable** | flat only |
 
-| `bit_width` | window needed for R@10 ≥ 0.99 | flat p50 |
-|---|---:|---:|
-| 1-bit (1M) | **800** | 56.8 ms |
-| 2-bit (1M) | 32 | 4.8 ms |
-| 4-bit (250k) | 32 | 9.0 ms |
+**Lead with the ceiling, not the milliseconds — the conclusion does not depend
+on any timing at all.** IVF cannot reach R@10 ≥ 0.98 at any setting, and at
+`probes = 128` widening the rerank window from 32 to 2000 leaves recall at
+**exactly 0.959 across all 8 windows** — it does not move by a single query,
+because the true neighbours are not in the probed cells. Recall is
+CPU-independent, so **discard every latency number and bw4 IVF still loses at
+the top two targets.** The 62 % latency gap is corroboration, not the argument.
 
-1-bit needs a **25× wider** window, so confining the scan to a few cells saves
-real work. 4-bit already reaches R@10 = 1.000 at window 32 — its scan is cheap,
-and cell-restriction mostly adds overhead. **2-bit is the direct evidence**: at
-1M it is a clean loss (flat 4.8 ms versus IVF ≥ 16 ms at *every* target), and
-4-bit sits on the same side of that line for the same reason.
+Why flat is unbeatable here: its *cheapest* config is also its *most accurate*
+(**R@10 = 1.000 at window 32, 6.08 ms**), so IVF never gets an opening. That is
+the mechanism § 0.6g originally predicted — the crossover needs both an
+expensive `O(n)` scan **and** a quantizer lossy enough to demand a wide window,
+and 4-bit needs only 32 where 1-bit needs 800. 2-bit measured the same way at
+1M, so all three bit widths now agree.
+
+For completeness, the single sub-flat p50 in 48 rows: at window 2000, IVF is
+116.77 ms versus flat's 122.19 ms (0.96×). It is **not** a win — 0.959 recall
+against flat's 1.000, so it fails a matched-recall comparison — but it is
+published here rather than left for a reader to find. The tightest honest
+statement of "never wins": IVF's fastest configuration *anywhere* is 15.76 ms at
+R@10 = 0.875, against flat's 6.08 ms at R@10 = 1.000.
 
 **3. What could it cost you?** Two things worth weighing before enabling it on
 a production index:
@@ -569,18 +580,65 @@ a production index:
   help, because the true neighbours are not in the probed cells at all. If you
   chose 4-bit you are probably recall-sensitive, so IVF may *cost* you accuracy
   rather than buy you latency.
-- **The build is memory-hungry.** The one `bw4 + lists = 512` index built at
-  1024-d reached **20.3 GB anon-RSS and was OOM-killed** at
-  `maintenance_work_mem = 3GB`; it completed in 50.6 s at `1GB` with 2 parallel
-  maintenance workers. See `docs/PRODUCTION.md`. Bound it explicitly.
+- **Build cost, now measured at 1M — and the OOM worry is retired for this
+  configuration.** With `maintenance_work_mem = '4GB'` and
+  `max_parallel_maintenance_workers = 4` at 1M × 1024-d:
+
+  | arm | bytes/vec | index | build | peak build anon-RSS |
+  |---|---:|---:|---:|---:|
+  | bw4 flat | 559.95 | 534 MB | **14.89 s** | **2.641 GiB** |
+  | bw4 `lists = 1024` | 564.17 | 538 MB | **101.22 s** (6.8×) | **2.154 GiB** |
+
+  These are **real peaks, not lower bounds** — 0.25 s sampling, 466 in-build
+  samples, from a pure-bash sampler that left idle loadavg at 0.00–0.01. Note
+  IVF's peak is *below* flat's, and 2.6 GiB is nowhere near the **20.3 GB** an
+  *unbounded* `3GB` setting reached on the 250k `bw4 + lists = 512` build (which
+  was OOM-killed on a 31 GB box). **So the memory hazard is about leaving
+  `maintenance_work_mem` unbounded, not about 4-bit IVF itself** — bound it and
+  this configuration is cheap. The real cost is the **6.8× build time**, which
+  matters more if you rebuild often. See `docs/PRODUCTION.md`.
+
+  Storage overhead here is **+0.75 %**. Do **not** pair that with § 0.6e's
+  +3.1 % as though it were a bit-width effect — those are different runs and the
+  resolvability caveat below applies.
+
+> **Caveat on comparing this arm to § 0.6e.** Its resolvability spread was
+> **18.6–69.1 %**, well below the **154–203 %** § 0.6e measured on nominally the
+> same corpus and shards. Both clear the ~10 % unusable floor, so each run's
+> *internal* flat-versus-IVF comparison stands — but the discrepancy is
+> **unexplained**, so do not treat this arm and § 0.6e as the same corpus.
+> Cross-run deltas between them (storage overhead, ceilings) are suggestive
+> only. This is the second corpus-identity surprise in this document; the first
+> forced the v2.8.1 corrections.
+>
+> Two further notes for anyone re-running: all 48 latency rows carry
+> `contended_flag = true` from loadavg decaying after the 438 s parallel GT build
+> (`cpu_busy` 3.8–40.2 %, `cpu_steal` ≤ 0.03 %), and the unflagged-row filter is
+> **unavailable** here — 0 of 8 flat and 0 of 40 IVF rows survive it, exactly the
+> trap § 0.6e warns about. The bias runs *against* IVF (flat ran at 22.0 % mean
+> `cpu_busy` versus IVF's 6.1 %, a 3.6× difference in CPU busy, or 1.87× in mean
+> loadavg) and flat still won by 62 %, so a quiet re-time could only widen flat's
+> margin. And GT took **438.4 s**, not the ~275 s § 0.6f reports — it was on the
+> parallel-CTAS path, so this is not a harness regression, but the 1.6×
+> discrepancy is unexplained and is flagged so a future diff does not misread it.
 
 **Recommended course:** measure it on your own data rather than trusting either
-the prediction above or a published curve. Build `WITH (lists = N)` on a copy
+the measurement above or a published curve. Build `WITH (lists = N)` on a copy
 with `maintenance_work_mem` bounded, and compare against your existing flat
 index **at your recall target** — not at whatever target a benchmark chose. That
 is decisive in a way this document cannot be, especially since (per § 0.6e's
 cross-scale caveat) the published 1M numbers come from a different corpus than
 the 250k ones. Your corpus is the only authority for your workload.
+
+**What this arm does and does not settle.** If your recall target is **≥ 0.98**
+you are answered at *any* scale: the per-probe ceiling is structural, not a size
+effect, so IVF cannot reach it for 4-bit however large `n` grows. If your target
+is **≲ 0.90 and your corpus is well above 1M**, this arm does **not** answer you
+— flat's `O(n)` scan keeps growing while IVF's probed-cell cost does not, so a
+crossover could appear further out. Nothing here measures 4-bit IVF beyond 1M.
+
+This arm also extends the "`bit_width ≥ 2` → flat" half of § 0.6e's two-axis
+rule from 2-bit to 4-bit at 1M; the 1-bit half is unchanged.
 
 ### 0.6d MANDATORY pre-flight for any synthetic corpus
 

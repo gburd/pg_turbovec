@@ -1,0 +1,6 @@
+-- pg_turbovec 2.8.2 -> 2.8.3
+-- Documentation-only: bit_width=4 + lists=N measured at 1M (flat wins at every
+-- target; IVF cannot reach R@10 >= 0.98 at any probes), the build-memory OOM
+-- worry retired for that configuration, and AWS burner-account rules recorded.
+-- Binary byte-identical to 2.8.2. No wire change (v8), no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

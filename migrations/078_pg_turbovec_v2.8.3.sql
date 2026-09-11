@@ -1,0 +1,50 @@
+-- 2.8.3 — bit_width=4 + IVF MEASURED at 1M. Documentation only; the binary is
+-- byte-identical to 2.8.2. No wire change (v8), no SQL surface change, no
+-- REINDEX.
+--
+-- Answers the production user's question with data instead of a prediction.
+-- v2.8.2 clarified that 4-bit IVF is SUPPORTED and gave a mechanism-based
+-- forecast that it would not help. That forecast is now confirmed by
+-- measurement: 1M x 1024-d real Cohere corpus, AVX-512, 48 configs, every one
+-- confirmed to run a real Index Scan.
+--
+--   R@10 >= 0.90: flat 6.08ms (w=32) vs IVF 16.04ms (p=64)  -> flat by 62%
+--   R@10 >= 0.95: flat 6.08ms (w=32) vs IVF 16.13ms (p=128) -> flat by 62%
+--   R@10 >= 0.98: flat 6.08ms        vs IVF UNREACHABLE
+--   R@10 >= 0.99: flat 6.08ms        vs IVF UNREACHABLE
+--
+-- The write-up LEADS WITH THE RECALL CEILING rather than the latencies, because
+-- the conclusion does not depend on any timing: at probes=128, widening the
+-- rerank window from 32 to 2000 leaves recall at EXACTLY 0.959 across all 8
+-- windows -- it does not move by a single query, because the true neighbours are
+-- not in the probed cells. Recall is CPU-independent, so discarding every
+-- latency number still leaves 4-bit IVF losing at the top two targets. Flat's
+-- CHEAPEST config is also its MOST ACCURATE (R@10 = 1.000 at window 32), so IVF
+-- never gets an opening.
+--
+-- THE OOM WORRY IS RETIRED for this configuration, which may matter more to an
+-- operator than the latency result: peak build anon-RSS is 2.6 GiB at
+-- 1M/1024-d with maintenance_work_mem='4GB' and 4 parallel maintenance workers
+-- -- real peaks from 0.25s sampling (466 in-build samples), not lower bounds,
+-- and IVF's peak is BELOW flat's. The 20.3 GB OOM kill recorded earlier came
+-- from leaving maintenance_work_mem UNBOUNDED, not from 4-bit IVF itself. The
+-- genuine cost is the 6.8x build time (101.22s vs 14.89s).
+--
+-- Caveats recorded rather than glossed: all 48 latency rows are
+-- contention-flagged and the unflagged-row filter is UNAVAILABLE here (0 of 8
+-- flat and 0 of 40 IVF rows survive it -- exactly the trap 0.6e documents),
+-- though the bias runs AGAINST IVF so the conclusion holds; a SECOND
+-- corpus-identity surprise (this arm's resolvability spread is 18.6-69.1%
+-- against 0.6e's 154-203% on nominally the same shards, unexplained, so the two
+-- runs must not be treated as same-corpus); and GT took 438.4s against 0.6f's
+-- ~275s on the same parallel-CTAS path, flagged so a future diff does not
+-- misread it as a harness regression.
+--
+-- Scope: a >=0.98 user is answered at ANY scale, since the per-probe ceiling is
+-- structural rather than a size effect. A <=0.90 user well above 1M is NOT
+-- answered by this arm.
+--
+-- Also: AGENTS.md gains an AWS section (it had none), recording the new `lava`
+-- burner and the rules that let a mid-run account expiry cost zero data.
+--
+-- This migration is intentionally empty.

@@ -4,6 +4,96 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.8.3] — 2026-09-11
+
+**`bit_width = 4` + IVF measured at 1M — flat wins at every target.** This
+answers the production user's question with data rather than the forecast
+v2.8.2 shipped. Documentation only; the binary is byte-identical to 2.8.2. No
+wire change (v8), no SQL surface change, no REINDEX.
+
+### The measurement
+
+1M × 1024-d real Cohere corpus, AVX-512, 48 configs, **every one confirmed to
+run a real `Index Scan`**. Artefacts:
+`benches/results/bq_1m_bw4ivf_20260911/`.
+
+| target | bw4 flat | bw4 `lists = 1024` | |
+|---|---|---|---|
+| R@10 ≥ 0.90 | **6.08 ms** (w=32) | 16.04 ms (p=64) | flat by 62 % |
+| R@10 ≥ 0.95 | **6.08 ms** (w=32) | 16.13 ms (p=128) | flat by 62 % |
+| R@10 ≥ 0.98 | **6.08 ms** (w=32) | **unreachable** | flat only |
+| R@10 ≥ 0.99 | **6.08 ms** (w=32) | **unreachable** | flat only |
+
+**The write-up leads with the recall ceiling, not the latencies, because the
+conclusion does not depend on any timing.** At `probes = 128`, widening the
+rerank window from 32 to 2000 leaves recall at **exactly 0.959 across all 8
+windows** — it does not move by a single query, because the true neighbours are
+not in the probed cells. Recall is CPU-independent, so **discard every latency
+number and 4-bit IVF still loses at the top two targets.** Flat's *cheapest*
+config is also its *most accurate* (R@10 = 1.000 at window 32), so IVF never
+gets an opening. The 62 % gap is corroboration.
+
+Published for completeness rather than left for a reader to find: the one
+sub-flat p50 in 48 rows is at window 2000, IVF 116.77 ms versus flat 122.19 ms
+(0.96×). It is **not** a win — 0.959 recall against 1.000 — so it fails a
+matched-recall comparison. The tightest honest framing: IVF's fastest
+configuration *anywhere* is 15.76 ms at R@10 = 0.875, against flat's 6.08 ms at
+R@10 = 1.000.
+
+### The OOM worry is retired for this configuration
+
+Possibly more actionable for an operator than the latency result. At 1M × 1024-d
+with `maintenance_work_mem = '4GB'` and 4 parallel maintenance workers:
+
+| arm | bytes/vec | index | build | peak build anon-RSS |
+|---|---:|---:|---:|---:|
+| bw4 flat | 559.95 | 534 MB | **14.89 s** | **2.641 GiB** |
+| bw4 `lists = 1024` | 564.17 | 538 MB | **101.22 s** (6.8×) | **2.154 GiB** |
+
+**Real peaks, not lower bounds** — 0.25 s sampling, 466 in-build samples, from a
+pure-bash sampler that left idle loadavg at 0.00–0.01. IVF's peak is *below*
+flat's, and 2.6 GiB is nowhere near the 20.3 GB an **unbounded** `3GB` setting
+reached on the earlier 250k build. **The hazard is leaving
+`maintenance_work_mem` unbounded, not 4-bit IVF.** The genuine cost is the
+**6.8× build time**.
+
+### Caveats, recorded rather than glossed
+
+- All 48 latency rows are contention-flagged, and the unflagged-row filter is
+  **unavailable** here: 0 of 8 flat and 0 of 40 IVF rows survive it — exactly
+  the trap § 0.6e documents. The bias runs *against* IVF (flat ran at 22.0 %
+  mean `cpu_busy` versus IVF's 6.1 %, a 3.64× difference; mean loadavg 1.87×)
+  and flat still won by 62 %, so a quiet re-time could only widen flat's margin.
+- **A second corpus-identity surprise.** This arm's resolvability spread was
+  **18.6–69.1 %** against § 0.6e's **154–203 %** on nominally the same corpus
+  and shards. Both clear the ~10 % unusable floor so each run's internal
+  comparison stands, but the discrepancy is unexplained and the two runs must
+  **not** be treated as same-corpus. The first such surprise forced the v2.8.1
+  corrections.
+- Ground truth took **438.4 s** against § 0.6f's ~275 s on the same
+  parallel-CTAS path. Unexplained, flagged so a future diff does not misread it
+  as a harness regression.
+- **Scope:** a ≥ 0.98 user is answered at *any* scale, since the per-probe
+  ceiling is structural rather than a size effect. A ≲ 0.90 user well above 1M
+  is **not** answered by this arm.
+
+Also closed a gap the previous 1M run left open: held-out queries are
+**value**-disjoint as well as id-disjoint (`value_overlap = 0` via md5 hash
+join).
+
+### Operational: AWS burner rules
+
+`AGENTS.md` had no AWS section, which is what let a mid-run account expiry stand
+a benchmark instance up with no way to terminate it (account `bene` expired at
+12:03 UTC, ~48 min after launch; `InvalidClientTokenId` on a previously-working
+key means the *account* went away, not that you broke something). Added the
+current burner (`lava`) and the rules that made that incident cost **zero data**
+— chiefly *pull artefacts as you go*.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.8.3';` — no REINDEX.
+
 ## [2.8.2] — 2026-09-10
 
 **4-bit IVF is supported — the "1-bit-only" result was about *benefit*, not

@@ -8013,14 +8013,28 @@ mod tests {
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
-            "2.8.2",
+            "2.8.2", "2.8.3",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        // Say WHICH versions differ, not just that they do. This assertion has
+        // fired twice on a release where the only fault was a new
+        // `migrations/NNN_*.sql` whose version had not been added to the list
+        // above, and both times the bare "don't match" message meant hunting
+        // for the delta by hand. The set difference is the actionable part.
+        let missing: Vec<&String> = sigils
+            .iter()
+            .filter(|v| !expected_owned.contains(v))
+            .collect();
+        let extra: Vec<&String> = expected_owned
+            .iter()
+            .filter(|v| !sigils.contains(v))
+            .collect();
         assert_eq!(
             sigils, expected_owned,
-            "migrations/*.sql sigils don't match the documented release \
-             history. Update this list, scripts/drift-check.sh § 9, \
-             and docs/UPGRADING.md together.",
+            "migrations/*.sql sigils don't match the documented release history.\n  \
+             in migrations/ but NOT in this list (add them here): {missing:?}\n  \
+             in this list but NOT in migrations/ (typo, or a missing file): {extra:?}\n  \
+             Update this list, scripts/drift-check.sh § 9, and docs/UPGRADING.md together.",
         );
     }
 

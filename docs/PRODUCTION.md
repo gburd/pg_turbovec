@@ -505,6 +505,72 @@ or index-AM change). Full guide with worked CTEs:
 
 ---
 
+## Should you enable IVF (`WITH (lists = N)`)? — decide it on your own data
+
+`WITH (lists = N)` works with **every** `bit_width`. If someone tells you IVF is
+"1-bit only", that is a misreading of a benchmark result about *which
+`bit_width` benefits*, not about what is supported — 4-bit IVF is the original
+IVF path and has been out-of-core end-to-end since v1.13.0.
+
+**The trade in one paragraph.** IVF prunes the scan to the nearest
+`turbovec.probes` cells, so it trades a *bounded* recall ceiling for a smaller
+scan. That helps when your scan is the bottleneck and hurts when it is not.
+Measured guidance (`docs/BQ_RECALL_BENCH.md` § 0.6e, § 0.6g):
+
+| your situation | recommendation |
+|---|---|
+| `bit_width = 1`, n ≳ 1M, target ≲ R@10 0.95 | **use `lists = N`** — measured 38–47 % faster |
+| `bit_width = 1`, target ≳ R@10 0.98 | **flat** — IVF cannot reach it at any `probes` |
+| `bit_width ≥ 2`, up to ~1M | **flat** — the scan is already cheap (2-bit measured a clean loss) |
+| n well below ~1M | **flat** — measured to win at every target at 250k |
+
+**Two costs to weigh before enabling it on a production index:**
+
+1. **IVF caps recall, and widening the rerank window does not fix it.** The
+   ceiling is per-probe-count: 0.986 at `probes = 128`, with R@10 ≥ 0.99
+   unreachable at any setting in the measured runs. The true neighbours are
+   simply not in the probed cells, so no amount of exact re-ranking recovers
+   them. Check this against *your* recall requirement first.
+2. **Build memory.** See the next section — bound `maintenance_work_mem`
+   explicitly or a high-dim, many-list build can get the backend OOM-killed.
+
+### The 20-minute experiment that beats any published curve
+
+Published numbers come from someone else's corpus. Since v2.8.1 the 1M and 250k
+figures in this project even come from *different* corpora (the older dataset
+became gated), so cross-scale deltas there are suggestive rather than measured.
+**Your corpus is the only authority for your workload.** Run this:
+
+```sql
+-- 1. Baseline: what does your CURRENT index give you, at YOUR target?
+--    Use a held-out query set -- rows NOT in the index -- or you will
+--    measure a 1/k floor instead of recall.
+	iming on
+SELECT id FROM docs
+ ORDER BY emb OPERATOR(turbovec.<=>) $1 LIMIT 10;   -- repeat, take the median
+
+-- 2. Build an IVF copy alongside it. lists ~ sqrt(n): ~1000 at 1M.
+--    Do NOT exceed sqrt(n) -- lists=4096 at 1M measured 11x the build time
+--    and ~50% HIGHER latency than lists=1024.
+SET maintenance_work_mem = '1GB';          -- bound it; see the next section
+SET max_parallel_maintenance_workers = 2;
+CREATE INDEX docs_ivf ON docs
+  USING turbovec (emb turbovec.vec_cosine_ops)
+  WITH (bit_width = 4, lists = 1024);       -- your bit_width, unchanged
+
+-- 3. Sweep probes and find where recall meets YOUR bar.
+SET turbovec.probes = 32;   -- then 64, 128; recall rises, latency rises
+```
+
+Then compare **at matched recall**, not at matched settings — an iso-knob
+comparison flatters whichever index happens to get a wider effective window.
+Verify with `EXPLAIN` that you are getting `Index Scan using docs_ivf`, because a
+sequential-scan fallback will look like a latency result and is not one.
+
+If IVF does not clear your recall bar at any `probes`, that is your answer:
+`DROP INDEX docs_ivf` and stay flat. A negative result from your own data is
+worth more than a positive one from someone else's.
+
 ## Bound `maintenance_work_mem` for high-dim IVF builds
 
 A high-dimension, many-list IVF build can get the backend **killed by the

@@ -224,7 +224,15 @@ cell-restricted search caps recall per probe count (0.986 max at probes=128).
 At 250k rows flat wins at every target. And for `bit_width >= 2` flat wins
 everywhere up to 1M, because 2-bit only needs a 32-wide rerank window so its
 full scan is already cheap. So: **1-bit + n >= ~1M + target <= ~0.95 -> use
-lists = N; otherwise flat.** Note an `INSERT` into an existing
+lists = N; otherwise flat.**
+
+> That is guidance about **when IVF is worth enabling**, not about what is
+> supported. `WITH (lists = N)` composes with **every** `bit_width` and always
+> has -- 4-bit IVF is the original IVF path, out-of-core end-to-end since
+> v1.13.0. The only combination the code rejects is `bit_width = 1` with
+> `graph = true`. If you are on 4-bit and want IVF, nothing is blocking you;
+> see [`docs/BQ_RECALL_BENCH.md`](docs/BQ_RECALL_BENCH.md) 0.6g for what to
+> expect and what has actually been measured. Note an `INSERT` into an existing
 IVF+BQ index appends rather than placing the row in its cell, which
 degrades that index to a flat Hamming scan until the next `REINDEX` —
 reportable via `turbovec.index_is_degraded()`.

@@ -285,7 +285,21 @@ mechanism was misnamed (P-D3, which surfaced the § 3 documentation error), and
 the latency-vs-dim shape was non-linear rather than linear (P-D4). Pre-registration
 earned its keep here precisely by being wrong in public.
 
-### 0.6e 1M REAL corpus (2026-09-10) — the IVF+BQ crossover EXISTS, and it is 1-bit-only
+### 0.6e 1M REAL corpus (2026-09-10) — the IVF+BQ crossover EXISTS, and the *benefit* is 1-bit-only
+
+> **Read this heading precisely — it is about which `bit_width` BENEFITS, not
+> which is SUPPORTED.** A production user read the original phrasing
+> ("the crossover is 1-bit-only") as meaning IVF cannot be combined with
+> `bit_width = 4`, and asked whether support could be added. It already exists.
+>
+> **`WITH (lists = N)` works with every `bit_width`, and always has.** 4-bit IVF
+> is the *original* IVF path — out-of-core end-to-end since v1.13.0 — and 2-bit
+> and 3-bit work too. The only `bit_width`/kind combination the code rejects is
+> `bit_width = 1` with `graph = true` (`options.rs`). Nothing about IVF is
+> gated on `bit_width`.
+>
+> What is 1-bit-only is the **measured latency win** below. See § 0.6g for what
+> that means for a 4-bit user, and for the honest limits of what was measured.
 
 Artefacts: `benches/results/bq_1m_20260910/`. Corpus:
 **CohereLabs/wikipedia-2023-11-embed-multilingual-v3 (en), 1 000 000 × 1024-d**
@@ -511,6 +525,62 @@ sort push into the workers.
 and never re-timed. The 1M run caught it from `pg_stat_activity` (one backend at
 99.9 % CPU, zero parallel workers). **Benchmark the statement you are going to
 ship, not a proxy for it.**
+
+### 0.6g "I'm on `bit_width = 4` and I want IVF" — you already have it
+
+Prompted by a production report. Three separate questions get conflated here,
+so they are answered separately.
+
+**1. Is it supported?** **Yes, and it always has been.** `WITH (lists = N)`
+composes with every `bit_width`. 4-bit IVF is the *original* IVF path
+(out-of-core end-to-end since v1.13.0); 2-bit and 3-bit work as well. The only
+`bit_width`/kind combination the code rejects is `bit_width = 1` with
+`graph = true`. There is nothing to enable and nothing to wait for.
+
+**2. Will it make your queries faster?** **Probably not, and here is why —
+though this specific combination has NOT been measured.** Be clear about the
+gap: `bit_width = 4` + `lists = N` **was never swept** at either scale. The
+artefacts contain bw1 and bw2 IVF at 1M, and bw1/bw2 IVF at 250k, but bw4 only
+ever appears *flat*.
+
+What the mechanism predicts, and why the prediction is well-grounded: the
+crossover needs **two** conditions at once — flat's `O(n)` scan grown expensive
+**and** a quantizer lossy enough to require a wide exact-rerank window. 4-bit
+fails the second:
+
+| `bit_width` | window needed for R@10 ≥ 0.99 | flat p50 |
+|---|---:|---:|
+| 1-bit (1M) | **800** | 56.8 ms |
+| 2-bit (1M) | 32 | 4.8 ms |
+| 4-bit (250k) | 32 | 9.0 ms |
+
+1-bit needs a **25× wider** window, so confining the scan to a few cells saves
+real work. 4-bit already reaches R@10 = 1.000 at window 32 — its scan is cheap,
+and cell-restriction mostly adds overhead. **2-bit is the direct evidence**: at
+1M it is a clean loss (flat 4.8 ms versus IVF ≥ 16 ms at *every* target), and
+4-bit sits on the same side of that line for the same reason.
+
+**3. What could it cost you?** Two things worth weighing before enabling it on
+a production index:
+
+- **IVF caps recall, and no knob recovers it.** Cell-restricted search has a
+  hard per-probe ceiling — 0.986 at `probes = 128`, with R@10 ≥ 0.99
+  **unreachable at any setting** (§ 0.6e). Widening the rerank window does not
+  help, because the true neighbours are not in the probed cells at all. If you
+  chose 4-bit you are probably recall-sensitive, so IVF may *cost* you accuracy
+  rather than buy you latency.
+- **The build is memory-hungry.** The one `bw4 + lists = 512` index built at
+  1024-d reached **20.3 GB anon-RSS and was OOM-killed** at
+  `maintenance_work_mem = 3GB`; it completed in 50.6 s at `1GB` with 2 parallel
+  maintenance workers. See `docs/PRODUCTION.md`. Bound it explicitly.
+
+**Recommended course:** measure it on your own data rather than trusting either
+the prediction above or a published curve. Build `WITH (lists = N)` on a copy
+with `maintenance_work_mem` bounded, and compare against your existing flat
+index **at your recall target** — not at whatever target a benchmark chose. That
+is decisive in a way this document cannot be, especially since (per § 0.6e's
+cross-scale caveat) the published 1M numbers come from a different corpus than
+the 250k ones. Your corpus is the only authority for your workload.
 
 ### 0.6d MANDATORY pre-flight for any synthetic corpus
 

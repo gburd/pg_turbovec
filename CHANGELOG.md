@@ -4,6 +4,77 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.8.2] — 2026-09-10
+
+**4-bit IVF is supported — the "1-bit-only" result was about *benefit*, not
+support.** Documentation only; the binary is byte-identical to 2.8.1. No wire
+change (v8), no SQL surface change, no REINDEX.
+
+### The report, and the answer
+
+A production user running `bit_width = 4` read v2.8.0's "the 1M IVF+BQ crossover
+is 1-bit-only" as meaning IVF cannot be combined with 4-bit, and asked whether
+support could be added.
+
+**It already exists and always has.** `WITH (lists = N)` composes with **every**
+`bit_width` — 4-bit IVF is the *original* IVF path, out-of-core end-to-end since
+v1.13.0, and 2-bit and 3-bit work too. The only `bit_width`/kind combination the
+code rejects is `bit_width = 1` with `graph = true`
+(`src/index/options.rs`). Verified by grepping every rejection site: there is no
+`bit_width` gate on IVF anywhere in the tree. **Nothing to enable, nothing to
+wait for.**
+
+The misreading is this project's fault, not the user's — the guidance paragraph
+sits inside the README's 1-bit section, so a 4-bit reader lands on it naturally.
+Corrected in the README, and § 0.6e's heading is restated as "the crossover
+EXISTS, and the ***benefit*** is 1-bit-only" with a callout naming the
+misreading so the next reader does not repeat it.
+
+### New § 0.6g — a 4-bit user's three questions, answered separately
+
+They were being conflated:
+
+1. **Is it supported?** Yes.
+2. **Will it help?** Probably not — **and this combination was never
+   measured**, stated plainly rather than implied. `bit_width = 4` +
+   `lists = N` does not appear in *any* artefact at either scale; bw4 is only
+   ever swept flat. The mechanism predicts no win: the crossover needs **both**
+   an expensive `O(n)` scan **and** a quantizer lossy enough to demand a wide
+   rerank window, and 4-bit needs only a **32-wide** window versus **800** for
+   1-bit, so its scan is already cheap and cell-restriction mostly adds
+   overhead. 2-bit is the direct evidence — a clean loss at 1M for exactly that
+   reason.
+3. **What could it cost?** Two things. The **per-probe recall ceiling** (0.986
+   at `probes = 128`; R@10 ≥ 0.99 unreachable at any setting, and widening the
+   rerank window does *not* recover it, because the true neighbours are not in
+   the probed cells). And **build memory** — `bw4 + lists = 512` at 1024-d
+   reached 20.3 GB anon-RSS and was OOM-killed at
+   `maintenance_work_mem = 3GB`.
+
+### New: "Should you enable IVF?" in `docs/PRODUCTION.md`
+
+A decision table plus a **20-minute experiment an operator can run on their own
+data**: baseline at *their* recall target, build an IVF copy with
+`maintenance_work_mem` bounded, sweep `probes`, compare at **matched recall**
+(not matched settings — an iso-knob comparison flatters whichever index gets a
+wider effective window), and verify with `EXPLAIN` that it really is an
+`Index Scan` rather than a sequential-scan fallback dressed up as a latency
+result.
+
+The reasoning behind pushing users toward their own measurement: since v2.8.1
+this project's own 1M and 250k figures come from **different corpora** (the
+older Cohere dataset became gated), so published cross-scale deltas are
+suggestive rather than measured. A user's corpus is the only authority for their
+workload, and a negative result from their data is worth more than a positive
+one from ours.
+
+A measurement of `bw4 + lists = 1024` at 1M is in flight and will replace
+§ 0.6g's prediction with a number when it lands.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.8.2';` — no REINDEX.
+
 ## [2.8.1] — 2026-09-10
 
 **Corrections to v2.8.0's benchmark write-up.** Documentation only — the binary

@@ -1,0 +1,50 @@
+-- 2.8.2 — clarify that 4-bit IVF is supported; add an operator decision guide.
+-- Documentation only: the binary is byte-identical to 2.8.1. No wire change
+-- (v8), no SQL surface change, no REINDEX.
+--
+-- PROMPTED BY A PRODUCTION REPORT. A user running bit_width = 4 read v2.8.0's
+-- "the 1M IVF+BQ crossover is 1-bit-only" as meaning IVF cannot be combined
+-- with 4-bit, and asked whether support could be added.
+--
+-- IT ALREADY EXISTS AND ALWAYS HAS. WITH (lists = N) composes with every
+-- bit_width; 4-bit IVF is the ORIGINAL IVF path, out-of-core end-to-end since
+-- v1.13.0; 2-bit and 3-bit work too. The only bit_width/kind combination the
+-- code rejects is bit_width = 1 with graph = true (src/index/options.rs).
+-- Verified by grepping every rejection site in the tree -- there is no
+-- bit_width gate on IVF anywhere.
+--
+-- The misreading is this project's documentation fault, not the user's: the
+-- guidance paragraph sits inside the README's 1-bit section, so a 4-bit reader
+-- lands on it naturally. Corrected in three places, with the 0.6e heading
+-- restated as "the crossover EXISTS, and the *benefit* is 1-bit-only".
+--
+-- NEW BQ_RECALL_BENCH 0.6g answers a 4-bit user's three distinct questions
+-- separately, because they were being conflated:
+--   1. Is it supported? YES, nothing to enable.
+--   2. Will it help? Probably not -- AND THIS COMBINATION WAS NEVER MEASURED,
+--      stated plainly rather than implied. bit_width = 4 + lists = N does not
+--      appear in any artefact at either scale; bw4 is only ever swept FLAT. The
+--      mechanism predicts no win: the crossover needs BOTH an expensive O(n)
+--      scan AND a quantizer lossy enough to demand a wide rerank window, and
+--      4-bit needs only a 32-wide window (versus 800 for 1-bit) so its scan is
+--      already cheap. 2-bit is the direct evidence -- a clean loss at 1M for
+--      exactly that reason.
+--   3. What could it cost? The per-probe recall CEILING (0.986 at probes=128,
+--      R@10 >= 0.99 unreachable at any setting, and widening the rerank window
+--      does NOT recover it), plus the build-memory edge -- bw4 + lists=512 at
+--      1024-d reached 20.3 GB anon-RSS and was OOM-killed at
+--      maintenance_work_mem = 3GB.
+--
+-- NEW PRODUCTION.md section "Should you enable IVF?" -- a decision table plus a
+-- 20-minute experiment an operator can run on their OWN data: baseline at their
+-- own recall target, build an IVF copy with maintenance_work_mem bounded, sweep
+-- probes, compare at MATCHED RECALL (not matched settings), and verify with
+-- EXPLAIN that it is really an Index Scan. Since v2.8.1 this project's own 1M
+-- and 250k figures come from DIFFERENT corpora (the older dataset became
+-- gated), so a user's corpus is the only authority for their workload. A
+-- negative result from their data is worth more than a positive one from ours.
+--
+-- A measurement of bw4 + lists=1024 at 1M is in flight and will replace 0.6g's
+-- prediction with a number when it lands.
+--
+-- This migration is intentionally empty.

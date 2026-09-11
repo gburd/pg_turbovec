@@ -1,0 +1,7 @@
+-- pg_turbovec 2.8.1 -> 2.8.2
+-- Documentation-only: clarifies that WITH (lists = N) is supported for EVERY
+-- bit_width (a production user read the "1-bit-only" benchmark result as a
+-- support restriction), and adds an operator decision guide for whether to
+-- enable IVF, with a recipe for measuring it on your own data.
+-- Binary byte-identical to 2.8.1. No wire change (v8), no REINDEX.
+-- Intentionally empty but MUST exist so ALTER EXTENSION ... UPDATE succeeds.

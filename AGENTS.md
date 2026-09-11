@@ -258,6 +258,39 @@ than ~60s with `benches/scripts/lib/with-heartbeat.sh`. Poll with
 
 ---
 
+## AWS burner accounts — check expiry BEFORE launching
+
+Bench work on EC2 runs in short-lived burner accounts that **expire without
+warning**, and an expiring account strands whatever it was running.
+
+**Current burner: `lava` → account `769093516156`, region `us-east-2`**
+(configured in `~/.aws/config`).
+
+Expired/dead, do not use: `bene` (292759875395, expired **2026-09-11 12:03
+UTC**), and before it `chiuso`, `lala`, `fred`, `egret`, `numa`.
+
+Rules, each of which has been paid for at least once:
+
+- **Verify the profile before you launch:** `aws sts get-caller-identity
+  --profile lava`. A launch on a nearly-expired account is money you cannot
+  reclaim, because you lose the ability to terminate.
+- **`InvalidClientTokenId` on a profile that worked minutes ago means the
+  account expired, not that you broke something.** Do not spend turns retrying
+  — check `get-caller-identity`, then escalate. On 2026-09-11 an agent burned
+  ~20 retries over 15 minutes on exactly this.
+- **NEVER open a security group to `0.0.0.0/0`** — it killed an earlier burner.
+  Scope SSH to the current egress `/32` (`curl -s https://checkip.amazonaws.com`;
+  it churns between Starlink and Comcast ranges), or use SSM with no inbound
+  port at all.
+- **Tag every instance `run=<something>`** and touch only your own tag. Other
+  people's untagged instances share these accounts — there is an untagged
+  `i4i.metal` in `lava` right now that is not ours.
+- **Pull artefacts down as you go, not at the end.** The 2026-09-11 run survived
+  a mid-run account expiry with zero data loss purely because the agent had
+  already copied everything locally.
+- **Terminate first, report second** if you are low on turns. A forgotten
+  `i4i.8xlarge` once ran for days.
+
 ## Operational gotchas
 
 - **Never `kill -9` a running postmaster.** Crash recovery truncates

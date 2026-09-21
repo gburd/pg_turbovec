@@ -369,8 +369,8 @@ unsafe fn aminsert_relfile(
 /// `ivf_degraded` is stamped, so `turbovec.index_is_degraded(rel)` reports
 /// `true` and `ambeginscan` emits the throttled degradation WARNING
 /// naming the index -- REINDEX restores the cells. (The TurboQuant IVF
-/// insert path degrades too, but blanks `lists` outright and is therefore
-/// NOT reportable; see the note in `xact::validate_flush_snapshot`.)
+/// insert path degrades the same way and, since Phase Z1, reports it the
+/// same way -- see `relfile::reconcile_and_write_flush`.)
 /// Real cell-aware incremental insert is future work, not attempted here.
 unsafe fn insert_bq_row(index_relation: pg_sys::Relation, value: Vector, id: u64) -> bool {
     use crate::index::onebit;

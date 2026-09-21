@@ -1023,6 +1023,7 @@ pub(crate) unsafe fn write_full(
         None,
         None,
         None,
+        /*degraded_lists=*/ 0,
     );
 }
 
@@ -1229,6 +1230,18 @@ pub(crate) unsafe fn reconcile_and_write_flush(
     lock_relfile_write(rel);
 
     let disk_meta = read_meta(rel);
+    // Phase Z1: remember whether this index was built IVF, BEFORE the
+    // rewrite plans a fresh (necessarily flat) meta page. This append
+    // cannot place the row in its cell without an O(n) reshuffle, so the
+    // index really does degrade to a flat scan -- but `lists` must
+    // survive so that degradation is REPORTABLE
+    // (`turbovec.index_is_degraded()` + the throttled `ambeginscan`
+    // WARNING) instead of the IVF identity being silently erased.
+    // Read under the already-held exclusive rewrite lock.
+    let degraded_lists = match &disk_meta {
+        Some(m) if m.index_was_ivf() => m.lists,
+        _ => 0,
+    };
     let stride = (dim as usize) * (bit_width as usize) / 8;
 
     let (n_vectors, out_codes, out_scales, out_ids) = match disk_meta {
@@ -1336,6 +1349,7 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         Some(prepared),
         None,
         None,
+        degraded_lists,
     );
 
     unlock_relfile_write(rel);
@@ -1410,6 +1424,7 @@ pub(crate) unsafe fn write_full_with_prepared(
         Some(prepared),
         None,
         None,
+        /*degraded_lists=*/ 0,
     );
 }
 
@@ -1448,6 +1463,7 @@ pub(crate) unsafe fn write_full_with_prepared_ivf(
         Some(prepared),
         Some(ivf),
         None,
+        /*degraded_lists=*/ 0,
     );
 }
 
@@ -1488,6 +1504,7 @@ pub(crate) unsafe fn write_full_with_prepared_graph(
         Some(prepared),
         None,
         Some(graph),
+        /*degraded_lists=*/ 0,
     );
 }
 
@@ -1537,6 +1554,7 @@ pub(crate) unsafe fn write_full_with_prepared_graph_and_tombstones(
         } else {
             Some(tombstones)
         },
+        /*degraded_lists=*/ 0,
     );
 }
 
@@ -1828,6 +1846,7 @@ unsafe fn write_full_inner(
     prepared: Option<PreparedParts<'_>>,
     ivf: Option<IvfParts<'_>>,
     graph: Option<GraphParts<'_>>,
+    degraded_lists: u32,
 ) {
     write_full_inner_with_tombstones(
         rel,
@@ -1842,6 +1861,7 @@ unsafe fn write_full_inner(
         ivf,
         graph,
         None,
+        degraded_lists,
     )
 }
 
@@ -1872,6 +1892,7 @@ unsafe fn write_full_inner_with_tombstones(
     ivf: Option<IvfParts<'_>>,
     graph: Option<GraphParts<'_>>,
     tombstones: Option<&[u8]>,
+    degraded_lists: u32,
 ) {
     // v1.7.1 revert: restored to v1.6.0's single-pass batched-
     // GenericXLog flow. Phase W-2 (v1.7.0) split this into
@@ -1999,6 +2020,26 @@ unsafe fn write_full_inner_with_tombstones(
         if iv.colbert {
             meta.mark_colbert();
         }
+    } else if degraded_lists > 0 {
+        // Phase Z1: a DEGRADING write of an index that was built IVF
+        // (the deferred-commit `aminsert` flush -- see
+        // `reconcile_and_write_flush`). Keep `lists` so
+        // `index_was_ivf()` stays true and the operator-facing
+        // signals fire (`turbovec.index_is_degraded()` plus the
+        // throttled `ambeginscan` WARNING), but leave every
+        // coarse/cell-dir OFFSET at zero so `read_coarse_centroids`
+        // / `read_cell_directory` return nothing and the scan takes
+        // the flat fallback DETERMINISTICALLY (not by a length
+        // coincidence). Byte-for-byte the same contract the 1-bit BQ
+        // path already implements in `write_full_bq_parts`; before
+        // Z1 this branch did not exist, so `lists` came back 0 and
+        // the degradation was invisible.
+        //
+        // NOTE: no chain is added or moved here -- only two meta
+        // scalars change -- so no running-sum/chain-offset audit is
+        // implicated (this project's recurrent corruption class).
+        meta.lists = degraded_lists;
+        meta.ivf_degraded = true;
     }
     // v6 graph (Phase G-2a): lay the adjacency chain out after EVERY
     // prior chain (including the IVF chains above, though a graph

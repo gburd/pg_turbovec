@@ -10468,6 +10468,173 @@ mod tests {
     /// Phase E-2a: when an IVF index DOES degrade to flat (the
     /// last-resort safety-net path, simulated here by forcing the
     /// `ivf_degraded` meta flag), the degradation is OBSERVABLE: the
+    /// Phase Z1 corollary: a SECOND insert into an `assign_dups > 1`
+    /// (IVF-4a soft-assignment) index must not be mistaken for on-disk
+    /// corruption.
+    ///
+    /// Soft assignment legitimately stores a boundary vector's external id
+    /// in more than one cell, so the deferred-flush duplicate-id guard in
+    /// `reconcile_and_write_flush` is deliberately gated to `m.lists == 0`
+    /// (the bijective flat kind). Before Z1 the FIRST insert blanked
+    /// `lists` to 0, so the SECOND insert re-read that meta, took the
+    /// `m.lists == 0` branch, found the perfectly legal duplicates and
+    /// raised ERRCODE_DATA_CORRUPTED with a bogus REINDEX hint --
+    /// a false corruption report against a healthy index.
+    ///
+    /// Preserving `lists` keeps the guard correctly skipped. This asserts
+    /// the second insert SUCCEEDS and the index is still not corrupt.
+    #[pg_test]
+    fn ivf_soft_assign_second_insert_is_not_false_corruption() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_z1sa", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_z1sa_idx ON ivf_z1sa \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 2)",
+        )
+        .unwrap();
+
+        let insert = |id: i32| {
+            Spi::run(&format!(
+                "INSERT INTO ivf_z1sa \
+                 SELECT {id}, ('[' || array_to_string(array(\
+                    SELECT ((({id} * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
+                    FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector"
+            ))
+            .unwrap();
+        };
+
+        // First insert degrades the index (expected, and now reportable).
+        insert(9001);
+        // THE ASSERTION: the second insert must not raise. Pre-Z1 this
+        // path read back `lists = 0` and false-reported DATA_CORRUPTED
+        // because soft-assigned duplicate ids look like a bijection
+        // violation once the IVF identity is gone.
+        insert(9002);
+
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT is_corrupt FROM turbovec.turbovec_check('ivf_z1sa_idx'::regclass)"
+            )
+            .unwrap(),
+            Some(false),
+            "a soft-assigned IVF index that took inserts is degraded, NOT corrupt"
+        );
+        // Both inserted rows must be findable through the flat fallback.
+        for id in [9001, 9002] {
+            let found: Option<i64> = Spi::get_one(&format!(
+                "SELECT id FROM ivf_z1sa ORDER BY emb OPERATOR(turbovec.<=>) \
+                 (SELECT emb FROM ivf_z1sa WHERE id = {id}) LIMIT 1"
+            ))
+            .unwrap();
+            assert_eq!(found, Some(id as i64), "inserted row {id} must be findable");
+        }
+    }
+
+    /// Phase Z1: an ordinary (TurboQuant) IVF index that takes an
+    /// `INSERT` degrades to a flat scan -- and that degradation MUST be
+    /// REPORTABLE, exactly as the 1-bit BQ path already reports it
+    /// (`onebit_ivf_insert_degrades_observably_and_stays_findable`).
+    ///
+    /// Before Z1 the TurboQuant reconcile-flush wrote a meta page from
+    /// `plan_with_blocked`, which never sets `lists` -- so `lists` came
+    /// back 0, `index_was_ivf()` went false, `is_degraded()` reported
+    /// FALSE and the `ambeginscan` WARNING never fired. The operator got
+    /// a quietly slower index with no signal and nothing to act on.
+    ///
+    /// The degradation itself is accepted (placing a row in its cell
+    /// would be an O(n) reshuffle); being silent about it is the defect.
+    /// Slower-but-correct is fine, undetectable is not.
+    #[pg_test]
+    fn ivf_insert_degradation_is_reportable() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_z1", 2000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_z1_idx ON ivf_z1 \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        let degraded = || -> bool {
+            Spi::get_one("SELECT turbovec.index_is_degraded('ivf_z1_idx'::regclass)")
+                .unwrap()
+                .expect("index_is_degraded")
+        };
+        assert!(
+            !degraded(),
+            "freshly-built IVF index must not report degraded"
+        );
+
+        // One ordinary INSERT through the deferred-commit aminsert path.
+        Spi::run(
+            "INSERT INTO ivf_z1 \
+             SELECT 9001, ('[' || array_to_string(array(\
+                SELECT (((9001 * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
+                FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector",
+        )
+        .unwrap();
+
+        // THE Z1 ASSERTION. Fails before the fix (reports false because
+        // `lists` was blanked to 0), passes after.
+        assert!(
+            degraded(),
+            "an INSERT into a TurboQuant IVF index must report the index as DEGRADED \
+             (`lists` preserved + `ivf_degraded` stamped), not blank the IVF identity \
+             silently -- that report is what tells an operator to REINDEX"
+        );
+
+        // `lists` must survive, or the operator cannot tell it was ever IVF.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_z1_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert_eq!(
+                meta.lists, 16,
+                "`lists` must be PRESERVED through the degrading insert, or the \
+                 operator cannot tell the index was ever built IVF"
+            );
+            assert!(
+                meta.index_was_ivf(),
+                "index_was_ivf() must stay true after the degrading insert"
+            );
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // Degraded is not corrupt: the chains stay internally consistent.
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT is_corrupt FROM turbovec.turbovec_check('ivf_z1_idx'::regclass)"
+            )
+            .unwrap(),
+            Some(false),
+            "degraded is not corrupt"
+        );
+
+        // Correctness through the flat fallback: the new row is findable
+        // and a pre-existing row is undamaged.
+        let found: Option<i64> = Spi::get_one(
+            "SELECT id FROM ivf_z1 ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM ivf_z1 WHERE id = 9001) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(found, Some(9001), "the inserted row must be findable");
+        let old: Option<i64> = Spi::get_one(
+            "SELECT id FROM ivf_z1 ORDER BY emb OPERATOR(turbovec.<=>) \
+             (SELECT emb FROM ivf_z1 WHERE id = 123) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(old, Some(123), "a pre-existing row must survive intact");
+
+        // REINDEX is the documented recovery.
+        Spi::run("REINDEX INDEX ivf_z1_idx").unwrap();
+        assert!(!degraded(), "REINDEX must restore the IVF cell metadata");
+    }
+
     /// `turbovec.index_is_degraded()` function returns true and the
     /// scan still returns correct results via the flat fallback (and
     /// emits the throttled WARNING). `lists` is preserved so the

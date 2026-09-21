@@ -10495,12 +10495,13 @@ mod tests {
         )
         .unwrap();
 
+        // dim 16 + the same generator as `ivf2_make_corpus`.
         let insert = |id: i32| {
             Spi::run(&format!(
                 "INSERT INTO ivf_z1sa \
                  SELECT {id}, ('[' || array_to_string(array(\
-                    SELECT ((({id} * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
-                    FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector"
+                    SELECT sin({id}::float8 / 50.0 + s::float8)::float8 \
+                    FROM generate_series(1, 16) s), ',') || ']')::vector"
             ))
             .unwrap();
         };
@@ -10521,14 +10522,19 @@ mod tests {
             Some(false),
             "a soft-assigned IVF index that took inserts is degraded, NOT corrupt"
         );
-        // Both inserted rows must be findable through the flat fallback.
+        // Both inserted rows must be findable. Top-k membership, not a
+        // top-1 self-match: the sin() corpus has exact cosine ties (see
+        // the note in `ivf_insert_degradation_is_reportable`).
         for id in [9001, 9002] {
-            let found: Option<i64> = Spi::get_one(&format!(
-                "SELECT id FROM ivf_z1sa ORDER BY emb OPERATOR(turbovec.<=>) \
-                 (SELECT emb FROM ivf_z1sa WHERE id = {id}) LIMIT 1"
+            let present = Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM (\
+                    SELECT id FROM ivf_z1sa ORDER BY emb OPERATOR(turbovec.<=>) \
+                    (SELECT emb FROM ivf_z1sa WHERE id = {id}) LIMIT 10\
+                 ) t WHERE t.id = {id})"
             ))
-            .unwrap();
-            assert_eq!(found, Some(id as i64), "inserted row {id} must be findable");
+            .unwrap()
+            .expect("exists");
+            assert!(present, "inserted row {id} must be findable");
         }
     }
 
@@ -10569,11 +10575,14 @@ mod tests {
         );
 
         // One ordinary INSERT through the deferred-commit aminsert path.
+        // Must match `ivf2_make_corpus`: dim 16, same generator, plain
+        // `::vector`. `g = 9001` keeps it distinguishable from the corpus
+        // while staying on the same sin() manifold.
         Spi::run(
             "INSERT INTO ivf_z1 \
              SELECT 9001, ('[' || array_to_string(array(\
-                SELECT (((9001 * 7919 + s * 104729) % 2000)::float8 / 1000.0) - 1.0 \
-                FROM generate_series(1, 64) s), ',') || ']')::turbovec.vector",
+                SELECT sin(9001::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector",
         )
         .unwrap();
 
@@ -10617,18 +10626,32 @@ mod tests {
 
         // Correctness through the flat fallback: the new row is findable
         // and a pre-existing row is undamaged.
-        let found: Option<i64> = Spi::get_one(
-            "SELECT id FROM ivf_z1 ORDER BY emb OPERATOR(turbovec.<=>) \
-             (SELECT emb FROM ivf_z1 WHERE id = 9001) LIMIT 1",
-        )
-        .unwrap();
-        assert_eq!(found, Some(9001), "the inserted row must be findable");
-        let old: Option<i64> = Spi::get_one(
-            "SELECT id FROM ivf_z1 ORDER BY emb OPERATOR(turbovec.<=>) \
-             (SELECT emb FROM ivf_z1 WHERE id = 123) LIMIT 1",
-        )
-        .unwrap();
-        assert_eq!(old, Some(123), "a pre-existing row must survive intact");
+        //
+        // NOT asserted via `LIMIT 1` self-match: `ivf2_make_corpus` is
+        // `sin(g/50 + s)`, which is periodic with period 100*pi ~ 314, so
+        // row 9001 ties row 1147 at cosine 1.000000 and row 123 has a
+        // 0.999995 neighbour. A top-1 assertion would be a coin flip on
+        // tie order. Assert membership in a small top-k window instead --
+        // that still fails loudly if the row is missing or the rewrite
+        // damaged the chains, without depending on tie-breaking.
+        let in_topk = |id: i64| -> bool {
+            Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM (\
+                    SELECT id FROM ivf_z1 ORDER BY emb OPERATOR(turbovec.<=>) \
+                    (SELECT emb FROM ivf_z1 WHERE id = {id}) LIMIT 10\
+                 ) t WHERE t.id = {id})"
+            ))
+            .unwrap()
+            .expect("exists")
+        };
+        assert!(
+            in_topk(9001),
+            "the inserted row must be findable through the (now flat) scan"
+        );
+        assert!(
+            in_topk(123),
+            "a pre-existing row must survive the insert rewrite intact"
+        );
 
         // REINDEX is the documented recovery.
         Spi::run("REINDEX INDEX ivf_z1_idx").unwrap();

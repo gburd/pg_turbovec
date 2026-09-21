@@ -170,11 +170,31 @@ the row in its cell without an O(n) reshuffle, so both insert paths append and
 fall back to a flat scan. That trade-off is fine; being *silent* about it is
 not. The BQ path preserves `lists` and stamps `ivf_degraded` so
 `turbovec.index_is_degraded()` and the throttled `ambeginscan` WARNING both
-fire. The TurboQuant path blanks `lists` and reports nothing - a known gap,
-tracked as **Phase Z1**. Rule for new work: any path that quietly drops trained
+fire. The TurboQuant path used to blank `lists` and report nothing; **Phase Z1
+fixed that** (it now stamps both fields on the degrading flush). Rule for new
+work: any path that quietly drops trained
 structure (IVF cells, centroids, tombstone bitmaps) must leave a
 machine-readable flag AND a user-visible warning. Slower-but-correct is
 acceptable; undetectable is not - an operator cannot fix what does not report.
+
+**The two insert paths write at DIFFERENT times - tests must match.** BQ
+writes synchronously inside `aminsert`; TurboQuant only marks the cache dirty
+and defers the relfile write to the `PreCommit` xact callback. A `#[pg_test]`'s
+outer transaction always rolls back before PreCommit, so **a plain `INSERT` in a
+test never exercises the TurboQuant flush path** - it will pass while testing
+nothing, or fail for the wrong reason. Drive it with
+`xact::flush_to_relfile_for_test`. Copying the BQ test's shape for a TurboQuant
+path is how Phase Z1 initially failed CI on all seven legs.
+
+**`assign_dups > 1` (IVF-4a soft assignment) indexes are effectively
+READ-ONLY.** Soft assignment repeats an external id across cells by design, so
+`slot_to_id` is not a bijection, and the insert path loads the whole index into
+a flat `IdMapIndex::from_id_map_parts`, which requires
+`id_to_slot.len() == slot_to_id.len()`. The load fails before any of our code
+runs. Our `lists == 0` gate on `assert_ids_unique_or_reindex` correctly skips
+OUR check for IVF, but cannot bypass turbovec's internal requirement. The error
+text (`corrupt relfile pages: duplicate ids`) is misleading - the index is
+healthy and `turbovec_check` confirms it - and is worth fixing separately.
 
 **Competitor comparisons are source reviews until measured.** The zvec review
 (`docs/PARITY_GAPS.md`) is annotated as un-benchmarked on purpose. Do not

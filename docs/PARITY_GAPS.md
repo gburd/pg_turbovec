@@ -313,17 +313,34 @@ listed separately so they do not get mistaken for work.
 
 ### Real gaps, in priority order
 
-**1. IVF degradation on insert is not reportable (ordinary TurboQuant path).**
-This is the cheapest genuine fix in the review. An `aminsert` into an IVF index
-cannot place the row in its cell without an O(n) reshuffle, so both our paths
-append and fall back to a flat scan. The BQ path handles this well — it
-*preserves* `lists` and stamps `ivf_degraded`, so
-`turbovec.index_is_degraded()` returns true and `ambeginscan` emits a throttled
-WARNING naming the index. **The TurboQuant path blanks `lists` outright and is
-therefore silent** (`src/index/insert.rs:357–374`;
-`src/index/relfile.rs:1327–1339`). An operator gets a quietly slower index with
-no signal. Bringing TurboQuant in line with BQ is a small, self-contained
-change and should come first.
+**1. ~~IVF degradation on insert is not reportable~~ — FIXED (Phase Z1).**
+An `aminsert` into an IVF index cannot place the row in its cell without an O(n)
+reshuffle, so both paths append and fall back to a flat scan. The BQ path always
+*preserved* `lists` and stamped `ivf_degraded`; the TurboQuant path blanked
+`lists`, so `index_was_ivf()` went false and the degradation was **silent** —
+`reconcile_and_write_flush` planned its meta via `plan_with_blocked`, which
+hardcodes `lists: 0`. Now it captures the on-disk `lists` under the held rewrite
+lock and stamps both fields, leaving the coarse/cell-dir offsets at zero so the
+scan takes the flat fallback deterministically. Tests:
+`ivf_flush_degradation_is_reportable`,
+`ivf_soft_assign_index_rejects_insert_and_is_not_corrupt` (429 passed, all legs).
+
+Two things this turned up, worth knowing before touching the insert path:
+
+- **The two insert paths differ in *when* they write.** BQ writes synchronously
+  inside `aminsert`; TurboQuant only marks the cache dirty and defers to the
+  `PreCommit` xact callback. A `#[pg_test]` always rolls back before PreCommit,
+  so a plain `INSERT` in a test **never exercises the TurboQuant flush** — drive
+  it through `xact::flush_to_relfile_for_test`.
+- **An `assign_dups > 1` index is effectively READ-ONLY, and this is not a Z1
+  regression.** Soft assignment repeats an external id across cells on purpose,
+  so `slot_to_id` is not a bijection; the insert path loads the index into a flat
+  `IdMapIndex::from_id_map_parts`, which requires
+  `id_to_slot.len() == slot_to_id.len()`, and fails before any of our code runs.
+  Our own `lists`-gated dup check correctly skips IVF — turbovec's internal
+  requirement is the blocker. **Separate bug worth fixing:** that rejection
+  reports `corrupt relfile pages: duplicate ids` about a perfectly healthy index
+  (`turbovec_check` verifies it clean).
 
 **2. No sparse ANN opclass.** We ship `sparsevec` with distance operators and
 casts (`src/sparsevec_ops.rs`), but the AM registers opclasses only over
@@ -436,11 +453,13 @@ still has to happen somewhere.
 - **Phase BC** - binary-compatible varlena layout for `vector` so
   casts to/from `pgvector.vector` are zero-copy. See
   .
-- **Phase Z1** - make ordinary (TurboQuant) IVF insert degradation
-  *reportable*, matching the BQ path: preserve `lists`, stamp
-  `ivf_degraded`, so `turbovec.index_is_degraded()` and the
-  `ambeginscan` WARNING both fire. Small, self-contained, no format
-  change. **Do this first** - see the zvec review section above.
+- ~~**Phase Z1** - make ordinary (TurboQuant) IVF insert degradation
+  *reportable*.~~ ✓ done. `lists` preserved + `ivf_degraded` stamped on
+  the degrading flush, so `turbovec.index_is_degraded()` and the
+  `ambeginscan` WARNING both fire. No format change (both are existing
+  v4 fields). See the zvec review section for the two gotchas it
+  exposed (deferred vs synchronous insert paths; `assign_dups > 1` is
+  read-only).
 - **Phase Z2** - sparse ANN opclass over `sparsevec` (inner product
   first), so learned-sparse retrieval stops requiring densification.
   Needs a kernel decision: TurboQuant does not apply to sparse, so

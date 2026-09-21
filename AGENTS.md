@@ -165,6 +165,26 @@ missing `bq_mean_count` in v2.6.0, two more in v2.7.0). If you add a chain,
 grep every running sum in `page.rs` and `relfile.rs` and add it to all of
 them. Meta page is always written **LAST**, after every chain.
 
+**Degradation must be OBSERVABLE.** An insert into an IVF index cannot place
+the row in its cell without an O(n) reshuffle, so both insert paths append and
+fall back to a flat scan. That trade-off is fine; being *silent* about it is
+not. The BQ path preserves `lists` and stamps `ivf_degraded` so
+`turbovec.index_is_degraded()` and the throttled `ambeginscan` WARNING both
+fire. The TurboQuant path blanks `lists` and reports nothing - a known gap,
+tracked as **Phase Z1**. Rule for new work: any path that quietly drops trained
+structure (IVF cells, centroids, tombstone bitmaps) must leave a
+machine-readable flag AND a user-visible warning. Slower-but-correct is
+acceptable; undetectable is not - an operator cannot fix what does not report.
+
+**Competitor comparisons are source reviews until measured.** The zvec review
+(`docs/PARITY_GAPS.md`) is annotated as un-benchmarked on purpose. Do not
+promote any of its statements into a performance claim, a README line, or a
+positioning doc without measuring on an AVX2+ host (arnold) per the bench-host
+table above. Two specific traps that review already caught: a rival "feature"
+is often something PostgreSQL gives us for free (scalar filtering, durability,
+full-text), and a rival's *directory* is not a shipped capability - check the
+public dispatch path before believing an algorithm is exposed.
+
 **Known upstream bug.** `SELECT ctid ... ORDER BY <vec-op>` projects
 `(4294967295,0)` — a PostgreSQL core defect in
 `ExecForceStoreHeapTuple` (reproduces with core GiST and no turbovec
@@ -350,6 +370,8 @@ format unchanged from X.Y.Z; no REINDEX needed." preamble.
 - Phase progress notes: `docs/PHASE_*.md`
 - Versioning policy detail: `docs/UPGRADING.md`
 - Pgvector parity: `docs/PARITY_GAPS.md`, `docs/MIGRATING_FROM_PGVECTOR.md`
+- Competitor-derived gaps + phases Z1-Z5: `docs/PARITY_GAPS.md`
+  § "Gaps found against zvec"
 - CI: `docs/CI.md`, `.github/workflows/`, `.forgejo/workflows/`
 - Bench results archive: `benches/results/`
 - BQ (1-bit) design + measured frontier: `docs/ONEBIT_BQ.md`,

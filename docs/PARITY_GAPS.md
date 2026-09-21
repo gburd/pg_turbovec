@@ -303,6 +303,117 @@ does not define arithmetic for `sparsevec`, so neither do we.
 | `bit_hamming_ops` | ✓ | ✗ - TurboQuant kernel doesn't fit Hamming-space ANN; use the exact `<~>` operator (no index) |
 | `bit_jaccard_ops` | ✓ | ✗ - same |
 
+## Gaps found against zvec (2026-09-21 source review)
+
+Read-only comparison of the local `alibaba/zvec` checkout (`d88357b`, v0.7.0)
+against pg_turbovec `deac2d9`. **This was a source review, not a benchmark — no
+performance claim below is measured.** zvec is an in-process embedded vector DB,
+so several of its "features" are things PostgreSQL already supplies us; those are
+listed separately so they do not get mistaken for work.
+
+### Real gaps, in priority order
+
+**1. IVF degradation on insert is not reportable (ordinary TurboQuant path).**
+This is the cheapest genuine fix in the review. An `aminsert` into an IVF index
+cannot place the row in its cell without an O(n) reshuffle, so both our paths
+append and fall back to a flat scan. The BQ path handles this well — it
+*preserves* `lists` and stamps `ivf_degraded`, so
+`turbovec.index_is_degraded()` returns true and `ambeginscan` emits a throttled
+WARNING naming the index. **The TurboQuant path blanks `lists` outright and is
+therefore silent** (`src/index/insert.rs:357–374`;
+`src/index/relfile.rs:1327–1339`). An operator gets a quietly slower index with
+no signal. Bringing TurboQuant in line with BQ is a small, self-contained
+change and should come first.
+
+**2. No sparse ANN opclass.** We ship `sparsevec` with distance operators and
+casts (`src/sparsevec_ops.rs`), but the AM registers opclasses only over
+`vector` and `vector[]` (`src/index/mod.rs:203–250`) — so indexed learned-sparse
+retrieval (SPLADE and similar) requires densifying first, which is exactly what
+sparse representations exist to avoid. zvec has native sparse FLAT and HNSW,
+inner-product only (`Z/src/core/interface/index.cc:1279–1323`). Note PostgreSQL
+GIN full-text is *not* a substitute: it does lexical matching, not weighted
+sparse nearest-neighbour.
+
+**3. `WHERE` predicates do not automatically become ANN masks.** We have the
+machinery — caller-supplied TID allowlists drive masked flat and out-of-core IVF
+scans, and the scan path widens candidates iteratively
+(`src/index/scan.rs:1423–1447,1497–1548`). What is missing is the *automatic*
+handoff: no bitmap callback, no multicolumn support
+(`src/index/mod.rs:94,142`), so an ordinary qual cannot be pushed into the
+kernel without the caller materialising ids by hand. zvec's planner does this
+conversion, including a small-result brute-force-by-key alternative
+(`Z/src/db/sqlengine/planner/query_planner.cc:535–572`).
+
+**4. Cost estimation ignores everything that matters for filtered ANN.**
+`amcostestimate` uses corpus size, dim and bit width, then reports
+`index_selectivity = 0.0` unconditionally (`src/index/cost.rs:49–121`). It does
+not model predicate selectivity, `turbovec.probes`, or the query `LIMIT`. That
+is what makes an "ANN vs scalar-filter-then-exact-sort" decision unreliable.
+Fixing (3) without fixing this would let the planner choose badly with more
+confidence. Worth noting zvec's equivalent is a *heuristic* match-ratio
+threshold (`Z/src/db/sqlengine/planner/optimizer.cc:32–94`), not a superior
+general optimiser — so this is a "do it properly for PostgreSQL" item, not a
+port.
+
+### The lesson worth stealing: bounded mutable delta + explicit consolidation
+
+zvec's answer to "writes destroy trained structure" is **not** incremental
+insertion into a trained index — both its IVF implementations *reject* additions
+after training (`Z/src/core/interface/indexes/ivf_index.cc:152–155`,
+`ivf_rabitq_index.cc:152–161`). Instead it separates concerns by lifecycle:
+writes land in a Flat-backed mutable segment
+(`Z/src/db/index/segment/segment.cc:4201–4259`), the segment is sealed and
+rolled over (`Z/src/db/collection.cc:1664–1748`), and indexes are built and
+merged by an explicit `optimize()` *outside* the exclusive locks, publishing
+atomically at the end (`Z/src/db/collection.cc:913–1010`).
+
+That maps onto our problem: keep the trained IVF cells intact and search a
+**bounded append delta** alongside them, with an explicit consolidation step,
+rather than flattening the whole index on first insert. Costs to weigh before
+committing to it: query fan-out across cells+delta, deletion/tombstone
+interaction, MVCC and crash-safety (our chains-then-meta invariant), and
+on-disk-format compatibility. Sealing alone builds no ANN structure — the build
+still has to happen somewhere.
+
+### Explicitly NOT gaps — PostgreSQL or we already cover these
+
+- **Hybrid fusion.** zvec has native C++ `MultiQuery` with RRF/weighted/callback
+  fusion (`Z/src/db/collection.cc:1877–1962`). We do this in SQL with
+  `turbovec.rrf_score` plus PostgreSQL's own joins/aggregation
+  (`docs/HYBRID_SEARCH.md`). The gap is packaged ergonomics, not capability —
+  and zvec fuses independently truncated candidate pools, which is not
+  obviously better.
+- **Token-level multivector.** We already have persistent ColBERT indexing with
+  batched token retrieval and exact MaxSim re-rank (`src/colbert.rs`). zvec's
+  `MultiQuery` is rank fusion and is **not** evidence of MaxSim support. Our
+  real limitation is narrower: `colbert_search` takes no filter argument and the
+  opclass has no ORDER BY operator.
+- **Durability / WAL.** Ours is PostgreSQL's, which is a stronger contract than
+  zvec's (its default WAL flush threshold is 0 and append-time flushing is
+  conditional — `Z/src/db/index/storage/wal/wal_file.h:27`). Not comparable
+  as a drop-in.
+- **Scalar filtering, partial indexes, full-text.** PostgreSQL's, natively.
+- **WAL amplification.** Already addressed: we skip unchanged full pages
+  (v2.3.0) and pad chain allocations (v2.4.0). The residual cost is *page
+  visits*, not pages logged — measure with the existing `PAGES_WAL_LOGGED`
+  counter before assuming otherwise.
+
+### Deliberately deferred
+
+- **RaBitQ / IVF-RaBitQ, PQ-INT8.** Alternative quantizers are only worth it
+  with training cost, raw-vector retention for refinement, and rebuild cost all
+  counted. We already have TurboQuant 2/3/4-bit plus centered sign-BQ. Note
+  zvec gates RaBitQ to Linux x86_64
+  (`Z/src/db/index/segment/segment_helper.cc:879–882`), and its PQ is a
+  DiskANN implementation detail, not a public IVF-PQ option.
+- **DiskANN.** Its build still copies the whole corpus and allocates graph
+  storage in memory; the internal memory limit bounds PQ chunk count, not build
+  RSS (`Z/src/core/algorithm/diskann/diskann_builder.cc:260–289,734–775`). We
+  already have a spill-backed out-of-core IVF build with bounded chunks
+  (`src/index/build.rs:862–875`) — keep it rather than importing an in-memory
+  graph build. Our deprecated Vamana kind is **not** a DiskANN equivalent and
+  should not be revived on the strength of this.
+
 ## Phase plan
 
 - ~~**Phase HV** - add `halfvec` (FP16) type.~~ ✓ done.
@@ -325,3 +436,26 @@ does not define arithmetic for `sparsevec`, so neither do we.
 - **Phase BC** - binary-compatible varlena layout for `vector` so
   casts to/from `pgvector.vector` are zero-copy. See
   .
+- **Phase Z1** - make ordinary (TurboQuant) IVF insert degradation
+  *reportable*, matching the BQ path: preserve `lists`, stamp
+  `ivf_degraded`, so `turbovec.index_is_degraded()` and the
+  `ambeginscan` WARNING both fire. Small, self-contained, no format
+  change. **Do this first** - see the zvec review section above.
+- **Phase Z2** - sparse ANN opclass over `sparsevec` (inner product
+  first), so learned-sparse retrieval stops requiring densification.
+  Needs a kernel decision: TurboQuant does not apply to sparse, so
+  this is sparse FLAT (and possibly an inverted/WAND posting scan),
+  not a reuse of the existing path.
+- **Phase Z3** - automatic predicate-to-ANN handoff: a bitmap/allowlist
+  callback so an ordinary `WHERE` becomes a kernel mask without the
+  caller materialising TIDs. **Gated on Phase Z4** - pushing filters
+  without selectivity-aware costing just makes bad plans confident.
+- **Phase Z4** - filter- and kind-aware `amcostestimate`: model
+  predicate selectivity, `turbovec.probes` and the query `LIMIT`
+  instead of reporting `index_selectivity = 0.0` unconditionally.
+- **Phase Z5** (research, large) - bounded mutable delta so inserts
+  stop flattening trained IVF: retain cells, search a capped append
+  region alongside them, consolidate explicitly. Weigh query fan-out,
+  tombstone interaction, MVCC/crash-safety and format compatibility
+  before starting. Phase Z1 makes the current degradation visible and
+  should ship regardless of whether this is ever attempted.

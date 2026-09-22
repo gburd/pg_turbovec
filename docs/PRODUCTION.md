@@ -7,6 +7,33 @@ upgrading from pgvector see
 
 ---
 
+## Before anything else: preload the library
+
+```sql
+ALTER SYSTEM SET shared_preload_libraries = 'pg_turbovec';   -- then restart
+```
+
+Every `turbovec.*` GUC is registered by `_PG_init`, i.e. when the shared
+library loads. Without preloading, a backend has **zero** of them:
+
+```sql
+SELECT count(*) FROM pg_settings WHERE name LIKE 'turbovec.%';   -- 0 = not preloaded
+```
+
+In that state `SET turbovec.probes = 16` is accepted and silently ignored,
+`SET turbovec.out_of_core = on` cannot be set at all, and every query runs at
+compiled-in defaults regardless of what you configure. Indexes still build and
+queries still return correct results, which is exactly why this is easy to
+misdiagnose as "tuning has no effect" or "IVF pruning doesn't work" — it cost
+a full benchmark round on 2026-09-22 before being spotted.
+
+If you cannot set `shared_preload_libraries` (some managed providers), see
+[`DEPLOYING_ON_MANAGED_POSTGRES.md`](DEPLOYING_ON_MANAGED_POSTGRES.md);
+`session_preload_libraries` or an explicit `LOAD 'pg_turbovec';` per session
+also registers the GUCs.
+
+---
+
 ## Audience
 
 This document is for operators running PostgreSQL 13 or newer who

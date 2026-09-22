@@ -303,6 +303,26 @@ CREATE EXTENSION pg_turbovec;
 SET search_path = public, turbovec;
 ```
 
+> **Add `pg_turbovec` to `shared_preload_libraries`.** The `turbovec.*` GUCs
+> (`probes`, `search_k`, `iterative_scan`, `out_of_core`, …) are registered
+> when the library loads. Without preloading, a session has **none** of them:
+> `SET turbovec.probes = 16` is silently accepted and does nothing, and every
+> query runs at the defaults no matter what you tune.
+>
+> ```sql
+> ALTER SYSTEM SET shared_preload_libraries = 'pg_turbovec';  -- then restart
+> ```
+>
+> Verify (expect a non-zero count, not `0`):
+>
+> ```sql
+> SELECT count(*) FROM pg_settings WHERE name LIKE 'turbovec.%';
+> ```
+>
+> Indexes and queries work without preloading — only the tuning knobs
+> disappear, which makes the failure quiet and easy to misdiagnose. This cost
+> a full benchmark round on 2026-09-22 before it was spotted.
+
 Create a table with a `vector` column:
 
 ```sql

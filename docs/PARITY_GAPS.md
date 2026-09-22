@@ -466,6 +466,41 @@ still has to happen somewhere.
   graph build. Our deprecated Vamana kind is **not** a DiskANN equivalent and
   should not be revived on the strength of this.
 
+## Known ceiling: IVF builds are not memory-bounded at 10M x 1024-d
+
+Found 2026-09-22 while attempting the Z5 >RAM measurement
+(`benches/results/z5_ram_20260922/`). **`CREATE INDEX ... WITH (lists = N)`
+OOM-kills at 10M x 1024-d on a 61 GiB host**, and its memory use is *linear
+in rows* rather than bounded by `maintenance_work_mem`:
+
+- `mwm = 8GB` + 16 parallel maintenance workers -> OOM at
+  `anon-rss:61311596kB`.
+- **Serial** with `mwm = 4GB` -> same linear growth (4.5 GiB at 2 min, 19.5
+  at 20 min, 27.6 at 31 min, no plateau). Parallelism is **not** the cause.
+- At 25.8 GiB RSS: one **20.7 GiB contiguous Rust-side allocation** (still
+  growing) plus 3.09 GiB that is exactly the capped k-means reservoir
+  (`lists x 256 x dim x 4`). `pg_backend_memory_contexts` showed nothing over
+  100 MB, so it is not a PostgreSQL context.
+- The spill IS working (`pgsql_tmp` reached 16 GB), so the *scan* phase is
+  bounded as designed. The growth is in the drain (`ivf_build_and_write`).
+
+This contradicts the documented "out-of-core end-to-end since v1.13.0 /
+`maintenance_work_mem`-bounded chunks" behaviour at this scale, and it matters
+for the project's own targets (>1.7M in production; trillion-scale via
+partitioning): a 10M-row partition that cannot be indexed on a 61 GiB host is
+a hard ceiling. `docs/BQ_RECALL_BENCH` 0.6e already recorded a "20.3 GB
+OOM-killed build" with *unbounded* `mwm` at 1M; this is the same failure at
+10M **with** `mwm` set.
+
+**The 20.7 GiB allocation is not yet identified.** Three hypotheses were
+formed and discarded by arithmetic: the reservoir (capped, and separately
+accounted), the `Vec<Vec<u32>>` assignments (<= ~1 GiB even with allocator
+overhead), and a full-corpus f32 array (the two that exist, `build.rs:1284`
+and `:1611`, are the **BQ** and **graph** paths, not IVF). Next candidates:
+the `Vec<Vec<Vec<u32>>>` per-block assignment collect (`build.rs:~1041` --
+three levels of nesting inside the otherwise-bounded loop) and
+`build_permutation_soft`'s output. **Use a heap profiler, not arithmetic.**
+
 ## Phase plan
 
 - ~~**Phase HV** - add `halfvec` (FP16) type.~~ ✓ done.
@@ -520,9 +555,17 @@ still has to happen somewhere.
   made a full 1M scan ~3000x too cheap. Arithmetic extracted into pure,
   unit-tested functions (it is not observable through `EXPLAIN` - PG's
   heap costs swamp it).
-- **Phase Z5** (research, large) - bounded mutable delta so inserts
-  stop flattening trained IVF: retain cells, search a capped append
-  region alongside them, consolidate explicitly. Weigh query fan-out,
-  tombstone interaction, MVCC/crash-safety and format compatibility
-  before starting. Phase Z1 makes the current degradation visible and
-  should ship regardless of whether this is ever attempted.
+- ~~**Phase Z5** (bounded mutable delta)~~ ✓ shipped in **v2.10.0**, and
+  it needed **no** format change: the delta length is derivable as
+  `n_live - cell_directory.total_vectors()` because inserts append at
+  the tail. Measured 11 % (in-memory) / 22 % (out-of-core) median win at
+  1M x 256-d -- not the 64x modelled, because a full 4-bit scan there is
+  only 1.6x a 1-cell scan. It ships on the functional contract (no
+  O(n) cliff on the first insert) plus a real out-of-core correctness
+  fix, not the latency delta. **The >RAM regime, where the win could be
+  materially larger, is still UNMEASURED** -- the attempt was blocked by
+  the build-memory ceiling documented above.
+- **Phase Z6** (new, from the Z5 >RAM attempt) - make IVF builds
+  actually memory-bounded. Blocks any measurement at 10M+ and is a
+  hard ceiling on the partitioned trillion-scale story. Start with a
+  heap profiler on `ivf_build_and_write` at 10M x 1024-d.

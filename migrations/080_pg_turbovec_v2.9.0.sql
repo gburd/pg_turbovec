@@ -1,0 +1,18 @@
+-- pg_turbovec v2.9.0
+--
+-- MINOR: adds one new SQL object. Wire format unchanged
+-- (MetaPageData::version stays 8) -- existing indexes decode
+-- byte-identically, so NO REINDEX is required. The upgrade is in-place:
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '2.9.0'` creates the function.
+--
+-- New: turbovec.index_degradation(regclass) -> TABLE(degraded, lists,
+-- n_vectors, scan_fraction, est_slowdown, recovery).
+--
+-- Phase Z1 made IVF degradation observable and Phase Z4 made the planner
+-- cost it; neither told an operator the SIZE of the problem, which is what
+-- decides whether to act. This quantifies it: a degraded index reports
+-- scan_fraction = 1.0 (it reads everything) and est_slowdown = lists/probes,
+-- plus the REINDEX command naming the index.
+--
+-- Reads only the meta page (one buffer hit), so it is safe to poll from
+-- monitoring.

@@ -228,6 +228,107 @@ fn index_is_degraded(index: pg_sys::Oid) -> bool {
     }
 }
 
+/// Phase Z5 (reporting): how BAD is this index's IVF degradation, and what
+/// are the options?
+///
+/// `turbovec.index_is_degraded()` (Phase Z1) answers "did it happen"; the
+/// planner now costs it correctly (Phase Z4). Neither tells an operator the
+/// SIZE of the problem, which is what decides whether to act: a degraded
+/// 10k-row index is a non-event, a degraded 10M-row index is an outage.
+///
+/// Reports what can be known without a rebuild:
+///
+/// - `degraded` -- the Z1 signal, same as `index_is_degraded()`.
+/// - `lists` -- the cell count the index was BUILT with (preserved through
+///   the degrading flush since Z1, which is what makes this reportable).
+/// - `n_vectors` -- live rows.
+/// - `scan_fraction` -- the fraction of the corpus a scan now touches.
+///   A healthy IVF index reads about `probes / lists`; a degraded one reads
+///   **1.0**, i.e. everything. This is the latency cliff, expressed as a
+///   number rather than a warning.
+/// - `est_slowdown` -- how much more work the degraded scan does than the
+///   healthy one would at the current `turbovec.probes`
+///   (`lists / probes`). `1.0` when healthy.
+/// - `recovery` -- the action, spelled out.
+///
+/// Deliberately cheap: reads only the meta page (one buffer hit), no chain
+/// scan, so it is safe to poll from monitoring.
+///
+/// ```ignore
+/// SELECT * FROM turbovec.index_degradation('my_ivf_idx'::regclass);
+/// ```
+#[pg_extern(stable, parallel_safe)]
+fn index_degradation(
+    index: pg_sys::Oid,
+) -> TableIterator<
+    'static,
+    (
+        name!(degraded, bool),
+        name!(lists, i32),
+        name!(n_vectors, i64),
+        name!(scan_fraction, f64),
+        name!(est_slowdown, f64),
+        name!(recovery, Option<String>),
+    ),
+> {
+    unsafe {
+        let rel = pg_sys::index_open(index, pg_sys::AccessShareLock as i32);
+        if rel.is_null() {
+            error!("index_degradation: could not open index {:?}", index);
+        }
+        let meta = crate::index::relfile::read_meta(rel);
+        let name = crate::index::scan::index_relname(rel);
+        pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+
+        let row = match meta {
+            // Never built IVF: nothing to degrade. A flat index always
+            // scans everything BY DESIGN, which is not a fault, so
+            // `scan_fraction` is 1.0 with no recovery advice.
+            Some(m) if !m.index_was_ivf() => (false, 0, m.n_vectors as i64, 1.0, 1.0, None),
+            Some(m) => {
+                let lists = m.lists as f64;
+                let probes = (crate::guc::PROBES.get() as f64).clamp(1.0, lists.max(1.0));
+                if m.is_degraded() {
+                    // Scans everything; the healthy scan would have read
+                    // `probes / lists`, so that ratio inverted is the extra
+                    // work being done now.
+                    let slowdown = (lists / probes).max(1.0);
+                    (
+                        true,
+                        m.lists as i32,
+                        m.n_vectors as i64,
+                        1.0,
+                        slowdown,
+                        Some(format!(
+                            "REINDEX INDEX {name}; -- rebuilds the IVF cell assignment. \
+                             This index was built WITH (lists = {}) but now scans all {} \
+                             rows (~{:.0}x the work of a healthy scan at \
+                             turbovec.probes = {:.0}). Inserts degrade an IVF index \
+                             because placing a row in its cell would be an O(n) reshuffle; \
+                             batch writes and REINDEX once rather than per-insert.",
+                            m.lists, m.n_vectors, slowdown, probes
+                        )),
+                    )
+                } else {
+                    let fraction = if lists > 0.0 { probes / lists } else { 1.0 };
+                    (
+                        false,
+                        m.lists as i32,
+                        m.n_vectors as i64,
+                        fraction,
+                        1.0,
+                        None,
+                    )
+                }
+            }
+            // No meta page (empty / partially built): report nothing rather
+            // than guessing.
+            None => (false, 0, 0, 1.0, 1.0, None),
+        };
+        TableIterator::once(row)
+    }
+}
+
 /// Ownership check portable across PG13-19: `object_ownercheck`
 /// (PG16+) vs the older `pg_class_ownercheck` (PG13-15). Superusers
 /// always pass. `pg_class`'s catalog OID is 1259

@@ -8013,7 +8013,7 @@ mod tests {
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
-            "2.8.2", "2.8.3", "2.8.4",
+            "2.8.2", "2.8.3", "2.8.4", "2.9.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10601,6 +10601,129 @@ mod tests {
         let startup: f64 = it.next().unwrap().parse().expect("startup cost");
         let total: f64 = it.next().unwrap().parse().expect("total cost");
         (startup, total)
+    }
+
+    /// Phase Z5 (reporting): `index_degradation()` must quantify the cliff,
+    /// not merely flag it.
+    ///
+    /// Z1 made degradation observable and Z4 made the planner cost it, but
+    /// neither tells an operator the SIZE of the problem -- which is what
+    /// decides whether to act. A degraded 10k-row index is a non-event; a
+    /// degraded 10M-row index is an outage.
+    #[pg_test]
+    fn index_degradation_quantifies_the_cliff() {
+        use_turbovec();
+        ivf2_make_corpus("z5_ivf", 2000);
+        Spi::run(
+            "CREATE INDEX z5_ivf_idx ON z5_ivf \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET turbovec.probes = 4").unwrap();
+
+        // Healthy: reports the real pruning fraction (4 of 16 cells) and no
+        // slowdown or recovery advice.
+        let col = |c: &str| -> String {
+            format!("SELECT {c}::text FROM turbovec.index_degradation('z5_ivf_idx'::regclass)")
+        };
+        let getf = |c: &str| -> Option<f64> {
+            Spi::get_one::<String>(&col(c))
+                .unwrap()
+                .map(|v| v.parse().expect("numeric"))
+        };
+        let deg = Spi::get_one::<bool>(
+            "SELECT degraded FROM turbovec.index_degradation('z5_ivf_idx'::regclass)",
+        )
+        .unwrap();
+        let lists = getf("lists").map(|v| v as i32);
+        let frac = getf("scan_fraction");
+        let slow = getf("est_slowdown");
+        let rec = Spi::get_one::<String>(
+            "SELECT recovery FROM turbovec.index_degradation('z5_ivf_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(deg, Some(false), "a healthy IVF index is not degraded");
+        assert_eq!(lists, Some(16));
+        assert_eq!(frac, Some(0.25), "probes=4 of lists=16 reads a quarter");
+        assert_eq!(slow, Some(1.0), "a healthy index has no slowdown");
+        assert_eq!(rec, None, "no recovery advice when healthy");
+
+        // Degrade it the same way a committing INSERT does.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'z5_ivf_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessExclusiveLock as i32);
+            crate::index::relfile::force_meta_set_degraded(rel);
+            pg_sys::index_close(rel, pg_sys::AccessExclusiveLock as i32);
+        }
+
+        let deg = Spi::get_one::<bool>(
+            "SELECT degraded FROM turbovec.index_degradation('z5_ivf_idx'::regclass)",
+        )
+        .unwrap();
+        let lists = getf("lists").map(|v| v as i32);
+        let frac = getf("scan_fraction");
+        let slow = getf("est_slowdown");
+        let rec = Spi::get_one::<String>(
+            "SELECT recovery FROM turbovec.index_degradation('z5_ivf_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(deg, Some(true), "must report the degradation");
+        assert_eq!(
+            lists,
+            Some(16),
+            "`lists` must survive so the operator can see it WAS IVF (Phase Z1)"
+        );
+        assert_eq!(
+            frac,
+            Some(1.0),
+            "a degraded index scans EVERYTHING -- that is the cliff"
+        );
+        assert_eq!(
+            slow,
+            Some(4.0),
+            "at probes=4 of lists=16 the degraded scan does 4x the work"
+        );
+        let rec = rec.expect("degraded index must carry recovery advice");
+        assert!(
+            rec.contains("REINDEX INDEX z5_ivf_idx"),
+            "recovery must name the actual index: {rec}"
+        );
+        assert!(
+            rec.contains("2000"),
+            "recovery should state the row count so the operator can judge \
+             severity: {rec}"
+        );
+    }
+
+    /// A FLAT index is not "degraded" -- it scans everything by design.
+    /// Reporting it as a fault would train operators to ignore the signal.
+    #[pg_test]
+    fn index_degradation_does_not_fault_a_flat_index() {
+        use_turbovec();
+        ivf2_make_corpus("z5_flat", 500);
+        Spi::run(
+            "CREATE INDEX z5_flat_idx ON z5_flat \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let deg = Spi::get_one::<bool>(
+            "SELECT degraded FROM turbovec.index_degradation('z5_flat_idx'::regclass)",
+        )
+        .unwrap();
+        let lists = Spi::get_one::<String>(
+            "SELECT lists::text FROM turbovec.index_degradation('z5_flat_idx'::regclass)",
+        )
+        .unwrap()
+        .map(|v| v.parse::<i32>().expect("lists"));
+        let rec = Spi::get_one::<String>(
+            "SELECT recovery FROM turbovec.index_degradation('z5_flat_idx'::regclass)",
+        )
+        .unwrap();
+        assert_eq!(deg, Some(false), "a flat index is not degraded");
+        assert_eq!(lists, Some(0), "a flat index has no cells");
+        assert_eq!(rec, None, "no recovery advice for a flat index");
     }
 
     /// Phase Z4 (integration): more probes must cost MORE through the real

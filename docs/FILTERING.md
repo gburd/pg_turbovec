@@ -179,6 +179,43 @@ blocks skipped is pure overhead. **Only use an allowlist when it is
 selective.** For non-selective filters, use a partial index or plain
 ANN + a cheap SQL post-filter.
 
+### Which side of the crossover is *your* query on?
+
+The table above is only actionable if you know your filter's
+selectivity. Ask PostgreSQL -- it already estimates this for the
+planner, so you do not have to guess or count rows yourself:
+
+```sql
+-- Estimated fraction of the table your WHERE keeps.
+-- Run ANALYZE first; this reads the planner's own estimate.
+EXPLAIN (FORMAT JSON)
+SELECT 1 FROM items WHERE category = 'electronics' AND in_stock;
+--                          ^^^^^^ your real predicate
+-- Read "Plan Rows" from the output and divide by:
+SELECT reltuples FROM pg_class WHERE oid = 'items'::regclass;
+```
+
+Then:
+
+| estimated fraction | use |
+|---:|---|
+| ≲ 1 %   | **allowlist** (§ 3) — the win grows as the filter tightens (14.7× at 0.1 %) |
+| 1–7 %   | **allowlist**, still ahead (2.6× at 1 %) |
+| ~7–10 % | break-even — either works; prefer iterative scan (§ 4) for ergonomics |
+| ≳ 10 %  | **plain ANN + SQL post-filter**, or a partial index. An allowlist here is *slower* |
+
+Two caveats. The crossover percentage is host- and corpus-dependent —
+the *shape* (allowlist falls with selectivity, post-filter is flat)
+is what transfers, not the exact 7–10 %. And a selectivity estimate
+is only as good as your statistics: if `ANALYZE` is stale, or the
+predicate correlates across columns in a way PostgreSQL does not
+model, the estimate can be badly off. Measure on your own data before
+building anything around a borderline number.
+
+Since v2.8.5 `amcostestimate` uses this same selectivity (the
+planner's `rel->rows / rel->tuples`) when costing an ANN scan, so
+`EXPLAIN` costs also reflect how selective your filter is.
+
 JSON: `benches/results/allowlist_crossover_floki_v1_13_0_20260617.json`.
 Reproduce: `cargo bench --bench allowlist_crossover --no-default-features --features pg16 -- --json`.
 

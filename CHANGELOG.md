@@ -4,6 +4,88 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.9.0] — 2026-09-22
+
+MINOR: adds one SQL function. **Wire format unchanged** from 2.8.x
+(`MetaPageData::version` stays **8**), so existing indexes decode
+byte-identically and **no REINDEX is required** — the upgrade is in place.
+
+### Added
+
+- **`turbovec.index_degradation(regclass)`** — quantifies an IVF
+  degradation instead of merely flagging it. Returns `degraded`, `lists`,
+  `n_vectors`, `scan_fraction`, `est_slowdown` and a `recovery` string.
+  Phase Z1 made degradation observable and Phase Z4 made the planner cost it
+  correctly; neither told an operator the **size** of the problem, which is
+  what decides whether to act — a degraded 10k-row index is a non-event, a
+  degraded 10M-row index is an outage. A degraded index reports
+  `scan_fraction = 1.0` (it reads everything) and
+  `est_slowdown = lists / probes`, plus the `REINDEX` command naming the
+  index. A flat index is explicitly **not** reported as degraded — it scans
+  everything by design, and faulting it would train operators to ignore the
+  signal. Reads only the meta page (one buffer hit), so it is safe to poll
+  from monitoring.
+
+### Changed
+
+- **Phase Z4 — `amcostestimate` is now probe- and filter-aware.** Three
+  defects, all of which made the planner blind to what the AM does:
+  - IVF was costed as a full-corpus scan although the scan clamps to
+    `turbovec.probes` cells, so an index probing 1 of 1024 cells was costed
+    identically to a flat scan of everything. Cost now scales with
+    `probes / lists`, floored at one cell's worth. A **degraded** IVF index
+    is costed as flat, since that is the path it takes.
+  - `index_selectivity` was hardcoded to `0.0` for every query. It now
+    derives from the planner's own `rel->rows / rel->tuples`, so we agree
+    with the planner by construction instead of second-guessing it.
+  - A **pre-existing unit error**: the ns→cost conversion divided *seconds*
+    by `cpu_operator_cost`, making a 1M × 1024-d flat scan cost ~23 while
+    PostgreSQL costs the equivalent sequential scan at ~73,000 — about
+    3000× too cheap, which let an ANN path beat plans that are genuinely
+    faster. Now ~1688. The ns throughput model itself validated against our
+    own published measurement (model 5.3 ms vs measured 6.08 ms), so only
+    the unit was wrong.
+
+  `index_pages` is likewise scoped to the pages a probed scan touches. The
+  arithmetic lives in two pure, unit-tested functions because it is **not**
+  observable through `EXPLAIN`: the index-scan node's cost also carries
+  PostgreSQL's heap-fetch and qual costs, which swamp it.
+
+### Documentation
+
+- **`docs/FILTERING.md` — the allowlist crossover is now actionable.** The
+  measured table (2.6–14.7× faster below ~7 % selectivity, 2.6× *slower* at
+  100 %) was only useful if you knew your filter's selectivity. Adds a
+  copy-pasteable way to read PostgreSQL's own estimate, a
+  fraction→technique table, and two caveats: the crossover percentage is
+  host-dependent (the *shape* transfers, not the number), and the estimate
+  is only as good as your statistics.
+- **Phase Z3 rescoped to a non-gap, with the reasoning recorded.**
+  "Automatically turn a `WHERE` into a kernel mask" is not implementable by
+  a PostgreSQL AM: a scan key is `index_key operator constant` over an
+  *index* column, so a qual on any other column becomes an executor Filter
+  and never reaches the AM. `amgetbitmap` is not a route either — it returns
+  an unordered bitmap, and ordering is the whole value of an ANN scan. The
+  useful behaviour shipped in v1.8.0 as iterative scan, which is
+  demand-driven and needs no view of the filter.
+- **Phase Z5 scoped, with both routes shown blocked.** A bounded mutable
+  delta needs a wire-format change (both scan paths assert
+  `directory.total_vectors() == n_live` and `centroids.len() == lists * dim`;
+  a synthetic "delta cell" would need a centroid it does not have).
+  Cheap in-place cell reassignment needs a `decode`/`reconstruct` that
+  turbovec does not expose (`pack.rs` has only `repack`/`unblock`). The
+  reporting half shipped instead.
+
+### Tests
+
+435 → **438 passed / 0 failed / 8 ignored**, uniform across pg13–19 native
+plus the classic lane.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.9.0';` — creates the new function.
+No REINDEX.
+
 ## [2.8.4] — 2026-09-21
 
 Code-only release. Wire format unchanged from 2.8.3 (`MetaPageData::version`

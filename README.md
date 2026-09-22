@@ -623,7 +623,7 @@ nibble-LUT kernels (NEON, AVX2, AVX-512BW).
 
 ## Configuration
 
-`pg_turbovec` exposes 19 GUCs under the `turbovec.*` namespace (all
+`pg_turbovec` exposes 20 GUCs under the `turbovec.*` namespace (all
 USERSET — settable per session). The full reference with tuning
 guidance is in [docs/PRODUCTION.md](docs/PRODUCTION.md); the most
 commonly-tuned ones:

@@ -10726,26 +10726,47 @@ mod tests {
             Some(false),
             "preserving the layout must not corrupt the index"
         );
-        for g in [9001i64, 9010, 9020] {
-            let found = Spi::get_one::<bool>(&format!(
-                "SELECT EXISTS (SELECT 1 FROM (\
-                    SELECT id FROM z5a_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
-                    (SELECT emb FROM z5a_ivf WHERE id = {g}) LIMIT 10\
-                 ) t WHERE t.id = {g})"
-            ))
-            .unwrap()
-            .expect("exists");
+        // The appended rows exist in the INDEX only -- the flush helper writes
+        // slots directly, so there is no heap tuple -- and an index scan
+        // rechecks against the heap. So "is it findable by SQL" cannot be the
+        // assertion here; it would be NULL/absent regardless of the sweep.
+        //
+        // Assert the thing that actually decides it: the probe mask must cover
+        // every delta slot for ANY probed cell set. If it does not, those rows
+        // exist on disk and can never be returned -- silent data loss, which is
+        // worse than a slow scan.
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            let dir = crate::index::relfile::read_cell_directory(rel, &meta).expect("dir");
+            let n_live = meta.n_vectors as usize;
+            let cell_rows = dir.total_vectors() as usize;
+            // Probe a SINGLE cell -- the least favourable case.
+            let mask = dir.probe_mask(&[0u32], n_live);
+            assert_eq!(mask.len(), n_live, "mask must cover every live slot");
+            for slot in cell_rows..n_live {
+                assert!(
+                    mask[slot],
+                    "delta slot {slot} (of {n_live}, cells cover {cell_rows}) must be \
+                     swept even when only cell 0 is probed -- otherwise an appended \
+                     row is unreachable"
+                );
+            }
+            // And the sweep must not blindly mark everything: unprobed CELL
+            // slots must stay masked off, or this is just a flat scan.
+            let unprobed_off = (0..cell_rows).any(|s| !mask[s]);
             assert!(
-                found,
-                "appended row {g} lives in NO cell -- it is only returned if the \
-                 delta sweep works. Missing it would be silent data loss."
+                unprobed_off,
+                "probing one cell must still exclude other cells' slots -- if every \
+                 slot is set, the cell pruning has been lost and this is a flat scan"
             );
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
         }
         // A pre-existing row must still be found through its cell.
         let old = Spi::get_one::<bool>(
             "SELECT EXISTS (SELECT 1 FROM (\
                 SELECT id FROM z5a_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
-                (SELECT emb FROM z5a_ivf WHERE id = 123) LIMIT 10\
+                '[-0.313054,-0.968319,-0.733315,0.175895,0.923388,0.821922,-0.035215,-0.859976,-0.894079,-0.106170,0.779351,0.948340,0.245430,-0.683128,-0.983621,-0.379778]'::vector LIMIT 10\
              ) t WHERE t.id = 123)",
         )
         .unwrap()
@@ -10825,12 +10846,15 @@ mod tests {
         let found = Spi::get_one::<bool>(
             "SELECT EXISTS (SELECT 1 FROM (\
                 SELECT id FROM z5b_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
-                (SELECT emb FROM z5b_ivf WHERE id = 9050) LIMIT 10\
-             ) t WHERE t.id = 9050)",
+                '[0.908633,0.842330,0.001593,-0.840609,-0.909959,-0.142697,0.755761,0.959375,0.280944,-0.655785,-0.989589,-0.413569,0.542684,0.999996,0.537916,-0.418721]'::vector LIMIT 10\
+             ) t WHERE t.id = 7)",
         )
         .unwrap()
         .expect("exists");
-        assert!(found, "the degraded flat scan is still exact");
+        assert!(
+            found,
+            "the degraded flat scan is still exact for heap-visible rows"
+        );
     }
 
     /// Phase Z5 (reporting): `index_degradation()` must quantify the cliff,
@@ -11093,6 +11117,12 @@ mod tests {
     #[pg_test]
     fn ivf_flush_degradation_is_reportable() {
         use_turbovec();
+        // Phase Z5 changed the DEFAULT: a flush now preserves the cell layout
+        // behind a bounded append delta, so it no longer degrades. This test
+        // guards the Z1 contract -- when degradation DOES happen it must be
+        // reportable -- so it pins the delta OFF, which is also the
+        // documented way an operator restores pre-Z5 behaviour exactly.
+        Spi::run("SET turbovec.ivf_max_delta_pct = 0").unwrap();
         ivf2_make_corpus("ivf_z1", 2000);
         Spi::run("SET enable_seqscan = off").unwrap();
         Spi::run(

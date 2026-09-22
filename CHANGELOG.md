@@ -78,7 +78,7 @@ byte-identically and **no REINDEX is required** — the upgrade is in place.
 
 ### Tests
 
-435 → **438 passed / 0 failed / 8 ignored**, uniform across pg13–19 native
+435 → **437 passed / 0 failed / 8 ignored**, uniform across pg13–19 native
 plus the classic lane.
 
 ### Migration

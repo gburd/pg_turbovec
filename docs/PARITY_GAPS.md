@@ -492,14 +492,39 @@ a hard ceiling. `docs/BQ_RECALL_BENCH` 0.6e already recorded a "20.3 GB
 OOM-killed build" with *unbounded* `mwm` at 1M; this is the same failure at
 10M **with** `mwm` set.
 
-**The 20.7 GiB allocation is not yet identified.** Three hypotheses were
-formed and discarded by arithmetic: the reservoir (capped, and separately
-accounted), the `Vec<Vec<u32>>` assignments (<= ~1 GiB even with allocator
-overhead), and a full-corpus f32 array (the two that exist, `build.rs:1284`
-and `:1611`, are the **BQ** and **graph** paths, not IVF). Next candidates:
-the `Vec<Vec<Vec<u32>>>` per-block assignment collect (`build.rs:~1041` --
-three levels of nesting inside the otherwise-bounded loop) and
-`build_permutation_soft`'s output. **Use a heap profiler, not arithmetic.**
+**Reproduced at 1/5 scale (2026-09-22, `benches/results/z6_buildmem_20260922/`):
+2M x 1024-d peaks at 15.26 GiB against a ~2.44 GiB accounted model, and the
+build COMPLETES (RSS falls back to ~1 GiB), so this is a peak-memory defect,
+not a leak.** That makes it cheap to iterate on without a 61 GiB host.
+
+Two facts are established. The constant 1.38 GiB block is the k-means
+reservoir, matching `lists x 256 x dim x 4` exactly (which validates the
+measurement method), and it is correctly capped. The growing block is
+periodically present TWICE (5.09 + 5.09, then 6.66 + 6.66) -- a realloc
+holding old + new -- which is what produces the observed total spikes. Its
+rate is ~3576 B/row.
+
+**The cause is still NOT identified, and four hypotheses have been DISPROVEN
+by measurement** (do not re-try these):
+
+1. *`Vec` doubling triples peak RSS* -- no: a standalone harness grew a
+   `Vec<u8>` to 4.77 GiB with capacity 8.00 GiB but peak RSS 4.77 GiB. Linux
+   `mremap` grows large blocks in place.
+2. *The reservoir* -- no: capped, and separately accounted as the 1.38 GiB block.
+3. *`Vec<Vec<u32>>` assignments* -- no: measured at 0.52 GiB for 10M rows.
+4. *`idx.prepare()` duplicating the codes via `pack::repack`* -- no, despite
+   sound reasoning (the IVF write consumes only `packed_codes` / `scales` /
+   `slot_to_id` / the TQ+ pair, and `blocked_codes()` / `n_blocks()` are used
+   NOWHERE, so the duplicate is built and discarded). **A/B: 15.26 GiB peak
+   with it, 15.26 GiB without.** Removing it is still justified as dead build
+   work -- it is just not a memory fix.
+
+**Next step must be an allocator profile, not arithmetic.** `heaptrack --pid`
+could not attach under the `postgres` uid even with `gdb` installed and
+`ptrace_scope=0`. Try, in order: jemalloc + `MALLOC_CONF=prof:true` (in-process,
+no attach); `heaptrack --` on a standalone harness calling
+`ivf_build_and_write` outside PostgreSQL; or an `LD_PRELOAD` malloc wrapper
+logging allocations > 256 MB with `backtrace()`.
 
 ## Phase plan
 

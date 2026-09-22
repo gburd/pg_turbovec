@@ -1,0 +1,3 @@
+-- pg_turbovec 2.8.3 -> 2.8.4
+-- Code-only release: no new/changed SQL objects, no wire-format change.
+-- Intentionally empty apart from this comment.

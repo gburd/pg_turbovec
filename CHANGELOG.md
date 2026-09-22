@@ -4,6 +4,77 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.8.4] — 2026-09-22
+
+Code-only release. Wire format unchanged from 2.8.3 (`MetaPageData::version`
+stays **8**); no REINDEX needed and no SQL surface change.
+
+### Fixed
+
+- **Phase Z1 — an IVF index that takes writes now REPORTS its degradation
+  (ordinary TurboQuant path).** An `aminsert` cannot place a row in its cell
+  without an O(n) reshuffle, so the deferred-commit flush appends and the
+  index falls back to a flat scan. The 1-bit BQ path always *preserved*
+  `lists` and stamped `ivf_degraded` so `turbovec.index_is_degraded()` and
+  the throttled `ambeginscan` WARNING fired; the TurboQuant path blanked
+  `lists`, so `index_was_ivf()` went false and the latency cliff was
+  **silent** — an operator got a quietly slower index with no signal and
+  nothing to act on. Root cause: `reconcile_and_write_flush` planned its
+  meta page via `plan_with_blocked`, which hardcodes `lists: 0`. It now
+  captures the on-disk `lists` under the already-held exclusive rewrite lock
+  and stamps both fields, leaving the coarse/cell-directory offsets at zero
+  so the readers return empty and the scan takes the flat fallback
+  *deterministically* rather than by a length coincidence. Both fields are
+  existing v4 meta scalars — no chain is added or moved, so the
+  chain-offset running-sum class is not implicated.
+
+- **An `INSERT` into an index built `WITH (assign_dups > 1)` no longer
+  claims the index is corrupt.** IVF-4a soft assignment stores a boundary
+  row in several cells on purpose, so its external id appears in several
+  slots and `slot_to_id` is deliberately not a bijection — while the insert
+  path loads the index into a flat `IdMapIndex`, which requires one. The
+  rejection reported `corrupt relfile pages: duplicate ids` with a REINDEX
+  hint; both halves were wrong (`turbovec_check` verifies such an index
+  clean, and a rebuild reproduces the same by-design duplicates), sending
+  operators hunting for corruption that does not exist. It now reports
+  `FEATURE_NOT_SUPPORTED`, names `assign_dups`, states the index is
+  effectively **READ-ONLY**, and the HINT says how to confirm it is healthy.
+  Behaviour is otherwise unchanged: the INSERT still fails, `SELECT` still
+  works. Zero cost on the healthy path — `from_id_map_parts` has exactly one
+  failure mode, so reaching the handler already identifies the cause.
+
+### Documentation
+
+- `docs/PARITY_GAPS.md` gains a **zvec source review** (local `alibaba/zvec`
+  checkout `d88357b` vs `deac2d9`), annotated throughout as un-benchmarked:
+  four real gaps in priority order, the one lesson worth stealing (bounded
+  mutable delta + explicit consolidation), explicit non-gaps (hybrid fusion,
+  ColBERT, WAL, durability, scalar filtering — PostgreSQL's or already
+  ours), and deliberately deferred items (RaBitQ/PQ, DiskANN). Adds phases
+  **Z1–Z5**; Z3 (automatic predicate→ANN handoff) is gated on Z4 (costing),
+  because pushing filters while `index_selectivity` is hardcoded to `0.0`
+  would only make bad plans confident.
+- `assign_dups > 1` is now documented as making the index read-only, in both
+  `docs/BENCHMARKS.md` (which recommended it for recall without saying so)
+  and the reloption reference in `src/index/options.rs`.
+- `AGENTS.md` gains four steering rules: degradation must be observable;
+  competitor comparisons stay source reviews until measured; the BQ and
+  TurboQuant insert paths write at **different times** (BQ synchronously in
+  `aminsert`, TurboQuant deferred to `PreCommit`, which a `#[pg_test]` never
+  reaches — so a plain `INSERT` in a test exercises nothing on that path);
+  and `assign_dups > 1` indexes are read-only.
+
+### Tests
+
+429 → **430 passed / 0 failed / 8 ignored**, uniform across pg13–19 native
+plus the classic lane. New: `ivf_flush_degradation_is_reportable`,
+`ivf_soft_assign_index_rejects_insert_and_is_not_corrupt`,
+`ivf_soft_assign_insert_error_names_assign_dups`.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.8.4';` — nothing else. No REINDEX.
+
 ## [2.8.3] — 2026-09-11
 
 **`bit_width = 4` + IVF measured at 1M — flat wins at every target.** This

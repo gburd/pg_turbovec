@@ -1,0 +1,14 @@
+-- pg_turbovec v2.8.4
+--
+-- Code-only release. No SQL surface change, no wire-format change
+-- (MetaPageData::version stays 8). `ALTER EXTENSION pg_turbovec UPDATE`
+-- is sufficient; no REINDEX.
+--
+-- 1. Phase Z1: an ordinary (TurboQuant) IVF index whose deferred-commit
+--    flush rewrites the relfile now PRESERVES `lists` and stamps
+--    `ivf_degraded`, so `turbovec.index_is_degraded()` and the throttled
+--    `ambeginscan` WARNING report the degradation instead of the IVF
+--    identity being silently erased. Both are existing v4 meta fields.
+-- 2. An INSERT into an index built WITH (assign_dups > 1) is rejected with
+--    FEATURE_NOT_SUPPORTED naming `assign_dups`, instead of claiming
+--    "corrupt relfile pages" about a healthy index.

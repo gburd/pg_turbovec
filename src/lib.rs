@@ -10603,24 +10603,19 @@ mod tests {
         (startup, total)
     }
 
-    /// Phase Z4: an IVF index must be costed for the cells it actually
-    /// PROBES, not the whole corpus.
+    /// Phase Z4 (integration): more probes must cost MORE through the real
+    /// planner, and the index scan must actually be chosen.
     ///
-    /// Before Z4 the model charged `n_vectors * dim * bit_width` for every
-    /// kind, so an IVF index probing 1 of 64 cells was costed identically to
-    /// a flat scan of everything -- the planner could not see the one thing
-    /// IVF exists to provide. The scan really does clamp to
-    /// `turbovec.probes` cells (`scan.rs`: `PROBES.get().clamp(1, lists)`),
-    /// so cost must scale with `probes / lists`.
-    ///
-    /// Asserts a RELATIONSHIP (more probes costs more, and a 1-probe scan is
-    /// materially cheaper than probing every cell), not absolute numbers,
-    /// which would pin the cost constants and break on any retune.
+    /// The MAGNITUDE of the probe pruning is asserted in `cost.rs`'s unit
+    /// tests, not here: the index-scan node's cost also carries PostgreSQL's
+    /// heap-fetch and qual costs (~1482 on this fixture), which swamp the
+    /// ~0.5 the AM contributes. Asserting a ratio on the EXPLAIN total would
+    /// be measuring PG's heap model, not ours -- that is exactly how this
+    /// test first failed CI (1482.03 vs 1482.52, a real 0.49 delta that my
+    /// `< 0.5x` assertion could never see).
     #[pg_test]
-    fn ivf_cost_scales_with_probes() {
+    fn ivf_cost_increases_with_probes() {
         use_turbovec();
-        // 20k rows so the scan-cost difference is unambiguous at
-        // EXPLAIN's two-decimal resolution (0.03 vs 0.52).
         ivf2_make_corpus("z4_ivf", 20000);
         Spi::run(
             "CREATE INDEX z4_ivf_idx ON z4_ivf \
@@ -10642,25 +10637,6 @@ mod tests {
             total_all > total_1,
             "probing all 16 cells must cost MORE than probing 1 \
              (got {total_1} at probes=1 vs {total_all} at probes=16); \
-             before Z4 both were identical because cost ignored probes"
-        );
-        // Compare the SCAN component, not the total. On a 2000-row fixture
-        // the startup term (~log2(n)) dominates both totals, so a ratio test
-        // on totals would be measuring startup cost, not probe pruning. The
-        // scan cost is `total - startup`, and probing 1 of 16 cells must be
-        // markedly cheaper there.
-        let (startup_1, _) = {
-            Spi::run("SET turbovec.probes = 1").unwrap();
-            explain_top_cost(q)
-        };
-        Spi::run("SET turbovec.probes = 16").unwrap();
-        let (startup_all, _) = explain_top_cost(q);
-        let scan_1 = total_1 - startup_1;
-        let scan_all = total_all - startup_all;
-        assert!(
-            scan_1 < scan_all * 0.5,
-            "the scan component of a 1-probe search should be much cheaper \
-             than a full 16-probe search (got {scan_1} vs {scan_all}); \
              before Z4 both were identical because cost ignored probes"
         );
     }

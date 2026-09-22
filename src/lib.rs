@@ -10488,8 +10488,13 @@ mod tests {
     /// This test pins that reality so the next person does not re-derive it
     /// (and so it fails loudly if the insert path is ever taught to handle
     /// soft-assigned images, at which point this becomes the Z5 delta work).
-    /// The message is NOT ideal -- it says "corrupt" about a healthy index --
-    /// which is worth fixing separately; the index itself verifies clean.
+    ///
+    /// It also pins the ERROR WORDING. The rejection used to say "corrupt
+    /// relfile pages: duplicate ids" about a perfectly healthy index, with a
+    /// REINDEX hint that cannot help (a rebuild reproduces the same by-design
+    /// duplicates). It now reports FEATURE_NOT_SUPPORTED and says the index is
+    /// read-only, so an operator stops hunting for corruption that is not
+    /// there.
     #[pg_test]
     fn ivf_soft_assign_index_rejects_insert_and_is_not_corrupt() {
         use_turbovec();
@@ -10530,6 +10535,23 @@ mod tests {
              flat IdMapIndex requires a bijection); if this ever starts passing, \
              the insert path learned to handle soft-assigned images -- update this \
              test rather than deleting it"
+        );
+        // And the message must NOT accuse a healthy index of corruption.
+        let msg = err
+            .err()
+            .and_then(|e| {
+                e.downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+        assert!(
+            !msg.contains("corrupt"),
+            "the rejection must not call a healthy soft-assigned index \"corrupt\"; got: {msg}"
+        );
+        assert!(
+            msg.contains("assign_dups") || msg.contains("does not support INSERT"),
+            "the rejection should name assign_dups as the cause; got: {msg}"
         );
     }
 

@@ -249,7 +249,8 @@ pub(crate) unsafe extern "C-unwind" fn amcostestimate(
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
-    use super::{scan_cpu_cost, scored_vectors};
+    #[allow(unused_imports)]
+    use super::*;
 
     /// Phase Z4: IVF must be costed for the cells it PROBES.
     ///

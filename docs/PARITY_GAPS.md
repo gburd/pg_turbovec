@@ -351,26 +351,61 @@ inner-product only (`Z/src/core/interface/index.cc:1279–1323`). Note PostgreSQ
 GIN full-text is *not* a substitute: it does lexical matching, not weighted
 sparse nearest-neighbour.
 
-**3. `WHERE` predicates do not automatically become ANN masks.** We have the
-machinery — caller-supplied TID allowlists drive masked flat and out-of-core IVF
-scans, and the scan path widens candidates iteratively
-(`src/index/scan.rs:1423–1447,1497–1548`). What is missing is the *automatic*
-handoff: no bitmap callback, no multicolumn support
-(`src/index/mod.rs:94,142`), so an ordinary qual cannot be pushed into the
-kernel without the caller materialising ids by hand. zvec's planner does this
-conversion, including a small-result brute-force-by-key alternative
-(`Z/src/db/sqlengine/planner/query_planner.cc:535–572`).
+**3. ~~`WHERE` predicates do not automatically become ANN masks~~ —
+RESCOPED, largely a non-gap (see Phase Z3 below).** Investigating this for
+implementation showed my original framing was wrong on two counts.
 
-**4. Cost estimation ignores everything that matters for filtered ANN.**
-`amcostestimate` uses corpus size, dim and bit width, then reports
-`index_selectivity = 0.0` unconditionally (`src/index/cost.rs:49–121`). It does
-not model predicate selectivity, `turbovec.probes`, or the query `LIMIT`. That
-is what makes an "ANN vs scalar-filter-then-exact-sort" decision unreliable.
-Fixing (3) without fixing this would let the planner choose badly with more
-confidence. Worth noting zvec's equivalent is a *heuristic* match-ratio
-threshold (`Z/src/db/sqlengine/planner/optimizer.cc:32–94`), not a superior
-general optimiser — so this is a "do it properly for PostgreSQL" item, not a
-port.
+*A qual on a non-indexed column cannot reach the AM at all.* PostgreSQL defines
+a scan key as `index_key operator constant` where "the index key is one of the
+columns of the index" ([Index Scanning][pg-idxscan]); a qual on any other column
+becomes a Filter on the scan node, evaluated by the executor. So "push the
+`WHERE` into the kernel" is not a thing an AM can unilaterally do — the
+information never arrives. zvec can do it because it *owns* its planner and
+storage; a PostgreSQL AM does not.
+
+*`amgetbitmap` is not the route.* It returns an unordered `TIDBitmap`, and an
+ANN scan's entire value is ordering. Serving `ORDER BY <-> LIMIT k` from a
+bitmap would force a sort over the whole candidate set — scoring everything,
+which is what ANN exists to avoid. Adding `amgetbitmap` would buy unordered
+retrieval we have no use for.
+
+*And the useful behaviour already shipped in v1.8.0.* Iterative scan handles
+exactly this case, demand-driven: when the executor's post-filter drains a
+batch, `amgettuple` re-runs the search with doubled `k` (widening `probes` for
+IVF), deduplicates, and restores ordering through the `xs_recheckorderby`
+reorder queue — capped by `turbovec.max_scan_tuples`. The AM never needs to see
+the filter, which is why this design works at all.
+
+What genuinely remains is smaller and is *not* a mask-pushdown feature: the
+manual allowlist path is a measured **2.6–14.7× win below ~7 % selectivity and
+a 2.6× LOSS at 100 %** (`docs/FILTERING.md` § 3), and nothing automatically
+decides which side of that crossover a query is on. Z4 supplies the missing
+input (real selectivity); see Phase Z3.
+
+[pg-idxscan]: https://www.postgresql.org/docs/current/index-scanning.html
+
+**4. ~~Cost estimation ignores everything that matters for filtered ANN~~ —
+FIXED (Phase Z4).** `amcostestimate` used corpus size, dim and bit width and
+reported `index_selectivity = 0.0` unconditionally. Three defects, all fixed:
+IVF is now costed for the cells it actually **probes** (`probes / lists`, with a
+degraded index costed as flat since it takes the flat fallback); selectivity
+derives from the planner's own `rel->rows / rel->tuples`, so we agree with it by
+construction rather than second-guessing with our own
+`clauselist_selectivity`; and a **pre-existing unit error** — seconds divided by
+`cpu_operator_cost` — had made a 1M × 1024-d flat scan cost ~23 against
+PostgreSQL's ~73,000 for the equivalent seq scan, i.e. ~3000× too cheap, which
+let an ANN path beat plans that are genuinely faster. The ns throughput model
+itself validated against our own published measurement (model 5.3 ms vs
+measured 6.08 ms), so only the unit was wrong.
+
+The arithmetic lives in two pure functions (`scored_vectors`, `scan_cpu_cost`)
+with unit tests, because it is **not** observable through `EXPLAIN`: the
+index-scan node's cost also carries PostgreSQL's heap-fetch and qual costs
+(~1482 on a 20k-row fixture), which swamp the ~0.5 the AM contributes.
+
+Worth noting zvec's equivalent is a *heuristic* match-ratio threshold
+(`Z/src/db/sqlengine/planner/optimizer.cc:32–94`), not a superior general
+optimiser.
 
 ### The lesson worth stealing: bounded mutable delta + explicit consolidation
 
@@ -465,13 +500,26 @@ still has to happen somewhere.
   Needs a kernel decision: TurboQuant does not apply to sparse, so
   this is sparse FLAT (and possibly an inverted/WAND posting scan),
   not a reuse of the existing path.
-- **Phase Z3** - automatic predicate-to-ANN handoff: a bitmap/allowlist
-  callback so an ordinary `WHERE` becomes a kernel mask without the
-  caller materialising TIDs. **Gated on Phase Z4** - pushing filters
-  without selectivity-aware costing just makes bad plans confident.
-- **Phase Z4** - filter- and kind-aware `amcostestimate`: model
-  predicate selectivity, `turbovec.probes` and the query `LIMIT`
-  instead of reporting `index_selectivity = 0.0` unconditionally.
+- **Phase Z3** - RESCOPED to a non-gap plus one small item. The original
+  framing ("a bitmap/allowlist callback so an ordinary `WHERE` becomes a
+  kernel mask") is not implementable and would not help: a qual on a
+  non-indexed column never reaches an AM (PostgreSQL defines a scan key
+  as `index_key operator constant` over an *index* column), and
+  `amgetbitmap` returns an unordered bitmap, destroying the ordering an
+  ANN scan exists to provide. The useful behaviour shipped in v1.8.0 as
+  iterative scan, which is demand-driven and needs no view of the
+  filter. See the rescoped § 3 above. **Remaining, genuinely small:**
+  the allowlist is a measured 2.6-14.7x win below ~7 % selectivity and a
+  2.6x LOSS at 100 %, and nothing tells a user which side they are on.
+  Z4 now computes that selectivity, so the open work is *guidance*
+  (documenting the crossover against a real estimate) and optionally a
+  planner-side hint - not a mask-pushdown feature.
+- ~~**Phase Z4** - filter- and kind-aware `amcostestimate`.~~ ✓ done.
+  IVF costed for the cells it probes; selectivity from the planner's own
+  `rel->rows / rel->tuples`; and a pre-existing unit error fixed that had
+  made a full 1M scan ~3000x too cheap. Arithmetic extracted into pure,
+  unit-tested functions (it is not observable through `EXPLAIN` - PG's
+  heap costs swamp it).
 - **Phase Z5** (research, large) - bounded mutable delta so inserts
   stop flattening trained IVF: retain cells, search a capped append
   region alongside them, consolidate explicitly. Weigh query fan-out,

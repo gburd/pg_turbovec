@@ -300,6 +300,14 @@ fixed `probes` by storing boundary vectors in their top-M nearest cells, at a
 bounded storage cost — see [Migrating from pgvector](MIGRATING_FROM_PGVECTOR.md)
 and .
 
+> **`assign_dups > 1` makes the index READ-ONLY.** Storing one row in several
+> cells means its external id appears in several slots, so the id table is not a
+> bijection — and the insert path loads the index into a structure that requires
+> one. `INSERT`/`UPDATE` on the table is REJECTED (clearly, naming
+> `assign_dups`, since v2.8.4); `SELECT` is unaffected. Use it only for corpora
+> you rebuild rather than append to. `assign_dups = 1` (the default) has no such
+> restriction.
+
 ## IVF warm-p50 (AVX2, `floki` — the latency win, confirmed)
 
 A small in-process AVX2 warm-p50 test confirming the IVF cell-skipping

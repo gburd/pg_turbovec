@@ -24,6 +24,15 @@
 //! `turbovec.probes` at a bounded storage cost. Only meaningful when
 //! `lists > 0`; ignored for flat indexes.
 //!
+//! **`assign_dups > 1` makes the index READ-ONLY.** Storing one row in
+//! several cells puts its external id in several slots, so `slot_to_id`
+//! is deliberately NOT a bijection — and the insert path loads the index
+//! into a flat `IdMapIndex`, which requires one. `INSERT`/`UPDATE` is
+//! therefore REJECTED with a `FEATURE_NOT_SUPPORTED` error naming
+//! `assign_dups` (the index is healthy, not corrupt — `turbovec_check`
+//! confirms it, and REINDEX cannot change it). `SELECT` is unaffected.
+//! Choose it only for corpora you rebuild rather than append to.
+//!
 //! `graph` (Phase G-2a, ) opts a
 //! build into the Vamana-style navigable-graph index kind
 //! (`KIND_GRAPH`, wire v6) instead of the flat/IVF layout — the

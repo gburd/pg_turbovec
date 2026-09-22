@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.8.4] — 2026-09-22
+## [2.8.4] — 2026-09-21
 
 Code-only release. Wire format unchanged from 2.8.3 (`MetaPageData::version`
 stays **8**); no REINDEX needed and no SQL surface change.

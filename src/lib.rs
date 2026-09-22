@@ -10536,23 +10536,41 @@ mod tests {
              the insert path learned to handle soft-assigned images -- update this \
              test rather than deleting it"
         );
-        // And the message must NOT accuse a healthy index of corruption.
-        let msg = err
-            .err()
-            .and_then(|e| {
-                e.downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-            })
-            .unwrap_or_default();
-        assert!(
-            !msg.contains("corrupt"),
-            "the rejection must not call a healthy soft-assigned index \"corrupt\"; got: {msg}"
-        );
-        assert!(
-            msg.contains("assign_dups") || msg.contains("does not support INSERT"),
-            "the rejection should name assign_dups as the cause; got: {msg}"
-        );
+        // The WORDING is asserted separately, in
+        // `ivf_soft_assign_insert_error_names_assign_dups` -- a PG ERROR
+        // raised through pgrx does not surface its message as a `String`
+        // panic payload, so `catch_unwind` + `downcast_ref` yields an
+        // empty string here and would assert nothing (it did, on CI).
+        // `#[should_panic(expected = ...)]` matches the real message.
+    }
+
+    /// The `assign_dups > 1` INSERT rejection must NOT accuse a healthy index
+    /// of corruption. It used to say "corrupt relfile pages: duplicate ids"
+    /// with a REINDEX hint -- both wrong: `turbovec_check` verifies the index
+    /// clean, and a rebuild reproduces the same by-design duplicates.
+    ///
+    /// Asserted with `should_panic` rather than `catch_unwind`: a PG ERROR
+    /// raised through pgrx does not carry its message as a `String` panic
+    /// payload, so downcasting the payload returns an empty string and the
+    /// assertion silently passes.
+    #[pg_test]
+    #[should_panic(expected = "does not support INSERT")]
+    fn ivf_soft_assign_insert_error_names_assign_dups() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_z1sa_msg", 2000);
+        Spi::run(
+            "CREATE INDEX ivf_z1sa_msg_idx ON ivf_z1sa_msg \
+             USING turbovec (emb vec_cosine_ops) \
+             WITH (bit_width = 4, lists = 16, assign_dups = 2)",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO ivf_z1sa_msg \
+             SELECT 9001, ('[' || array_to_string(array(\
+                SELECT sin(9001::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector",
+        )
+        .unwrap();
     }
 
     /// Phase Z1: an ordinary (TurboQuant) IVF index whose deferred-commit

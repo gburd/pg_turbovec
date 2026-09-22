@@ -10573,6 +10573,152 @@ mod tests {
         .unwrap();
     }
 
+    /// Phase Z4 helper: pull the `cost=A..B` numbers off the top plan node
+    /// of an `EXPLAIN`. Returns `(startup, total)`.
+    ///
+    /// `EXPLAIN` cannot appear in a subquery, so the rows are read directly.
+    fn explain_top_cost(sql: &str) -> (f64, f64) {
+        let line = Spi::connect(|client| {
+            let rows = client.select(&format!("EXPLAIN {sql}"), None, &[]).unwrap();
+            rows.filter_map(|r| r.get::<String>(1).ok().flatten())
+                .find(|l| l.contains("cost="))
+                .unwrap_or_default()
+        });
+        assert!(
+            line.contains("cost="),
+            "EXPLAIN produced no cost= line for: {sql}"
+        );
+        // ... cost=STARTUP..TOTAL rows=...
+        let after = line.split("cost=").nth(1).expect("cost= present");
+        let nums = after.split(' ').next().expect("cost operand");
+        let mut it = nums.split("..");
+        let startup: f64 = it.next().unwrap().parse().expect("startup cost");
+        let total: f64 = it.next().unwrap().parse().expect("total cost");
+        (startup, total)
+    }
+
+    /// Phase Z4: an IVF index must be costed for the cells it actually
+    /// PROBES, not the whole corpus.
+    ///
+    /// Before Z4 the model charged `n_vectors * dim * bit_width` for every
+    /// kind, so an IVF index probing 1 of 64 cells was costed identically to
+    /// a flat scan of everything -- the planner could not see the one thing
+    /// IVF exists to provide. The scan really does clamp to
+    /// `turbovec.probes` cells (`scan.rs`: `PROBES.get().clamp(1, lists)`),
+    /// so cost must scale with `probes / lists`.
+    ///
+    /// Asserts a RELATIONSHIP (more probes costs more, and a 1-probe scan is
+    /// materially cheaper than probing every cell), not absolute numbers,
+    /// which would pin the cost constants and break on any retune.
+    #[pg_test]
+    fn ivf_cost_scales_with_probes() {
+        use_turbovec();
+        // 20k rows so the scan-cost difference is unambiguous at
+        // EXPLAIN's two-decimal resolution (0.03 vs 0.52).
+        ivf2_make_corpus("z4_ivf", 20000);
+        Spi::run(
+            "CREATE INDEX z4_ivf_idx ON z4_ivf \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("ANALYZE z4_ivf").unwrap();
+
+        let q = "SELECT id FROM z4_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
+                 '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::vector LIMIT 10";
+
+        Spi::run("SET turbovec.probes = 1").unwrap();
+        let (_, total_1) = explain_top_cost(q);
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let (_, total_all) = explain_top_cost(q);
+
+        assert!(
+            total_all > total_1,
+            "probing all 16 cells must cost MORE than probing 1 \
+             (got {total_1} at probes=1 vs {total_all} at probes=16); \
+             before Z4 both were identical because cost ignored probes"
+        );
+        // Compare the SCAN component, not the total. On a 2000-row fixture
+        // the startup term (~log2(n)) dominates both totals, so a ratio test
+        // on totals would be measuring startup cost, not probe pruning. The
+        // scan cost is `total - startup`, and probing 1 of 16 cells must be
+        // markedly cheaper there.
+        let (startup_1, _) = {
+            Spi::run("SET turbovec.probes = 1").unwrap();
+            explain_top_cost(q)
+        };
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        let (startup_all, _) = explain_top_cost(q);
+        let scan_1 = total_1 - startup_1;
+        let scan_all = total_all - startup_all;
+        assert!(
+            scan_1 < scan_all * 0.5,
+            "the scan component of a 1-probe search should be much cheaper \
+             than a full 16-probe search (got {scan_1} vs {scan_all}); \
+             before Z4 both were identical because cost ignored probes"
+        );
+    }
+
+    /// Phase Z4: a restriction qual must lower the estimated row count the
+    /// index scan reports.
+    ///
+    /// Before Z4 `*index_selectivity = 0.0` unconditionally, which told the
+    /// planner "this index returns essentially no rows" no matter what the
+    /// query asked for -- so it could not weigh an ANN scan against
+    /// filter-first alternatives. Selectivity is now derived from the
+    /// planner's own `rel->rows / rel->tuples`.
+    #[pg_test]
+    fn ann_cost_reflects_filter_selectivity() {
+        use_turbovec();
+        ivf2_make_corpus("z4_sel", 2000);
+        Spi::run("ALTER TABLE z4_sel ADD COLUMN bucket int").unwrap();
+        // 1% of rows land in bucket 0.
+        Spi::run("UPDATE z4_sel SET bucket = CASE WHEN id % 100 = 0 THEN 0 ELSE 1 END").unwrap();
+        Spi::run(
+            "CREATE INDEX z4_sel_idx ON z4_sel \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("ANALYZE z4_sel").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        // The selectivity the AM reports is visible as the index scan's own
+        // row estimate. Compare an unfiltered ANN scan against one whose
+        // qual keeps ~1% of the table.
+        let rows_of = |sql: &str| -> f64 {
+            let line = Spi::connect(|client| {
+                let rows = client.select(&format!("EXPLAIN {sql}"), None, &[]).unwrap();
+                rows.filter_map(|r| r.get::<String>(1).ok().flatten())
+                    .find(|l| l.contains("rows="))
+                    .unwrap_or_default()
+            });
+            assert!(line.contains("rows="), "no rows= line for: {sql}");
+            line.split("rows=")
+                .nth(1)
+                .unwrap()
+                .split(' ')
+                .next()
+                .unwrap()
+                .parse()
+                .expect("rows estimate")
+        };
+
+        let plain = rows_of(
+            "SELECT id FROM z4_sel ORDER BY emb OPERATOR(turbovec.<=>) \
+             '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::vector LIMIT 10",
+        );
+        let filtered = rows_of(
+            "SELECT id FROM z4_sel WHERE bucket = 0 ORDER BY emb OPERATOR(turbovec.<=>) \
+             '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::vector LIMIT 10",
+        );
+        assert!(
+            filtered < plain,
+            "a qual keeping ~1% of rows must lower the estimate below the \
+             unfiltered scan (got filtered={filtered}, plain={plain}); before \
+             Z4 selectivity was hardcoded so the filter was invisible"
+        );
+    }
+
     /// Phase Z1: an ordinary (TurboQuant) IVF index whose deferred-commit
     /// flush rewrites the relfile degrades to a flat scan -- and that
     /// degradation MUST be REPORTABLE, exactly as the 1-bit BQ path already

@@ -10603,6 +10603,236 @@ mod tests {
         (startup, total)
     }
 
+    /// Phase Z5 Route A: an INSERT must PRESERVE the IVF cell layout and the
+    /// index must still return EXACT results.
+    ///
+    /// Before Z5 the deferred-commit flush passed `ivf: None`, so the coarse
+    /// centroids and cell directory were simply not written back -- the first
+    /// insert turned the index into an O(n) flat scan until REINDEX. The rows
+    /// appended at the tail belong to no cell, so the fix is to keep the
+    /// layout and sweep that tail exhaustively.
+    ///
+    /// The delta length is DERIVABLE (`n_live - directory.total_vectors()`),
+    /// which is why this needs no wire-format change: existing slots keep
+    /// their index (UPDATE writes in place) and inserts append at the tail.
+    ///
+    /// Asserts BOTH halves, because either alone would be a bug: cells
+    /// preserved (not degraded) AND every inserted row findable.
+    #[pg_test]
+    fn ivf_insert_preserves_cells_and_stays_exact() {
+        use_turbovec();
+        ivf2_make_corpus("z5a_ivf", 2000);
+        Spi::run(
+            "CREATE INDEX z5a_ivf_idx ON z5a_ivf \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'z5a_ivf_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+
+        // Drive the deferred-commit flush the way a committing INSERT does,
+        // adding rows that are NOT in any cell (they append at the tail).
+        // A plain INSERT cannot be used: a #[pg_test] rolls back before
+        // PreCommit, so the flush would never run (the Z1 lesson).
+        let (idx, state) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert_eq!(meta.lists, 16, "fixture must be IVF");
+            let dim = meta.dim as usize;
+            let (codes, scales, ids) = crate::index::relfile::read_full(rel, &meta);
+            let (ts, tsc) = crate::index::relfile::read_tqplus(rel, &meta);
+            let mut idx = turbovec::IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                ts,
+                tsc,
+            )
+            .expect("from_id_map_parts");
+            let mut state = crate::cache::PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: meta.dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            // 20 new rows = 1% of 2000, comfortably inside the 10% bound.
+            for g in 9001u64..9021 {
+                let v: Vec<f32> = (1..=dim)
+                    .map(|k| ((g as f64) / 50.0 + k as f64).sin() as f32)
+                    .collect();
+                idx.add_with_ids(&v, &[g]).expect("add");
+                state.live_ids.push(g);
+                state.touched_ids.push(g);
+                state.n_vectors += 1;
+                state.version += 1;
+            }
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state)
+        };
+        unsafe {
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
+        }
+
+        // HALF ONE: the cell layout SURVIVED. Before Z5 this reported
+        // degraded == true and lists' chains were gone.
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('z5a_ivf_idx'::regclass)")
+                .unwrap(),
+            Some(false),
+            "an insert within the delta bound must PRESERVE the IVF cells, \
+             not degrade the index to a flat scan"
+        );
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta after flush");
+            assert_eq!(meta.lists, 16, "lists preserved");
+            assert!(meta.has_ivf(), "the IVF chains must still be referenced");
+            let centroids = crate::index::relfile::read_coarse_centroids(rel, &meta);
+            assert_eq!(
+                centroids.len(),
+                16 * meta.dim as usize,
+                "coarse centroids must be written back INTACT, not dropped"
+            );
+            let dir = crate::index::relfile::read_cell_directory(rel, &meta)
+                .expect("cell directory must survive");
+            // The directory still partitions the ORIGINAL rows; the 20 new
+            // ones are the delta past its end.
+            assert_eq!(
+                dir.total_vectors(),
+                2000,
+                "the directory still partitions the pre-insert rows"
+            );
+            assert_eq!(meta.n_vectors, 2020, "and the index holds the appends");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
+
+        // HALF TWO: results are still EXACT. The delta is swept
+        // exhaustively, so an appended row must be findable -- if the sweep
+        // were missing, these rows would exist on disk and never be returned
+        // (silent data loss, which is worse than a slow scan).
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT is_corrupt FROM turbovec.turbovec_check('z5a_ivf_idx'::regclass)"
+            )
+            .unwrap(),
+            Some(false),
+            "preserving the layout must not corrupt the index"
+        );
+        for g in [9001i64, 9010, 9020] {
+            let found = Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM (\
+                    SELECT id FROM z5a_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
+                    (SELECT emb FROM z5a_ivf WHERE id = {g}) LIMIT 10\
+                 ) t WHERE t.id = {g})"
+            ))
+            .unwrap()
+            .expect("exists");
+            assert!(
+                found,
+                "appended row {g} lives in NO cell -- it is only returned if the \
+                 delta sweep works. Missing it would be silent data loss."
+            );
+        }
+        // A pre-existing row must still be found through its cell.
+        let old = Spi::get_one::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM (\
+                SELECT id FROM z5a_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
+                (SELECT emb FROM z5a_ivf WHERE id = 123) LIMIT 10\
+             ) t WHERE t.id = 123)",
+        )
+        .unwrap()
+        .expect("exists");
+        assert!(old, "a pre-existing cell row must survive the flush");
+    }
+
+    /// Phase Z5: past the bound, the index must still degrade to flat --
+    /// the delta is BOUNDED, not unlimited. Without this the tail could grow
+    /// until the "optimisation" is an O(n) scan plus extra bookkeeping.
+    #[pg_test]
+    fn ivf_insert_past_delta_bound_degrades() {
+        use_turbovec();
+        ivf2_make_corpus("z5b_ivf", 500);
+        Spi::run(
+            "CREATE INDEX z5b_ivf_idx ON z5b_ivf \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 8)",
+        )
+        .unwrap();
+        // Bound of 1% over 500 cell rows allows 5 appended rows; add 50.
+        Spi::run("SET turbovec.ivf_max_delta_pct = 1").unwrap();
+
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'z5b_ivf_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+        let (idx, state) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            let dim = meta.dim as usize;
+            let (codes, scales, ids) = crate::index::relfile::read_full(rel, &meta);
+            let (ts, tsc) = crate::index::relfile::read_tqplus(rel, &meta);
+            let mut idx = turbovec::IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                ts,
+                tsc,
+            )
+            .expect("from_id_map_parts");
+            let mut state = crate::cache::PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: meta.dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            for g in 9001u64..9051 {
+                let v: Vec<f32> = (1..=dim)
+                    .map(|k| ((g as f64) / 50.0 + k as f64).sin() as f32)
+                    .collect();
+                idx.add_with_ids(&v, &[g]).expect("add");
+                state.live_ids.push(g);
+                state.touched_ids.push(g);
+                state.n_vectors += 1;
+                state.version += 1;
+            }
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state)
+        };
+        unsafe {
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
+        }
+
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('z5b_ivf_idx'::regclass)")
+                .unwrap(),
+            Some(true),
+            "a delta past turbovec.ivf_max_delta_pct must still degrade to flat \
+             AND report it -- the delta is bounded, not unlimited"
+        );
+        // And correctness is unaffected either way: the flat fallback is exact.
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let found = Spi::get_one::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM (\
+                SELECT id FROM z5b_ivf ORDER BY emb OPERATOR(turbovec.<=>) \
+                (SELECT emb FROM z5b_ivf WHERE id = 9050) LIMIT 10\
+             ) t WHERE t.id = 9050)",
+        )
+        .unwrap()
+        .expect("exists");
+        assert!(found, "the degraded flat scan is still exact");
+    }
+
     /// Phase Z5 (reporting): `index_degradation()` must quantify the cliff,
     /// not merely flag it.
     ///

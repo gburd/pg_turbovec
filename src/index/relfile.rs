@@ -1242,6 +1242,45 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         Some(m) if m.index_was_ivf() => m.lists,
         _ => 0,
     };
+
+    // Phase Z5 (bounded delta): read the EXISTING coarse centroids and cell
+    // directory so this flush can write them back UNCHANGED instead of
+    // dropping them. That is the whole mechanism -- no format change.
+    //
+    // Why it is sound: `reconcile_flush_image` keeps every existing row at
+    // its current slot (UPDATE writes in place) and APPENDS new rows at the
+    // tail. So after this flush, slots `[0, D)` are still exactly the
+    // cell-partitioned region the directory describes, and `[D, n_live)` is
+    // a delta the scan searches exhaustively. `D` is the directory's own
+    // `total_vectors()`, so the delta length is DERIVABLE
+    // (`n_live - D`) and needs no new meta field.
+    //
+    // VACUUM does not disturb this: an IVF index TOMBSTONES rather than
+    // swap-removing (Phase E-2), so slot indices are stable and the
+    // tombstone bitmap is ANDed in separately.
+    //
+    // Bounded: `ivf_delta_within_bound` decides whether the delta is still
+    // small enough to be worth searching exhaustively. Past the bound we
+    // keep today's behaviour (drop the chains, degrade to flat, report it),
+    // so the delta cannot grow unbounded and silently become an O(n) scan
+    // with extra bookkeeping.
+    let preserved_ivf: Option<(Vec<f32>, Vec<u8>, u32)> = match &disk_meta {
+        Some(m) if m.index_was_ivf() && !m.is_degraded() => {
+            let centroids = read_coarse_centroids(rel, m);
+            let dir_bytes = read_cell_directory_bytes(rel, m);
+            // Only carry them forward if both are INTACT for this `lists`
+            // (a partial/short read means something is already wrong, and
+            // re-stamping half a layout is how chains get corrupted).
+            let want_centroids = (m.lists as usize) * (m.dim as usize);
+            let want_dir = (m.lists as usize) * crate::index::ivf::CellEntry::ENCODED_BYTES;
+            if centroids.len() == want_centroids && dir_bytes.len() == want_dir {
+                Some((centroids, dir_bytes, m.lists))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     let stride = (dim as usize) * (bit_width as usize) / 8;
 
     let (n_vectors, out_codes, out_scales, out_ids) = match disk_meta {
@@ -1337,6 +1376,42 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         }
     };
 
+    // Phase Z5: decide between carrying the cell layout forward (delta) and
+    // dropping it (degrade to flat, pre-Z5 behaviour).
+    //
+    // `cell_rows` is what the directory partitions; everything past it is the
+    // append region the scan will sweep exhaustively. Keep the layout only
+    // while that region is within the configured bound -- past it the sweep
+    // would cost more than it saves and we are better off admitting the
+    // degradation (which Z1 makes reportable).
+    let ivf_carry = match &preserved_ivf {
+        Some((centroids, dir_bytes, lists)) => {
+            let cell_rows = crate::index::ivf::CellDirectory::decode(dir_bytes, *lists as usize)
+                .total_vectors();
+            if ivf_delta_within_bound(cell_rows, n_vectors) {
+                Some(IvfParts {
+                    lists: *lists,
+                    coarse_centroids: centroids,
+                    cell_dir_bytes: dir_bytes,
+                    colbert: false,
+                })
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    // When the layout IS carried, the index is not degraded, so the Z1
+    // degraded stamp must not fire (it would report a healthy index as
+    // needing REINDEX and make `is_degraded()` disable the cells it just
+    // preserved). `write_full_inner` ignores `degraded_lists` whenever
+    // `ivf` is `Some`, but pass 0 so the intent is explicit at the call.
+    let degraded_lists = if ivf_carry.is_some() {
+        0
+    } else {
+        degraded_lists
+    };
+
     write_full_inner(
         rel,
         bit_width,
@@ -1347,7 +1422,7 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         &out_ids,
         am_version,
         Some(prepared),
-        None,
+        ivf_carry,
         None,
         degraded_lists,
     );
@@ -2923,6 +2998,70 @@ pub(crate) unsafe fn read_coarse_centroids(rel: pg_sys::Relation, meta: &MetaPag
 /// # Safety
 ///
 /// Caller must hold a relation reference.
+/// Phase Z5: is the append region still small enough to sweep exhaustively?
+///
+/// `cell_rows` is the number of rows the cell directory partitions;
+/// `total_rows` is every live slot. The difference is the delta -- rows that
+/// were appended by `aminsert` and therefore belong to no cell.
+///
+/// The scan searches probed cells PLUS the whole delta, so results stay
+/// exact and only latency is at stake. Cost is linear in the delta, which is
+/// what `turbovec.ivf_max_delta_pct` bounds (as a percent of `cell_rows`).
+/// `0` disables the delta, restoring pre-Z5 behaviour where any insert
+/// degrades the index to flat.
+///
+/// Pure so it can be unit-tested without a relation.
+pub(crate) fn delta_within_bound(cell_rows: u64, total_rows: u64, max_pct: i32) -> bool {
+    if max_pct <= 0 {
+        return false;
+    }
+    // Nothing partitioned means there is no cell layout worth keeping.
+    if cell_rows == 0 {
+        return false;
+    }
+    // Fewer rows than the directory claims is an INCONSISTENCY, not a delta
+    // (rows cannot vanish from a cell without a rewrite). Refuse to carry a
+    // layout we cannot explain.
+    if total_rows < cell_rows {
+        return false;
+    }
+    let delta = total_rows - cell_rows;
+    // Compare in integers scaled by 100 to avoid float rounding at the bound.
+    delta.saturating_mul(100) <= cell_rows.saturating_mul(max_pct as u64)
+}
+
+/// [`delta_within_bound`] against the live `turbovec.ivf_max_delta_pct`.
+fn ivf_delta_within_bound(cell_rows: u64, total_rows: u64) -> bool {
+    delta_within_bound(cell_rows, total_rows, crate::guc::IVF_MAX_DELTA_PCT.get())
+}
+
+/// Raw bytes of the cell-directory chain, exactly as persisted.
+///
+/// Phase Z5: the reconcile flush writes these back UNCHANGED to preserve the
+/// cell layout across an append, so it needs the bytes rather than a decoded
+/// directory. Shared with [`read_cell_directory`] so there is ONE definition
+/// of where the chain starts and how long it is -- a second copy of that
+/// arithmetic is how chain offsets drift apart.
+///
+/// Returns an empty vec when this index has no cell directory.
+pub(crate) unsafe fn read_cell_directory_bytes(
+    rel: pg_sys::Relation,
+    meta: &MetaPageData,
+) -> Vec<u8> {
+    use crate::index::ivf::CellEntry;
+    if meta.lists == 0 || meta.cell_dir_first == 0 || meta.cell_dir_count == 0 {
+        return Vec::new();
+    }
+    let n_bytes = ((meta.lists as usize) * CellEntry::ENCODED_BYTES) as u64;
+    read_chain(
+        rel,
+        meta.cell_dir_first,
+        1,
+        crate::index::page::PAYLOAD_BYTES as u32,
+        n_bytes,
+    )
+}
+
 pub(crate) unsafe fn read_cell_directory(
     rel: pg_sys::Relation,
     meta: &MetaPageData,
@@ -2932,15 +3071,8 @@ pub(crate) unsafe fn read_cell_directory(
         return None;
     }
     let lists = meta.lists as usize;
-    let n_bytes = (lists * CellEntry::ENCODED_BYTES) as u64;
-    let bytes = read_chain(
-        rel,
-        meta.cell_dir_first,
-        1,
-        crate::index::page::PAYLOAD_BYTES as u32,
-        n_bytes,
-    );
-    debug_assert_eq!(bytes.len(), n_bytes as usize);
+    let bytes = read_cell_directory_bytes(rel, meta);
+    debug_assert_eq!(bytes.len(), lists * CellEntry::ENCODED_BYTES);
     Some(CellDirectory::decode(&bytes, lists))
 }
 
@@ -3329,6 +3461,69 @@ pub(crate) unsafe fn force_corrupt_scale(
 #[cfg(test)]
 mod reconcile_tests {
     use super::reconcile_flush_image;
+
+    /// Phase Z5: the delta bound decides whether an appended tail is still
+    /// worth sweeping exhaustively, or the index should admit degradation.
+    #[test]
+    fn delta_bound_accepts_small_appends_and_rejects_large() {
+        assert!(
+            super::delta_within_bound(1000, 1000, 10),
+            "no delta is fine"
+        );
+        assert!(
+            super::delta_within_bound(1000, 1050, 10),
+            "5% is within 10%"
+        );
+        assert!(
+            super::delta_within_bound(1000, 1100, 10),
+            "exactly 10% is IN"
+        );
+        assert!(
+            !super::delta_within_bound(1000, 1101, 10),
+            "just over 10% is OUT -- the sweep would cost more than it saves"
+        );
+        assert!(
+            !super::delta_within_bound(1000, 2000, 10),
+            "100% is far out"
+        );
+    }
+
+    /// `0` disables the delta entirely, restoring pre-Z5 behaviour where any
+    /// insert degrades the index to flat. Operators who prefer the old
+    /// contract must be able to get it back exactly.
+    #[test]
+    fn delta_bound_zero_disables_the_delta() {
+        assert!(
+            !super::delta_within_bound(1000, 1000, 0),
+            "0 disables even an empty delta"
+        );
+        assert!(!super::delta_within_bound(1000, 1001, 0));
+        assert!(!super::delta_within_bound(1000, 2000, 0));
+    }
+
+    /// Refuse to carry a layout we cannot explain. Fewer live rows than the
+    /// directory partitions is an INCONSISTENCY, not a delta -- rows cannot
+    /// leave a cell without a rewrite -- and a mask built from it would
+    /// address slots that do not exist.
+    #[test]
+    fn delta_bound_rejects_inconsistent_and_empty_layouts() {
+        assert!(
+            !super::delta_within_bound(1000, 999, 10),
+            "fewer rows than partitioned is inconsistent, not a delta"
+        );
+        assert!(
+            !super::delta_within_bound(0, 100, 10),
+            "nothing partitioned means there is no cell layout worth keeping"
+        );
+        assert!(
+            super::delta_within_bound(1, 2, 100),
+            "delta == cell_rows at 100%"
+        );
+        assert!(
+            !super::delta_within_bound(1, 3, 100),
+            "2x cell_rows exceeds 100%"
+        );
+    }
 
     // v1.29.1 corruption fix #2 (deferred-flush lost-update) gate.
     // These run under plain `cargo test --lib` (no PostgreSQL cluster).

@@ -15,6 +15,7 @@
 //! | `turbovec.probes`                | int  | 16      | 1..=65536      |
 //! | `turbovec.iterative_scan`        | enum | off     | off, relaxed_order |
 //! | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10_000_000 |
+//! | `turbovec.ivf_max_delta_pct`     | int  | 10      | 0..=100 |
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 //! | `turbovec.scan_parallelism`      | int  | 0       | 0..=128        |
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
@@ -63,6 +64,23 @@ pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(16);
 /// `turbovec.max_scan_tuples` still caps total candidate work as a
 /// backstop regardless of probe widening.
 pub static MAX_PROBES: GucSetting<i32> = GucSetting::<i32>::new(64);
+
+/// Phase Z5 (bounded delta): the largest APPEND REGION, as a percentage of
+/// the index's cell-partitioned rows, that an IVF index will search
+/// exhaustively before it gives up and degrades to a flat scan.
+///
+/// An `aminsert` cannot place a row in its cell without an O(n) reshuffle,
+/// so appended rows land at the tail, outside every cell. Rather than
+/// throwing the cell layout away on the first insert (which turned the whole
+/// index into an O(n) scan), the scan now probes its cells AND sweeps that
+/// tail. The sweep is exact, so recall is unaffected; the cost is linear in
+/// the delta's size, which is exactly what this bounds.
+///
+/// `0` disables the delta entirely (pre-Z5 behaviour: any insert degrades
+/// the index to flat). The default 10 % keeps a large win -- at 1M rows with
+/// `lists = 1024, probes = 16` a 10 % delta still scans ~8.6x less than the
+/// flat fallback -- while guaranteeing the delta can never dominate.
+pub static IVF_MAX_DELTA_PCT: GucSetting<i32> = GucSetting::<i32>::new(10);
 
 /// Phase B-1/B-2 (out-of-core query): when on (the default), an
 /// IVF index scanned cold from the relfile is served **cell-scoped**
@@ -748,6 +766,19 @@ pub fn register_gucs() {
         &MAX_PROBES,
         1,
         65_536,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.ivf_max_delta_pct\0"),
+        c_str(b"Largest IVF append region, as a percent of cell-partitioned rows, searched exhaustively before degrading to flat (default 10; 0 disables).\0"),
+        c_str(
+            b"An aminsert cannot place a row into its IVF cell without an O(n) reshuffle, so appended rows land at the tail, outside every cell. Before Phase Z5 the first insert discarded the cell layout and the index became an O(n) flat scan until REINDEX. It now keeps the cells and additionally sweeps the tail: the sweep is EXHAUSTIVE, so results stay exact, and its cost is linear in the tail's size. This GUC bounds that size as a percent of the cell-partitioned row count; past the bound the index degrades to flat exactly as before (reported via turbovec.index_is_degraded and turbovec.index_degradation). 0 disables the delta entirely, restoring pre-Z5 behaviour. Raising it trades scan latency for a longer interval between REINDEXes. No effect on flat (lists = 0) indexes.\0",
+        ),
+        &IVF_MAX_DELTA_PCT,
+        0,
+        100,
         GucContext::Userset,
         GucFlags::default(),
     );

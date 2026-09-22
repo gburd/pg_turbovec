@@ -1204,7 +1204,12 @@ unsafe fn try_install_ooc(
         return None;
     }
     let directory = relfile::read_cell_directory(rel, meta)?;
-    if directory.total_vectors() != n_vectors as u64 {
+    // Phase Z5: the directory may partition FEWER slots than the index holds
+    // -- the difference is the append region (`aminsert` appends at the tail,
+    // outside every cell), which `probe_mask` sweeps exhaustively. MORE is
+    // still an inconsistency: rows cannot vanish from a cell without a
+    // rewrite, so a mask built from it would be wrong. Fall back to flat.
+    if directory.total_vectors() > n_vectors as u64 {
         return None;
     }
 
@@ -1334,9 +1339,12 @@ unsafe fn ivf_setup_and_search(
         r
     };
     let directory = relfile::read_cell_directory((*scan).indexRelation, &meta)?;
-    // The cell directory must partition exactly n_live slots; if it
-    // doesn't, the mask would be wrong — fall back to flat.
-    if directory.total_vectors() != n_live as u64 {
+    // Phase Z5: the directory may partition FEWER slots than are live -- the
+    // remainder is the append region, which `probe_mask` sweeps exhaustively
+    // so results stay exact. Partitioning MORE than exist is a real
+    // inconsistency (a mask built from it would address slots that are not
+    // there), so that still falls back to flat.
+    if directory.total_vectors() > n_live as u64 {
         return None;
     }
 

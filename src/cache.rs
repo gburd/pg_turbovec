@@ -937,15 +937,36 @@ impl OocIvfIndex {
             let byte = slot / 8;
             byte < dead.len() && (dead[byte] >> (slot % 8)) & 1 != 0
         };
-        for &c in probed {
+        // Phase Z5 (bounded delta): the probed cells, PLUS the append region.
+        //
+        // `aminsert` cannot place a row into its cell without an O(n)
+        // reshuffle, so it appends at the tail -- those slots belong to no
+        // cell and are therefore invisible to any `probed` set. On this
+        // out-of-core path that would not merely cost recall, it would DROP
+        // the rows silently: the gather only copies ranges it is told about,
+        // so an unswept tail is a row that exists on disk and can never be
+        // returned. Sweep it exhaustively, exactly as the whole-load path's
+        // `probe_mask` does, so both paths return identical results.
+        //
+        // Expressed as one extra range fed through the SAME tombstone-aware
+        // run-splitting below, rather than a second gather, so a tombstoned
+        // appended row cannot resurrect (the v2.7.0 class of bug).
+        let cell_rows = self.directory.total_vectors().min(self.n_vectors as u64);
+        let delta_range =
+            (cell_rows < self.n_vectors as u64).then(|| (cell_rows, self.n_vectors as u64));
+        let cell_ranges = probed.iter().filter_map(|&c| {
             let c = c as usize;
             if c >= self.lists || seen[c] {
-                continue;
+                return None;
             }
             seen[c] = true;
             let e = self.directory.entries[c];
-            let start = e.code_offset;
-            let end = (e.code_offset + u64::from(e.n_vectors)).min(self.n_vectors as u64);
+            Some((
+                e.code_offset,
+                (e.code_offset + u64::from(e.n_vectors)).min(self.n_vectors as u64),
+            ))
+        });
+        for (start, end) in cell_ranges.chain(delta_range) {
             // The gather copies code bytes for [start, end); the
             // tombstone skip is applied to the compact slot list so
             // dead rows are dropped after the gather (the gather is

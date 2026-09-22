@@ -206,6 +206,25 @@ impl CellDirectory {
                 *s = true;
             }
         }
+        // Phase Z5 (bounded delta): slots past the partitioned region are
+        // APPENDED rows -- `aminsert` cannot place a row in its cell without
+        // an O(n) reshuffle, so it appends at the tail and those rows belong
+        // to no cell. They are therefore invisible to any `probed` set, and
+        // before Z5 the only way to see them was to throw the cell layout
+        // away and scan everything.
+        //
+        // Sweep them ALWAYS, whichever cells were probed. That keeps results
+        // EXACT (an appended row is never missed, so recall is unaffected)
+        // at a cost linear in the delta -- bounded by
+        // `turbovec.ivf_max_delta_pct` at write time, which refuses to
+        // preserve the layout once the tail grows too large.
+        //
+        // Done here rather than at the call sites so the initial scan and the
+        // iterative-scan probe-widening refill cannot disagree: there is one
+        // definition of "which slots does this scan look at".
+        for s in mask.iter_mut().skip(self.total_vectors() as usize) {
+            *s = true;
+        }
         mask
     }
 

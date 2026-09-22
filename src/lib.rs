@@ -10578,15 +10578,21 @@ mod tests {
     ///
     /// `EXPLAIN` cannot appear in a subquery, so the rows are read directly.
     fn explain_top_cost(sql: &str) -> (f64, f64) {
+        // MUST match the Index Scan node, not merely the first `cost=` line:
+        // that is the `Limit`, whose cost and rows are capped by the LIMIT
+        // and are therefore identical no matter what the AM reported. Both
+        // Z4 tests first failed on CI for exactly that reason (16.03 vs
+        // 16.03, rows=10 vs rows=10).
         let line = Spi::connect(|client| {
             let rows = client.select(&format!("EXPLAIN {sql}"), None, &[]).unwrap();
             rows.filter_map(|r| r.get::<String>(1).ok().flatten())
-                .find(|l| l.contains("cost="))
+                .find(|l| l.contains("Index Scan") && l.contains("cost="))
                 .unwrap_or_default()
         });
         assert!(
             line.contains("cost="),
-            "EXPLAIN produced no cost= line for: {sql}"
+            "EXPLAIN produced no Index Scan cost= line for: {sql} -- if the \
+             plan is a Seq Scan the test is measuring the wrong thing"
         );
         // ... cost=STARTUP..TOTAL rows=...
         let after = line.split("cost=").nth(1).expect("cost= present");
@@ -10689,10 +10695,15 @@ mod tests {
             let line = Spi::connect(|client| {
                 let rows = client.select(&format!("EXPLAIN {sql}"), None, &[]).unwrap();
                 rows.filter_map(|r| r.get::<String>(1).ok().flatten())
-                    .find(|l| l.contains("rows="))
+                    .find(|l| l.contains("Index Scan") && l.contains("rows="))
                     .unwrap_or_default()
             });
-            assert!(line.contains("rows="), "no rows= line for: {sql}");
+            assert!(
+                line.contains("rows="),
+                "no Index Scan rows= line for: {sql} -- the first rows= line is \
+                 the Limit node, which is capped at the LIMIT and identical for \
+                 every plan"
+            );
             line.split("rows=")
                 .nth(1)
                 .unwrap()
@@ -10713,9 +10724,18 @@ mod tests {
         );
         assert!(
             filtered < plain,
-            "a qual keeping ~1% of rows must lower the estimate below the \
-             unfiltered scan (got filtered={filtered}, plain={plain}); before \
-             Z4 selectivity was hardcoded so the filter was invisible"
+            "a qual keeping ~1% of rows must lower the Index Scan row estimate \
+             below the unfiltered scan (got filtered={filtered}, plain={plain}); \
+             before Z4 selectivity was hardcoded to 0.0 so the filter could not \
+             influence the estimate at all"
+        );
+        // The estimate should be in the neighbourhood of 1% of 2000 rows, not
+        // merely "smaller". Loose bounds: this asserts the selectivity is
+        // actually being USED, without pinning PG's rounding.
+        assert!(
+            filtered <= plain * 0.25,
+            "a ~1% qual should cut the estimate substantially, not marginally \
+             (got filtered={filtered} vs plain={plain})"
         );
     }
 

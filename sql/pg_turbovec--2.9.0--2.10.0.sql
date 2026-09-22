@@ -1,0 +1,9 @@
+-- pg_turbovec upgrade 2.9.0 -> 2.10.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.10.0';`.
+--
+-- No new or changed SQL objects: Phase Z5 Route A is a scan/persist
+-- behaviour change plus one new GUC (turbovec.ivf_max_delta_pct), and GUCs
+-- are registered by the library at load time, not by SQL.
+--
+-- No wire-format change (stays v8), so no REINDEX. Intentionally empty apart
+-- from this comment.

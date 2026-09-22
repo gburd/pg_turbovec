@@ -1,0 +1,25 @@
+-- pg_turbovec v2.10.0
+--
+-- MINOR: new GUC + changed runtime behaviour. NO SQL-surface change and NO
+-- wire-format change (MetaPageData::version stays 8) -- existing indexes
+-- decode byte-identically and NO REINDEX is required. `ALTER EXTENSION
+-- pg_turbovec UPDATE TO '2.10.0'` is sufficient.
+--
+-- Phase Z5 Route A: an IVF index no longer loses its cell layout on the
+-- first INSERT.
+--
+-- `aminsert` cannot place a row into its cell without an O(n) reshuffle, so
+-- appended rows land at the tail, outside every cell. Previously the flush
+-- dropped the coarse-centroid and cell-directory chains entirely, so one
+-- commit turned the index into an O(n) flat scan until REINDEX. The flush
+-- now writes those chains back UNCHANGED and the scan additionally sweeps
+-- the tail exhaustively -- results stay EXACT, only latency is affected.
+--
+-- No new meta field is needed: the delta length is DERIVABLE as
+-- `n_live - cell_directory.total_vectors()`, because existing rows keep
+-- their slot (UPDATE writes in place) and inserts append at the tail.
+--
+-- New GUC: turbovec.ivf_max_delta_pct (default 10, range 0..=100). Bounds
+-- the append region as a percent of cell-partitioned rows. Past the bound
+-- the index degrades to flat and reports it exactly as before. Setting it to
+-- 0 restores pre-2.10.0 behaviour byte-for-byte.

@@ -4,6 +4,105 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.10.0] — 2026-09-22
+
+MINOR: one new GUC and a changed IVF insert/scan behaviour. **No SQL-surface
+change and no wire-format change** (`MetaPageData::version` stays **8**) —
+existing indexes decode byte-identically and **no REINDEX** is required.
+
+### Changed
+
+- **Phase Z5 Route A — an IVF index no longer loses its cell layout on the
+  first `INSERT`.** `aminsert` cannot place a row into its cell without an
+  O(n) reshuffle, so appended rows land at the tail, outside every cell.
+  Previously the deferred-commit flush dropped the coarse-centroid and
+  cell-directory chains outright, so **one commit turned the index into an
+  O(n) flat scan until `REINDEX`** — an operational cliff with no cheap
+  recovery. The flush now writes those chains back **unchanged**, and the
+  scan additionally sweeps the tail exhaustively. Results stay **exact**;
+  only latency is affected.
+
+  **No new meta field was needed.** The delta length is *derivable* as
+  `n_live - cell_directory.total_vectors()`, because existing rows keep their
+  slot (an UPDATE writes in place) and inserts append at the tail. An earlier
+  assessment in `docs/PARITY_GAPS.md` called this "blocked on a wire-format
+  change"; that was wrong, and the correction is recorded there.
+
+  Bounded by the new **`turbovec.ivf_max_delta_pct`** (default `10`, range
+  `0..=100`): past the bound the index degrades to flat and reports it
+  exactly as before, so the tail cannot grow until the optimisation is an
+  O(n) scan with extra bookkeeping. **Setting it to `0` restores pre-2.10.0
+  behaviour byte-for-byte.**
+
+### Fixed
+
+- **Out-of-core path could make appended rows unreachable.** The OOC gather
+  iterates only *probed cells*, so a tail outside every cell was never read —
+  those rows existed on disk and could never be returned. That is silent
+  loss, not slowness. The delta is now fed through the **same** tombstone-aware
+  run-splitting as cells, so a tombstoned appended row cannot resurrect (the
+  v2.7.0 class of bug).
+
+### Documentation
+
+- **`shared_preload_libraries = 'pg_turbovec'` is now documented as
+  required** (README + first section of `PRODUCTION.md`). Every `turbovec.*`
+  GUC is registered by `_PG_init`, i.e. at library load; without preloading a
+  backend has **zero** of them, `SET turbovec.probes = 16` is accepted and
+  silently ignored, and every query runs at compiled-in defaults. Indexes
+  still build and queries still return correct results, which is exactly why
+  it misdiagnoses as "tuning has no effect" or "IVF pruning doesn't work" —
+  it cost a full benchmark round before being spotted. Includes the one-line
+  check (`SELECT count(*) FROM pg_settings WHERE name LIKE 'turbovec.%'`) and
+  the `LOAD` / `session_preload_libraries` alternative for managed providers
+  (verified: every GUC is `Userset`, with no Postmaster/Sighup context).
+
+### Measured (EC2, `benches/results/z5_delta_20260922/`)
+
+c7i.4xlarge (16 vCPU, AVX-512), PostgreSQL 16.15, 1M × 256-d, `bit_width=4`,
+`lists=1024`, 1000 inserts, 30 warm queries per arm in one session, fresh
+index per arm, autovacuum disabled, index health verified after the inserts:
+
+| arm | in-memory | out-of-core |
+|---|---:|---:|
+| pre-Z5 (`pct=0`) → **degraded**, `scan_fraction` 1.0 | 4.51 ms | 4.43 ms |
+| **Z5 delta** (`pct=10`) → healthy, `scan_fraction` 0.0156 | **4.03 ms** | **3.46 ms** |
+
+**The win is 11 % in memory and 22 % out-of-core — not the 64× that was
+modelled.** The model assumed latency scales with rows scanned, but at
+1M × 256-d a *full* 4-bit scan is only **1.6×** a 1-cell scan (5.97 vs
+3.66 ms): the 139 MB index is RAM-resident and per-query fixed costs are the
+same order as the SIMD sweep. This agrees with our own published 1M bw4
+result (flat **6.08 ms beats** IVF 16.04 ms; v2.8.3 "flat wins at every
+target"). **This release ships on the functional contract — no cliff on
+insert, plus the OOC correctness fix — not on the latency delta.** The >RAM
+regime, where a full scan is disk I/O and the win could be materially larger,
+is **explicitly unmeasured**.
+
+### Corruption validation (HARD MANDATE)
+
+6 concurrent writers + 4 readers + `VACUUM` every 30 s for 5 minutes, with
+autovacuum enabled: `is_corrupt = false`, no duplicate id,
+`n_vectors == slot_count` exactly, wire still v8, and the cell layout
+**survived** (`degraded = false`, `scan_fraction = 0.0156`). Two apparent
+discrepancies were investigated rather than assumed: the index holding 1072
+more rows than the heap (lazy vacuum reclaim of 10072 dead tuples) and a
+1000-row sample returning 254 (`turbovec.search_k = 32` caps candidates).
+
+### Tests
+
+442 passed / 0 failed / 8 ignored, uniform across pg13–19 native plus the
+classic lane. New: the delta-bound predicate (accept/reject, `0` disables,
+inconsistent layouts), plus two integration tests asserting **both** halves —
+cells preserved *and* every appended slot swept even when a single cell is
+probed, while unprobed cells stay excluded (otherwise the pruning is gone and
+it is a flat scan in disguise).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.10.0';` — nothing else. No REINDEX.
+To keep the previous behaviour exactly: `SET turbovec.ivf_max_delta_pct = 0`.
+
 ## [2.9.0] — 2026-09-22
 
 MINOR: adds one SQL function. **Wire format unchanged** from 2.8.x

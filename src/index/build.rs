@@ -995,6 +995,17 @@ unsafe fn ivf_build_and_write(
             build_pool.map_or(1, |p| p.current_num_threads())
         );
     }
+    // Z6: mark the END OF THE HEAP SCAN, before training starts.
+    //
+    // `trace_stage!` reports CUMULATIVE process private memory, not a
+    // per-stage delta. Without this marker the first stage
+    // (`1_train_kmeans`) appears to account for everything allocated since
+    // `ambuild` began -- including the whole scan that wrote the spill and
+    // filled the reservoir. That misattribution sent one investigation at
+    // `train_kmeans` when the memory may have been resident before it ran.
+    // See benches/results/z6_buildmem_20260922/FINDINGS.md.
+    trace_stage!("0_scan_end(entry)", t_start);
+
     let t0 = std::time::Instant::now();
     // P0 (managed-PG readiness): poll at each build-stage boundary.
     // No buffer lock is held between stages. This makes a large

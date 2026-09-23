@@ -597,12 +597,24 @@ logging allocations > 256 MB with `backtrace()`.
   - ~~Lloyd `cross` matrix, quadratic in `lists` (9.54 GiB at
     `lists = 3162`)~~ ✓ fixed: chunked under a ~256 MiB budget,
     bit-identity guarded.
-  - **LOCALIZED (session 4):** 85 % of peak is resident when
-    `1_train_kmeans` ENDS, before any corpus streaming -- the drain was
-    never the problem. Measured stage timeline at 2M x 1024-d:
-    train_kmeans 10.91 GiB, then the three corpus stages add only
-    ~2 GiB combined. `trace_stage!` now reports private memory
-    permanently so this stays visible.
+  - **Session 4 claimed 85 % of peak was allocated by `1_train_kmeans`;
+    session 5 RETRACTED it.** `trace_stage!` reports CUMULATIVE process
+    private memory, not a per-stage delta, so that reading included the
+    entire heap scan that preceded it. A `0_scan_end(entry)` marker now
+    separates the scan.
+  - **`train_kmeans` is fully accounted and is NOT the problem.** It has
+    zero `pgrx` references, so it was reproduced in a standalone crate at
+    the real dimensions: 3.02 GiB at `lists = 1414` (reservoir 1.38 +
+    rotation dest 1.38 + bounded `cross` 0.25), scaling cleanly 2x for 2x
+    `lists`, with threads adding nothing (1 thread 3.02 vs 16 threads
+    3.03). `gemm`'s internal packing buffers were checked in-source and
+    are ~0.35-0.69 GiB. Settled locally in minutes at zero cost after
+    four sessions of EC2 work -- **check whether a suspect stage is pure
+    code before renting a host.**
+  - **Open:** the dominant per-row term, now known NOT to be in
+    `train_kmeans`. Next suspect is the scan phase
+    (`ambuild_callback` per heap row), which the new marker measures in
+    one traced build.
   - ~~`turbovec.build_parallelism` documented as speed-only~~ ✓ fixed:
     it is a MEMORY knob. 16 threads = 16.24 GiB vs 1 thread = 12.16 GiB
     peak private (~0.27 GiB/thread of GEMM packing buffers), and

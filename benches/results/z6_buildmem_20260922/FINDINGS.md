@@ -324,3 +324,70 @@ that is not being reused — cheap to find now that the stage is known.
 c7i.4xlarge, ~7 h (three full builds plus a wasted sweep) ≈ $6. Instance
 terminated, SG and key pair deleted; all five of this run's instances verified
 absent from every billable state.
+
+---
+
+# Session 5 — CORRECTION: `train_kmeans` is fully accounted; the attribution was wrong
+
+## The error in Session 4's conclusion
+
+`trace_stage!` reports **cumulative process private memory, not a per-stage
+delta.** So the 10.91 GiB shown at `1_train_kmeans` includes everything
+allocated since `ambuild` began — the entire heap scan that wrote the spill
+and filled the reservoir. Session 4 read that as "`train_kmeans` allocated
+10.91 GiB". It does not follow: the memory may have been resident *before*
+training ran.
+
+A marker (`0_scan_end(entry)`) is now emitted at drain entry so the scan phase
+is measured separately. Future timelines will not repeat this misreading.
+
+## `train_kmeans` reproduced LOCALLY, free, and it is fully accounted
+
+`train_kmeans` has **zero** `pgrx`/`pg_sys` references, so its memory
+behaviour can be reproduced outside PostgreSQL. A standalone crate
+(`gemm` 0.18.2, same call shapes, same dimensions) at `lists = 1414`,
+`dim = 1024`, `n_sample = 361 984`:
+
+| step | private |
+|---|---:|
+| baseline | 0.00 GiB |
+| + reservoir + rotation destination | 1.39 GiB |
+| + rotate GEMM (`m = n_sample`) | 2.77 GiB |
+| + cross GEMM (bounded `m = 47 460`) | **3.02 GiB** |
+
+That matches the arithmetic exactly (reservoir 1.38 + rotation dest 1.38 +
+`cross` 0.25 = 3.01 GiB). Scaling is clean and linear: `lists = 707` gives
+**1.64 GiB**, `lists = 1414` gives **3.02 GiB** — 2× for 2×.
+
+**There is no hidden allocation inside `train_kmeans`.** The `gemm` internal
+packing buffers were checked directly in `gemm-common-0.18.2`
+(`packed_lhs_stride = kc * MR`, so the lhs prepack is `kc × m × 4` ≈
+0.35–0.69 GiB) and are not significant at these shapes.
+
+**Threads add nothing here either:** 1 thread 3.02 GiB vs 16 threads 3.03 GiB.
+So the 4.08 GiB thread-scaled term measured on EC2 (16 → 1 threads: 16.24 →
+12.16 GiB) is real but comes from somewhere else in the build — most likely
+the `2_assign_sweep`'s per-chunk rayon closures, which allocate
+`norm` + `rot` scratch per task.
+
+## Corrected state of Z6
+
+| claim | status |
+|---|---|
+| `cross` matrix is quadratic in `lists` (9.54 GiB at 3162) | **fixed**, bit-identity guarded |
+| `build_parallelism` is a memory knob (~0.27 GiB/thread) | **measured on EC2**, GUC text corrected |
+| "85 % of peak is allocated by `train_kmeans`" | **RETRACTED** — cumulative reading, not a delta |
+| `train_kmeans` itself | **fully accounted at 3.02 GiB**, no hidden term |
+| the dominant per-row term | **still open**, and now known NOT to be in `train_kmeans` |
+
+## What the next session should do first
+
+The scan phase (`ambuild_callback` per heap row) is the remaining suspect and
+has never been measured in isolation. The new `0_scan_end(entry)` marker
+answers it in one traced build. The local harness pattern is also worth
+reusing: `train_kmeans` was settled in **minutes at zero cost** after four
+sessions of EC2 work, because it turned out to be pure code.
+
+## Cost
+
+Session 5 used **no EC2** — the decisive measurement ran locally.

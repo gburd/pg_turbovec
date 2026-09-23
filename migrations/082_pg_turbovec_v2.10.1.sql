@@ -1,0 +1,18 @@
+-- pg_turbovec v2.10.1
+--
+-- PATCH: build-time memory profile only. No SQL surface change, no GUC
+-- change, no wire-format change (MetaPageData::version stays 8), and the
+-- on-disk index bytes are IDENTICAL (guarded by the IVF byte-identity
+-- tests). `ALTER EXTENSION pg_turbovec UPDATE` is sufficient; no REINDEX.
+--
+-- Phase Z6: CREATE INDEX / REINDEX peak memory cut ~3.5x.
+--
+-- `Vector` is stored as CBOR, so FromDatum palloc's a decoded buffer per
+-- row. The build callback had no memory-context management at all, so every
+-- decoded row accumulated in the long-lived ambuild context for the whole
+-- scan -- the spill wrote the corpus to disk while PostgreSQL held a decoded
+-- copy of all of it in RAM. The callback now runs in a per-tuple context
+-- that is reset after every row.
+--
+-- Measured on 2M x 1024-d, lists=1414: peak 12.16 -> 3.45 GiB, and 16 %
+-- faster. This is what made 10M x 1024-d builds OOM-kill a 61 GiB host.

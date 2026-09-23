@@ -1,0 +1,6 @@
+-- pg_turbovec upgrade 2.10.0 -> 2.10.1
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.10.1';`.
+--
+-- No new or changed SQL objects: this release is a build-time memory fix
+-- (Phase Z6). No wire-format change (stays v8), no REINDEX, and the on-disk
+-- index bytes are identical. Intentionally empty apart from this comment.

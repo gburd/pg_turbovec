@@ -4,6 +4,90 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.10.1] — 2026-09-23
+
+PATCH: build-time memory profile only. **No SQL surface change, no GUC change,
+no wire-format change** (`MetaPageData::version` stays **8**), and the on-disk
+index bytes are **identical** — guarded by the IVF byte-identity tests. No
+REINDEX.
+
+### Fixed
+
+- **Phase Z6 — `CREATE INDEX` / `REINDEX` peak memory cut ~3.5×.** The build
+  callback had **no memory-context management at all**: no switch, no reset,
+  no `pfree`. `Vector` is a `PostgresType` stored as CBOR, so
+  `FromDatum::from_datum` palloc's a decoded buffer for every row — and those
+  buffers accumulated in the long-lived `ambuild` context for the entire scan.
+  The `CorpusSpill` was faithfully streaming the corpus to disk while
+  PostgreSQL held a decoded copy of **all of it** in RAM, defeating the spill's
+  whole purpose.
+
+  `build_callback` is now a thin wrapper that switches into a per-tuple
+  context, calls the unchanged inner callback, restores, and resets. The inner
+  function has six early-return paths, so doing this inline would have been six
+  chances to leak the switch.
+
+  One hazard came with it: `BufFileCreateTemp` palloc's in the *current*
+  context and the spill is opened **lazily on the first row** — inside the
+  context now being reset, which would have left a dangling `BufFile` on row
+  two. `CorpusSpill::new_in(cxt, dim)` plus an explicit `BuildState.build_cxt`
+  keep it in the long-lived context **by construction** at all three lazy-open
+  sites (single-vector, BQ/graph, ColBERT).
+
+  Measured on 2M × 1024-d, `lists = 1414`
+  (`benches/results/z6_buildmem_20260922/`):
+
+  | | before | after |
+  |---|---:|---:|
+  | at drain entry | 12.07 GiB | **2.39 GiB** (5.05× less) |
+  | whole-build peak | 12.16 GiB | **3.45 GiB** (3.5× less) |
+  | build wall time | 1055 s | **889 s** (16 % faster) |
+
+  This is what made 10M × 1024-d builds OOM-kill a 61 GiB host. Projected for
+  10M × 1024-d / `lists = 3162`: ≈ **11.2 GiB** (codes 4.77 + reservoir 3.09 +
+  rotation destination 3.09 + bounded `cross` 0.25). **Not re-measured at
+  10M** — but the term that scaled at ~5125 B/row is gone.
+
+- **The Lloyd `cross` matrix was quadratic in `lists`.** `train_kmeans`
+  allocated `n_sample × lists` where `n_sample = lists × 256` — **9.54 GiB at
+  `lists = 3162`**. Now chunked over sample rows under a fixed ~256 MiB budget.
+  Bit-identity is tested, not assumed: `kmeans_cross_chunking_is_bit_identical`
+  compares the whole-sample call against chunk sizes 1/7/64/199/500.
+
+### Changed
+
+- **`turbovec.build_parallelism` is a memory knob, and its description said
+  the opposite** ("only build wall-clock changes"). Measured: 16 threads →
+  16.24 GiB peak private, 1 thread → 12.16 GiB — ≈ **0.27 GiB/thread** of
+  thread-local GEMM packing buffers, which `maintenance_work_mem` does **not**
+  bound. Corrected, with the advice to lower it when `CREATE INDEX` is
+  memory-constrained.
+- **`trace_stage!` (under `TURBOVEC_BUILD_TRACE`) now reports private memory**
+  per stage, plus a new `0_at_drain_entry` marker. Peak had been misattributed
+  for three sessions because the only signal was a process-wide total — which
+  also includes `shared_buffers`. That single marker localised this bug in one
+  build.
+
+### Documentation
+
+- A **constraint** is now pinned by test: `rotate_corpus_into` is **not**
+  invariant to row-block shape (`Parallelism::Rayon(0)` makes the GEMM's
+  reduction order depend on `m`), so the reservoir rotation cannot be chunked
+  to save memory. A blocked-rotation optimisation was written and **CI caught
+  it** before it could change index bytes;
+  `rotate_corpus_is_not_row_block_shape_invariant` records why. The
+  pre-existing `rotate_corpus_bit_identical_across_pool_sizes` does not cover
+  this — it varies thread count at a *fixed* shape.
+
+### Tests
+
+444 passed / 0 failed / 8 ignored, uniform across pg13–19 native plus the
+classic lane.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.10.1';` — nothing else. No REINDEX.
+
 ## [2.10.0] — 2026-09-22
 
 MINOR: one new GUC and a changed IVF insert/scan behaviour. **No SQL-surface

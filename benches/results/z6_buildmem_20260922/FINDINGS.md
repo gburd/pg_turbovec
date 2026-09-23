@@ -178,3 +178,62 @@ it costs, not as a memory fix.
 Two instances this session (c7i.4xlarge ×2), ~3 h ≈ $3. All four of today's
 instances terminated; security groups and key pairs deleted; verified none in
 a billable state. Other tenants' untagged instances untouched.
+
+---
+
+# Session 3 — one fix shipped, one optimisation correctly abandoned
+
+Both candidate fixes from Session 2 were implemented with a byte-identity
+guard written **before** the optimisation was trusted. That ordering paid for
+itself immediately.
+
+## SHIPPED: bound the Lloyd `cross` matrix
+
+Chunking `gemm_lloyd_assign` over sample rows under a fixed ~256 MiB budget,
+replacing an `n_sample × lists` allocation that is quadratic in `lists`
+(**9.54 GiB at `lists = 3162`**). Guard
+`kmeans_cross_chunking_is_bit_identical` compares the whole-sample call
+against chunk sizes 1 / 7 / 64 / 199 / 500 (including sizes that do not
+divide evenly) and requires identical `assign` output — **passes on all legs**.
+
+This is the term that specifically breaks *large-`lists`* builds. It does not
+address the `1.27 × n × dim × 4` per-row term.
+
+## ABANDONED, with the reason tested: blocked reservoir rotation
+
+The plan was to rotate the reservoir in row-blocks through a small scratch
+buffer, removing the `sample.clone()` (3.09 GiB at `lists = 3162`).
+
+**CI failed it at `rows_per = 1`.** `rotate_corpus_into` is a GEMM with
+`Parallelism::Rayon(0)`, so its internal tiling — and therefore its
+floating-point reduction order — **depends on the row count `m`**. Blocking
+is mathematically equivalent but not bit-equal, so it would have silently
+changed index bytes on disk.
+
+The existing `rotate_corpus_bit_identical_across_pool_sizes` does **not**
+cover this: it varies the *thread count* at a fixed shape. Shape-invariance
+is a different invariant and it does not hold. Now pinned by
+`rotate_corpus_is_not_row_block_shape_invariant` (same shape twice =
+bit-identical; `m=1` vs `m=300` = numerically close only, max abs diff
+< 1e-4) so the optimisation is not re-attempted.
+
+`sample.clone()` is still removed in the weaker sense — the destination is
+allocated once and swapped rather than cloned — but two reservoir-sized
+buffers remain live at the peak. **The honest reservoir win must come from
+`ivf_sample_cap` (currently `lists × 256`), not from reshaping the GEMM.**
+
+## Where Z6 stands
+
+| term | size at 10M × 1024-d, `lists=3162` | status |
+|---|---:|---|
+| Lloyd `cross` matrix | 9.54 GiB | **fixed** (bounded to ~256 MiB) |
+| reservoir + rotation destination | 3.09 GiB × 2 | open — needs a smaller `ivf_sample_cap` |
+| `1.27 × n × dim × 4` per-row term | ~48 GiB | **open, unattributed** |
+| `prepare()` blocked cache | 4.77 GiB | dead build work; A/B showed no peak change |
+
+Tests: **444 passed / 0 failed / 8 ignored**, uniform across pg13–19 + classic.
+
+**Not claimed:** that a 10M × 1024-d build now fits in 61 GiB. The dominant
+per-row term is untouched, so it almost certainly does not. Re-measuring on
+EC2 is the next step, and it is now cheaper because the 2M repro is
+sufficient to see the model.

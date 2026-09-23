@@ -590,7 +590,23 @@ logging allocations > 256 MB with `backtrace()`.
   fix, not the latency delta. **The >RAM regime, where the win could be
   materially larger, is still UNMEASURED** -- the attempt was blocked by
   the build-memory ceiling documented above.
-- **Phase Z6** (new, from the Z5 >RAM attempt) - make IVF builds
-  actually memory-bounded. Blocks any measurement at 10M+ and is a
-  hard ceiling on the partitioned trillion-scale story. Start with a
-  heap profiler on `ivf_build_and_write` at 10M x 1024-d.
+- **Phase Z6** (from the Z5 >RAM attempt) - make IVF builds actually
+  memory-bounded. **Partially done.** Fitted model (measured over three
+  points, `benches/results/z6_buildmem_20260922/`):
+  `peak_private ~= 1.27 x (n x dim x 4) + ~3.6 GiB`.
+  - ~~Lloyd `cross` matrix, quadratic in `lists` (9.54 GiB at
+    `lists = 3162`)~~ ✓ fixed: chunked under a ~256 MiB budget,
+    bit-identity guarded.
+  - **Open:** the `1.27 x n x dim x 4` per-row term (~48 GiB at 10M x
+    1024-d). MORE than one full uncompressed corpus resident in a build
+    designed to stream from a spill. Unattributed after five disproven
+    hypotheses; needs an allocator profile, not arithmetic.
+  - **Open:** reservoir + rotation destination (3.09 GiB x2 at
+    `lists = 3162`). Must come from a smaller `ivf_sample_cap` -- the
+    GEMM cannot be reshaped (see below).
+  - **Constraint discovered:** `rotate_corpus_into` is NOT invariant to
+    row-block shape (`Parallelism::Rayon(0)` makes the reduction order
+    depend on `m`), so the reservoir rotation cannot be chunked. Pinned
+    by `rotate_corpus_is_not_row_block_shape_invariant`. The existing
+    `rotate_corpus_bit_identical_across_pool_sizes` does not cover this
+    -- it varies thread count at fixed shape.

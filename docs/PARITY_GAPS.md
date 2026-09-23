@@ -597,10 +597,20 @@ logging allocations > 256 MB with `backtrace()`.
   - ~~Lloyd `cross` matrix, quadratic in `lists` (9.54 GiB at
     `lists = 3162`)~~ ✓ fixed: chunked under a ~256 MiB budget,
     bit-identity guarded.
-  - **Open:** the `1.27 x n x dim x 4` per-row term (~48 GiB at 10M x
-    1024-d). MORE than one full uncompressed corpus resident in a build
-    designed to stream from a spill. Unattributed after five disproven
-    hypotheses; needs an allocator profile, not arithmetic.
+  - **LOCALIZED (session 4):** 85 % of peak is resident when
+    `1_train_kmeans` ENDS, before any corpus streaming -- the drain was
+    never the problem. Measured stage timeline at 2M x 1024-d:
+    train_kmeans 10.91 GiB, then the three corpus stages add only
+    ~2 GiB combined. `trace_stage!` now reports private memory
+    permanently so this stays visible.
+  - ~~`turbovec.build_parallelism` documented as speed-only~~ ✓ fixed:
+    it is a MEMORY knob. 16 threads = 16.24 GiB vs 1 thread = 12.16 GiB
+    peak private (~0.27 GiB/thread of GEMM packing buffers), and
+    `maintenance_work_mem` does not bound it.
+  - **Open:** ~3.8 GiB of single-threaded, `lists`-scaled allocation
+    inside `train_kmeans` (explicit terms account for only 3.01 GiB of
+    the 10.91). Next: probe `1a_kmeanspp_seeding` and each Lloyd
+    iteration -- the search space is now one function, not the build.
   - **Open:** reservoir + rotation destination (3.09 GiB x2 at
     `lists = 3162`). Must come from a smaller `ivf_sample_cap` -- the
     GEMM cannot be reshaped (see below).

@@ -391,3 +391,44 @@ sessions of EC2 work, because it turned out to be pure code.
 ## Cost
 
 Session 5 used **no EC2** — the decisive measurement ran locally.
+
+## Session 5 addendum — the assign-sweep is also ruled out (by arithmetic, in-source)
+
+Checked the remaining candidates in `2_assign_sweep`, read from source rather
+than measured, so treat as indicative:
+
+- per-chunk `norm` + `rot` scratch: `ivf_par_chunk_rows` targets ~4 MiB
+  (`(4 MiB)/(2·dim·4)`, clamped 256..4096), so 512 rows at dim 1024 = **4.0
+  MiB/task**, ≈ 0.06 GiB across 16 threads.
+- `batched_assign_soft`'s per-call `cross = n_rows × lists × 4`: **2.8
+  MiB/thread** at `lists = 1414`, 6.2 MiB at 3162 — ≈ 0.04–0.10 GiB across 16
+  threads. (Note this one is *unbounded* in principle, unlike the Lloyd
+  `cross` fixed in Session 3, but at the real chunk size it is small.)
+
+Neither explains the 4.08 GiB thread-scaled term, so that term is also not in
+the assign sweep. **By elimination the remaining memory is in the scan phase
+(`ambuild_callback`), which has never been measured in isolation** — exactly
+what the new `0_scan_end(entry)` marker exists to answer.
+
+### Precise handoff for the next session
+
+One traced build answers it:
+
+```
+sudo systemctl stop postgresql@16-main
+sudo -u postgres env TURBOVEC_BUILD_TRACE=1 \
+  /usr/lib/postgresql/16/bin/pg_ctl -D /var/lib/postgresql/16/main \
+  -o "-c config_file=/etc/postgresql/16/main/postgresql.conf" \
+  -l /tmp/pg_trace.log start          # env vars only survive via pg_ctl
+```
+
+then build 2M × 1024-d with `lists = 1414` and read
+`sudo grep "build trace" /tmp/pg_trace.log`. The first line is now
+`0_scan_end(entry)`:
+
+- if it already shows ~10 GiB → the scan phase is the defect, and the spill's
+  purpose is being defeated somewhere in `ambuild_callback`;
+- if it shows ~3 GiB → the growth is between scan end and `1_train_kmeans`,
+  which is a ~40-line window.
+
+Either way it is one build (~17 min, ~$0.30), not a session.

@@ -495,3 +495,70 @@ code-only change, testable on the same 2M repro for ~$0.30.
 c7i.4xlarge, ~35 min (terminated as soon as the marker printed, rather than
 waiting out a 17-min training phase whose answer was already known) ≈ $0.60.
 All six instances across Z5/Z6 verified terminated.
+
+---
+
+# Session 6 — ROOT CAUSE FOUND AND FIXED (verified end to end)
+
+## The cause: no memory-context management in the build callback
+
+`Vector` is a `PostgresType` whose on-disk form is **CBOR**, so
+`FromDatum::from_datum` palloc's a decoded buffer for every row. The build
+path had **zero** context management — no switch, no reset, no `pfree` — so
+every decoded row accumulated in the long-lived `ambuild` context for the
+entire scan. The `CorpusSpill` was faithfully writing the corpus to disk while
+PostgreSQL held a decoded copy of all of it in memory.
+
+The arithmetic matches: 2M rows × ~5125 B of CBOR varlena (1024 f32s at 5
+B/elem + header) = **9.55 GiB** against the **10.69 GiB** measured as
+unexplained, and a CBOR/raw ratio of 1.25× against the measured
+1.40×-of-f32-corpus.
+
+## The fix
+
+`build_callback` is now a thin wrapper that switches into a per-tuple context,
+calls the unchanged inner callback, restores, and resets. The inner function
+has six early-return paths, so doing this inline would have been six chances
+to leak the switch.
+
+**One hazard had to be handled:** `BufFileCreateTemp` palloc's in the *current*
+context and the `CorpusSpill` is opened **lazily on the first row** — inside
+the context now being reset. That would have left a dangling `BufFile` on row
+two. Added `CorpusSpill::new_in(cxt, dim)` and an explicit `BuildState.build_cxt`
+so all three lazy-open sites (single-vector, BQ/graph, ColBERT) allocate in the
+long-lived context **by construction**, not by relying on whatever context
+happens to be current.
+
+## Measured, same 2M × 1024-d / `lists = 1414` repro
+
+| | before | after | change |
+|---|---:|---:|---:|
+| at drain entry | 12.07 GiB | **2.39 GiB** | **5.05× less** |
+| whole-build peak | 12.16 GiB | **3.45 GiB** | **3.5× less** |
+| build wall time | 1055 s | 889 s | 16 % faster |
+
+The post-fix 2.39 GiB at drain entry is the reservoir (1.38 GiB) plus expected
+overhead — i.e. the scan now holds what it is *designed* to hold. The stage
+timeline confirms it: `1_train_kmeans` ends at **1.23 GiB** (was 10.91), and
+the peak now arrives where the real work is, in
+`4_quantize_encode` → `5_prepare_and_persist`.
+
+CI: **444 passed / 0 failed** including the IVF byte-identity guards, so the
+index bytes are unchanged.
+
+## Revised projection for 10M × 1024-d
+
+The scan term was `~5125 B × n` and is now bounded by one row. Remaining
+growth is `packed_codes` (512 B/row at 4-bit) plus the reservoir
+(`lists × 256 × dim × 4`). At 10M × 1024-d / `lists = 3162`:
+
+- codes 4.77 GiB + reservoir 3.09 GiB + rotation dest 3.09 GiB + bounded
+  `cross` 0.25 GiB ≈ **11.2 GiB**, versus a previously-OOM-killed 61 GiB host.
+
+**Not claimed as measured.** The 10M build has not been re-run. But the term
+that scaled at 5125 B/row is gone, which is what made 10M impossible.
+
+## Cost
+
+c7i.4xlarge, ~55 min ≈ $1. Seven instances across Z5/Z6 all verified
+terminated, security groups and key pairs deleted.

@@ -24,3 +24,7 @@ Other tenants' untagged instances share this account; touch only run=z6prof-2026
 ## Fourth instance (scan-phase measurement, session 5)
 - i-08cfafdb63e6f39fb (c7i.4xlarge) us-east-2c, tag run=z6scan-20260923-150737, sg sg-0074f7a0420367500, key ~/.ssh/z6scan-20260923-150737.pem
 - teardown: terminate-instances i-08cfafdb63e6f39fb ; delete-security-group sg-0074f7a0420367500 ; delete-key-pair z6scan-20260923-150737
+
+## Fifth instance (fix verification, session 6)
+- i-07841f9aad379271b (c7i.4xlarge) us-east-2b, tag run=z6fix-20260923-170407, sg sg-039887101fc6b1dba, key ~/.ssh/z6fix-20260923-170407.pem
+- teardown: terminate-instances i-07841f9aad379271b ; delete-security-group sg-039887101fc6b1dba ; delete-key-pair z6fix-20260923-170407

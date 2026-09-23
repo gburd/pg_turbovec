@@ -466,65 +466,52 @@ still has to happen somewhere.
   graph build. Our deprecated Vamana kind is **not** a DiskANN equivalent and
   should not be revived on the strength of this.
 
-## Known ceiling: IVF builds are not memory-bounded at 10M x 1024-d
+## ~~Known ceiling: IVF builds are not memory-bounded~~ — FIXED (Phase Z6)
 
-Found 2026-09-22 while attempting the Z5 >RAM measurement
-(`benches/results/z5_ram_20260922/`). **`CREATE INDEX ... WITH (lists = N)`
-OOM-kills at 10M x 1024-d on a 61 GiB host**, and its memory use is *linear
-in rows* rather than bounded by `maintenance_work_mem`:
+**Root cause: the build callback had no memory-context management.** `Vector`
+is a `PostgresType` stored as **CBOR**, so `FromDatum::from_datum` palloc's a
+decoded buffer per row. With no switch, no reset and no `pfree`, every decoded
+row accumulated in the long-lived `ambuild` context for the whole scan — so
+the `CorpusSpill` was writing the corpus to disk while PostgreSQL held a
+decoded copy of *all* of it in RAM. The arithmetic matched the measurement:
+2M × ~5125 B of CBOR varlena = 9.55 GiB against 10.69 GiB measured as
+unexplained.
 
-- `mwm = 8GB` + 16 parallel maintenance workers -> OOM at
-  `anon-rss:61311596kB`.
-- **Serial** with `mwm = 4GB` -> same linear growth (4.5 GiB at 2 min, 19.5
-  at 20 min, 27.6 at 31 min, no plateau). Parallelism is **not** the cause.
-- At 25.8 GiB RSS: one **20.7 GiB contiguous Rust-side allocation** (still
-  growing) plus 3.09 GiB that is exactly the capped k-means reservoir
-  (`lists x 256 x dim x 4`). `pg_backend_memory_contexts` showed nothing over
-  100 MB, so it is not a PostgreSQL context.
-- The spill IS working (`pgsql_tmp` reached 16 GB), so the *scan* phase is
-  bounded as designed. The growth is in the drain (`ivf_build_and_write`).
+`build_callback` is now a wrapper that switches into a per-tuple context and
+resets it after every row. `CorpusSpill::new_in(cxt, dim)` plus an explicit
+`BuildState.build_cxt` keep the lazily-opened `BufFile` in the long-lived
+context — without that, resetting would have left a dangling `BufFile` on row
+two.
 
-This contradicts the documented "out-of-core end-to-end since v1.13.0 /
-`maintenance_work_mem`-bounded chunks" behaviour at this scale, and it matters
-for the project's own targets (>1.7M in production; trillion-scale via
-partitioning): a 10M-row partition that cannot be indexed on a 61 GiB host is
-a hard ceiling. `docs/BQ_RECALL_BENCH` 0.6e already recorded a "20.3 GB
-OOM-killed build" with *unbounded* `mwm` at 1M; this is the same failure at
-10M **with** `mwm` set.
+**Measured** (2M × 1024-d, `lists = 1414`,
+`benches/results/z6_buildmem_20260922/`):
 
-**Reproduced at 1/5 scale (2026-09-22, `benches/results/z6_buildmem_20260922/`):
-2M x 1024-d peaks at 15.26 GiB against a ~2.44 GiB accounted model, and the
-build COMPLETES (RSS falls back to ~1 GiB), so this is a peak-memory defect,
-not a leak.** That makes it cheap to iterate on without a 61 GiB host.
+| | before | after |
+|---|---:|---:|
+| at drain entry | 12.07 GiB | **2.39 GiB** (5.05× less) |
+| whole-build peak | 12.16 GiB | **3.45 GiB** (3.5× less) |
+| wall time | 1055 s | 889 s (16 % faster) |
 
-Two facts are established. The constant 1.38 GiB block is the k-means
-reservoir, matching `lists x 256 x dim x 4` exactly (which validates the
-measurement method), and it is correctly capped. The growing block is
-periodically present TWICE (5.09 + 5.09, then 6.66 + 6.66) -- a realloc
-holding old + new -- which is what produces the observed total spikes. Its
-rate is ~3576 B/row.
+Index bytes unchanged (CI 444/0, including the IVF byte-identity guards).
 
-**The cause is still NOT identified, and four hypotheses have been DISPROVEN
-by measurement** (do not re-try these):
+**Projected** for 10M × 1024-d / `lists = 3162`: codes 4.77 + reservoir 3.09 +
+rotation dest 3.09 + bounded `cross` 0.25 ≈ **11.2 GiB**, versus the 61 GiB
+host this OOM-killed before. **Not re-measured at 10M** — but the term that
+scaled at 5125 B/row is gone.
 
-1. *`Vec` doubling triples peak RSS* -- no: a standalone harness grew a
-   `Vec<u8>` to 4.77 GiB with capacity 8.00 GiB but peak RSS 4.77 GiB. Linux
-   `mremap` grows large blocks in place.
-2. *The reservoir* -- no: capped, and separately accounted as the 1.38 GiB block.
-3. *`Vec<Vec<u32>>` assignments* -- no: measured at 0.52 GiB for 10M rows.
-4. *`idx.prepare()` duplicating the codes via `pack::repack`* -- no, despite
-   sound reasoning (the IVF write consumes only `packed_codes` / `scales` /
-   `slot_to_id` / the TQ+ pair, and `blocked_codes()` / `n_blocks()` are used
-   NOWHERE, so the duplicate is built and discarded). **A/B: 15.26 GiB peak
-   with it, 15.26 GiB without.** Removing it is still justified as dead build
-   work -- it is just not a memory fix.
+### How six hypotheses missed it
 
-**Next step must be an allocator profile, not arithmetic.** `heaptrack --pid`
-could not attach under the `postgres` uid even with `gdb` installed and
-`ptrace_scope=0`. Try, in order: jemalloc + `MALLOC_CONF=prof:true` (in-process,
-no attach); `heaptrack --` on a standalone harness calling
-`ivf_build_and_write` outside PostgreSQL; or an `LD_PRELOAD` malloc wrapper
-logging allocations > 256 MB with `backtrace()`.
+Every one looked in the drain (Vec doubling, the reservoir, `Vec<Vec<u32>>`,
+`prepare()`, the Lloyd `cross`, the assign sweep), where only ~1 % of the peak
+is allocated. Two process lessons, both earned the hard way:
+
+- **`trace_stage!` reported cumulative memory, not per-stage deltas**, which
+  produced a confidently wrong attribution to `train_kmeans` (retracted). It
+  now emits `0_at_drain_entry` so the scan is measured separately — and that
+  single marker localised the bug in one build.
+- **Check whether a suspect stage is pure code before renting a host.**
+  `train_kmeans` has no `pgrx` references; it was exonerated in minutes in a
+  local harness after four sessions of EC2 work.
 
 ## Phase plan
 
@@ -590,58 +577,13 @@ logging allocations > 256 MB with `backtrace()`.
   fix, not the latency delta. **The >RAM regime, where the win could be
   materially larger, is still UNMEASURED** -- the attempt was blocked by
   the build-memory ceiling documented above.
-- **Phase Z6** (from the Z5 >RAM attempt) - make IVF builds actually
-  memory-bounded. **Partially done.** Fitted model (measured over three
-  points, `benches/results/z6_buildmem_20260922/`):
-  `peak_private ~= 1.27 x (n x dim x 4) + ~3.6 GiB`.
-  - ~~Lloyd `cross` matrix, quadratic in `lists` (9.54 GiB at
-    `lists = 3162`)~~ ✓ fixed: chunked under a ~256 MiB budget,
-    bit-identity guarded.
-  - **Session 4 claimed 85 % of peak was allocated by `1_train_kmeans`;
-    session 5 RETRACTED it.** `trace_stage!` reports CUMULATIVE process
-    private memory, not a per-stage delta, so that reading included the
-    entire heap scan that preceded it. A `0_scan_end(entry)` marker now
-    separates the scan.
-  - **`train_kmeans` is fully accounted and is NOT the problem.** It has
-    zero `pgrx` references, so it was reproduced in a standalone crate at
-    the real dimensions: 3.02 GiB at `lists = 1414` (reservoir 1.38 +
-    rotation dest 1.38 + bounded `cross` 0.25), scaling cleanly 2x for 2x
-    `lists`, with threads adding nothing (1 thread 3.02 vs 16 threads
-    3.03). `gemm`'s internal packing buffers were checked in-source and
-    are ~0.35-0.69 GiB. Settled locally in minutes at zero cost after
-    four sessions of EC2 work -- **check whether a suspect stage is pure
-    code before renting a host.**
-  - **SETTLED: the memory is allocated during the HEAP SCAN.** One
-    traced build with the new `0_at_drain_entry` marker shows
-    **12.07 GiB private already resident when `ivf_build_and_write` is
-    entered** -- before any training, assignment, quantization or
-    persist -- against a 12.16-12.88 GiB whole-build peak. So **~99 % of
-    build peak is allocated by the scan**, which is why four sessions of
-    hypotheses aimed at the drain all missed.
-  - **Open (narrow):** the reservoir explains only 1.38 GiB of that
-    12.07. The remaining **10.69 GiB is 1.40x the full f32 corpus**
-    (7.63 GiB at 2M x 1024-d) -- in a scan whose design is to spill to a
-    `BufFile` rather than hold the corpus. Candidates:
-    `pending_flat`/`pending_ids` (the IVF path early-`return`s before
-    them, but `BuildState` owns them), per-tuple context churn across 2M
-    `ambuild_callback` calls, or `CorpusSpill`'s write buffering.
-    **Next step is code-only:** private-memory probes every ~250 k rows
-    inside `ambuild_callback`, then check whether the curve is linear in
-    rows (retention) or steps (a buffer). ~$0.30 on the same 2M repro.
-  - ~~`turbovec.build_parallelism` documented as speed-only~~ ✓ fixed:
-    it is a MEMORY knob. 16 threads = 16.24 GiB vs 1 thread = 12.16 GiB
-    peak private (~0.27 GiB/thread of GEMM packing buffers), and
-    `maintenance_work_mem` does not bound it.
-  - **Open:** ~3.8 GiB of single-threaded, `lists`-scaled allocation
-    inside `train_kmeans` (explicit terms account for only 3.01 GiB of
-    the 10.91). Next: probe `1a_kmeanspp_seeding` and each Lloyd
-    iteration -- the search space is now one function, not the build.
-  - **Open:** reservoir + rotation destination (3.09 GiB x2 at
-    `lists = 3162`). Must come from a smaller `ivf_sample_cap` -- the
-    GEMM cannot be reshaped (see below).
-  - **Constraint discovered:** `rotate_corpus_into` is NOT invariant to
-    row-block shape (`Parallelism::Rayon(0)` makes the reduction order
-    depend on `m`), so the reservoir rotation cannot be chunked. Pinned
-    by `rotate_corpus_is_not_row_block_shape_invariant`. The existing
-    `rotate_corpus_bit_identical_across_pool_sizes` does not cover this
-    -- it varies thread count at fixed shape.
+- ~~**Phase Z6** - make IVF builds memory-bounded.~~ ✓ done. Root cause
+  was the build callback retaining a CBOR-decoded copy of EVERY row in the
+  long-lived `ambuild` context (no context switch/reset anywhere in the
+  build path), so the spill wrote the corpus to disk while PostgreSQL held
+  all of it in RAM. Fixed with a per-tuple context. **Measured 2M x 1024-d
+  peak 12.16 -> 3.45 GiB (3.5x), drain entry 12.07 -> 2.39 GiB (5.05x),
+  16 % faster, index bytes unchanged.** Also fixed on the way: the Lloyd
+  `cross` matrix was quadratic in `lists` (9.54 GiB at 3162), and
+  `turbovec.build_parallelism` was documented as speed-only when it is
+  also worth ~0.27 GiB/thread. Full account in the section above.

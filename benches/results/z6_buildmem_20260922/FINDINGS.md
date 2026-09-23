@@ -237,3 +237,90 @@ Tests: **444 passed / 0 failed / 8 ignored**, uniform across pg13–19 + classic
 per-row term is untouched, so it almost certainly does not. Re-measuring on
 EC2 is the next step, and it is now cheaper because the 2M repro is
 sufficient to see the model.
+
+---
+
+# Session 4 — LOCALIZED: 85 % of peak is inside `train_kmeans`
+
+The breakthrough was abandoning external profilers and instrumenting the
+project's **own** `trace_stage!` hooks with a `/proc/self/smaps_rollup`
+`Private_Dirty` read. Attribution then comes from our timeline, not guesswork.
+
+## Stage timeline (2M × 1024-d, `lists = 1414`, `build_parallelism = 16`)
+
+| stage | wall | private at end |
+|---|---:|---:|
+| `1_train_kmeans` | 794.6 s | **10.91 GiB** |
+| `2_assign_sweep` | 146.9 s | 10.96 GiB |
+| `3_build_permutation` | 0.2 s | 10.92 GiB |
+| `4_quantize_encode` | 18.0 s | 12.21 GiB |
+| `5_prepare_and_persist` | 24.5 s | 12.88 GiB |
+
+**85 % of the peak is already resident when `train_kmeans` ends — before any
+corpus streaming happens.** The stages that touch the 2M-row corpus add only
+~2 GiB combined. Every earlier hypothesis looked in the wrong place: the
+corpus-streaming drain was never the problem.
+
+Within `train_kmeans`, `1a_kmeanspp_seeding` is ~400 s and `1b_lloyd_loop`
+393 s (25 iterations at ~15.7 s).
+
+## Thread scaling: 4.08 GiB is per-thread GEMM buffers
+
+| `turbovec.build_parallelism` | peak private |
+|---:|---:|
+| 16 | **16.24 GiB** |
+| 1 | **12.16 GiB** |
+
+A real, measured **4.08 GiB** (≈ 0.27 GiB/thread) comes from thread-local
+allocations inside the `gemm` calls (`Parallelism::Rayon(0)` packing buffers).
+That is a genuine, actionable finding: **`build_parallelism` is a memory knob,
+not only a speed knob**, and it is not documented as such.
+
+But **12.16 GiB remains single-threaded**, so threads are not the main story.
+
+## Accounting, with the remaining gap
+
+At `lists = 1414`, `train_kmeans`'s explicit allocations are:
+
+| term | size |
+|---|---:|
+| reservoir (`lists × 256 × dim × 4`) | 1.38 GiB |
+| rotation destination (the swap that replaced `sample.clone()`) | 1.38 GiB |
+| `cross` (now bounded, Session 3) | 0.25 GiB |
+| **accounted** | **3.01 GiB** |
+| measured at 16 threads | 10.91 GiB |
+| unaccounted | 7.90 GiB → **3.82 GiB after subtracting the thread term** |
+
+So ~3.8 GiB of single-threaded, `lists`-scaled allocation inside
+`train_kmeans` is still unexplained — but the search space is now one function
+and two sub-stages instead of the whole build.
+
+## Tooling that did NOT work (recorded to save the next attempt)
+
+- **`LD_PRELOAD` malloc interposer** — wrote one, it compiled and ran, but
+  Debian's `pg_ctlcluster` wrapper **rejects `LD_PRELOAD`** in
+  `/etc/postgresql/16/main/environment` ("invalid line") and strips it from the
+  systemd unit. Also: glibc routes large allocations through `mmap`, so a
+  `malloc`-only hook would have missed them anyway — `mmap` must be
+  interposed too.
+- **`heaptrack --pid`** — needs `gdb` plus a uid-matched FIFO; fails under the
+  `postgres` uid even with `ptrace_scope=0` (Session 1).
+- **Env vars via systemd** — the Debian wrapper sanitizes them.
+  `TURBOVEC_BUILD_TRACE` only reached backends when the postmaster was started
+  through `pg_ctl` directly with `env`.
+- **A self-matching guard** — `pgrep -f "CREATE INDEX"` matches the *sweep
+  script's own cmdline*, so the first parallelism sweep waited forever and
+  burned ~2 h. Guard on `pg_stat_activity`, not `pgrep`.
+
+## Next step
+
+Instrument inside `train_kmeans` itself: add `Private_Dirty` reads around
+`1a_kmeanspp_seeding` and each Lloyd iteration. The remaining 3.8 GiB is
+`lists`-scaled and single-threaded, which points at a per-iteration buffer
+that is not being reused — cheap to find now that the stage is known.
+
+## Cost / cleanup
+
+c7i.4xlarge, ~7 h (three full builds plus a wasted sweep) ≈ $6. Instance
+terminated, SG and key pair deleted; all five of this run's instances verified
+absent from every billable state.

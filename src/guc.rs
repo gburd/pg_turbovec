@@ -864,7 +864,7 @@ pub fn register_gucs() {
         c_str(b"turbovec.build_parallelism\0"),
         c_str(b"OS threads used to quantize + repack vectors during CREATE INDEX / REINDEX (0 = auto).\0"),
         c_str(
-            b"ambuild's encode and SIMD-repack phases are embarrassingly parallel per vector. This caps the rayon thread pool sizing those phases. 0 (the default) derives the pool size from max_parallel_maintenance_workers + 1 (leader + worker budget). A positive value pins the thread count. The on-disk index bytes are identical regardless of this value \xe2\x80\x94 only build wall-clock changes.\0",
+            b"ambuild's encode and SIMD-repack phases are embarrassingly parallel per vector. This caps the rayon thread pool sizing those phases. 0 (the default) derives the pool size from max_parallel_maintenance_workers + 1 (leader + worker budget). A positive value pins the thread count. The on-disk index bytes are identical regardless of this value. NOTE: this is also a MEMORY knob, not only a speed knob \xe2\x80\x94 the GEMM kernels allocate thread-local packing buffers, measured at ~0.27 GiB per thread on a 2M x 1024-d IVF build (16 threads 16.24 GiB vs 1 thread 12.16 GiB peak private). Lower it if CREATE INDEX is memory-constrained; maintenance_work_mem does NOT bound this.\0",
         ),
         &BUILD_PARALLELISM,
         0,

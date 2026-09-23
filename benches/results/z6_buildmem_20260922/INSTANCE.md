@@ -16,3 +16,7 @@ Other tenants' untagged instances share this account; touch only run=z6prof-2026
 ## Second instance (cross-term test)
 - i-0ad266bd77b62fb6f (c7i.4xlarge) us-east-2b, tag run=z6cross-20260922-225815, sg sg-0b8a750ab7c60e9dc, key ~/.ssh/z6cross-20260922-225815.pem
 - teardown: terminate-instances i-0ad266bd77b62fb6f ; delete-security-group sg-0b8a750ab7c60e9dc ; delete-key-pair z6cross-20260922-225815
+
+## Third instance (allocation tracing, session 4)
+- i-06da21f8ae95bfa2a (c7i.4xlarge) us-east-2b, tag run=z6alloc-20260923-065610, sg sg-0c1614861fcc178b2, key ~/.ssh/z6alloc-20260923-065610.pem
+- teardown: terminate-instances i-06da21f8ae95bfa2a ; delete-security-group sg-0c1614861fcc178b2 ; delete-key-pair z6alloc-20260923-065610

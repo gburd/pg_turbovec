@@ -901,10 +901,28 @@ unsafe fn ivf_build_and_write(
     macro_rules! trace_stage {
         ($label:expr, $t0:expr) => {
             if trace {
+                // Z6: report PRIVATE memory at each stage boundary, not just
+                // wall time. Peak build memory was mis-attributed for three
+                // sessions because the only signal was a process-wide total
+                // (which also includes `shared_buffers`, inflating it). With
+                // this line the 2M x 1024-d peak resolved immediately: 85 % of
+                // it is resident when `1_train_kmeans` ends, BEFORE any
+                // corpus streaming -- so the drain was never the problem.
+                // See benches/results/z6_buildmem_20260922/FINDINGS.md.
+                let priv_gib = std::fs::read_to_string("/proc/self/smaps_rollup")
+                    .ok()
+                    .and_then(|t| {
+                        t.lines()
+                            .find(|l| l.starts_with("Private_Dirty:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                    .map_or(f64::NAN, |kb| (kb as f64) / 1048576.0);
                 eprintln!(
-                    "[turbovec build trace] {:<24} {:>8.3}s",
+                    "[turbovec build trace] {:<24} {:>8.3}s  private={:.2}GiB",
                     $label,
-                    $t0.elapsed().as_secs_f64()
+                    $t0.elapsed().as_secs_f64(),
+                    priv_gib
                 );
             }
         };

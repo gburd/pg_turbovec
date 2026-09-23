@@ -995,7 +995,7 @@ unsafe fn ivf_build_and_write(
             build_pool.map_or(1, |p| p.current_num_threads())
         );
     }
-    // Z6: mark the END OF THE HEAP SCAN, before training starts.
+    // Z6: report memory AT DRAIN ENTRY, before any training.
     //
     // `trace_stage!` reports CUMULATIVE process private memory, not a
     // per-stage delta. Without this marker the first stage
@@ -1004,7 +1004,7 @@ unsafe fn ivf_build_and_write(
     // filled the reservoir. That misattribution sent one investigation at
     // `train_kmeans` when the memory may have been resident before it ran.
     // See benches/results/z6_buildmem_20260922/FINDINGS.md.
-    trace_stage!("0_scan_end(entry)", t_start);
+    trace_stage!("0_at_drain_entry", t_start);
 
     let t0 = std::time::Instant::now();
     // P0 (managed-PG readiness): poll at each build-stage boundary.

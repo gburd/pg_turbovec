@@ -432,3 +432,66 @@ then build 2M × 1024-d with `lists = 1414` and read
   which is a ~40-line window.
 
 Either way it is one build (~17 min, ~$0.30), not a session.
+
+---
+
+# Session 5 final — SETTLED: the memory is allocated during the HEAP SCAN
+
+One traced build on a fresh c7i.4xlarge, `pg_turbovec` at `169a3c2` (with the
+new marker), 2M × 1024-d, `lists = 1414`, `mwm = 2GB`:
+
+```
+[turbovec build trace] 0_scan_end(entry)    8.870s  private=12.07GiB
+[turbovec build trace]   1a_kmeanspp_seeding  371.270s
+```
+
+**12.07 GiB is already resident at the moment `ivf_build_and_write` is
+entered** — i.e. before any training, assignment, quantization or persist.
+Measured peak for this configuration is 12.16 GiB (1 thread) / 12.88 GiB
+(16 threads), so **~99 % of build peak is allocated during the heap scan.**
+
+This closes the question and confirms both of Session 5's earlier results:
+`train_kmeans` is fully accounted at 3.02 GiB (local harness) and adds
+essentially nothing on top of what the scan already holds, which is exactly
+why the Session 4 attribution had to be retracted.
+
+**Caveat on the label:** `t_start` is set *inside* `ivf_build_and_write`
+(line 900), so the `8.870s` is the drain's pre-training window, **not** the
+heap-scan duration — the scan happens earlier, in `ambuild`'s table scan
+before this function is called. The *memory* figure is unaffected (it is an
+absolute `Private_Dirty` reading at drain entry), but the marker name
+`0_scan_end(entry)` is better read as "state at drain entry". Worth renaming.
+
+## Where to look next — a specific, small target
+
+The scan path for `lists > 0` is supposed to keep only bounded state: push
+each vector to the `CorpusSpill` (a `BufFile`, not RAM) and reservoir-sample
+it. Accounting at 2M × 1024-d:
+
+| term | size |
+|---|---:|
+| reservoir (`lists × 256 × dim × 4`) | 1.38 GiB |
+| **measured at drain entry** | **12.07 GiB** |
+| unexplained | **10.69 GiB** = **1.40 × the full f32 corpus** (7.63 GiB) |
+
+1.40× a full uncompressed corpus, in a scan whose entire design is to *avoid*
+holding the corpus. Candidates, in `ambuild_callback` / `BuildState`:
+
+1. `pending_flat` / `pending_ids` — the IVF path takes an early `return`
+   before touching these, but `BuildState` still *owns* them; confirm they are
+   never grown on this path.
+2. PostgreSQL's own per-tuple context churn across 2M `ambuild_callback`
+   invocations (a leaked per-row allocation in a long-lived context would look
+   exactly like this).
+3. The `CorpusSpill`'s `BufFile` write buffering.
+
+**Cheapest next step:** add `trace_stage!`-style private-memory probes *inside*
+the scan — e.g. every 250 k rows in `ambuild_callback` — and watch whether the
+curve is linear in rows (a leak/retention) or steps (a buffer). That is a
+code-only change, testable on the same 2M repro for ~$0.30.
+
+## Cost
+
+c7i.4xlarge, ~35 min (terminated as soon as the marker printed, rather than
+waiting out a 17-min training phase whose answer was already known) ≈ $0.60.
+All six instances across Z5/Z6 verified terminated.

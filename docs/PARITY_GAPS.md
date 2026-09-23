@@ -611,10 +611,23 @@ logging allocations > 256 MB with `backtrace()`.
     are ~0.35-0.69 GiB. Settled locally in minutes at zero cost after
     four sessions of EC2 work -- **check whether a suspect stage is pure
     code before renting a host.**
-  - **Open:** the dominant per-row term, now known NOT to be in
-    `train_kmeans`. Next suspect is the scan phase
-    (`ambuild_callback` per heap row), which the new marker measures in
-    one traced build.
+  - **SETTLED: the memory is allocated during the HEAP SCAN.** One
+    traced build with the new `0_at_drain_entry` marker shows
+    **12.07 GiB private already resident when `ivf_build_and_write` is
+    entered** -- before any training, assignment, quantization or
+    persist -- against a 12.16-12.88 GiB whole-build peak. So **~99 % of
+    build peak is allocated by the scan**, which is why four sessions of
+    hypotheses aimed at the drain all missed.
+  - **Open (narrow):** the reservoir explains only 1.38 GiB of that
+    12.07. The remaining **10.69 GiB is 1.40x the full f32 corpus**
+    (7.63 GiB at 2M x 1024-d) -- in a scan whose design is to spill to a
+    `BufFile` rather than hold the corpus. Candidates:
+    `pending_flat`/`pending_ids` (the IVF path early-`return`s before
+    them, but `BuildState` owns them), per-tuple context churn across 2M
+    `ambuild_callback` calls, or `CorpusSpill`'s write buffering.
+    **Next step is code-only:** private-memory probes every ~250 k rows
+    inside `ambuild_callback`, then check whether the curve is linear in
+    rows (retention) or steps (a buffer). ~$0.30 on the same 2M repro.
   - ~~`turbovec.build_parallelism` documented as speed-only~~ ✓ fixed:
     it is a MEMORY knob. 16 threads = 16.24 GiB vs 1 thread = 12.16 GiB
     peak private (~0.27 GiB/thread of GEMM packing buffers), and

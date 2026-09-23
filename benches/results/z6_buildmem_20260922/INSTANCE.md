@@ -20,3 +20,7 @@ Other tenants' untagged instances share this account; touch only run=z6prof-2026
 ## Third instance (allocation tracing, session 4)
 - i-06da21f8ae95bfa2a (c7i.4xlarge) us-east-2b, tag run=z6alloc-20260923-065610, sg sg-0c1614861fcc178b2, key ~/.ssh/z6alloc-20260923-065610.pem
 - teardown: terminate-instances i-06da21f8ae95bfa2a ; delete-security-group sg-0c1614861fcc178b2 ; delete-key-pair z6alloc-20260923-065610
+
+## Fourth instance (scan-phase measurement, session 5)
+- i-08cfafdb63e6f39fb (c7i.4xlarge) us-east-2c, tag run=z6scan-20260923-150737, sg sg-0074f7a0420367500, key ~/.ssh/z6scan-20260923-150737.pem
+- teardown: terminate-instances i-08cfafdb63e6f39fb ; delete-security-group sg-0074f7a0420367500 ; delete-key-pair z6scan-20260923-150737

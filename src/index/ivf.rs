@@ -2050,48 +2050,71 @@ mod tests {
         }
     }
 
-    /// Z6: rotating the k-means reservoir in blocks must equal rotating it
-    /// whole.
+    /// Z6, RECORDED AS A CONSTRAINT: `rotate_corpus_into` is NOT invariant to
+    /// the row-block shape, so the reservoir rotation cannot be chunked to
+    /// save memory.
     ///
-    /// The build used to `sample.clone()` before rotating (a GEMM needs
-    /// distinct src/dst), holding a SECOND full reservoir copy -- 3.09 GiB at
-    /// `lists = 3162`. It now rotates through a small fixed scratch buffer,
-    /// block by block. Sound because the rotation is a per-row linear map,
-    /// but that is exactly what must be proven rather than assumed.
+    /// The GEMM runs with `Parallelism::Rayon(0)`, so its internal tiling --
+    /// and hence its floating-point reduction order -- depends on the row
+    /// count `m`. Rotating rows in blocks therefore differs in the last bits
+    /// from rotating the whole array, even though the rotation is
+    /// mathematically a per-row linear map.
+    ///
+    /// This was NOT obvious: the existing
+    /// `rotate_corpus_bit_identical_across_pool_sizes` varies the thread
+    /// count at a FIXED shape and passes, which is a different invariant. A
+    /// blocked-rotation optimisation was written, and CI caught it here at
+    /// `rows_per = 1` before it could change any index on disk.
+    ///
+    /// The test asserts the constraint so nobody re-tries the optimisation:
+    /// blocking at the SAME shape is identical, and blocking at a DIFFERENT
+    /// shape is not guaranteed to be.
     #[test]
-    fn rotate_corpus_blocked_matches_whole() {
+    fn rotate_corpus_is_not_row_block_shape_invariant() {
         let dim = 16usize;
         let n_rows = 300usize;
         let corpus: Vec<f32> = (0..n_rows * dim)
             .map(|i| ((i * 7919 % 2000) as f32 / 1000.0) - 1.0)
             .collect();
         let rotation = super::materialize_rotation_matrix(dim);
-        assert_eq!(rotation.len(), dim * dim);
 
-        let mut want = vec![0.0f32; n_rows * dim];
-        super::rotate_corpus_into(&corpus, &rotation, n_rows, dim, &mut want);
+        let mut whole = vec![0.0f32; n_rows * dim];
+        super::rotate_corpus_into(&corpus, &rotation, n_rows, dim, &mut whole);
 
-        for rows_per in [1usize, 5, 64, 299, 300] {
-            // Mimic the build exactly: rotate IN PLACE through a scratch
-            // buffer, so this also catches an aliasing mistake.
-            let mut inplace = corpus.clone();
-            let mut scratch = vec![0.0f32; rows_per * dim];
-            let mut start = 0usize;
-            while start < n_rows {
-                let rows = rows_per.min(n_rows - start);
-                let lo = start * dim;
-                let hi = lo + rows * dim;
-                scratch[..rows * dim].copy_from_slice(&inplace[lo..hi]);
-                let src: Vec<f32> = scratch[..rows * dim].to_vec();
-                super::rotate_corpus_into(&src, &rotation, rows, dim, &mut inplace[lo..hi]);
-                start += rows;
-            }
-            assert_eq!(
-                inplace, want,
-                "blocked in-place rotation (rows_per={rows_per}) must be \
-                 BIT-IDENTICAL to the whole-array rotation"
+        // Same shape, fresh buffer: MUST be identical (this is the invariant
+        // the build actually relies on).
+        let mut again = vec![0.0f32; n_rows * dim];
+        super::rotate_corpus_into(&corpus, &rotation, n_rows, dim, &mut again);
+        assert_eq!(
+            again, whole,
+            "rotating the same shape twice must be bit-identical -- if THIS \
+             fails the rotation is not deterministic at all"
+        );
+
+        // Row-by-row (m = 1) is mathematically equal but need not be
+        // bit-equal. Assert only that it is CLOSE, and document that the
+        // build must not depend on it being exact.
+        let mut per_row = vec![0.0f32; n_rows * dim];
+        for r in 0..n_rows {
+            let src = corpus[r * dim..(r + 1) * dim].to_vec();
+            super::rotate_corpus_into(
+                &src,
+                &rotation,
+                1,
+                dim,
+                &mut per_row[r * dim..(r + 1) * dim],
             );
         }
+        let max_abs = whole
+            .iter()
+            .zip(&per_row)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs < 1e-4,
+            "per-row and whole-array rotation must agree numerically \
+             (max abs diff {max_abs})"
+        );
     }
 
     fn kmeans_deterministic() {

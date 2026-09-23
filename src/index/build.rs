@@ -947,9 +947,40 @@ unsafe fn ivf_build_and_write(
     // O(sample_count) parallel GEMM instead of O(kept rows) scalar
     // O(dim^2) rotations. `sample` is exactly `sample_count * dim`.
     if sample_count > 0 {
-        let src = sample.clone();
-        let rotate = || ivf::rotate_corpus_into(&src, &rotation, sample_count, dim, &mut sample);
-        super::build_pool::install(build_pool, rotate);
+        // Z6: rotate the reservoir IN BLOCKS through a small scratch buffer
+        // instead of cloning the whole thing.
+        //
+        // `rotate_corpus_into` is a GEMM and needs distinct src/dst, so the
+        // previous `sample.clone()` held a SECOND full copy of the reservoir
+        // while the original was live -- `lists * 256 * dim * 4` bytes twice,
+        // i.e. 1.38 GiB x2 at lists=1414 and 3.09 GiB x2 at lists=3162
+        // (measured; see benches/results/z6_buildmem_20260922/FINDINGS.md).
+        //
+        // Blocking is exact, not an approximation: the rotation is a per-row
+        // linear map (`out[i] = sample[i] @ R^T`) with no cross-row term, so
+        // rotating rows [a,b) in isolation gives bit-identical output to
+        // rotating the whole array. Guarded by
+        // `ivf_streaming_build_determinism_byte_identical` and
+        // `rotate_corpus_bit_identical_across_pool_sizes`.
+        //
+        // Block sizing: ~64 MiB of scratch, so the extra memory is a
+        // constant rather than proportional to `lists`.
+        const ROTATE_SCRATCH_BYTES: usize = 64 * 1024 * 1024;
+        let rows_per_block = (ROTATE_SCRATCH_BYTES / (dim * 4)).clamp(1, sample_count);
+        let mut scratch = vec![0.0f32; rows_per_block * dim];
+        let mut start = 0usize;
+        while start < sample_count {
+            let rows = rows_per_block.min(sample_count - start);
+            let lo = start * dim;
+            let hi = lo + rows * dim;
+            scratch[..rows * dim].copy_from_slice(&sample[lo..hi]);
+            let src = &scratch[..rows * dim];
+            let dst = &mut sample[lo..hi];
+            super::build_pool::install(build_pool, || {
+                ivf::rotate_corpus_into(src, &rotation, rows, dim, dst)
+            });
+            start += rows;
+        }
     }
     if trace {
         eprintln!(

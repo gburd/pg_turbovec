@@ -12,3 +12,7 @@ aws ec2 delete-key-pair       --profile hotdog --region us-east-2 --key-name z6p
 ```
 SSH needs: -o IdentitiesOnly=yes -o IdentityAgent=none
 Other tenants' untagged instances share this account; touch only run=z6prof-20260922-165444.
+
+## Second instance (cross-term test)
+- i-0ad266bd77b62fb6f (c7i.4xlarge) us-east-2b, tag run=z6cross-20260922-225815, sg sg-0b8a750ab7c60e9dc, key ~/.ssh/z6cross-20260922-225815.pem
+- teardown: terminate-instances i-0ad266bd77b62fb6f ; delete-security-group sg-0b8a750ab7c60e9dc ; delete-key-pair z6cross-20260922-225815

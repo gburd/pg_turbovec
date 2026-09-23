@@ -1237,7 +1237,24 @@ fn train_kmeans_iters(
     // and the threshold are deterministic, so the iteration count is
     // a fixed function of the input.
     let mut assign = vec![0u32; n_sample];
-    let mut cross = vec![0.0f32; n_sample * lists];
+    // Z6: `cross` is the (rows x lists) GEMM output feeding the argmin. Sized
+    // over the WHOLE sample it is QUADRATIC in `lists`
+    // (`n_sample = lists * 256`), i.e. 1.91 GiB at lists=1414 and **9.54 GiB
+    // at lists=3162** -- which is what makes a large-`lists` build OOM
+    // (measured; benches/results/z6_buildmem_20260922/FINDINGS.md).
+    //
+    // Bound it: `gemm_lloyd_assign` documents that each `assign[i]` is a pure
+    // function of row `i`'s cross scores with no cross-row dependence and no
+    // reduction, so processing the sample in row-chunks is BIT-IDENTICAL to
+    // one big call. We keep a fixed ~256 MiB budget instead of a
+    // lists-quadratic one.
+    //
+    // Guarded by `kmeans_deterministic`, `kmeans_deterministic_across_pool_sizes`,
+    // `kmeans_cross_chunking_is_bit_identical` (below) and
+    // `ivf_streaming_build_determinism_byte_identical` in `lib.rs`.
+    const CROSS_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+    let cross_rows = (CROSS_BUDGET_BYTES / (lists * 4).max(1)).clamp(1, n_sample);
+    let mut cross = vec![0.0f32; cross_rows * lists];
     let mut cnorm = vec![0.0f32; lists];
     let mut prev_centroids = vec![0.0f32; lists * dim];
     let mut iters_run = 0usize;
@@ -1257,16 +1274,23 @@ fn train_kmeans_iters(
                 .map(|&x| x * x)
                 .sum::<f32>();
         }
-        gemm_lloyd_assign(
-            sample,
-            &centroids,
-            &cnorm,
-            n_sample,
-            lists,
-            dim,
-            &mut cross,
-            &mut assign,
-        );
+        // Chunked over sample rows; bit-identical to one call (see the
+        // `cross` sizing note above).
+        let mut row0 = 0usize;
+        while row0 < n_sample {
+            let rows = cross_rows.min(n_sample - row0);
+            gemm_lloyd_assign(
+                &sample[row0 * dim..(row0 + rows) * dim],
+                &centroids,
+                &cnorm,
+                rows,
+                lists,
+                dim,
+                &mut cross[..rows * lists],
+                &mut assign[row0..row0 + rows],
+            );
+            row0 += rows;
+        }
 
         // Update step: mean of assigned points. The per-cell f64
         // accumulation is parallelized with a FIXED-ORDER reduction
@@ -1950,6 +1974,126 @@ mod tests {
     /// Same sample + same lists ⇒ byte-identical centroids. The
     /// determinism anchor.
     #[test]
+    /// Z6: bounding the Lloyd `cross` matrix must not change the result.
+    ///
+    /// `cross` was sized `n_sample * lists`, which is QUADRATIC in `lists`
+    /// (because `n_sample = lists * 256`) -- 9.54 GiB at `lists = 3162`, and
+    /// the reason large-`lists` builds OOM. It is now chunked over sample
+    /// rows under a fixed byte budget.
+    ///
+    /// The chunking is only sound because each `assign[i]` is a pure function
+    /// of row `i`'s cross scores (no cross-row dependence, no reduction --
+    /// `gemm_lloyd_assign` documents this). This test is the guard: call the
+    /// assignment with the FULL sample and then in several chunk sizes, and
+    /// require bit-identical `assign` output.
+    #[test]
+    fn kmeans_cross_chunking_is_bit_identical() {
+        let dim = 16usize;
+        let lists = 8usize;
+        let n_sample = 500usize;
+        // Deterministic pseudo-random sample + centroids.
+        let sample: Vec<f32> = (0..n_sample * dim)
+            .map(|i| ((i * 7919 % 2000) as f32 / 1000.0) - 1.0)
+            .collect();
+        let centroids: Vec<f32> = (0..lists * dim)
+            .map(|i| ((i * 104729 % 2000) as f32 / 1000.0) - 1.0)
+            .collect();
+        let cnorm: Vec<f32> = (0..lists)
+            .map(|c| {
+                centroids[c * dim..(c + 1) * dim]
+                    .iter()
+                    .map(|x| x * x)
+                    .sum()
+            })
+            .collect();
+
+        // Reference: one call over the whole sample.
+        let mut cross_all = vec![0.0f32; n_sample * lists];
+        let mut want = vec![0u32; n_sample];
+        super::gemm_lloyd_assign(
+            &sample,
+            &centroids,
+            &cnorm,
+            n_sample,
+            lists,
+            dim,
+            &mut cross_all,
+            &mut want,
+        );
+
+        // Every chunk size must reproduce it exactly, including sizes that
+        // do not divide n_sample evenly and the degenerate size 1.
+        for rows_per in [1usize, 7, 64, 199, 500] {
+            let mut cross = vec![0.0f32; rows_per * lists];
+            let mut got = vec![0u32; n_sample];
+            let mut row0 = 0usize;
+            while row0 < n_sample {
+                let rows = rows_per.min(n_sample - row0);
+                super::gemm_lloyd_assign(
+                    &sample[row0 * dim..(row0 + rows) * dim],
+                    &centroids,
+                    &cnorm,
+                    rows,
+                    lists,
+                    dim,
+                    &mut cross[..rows * lists],
+                    &mut got[row0..row0 + rows],
+                );
+                row0 += rows;
+            }
+            assert_eq!(
+                got, want,
+                "chunked assignment (rows_per={rows_per}) must be BIT-IDENTICAL to \
+                 the whole-sample call; if it is not, bounding `cross` changed the \
+                 index and the memory fix is unsafe to ship"
+            );
+        }
+    }
+
+    /// Z6: rotating the k-means reservoir in blocks must equal rotating it
+    /// whole.
+    ///
+    /// The build used to `sample.clone()` before rotating (a GEMM needs
+    /// distinct src/dst), holding a SECOND full reservoir copy -- 3.09 GiB at
+    /// `lists = 3162`. It now rotates through a small fixed scratch buffer,
+    /// block by block. Sound because the rotation is a per-row linear map,
+    /// but that is exactly what must be proven rather than assumed.
+    #[test]
+    fn rotate_corpus_blocked_matches_whole() {
+        let dim = 16usize;
+        let n_rows = 300usize;
+        let corpus: Vec<f32> = (0..n_rows * dim)
+            .map(|i| ((i * 7919 % 2000) as f32 / 1000.0) - 1.0)
+            .collect();
+        let rotation = super::materialize_rotation_matrix(dim);
+        assert_eq!(rotation.len(), dim * dim);
+
+        let mut want = vec![0.0f32; n_rows * dim];
+        super::rotate_corpus_into(&corpus, &rotation, n_rows, dim, &mut want);
+
+        for rows_per in [1usize, 5, 64, 299, 300] {
+            // Mimic the build exactly: rotate IN PLACE through a scratch
+            // buffer, so this also catches an aliasing mistake.
+            let mut inplace = corpus.clone();
+            let mut scratch = vec![0.0f32; rows_per * dim];
+            let mut start = 0usize;
+            while start < n_rows {
+                let rows = rows_per.min(n_rows - start);
+                let lo = start * dim;
+                let hi = lo + rows * dim;
+                scratch[..rows * dim].copy_from_slice(&inplace[lo..hi]);
+                let src: Vec<f32> = scratch[..rows * dim].to_vec();
+                super::rotate_corpus_into(&src, &rotation, rows, dim, &mut inplace[lo..hi]);
+                start += rows;
+            }
+            assert_eq!(
+                inplace, want,
+                "blocked in-place rotation (rows_per={rows_per}) must be \
+                 BIT-IDENTICAL to the whole-array rotation"
+            );
+        }
+    }
+
     fn kmeans_deterministic() {
         let dim = 8;
         let n = 300;

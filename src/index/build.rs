@@ -75,6 +75,21 @@ impl CorpusSpill {
     /// # Safety
     /// Must run inside a transaction with a valid CurrentResourceOwner
     /// (true throughout `ambuild`).
+    /// Z6: create the spill with its `BufFile` allocated in `cxt`.
+    ///
+    /// `BufFileCreateTemp` palloc's in the CURRENT context, and the build
+    /// callback now runs inside a per-tuple context that is reset after every
+    /// row. The spill is opened lazily on the first row, so allocating it
+    /// there would leave a dangling `BufFile` on row two. Callers pass the
+    /// long-lived build context explicitly rather than relying on whatever
+    /// context happens to be current.
+    unsafe fn new_in(cxt: pg_sys::MemoryContext, dim: usize) -> Self {
+        let prev = pg_sys::MemoryContextSwitchTo(cxt);
+        let me = Self::new(dim);
+        pg_sys::MemoryContextSwitchTo(prev);
+        me
+    }
+
     unsafe fn new(dim: usize) -> Self {
         let file = pg_sys::BufFileCreateTemp(false);
         if file.is_null() {
@@ -287,6 +302,26 @@ struct BuildState {
     normalise: bool,
     /// Pending f32 staging buffer; flushed into `idx.add_with_ids`
     /// every `chunk_rows`. Bounded by `chunk_rows * dim * 4` bytes.
+    /// Z6: the long-lived context `ambuild` runs in. Anything that must
+    /// OUTLIVE a single heap tuple (the `CorpusSpill`'s palloc'd `BufFile`)
+    /// is allocated here explicitly, because the callback itself runs inside
+    /// `per_tuple_cxt`, which is reset after every row.
+    build_cxt: pg_sys::MemoryContext,
+    /// Z6: short-lived context reset after EVERY heap tuple.
+    ///
+    /// `Vector` is a `PostgresType` whose on-disk form is CBOR, so
+    /// `FromDatum::from_datum` palloc's a decoded buffer per row. With no
+    /// context management those buffers accumulated in the long-lived
+    /// `ambuild` context: measured **12.07 GiB resident at drain entry** for
+    /// 2M x 1024-d, of which only 1.38 GiB was the k-means reservoir. The
+    /// remainder (~10.7 GiB) matches 2M x ~5125 B of CBOR varlena (9.55 GiB)
+    /// -- i.e. the whole corpus was retained in decoded form, defeating the
+    /// spill whose entire purpose is to avoid exactly that.
+    ///
+    /// `build_callback` now switches into this context and resets it per
+    /// tuple, so per-row decode memory is bounded by ONE row.
+    /// See benches/results/z6_buildmem_20260922/FINDINGS.md.
+    per_tuple_cxt: pg_sys::MemoryContext,
     pending_flat: Vec<f32>,
     /// Pending u64 ids, parallel to `pending_flat`.
     pending_ids: Vec<u64>,
@@ -546,11 +581,24 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         None
     };
 
+    // Z6: per-tuple context for the heap scan. Created as a child of the
+    // current (ambuild) context so it is destroyed automatically if anything
+    // below longjmps.
+    let per_tuple_cxt = pg_sys::AllocSetContextCreateExtended(
+        pg_sys::CurrentMemoryContext,
+        c"turbovec ambuild per-tuple".as_ptr(),
+        pg_sys::ALLOCSET_SMALL_MINSIZE as usize,
+        pg_sys::ALLOCSET_SMALL_INITSIZE as usize,
+        pg_sys::ALLOCSET_SMALL_MAXSIZE as usize,
+    );
+
     let mut state = BuildState {
         idx: None,
         bit_width: cfg_bit_width as usize,
         dim: initial_dim,
         normalise,
+        build_cxt: pg_sys::CurrentMemoryContext,
+        per_tuple_cxt,
         pending_flat: Vec::new(),
         pending_ids: Vec::new(),
         // Lazily computed from `dim` on the first chunk; if dim was
@@ -612,7 +660,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
             // Phase B-4: open the disk spill now that the record
             // stride (8 + d*4) is known. The heap scan streams every
             // accepted vector into it instead of `ivf_flat`.
-            state.ivf_spill = Some(CorpusSpill::new(d));
+            state.ivf_spill = Some(CorpusSpill::new_in(state.build_cxt, d));
         }
         if state.lists > 0 && !state.bq {
             state.ivf_rotation = Some(crate::index::ivf::materialize_rotation_matrix(d));
@@ -1826,7 +1874,7 @@ unsafe fn colbert_build_callback(
                 if state.ivf_rotation.is_none() {
                     state.ivf_rotation =
                         Some(crate::index::ivf::materialize_rotation_matrix(row_dim));
-                    state.ivf_spill = Some(CorpusSpill::new(row_dim));
+                    state.ivf_spill = Some(CorpusSpill::new_in(state.build_cxt, row_dim));
                 }
             }
             _ => {}
@@ -1852,7 +1900,45 @@ unsafe fn colbert_build_callback(
 /// Per-tuple callback invoked by `index_build_range_scan`. We treat
 /// dead tuples (`tuple_is_alive == false`) like NULL: they are skipped
 /// rather than indexed, matching pgvector's policy.
+/// Z6: per-tuple memory-context wrapper around [`build_callback_inner`].
+///
+/// `Vector` is a `PostgresType` stored as CBOR, so `FromDatum::from_datum`
+/// palloc's a decoded buffer for every row. With no context management those
+/// buffers accumulated in the long-lived `ambuild` context: **12.07 GiB was
+/// resident at drain entry** for 2M x 1024-d, of which only 1.38 GiB was the
+/// k-means reservoir. The ~10.7 GiB remainder matches 2M x ~5125 B of CBOR
+/// varlena (9.55 GiB) -- the entire corpus retained in decoded form, which
+/// defeats the `CorpusSpill` whose whole purpose is to avoid that.
+///
+/// The inner callback has six early-return paths; doing the
+/// switch/restore/reset inline would mean six chances to get it wrong. This
+/// wrapper owns it in ONE place instead.
+///
+/// See `benches/results/z6_buildmem_20260922/FINDINGS.md`.
 unsafe extern "C-unwind" fn build_callback(
+    index_relation: pg_sys::Relation,
+    tid: pg_sys::ItemPointer,
+    values: *mut pg_sys::Datum,
+    isnull: *mut bool,
+    tuple_is_alive: bool,
+    state_ptr: *mut std::ffi::c_void,
+) {
+    let state = &mut *(state_ptr as *mut BuildState);
+    let old_cxt = pg_sys::MemoryContextSwitchTo(state.per_tuple_cxt);
+    build_callback_inner(
+        index_relation,
+        tid,
+        values,
+        isnull,
+        tuple_is_alive,
+        state_ptr,
+    );
+    pg_sys::MemoryContextSwitchTo(old_cxt);
+    // O(1) on a context holding one row's worth of chunks.
+    pg_sys::MemoryContextReset(state.per_tuple_cxt);
+}
+
+unsafe fn build_callback_inner(
     index_relation: pg_sys::Relation,
     tid: pg_sys::ItemPointer,
     values: *mut pg_sys::Datum,
@@ -1923,7 +2009,7 @@ unsafe extern "C-unwind" fn build_callback(
             // record stride (8 + dim*4) is known. Mirrors the eager
             // (dim-pinned-by-reloptions) site in `ambuild`.
             if (state.lists > 0 || state.graph || state.bq) && state.ivf_spill.is_none() {
-                state.ivf_spill = Some(CorpusSpill::new(row_dim));
+                state.ivf_spill = Some(CorpusSpill::new_in(state.build_cxt, row_dim));
             }
             // The IVF rotation matrix puts reservoir samples in the
             // clustering space -- needed only for a TurboQuant IVF build.

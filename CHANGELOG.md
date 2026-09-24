@@ -43,10 +43,14 @@ REINDEX.
   | whole-build peak | 12.16 GiB | **3.45 GiB** (3.5× less) |
   | build wall time | 1055 s | **889 s** (16 % faster) |
 
-  This is what made 10M × 1024-d builds OOM-kill a 61 GiB host. Projected for
-  10M × 1024-d / `lists = 3162`: ≈ **11.2 GiB** (codes 4.77 + reservoir 3.09 +
-  rotation destination 3.09 + bounded `cross` 0.25). **Not re-measured at
-  10M** — but the term that scaled at ~5125 B/row is gone.
+  This is what made 10M × 1024-d builds OOM-kill a 61 GiB host.
+  **Since measured** (`benches/results/z6_10m_20260924/`): on the same
+  c7i.8xlarge / 61 GiB host with the identical config that died before
+  (`mwm = 8GB`, 16 parallel workers, `lists = 3162`), the 10M × 1024-d build
+  now **completes in 69.8 min at 11.20 GiB peak private** — 18 % of the host,
+  zero OOM events, against `anon-rss` 58.47 GiB at the kill. The projection
+  above was 11.2 GiB. Index verified sound (wire v8, 10M/10M slots,
+  `is_corrupt = false`, `scan_fraction = 0.00506`, 51 ms warm).
 
 - **The Lloyd `cross` matrix was quadratic in `lists`.** `train_kmeans`
   allocated `n_sample × lists` where `n_sample = lists × 256` — **9.54 GiB at

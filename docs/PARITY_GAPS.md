@@ -494,10 +494,23 @@ two.
 
 Index bytes unchanged (CI 444/0, including the IVF byte-identity guards).
 
-**Projected** for 10M × 1024-d / `lists = 3162`: codes 4.77 + reservoir 3.09 +
-rotation dest 3.09 + bounded `cross` 0.25 ≈ **11.2 GiB**, versus the 61 GiB
-host this OOM-killed before. **Not re-measured at 10M** — but the term that
-scaled at 5125 B/row is gone.
+**MEASURED at 10M × 1024-d** (`benches/results/z6_10m_20260924/`), on the same
+c7i.8xlarge / 61 GiB host and the *identical* config that OOM-killed before
+(`mwm = 8GB`, 16 parallel maintenance workers, `lists = 3162`):
+
+| | before (≤ 2.10.0) | after (2.10.1) |
+|---|---|---|
+| outcome | **OOM-killed** at `anon-rss` 58.47 GiB | **completed** in 69.8 min |
+| peak private | — | **11.20 GiB** (18 % of the host) |
+| `dmesg` OOM events | 1 | **0** |
+
+The release notes projected **11.2 GiB** term by term; the measurement came in
+at **11.20 GiB**, validating the root-cause model quantitatively — a
+projection derived purely from "the CBOR retention is gone, these four terms
+remain" would not land within 0.01 GiB unless the retention really was the
+whole defect. Index verified sound: wire v8, 10M/10M slots, `is_corrupt =
+false`, not degraded, `scan_fraction = 0.00506` (= 16/3162, so cell pruning is
+live), 51 ms warm at `probes = 16`.
 
 ### How six hypotheses missed it
 

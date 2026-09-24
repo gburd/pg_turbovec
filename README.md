@@ -67,7 +67,160 @@ Head-to-head, warm cache, release build. Storage + recall
 | Recall@10 (IVF, tuned) | ~0.90 (R@100 → 0.99) | 0.96–0.99 |
 | Exact re-ranking vs heap | ✓ (`xs_recheckorderby`) | ✓ |
 
-### Honest latency note (read this)
+### Common objections, answered with measurements
+
+Four things evaluators say about pg_turbovec. Two are misunderstandings we
+caused, one is true-and-fixed, one is true-and-stands.
+
+#### "pg_turbovec doesn't support ANN"
+
+It does — but **the default index is exact, not approximate**, and that is
+almost certainly why you concluded otherwise:
+
+```sql
+-- Exact quantized scan. O(n·dim). Recall@10 = 1.000. This is the DEFAULT.
+CREATE INDEX ON items USING turbovec (embedding vec_cosine_ops);
+
+-- Approximate, cell-pruned IVF scan. This is the ANN path.
+CREATE INDEX ON items USING turbovec (embedding vec_cosine_ops)
+  WITH (lists = 1000);
+```
+
+`lists` defaults to `0`, which means flat. Nothing in a default build tells
+you IVF exists, which is a documentation failure on our side, not a
+misreading on yours. Since v2.10.2 a flat build over 100 k rows emits a
+`NOTICE` pointing at the ANN option. See
+[Choosing `lists`](#choosing-lists--the-ann-tuning-knob) for how to pick a
+value — and note that on our own measurements, **flat is the right choice
+more often than you would expect** (that section says when).
+
+#### "HNSW has a high memory footprint and is slow to build"
+
+**Agreed — that is why we did not build on HNSW.** Measured head-to-head on
+the same host, 10 M × 1536-d real embeddings
+([`docs/RECALL.md`](docs/RECALL.md)):
+
+| | pgvector HNSW (m=16, ef_construction=64) | pg_turbovec 4-bit |
+|---|---:|---:|
+| Index size | 65.5 GiB | **14.9 GiB** (4.4× smaller) |
+| Build time | 3 h 38 min | **1 h 24 min** (2.6× faster) |
+
+Our build log also shows HNSW slowing **super-linearly past 5 M rows** even
+with the whole corpus in page cache, which matches the common complaint.
+
+#### "pg_turbovec's own build memory was worse than HNSW's"
+
+**This was true, and it is now fixed.** The same 10 M × 1536-d benchmark
+measured pg_turbovec's build at **121 GiB peak + 60 GiB swap** against HNSW's
+16.9 GiB — we were ~7× *worse*. That figure is from **v1.5.1 (May 2026)** and
+is still quoted in `docs/RECALL.md` for the run it belongs to.
+
+Root cause (found and fixed in **v2.10.1**): `vector` is stored as CBOR, so
+`FromDatum` palloc'd a decoded buffer per row, and the build callback had **no
+memory-context management at all** — every decoded row accumulated for the
+whole scan. The spill was streaming the corpus to disk while PostgreSQL held a
+decoded copy of *all of it* in RAM.
+
+Measured after the fix:
+
+| build | before | after |
+|---|---|---|
+| 2 M × 1024-d peak | 12.16 GiB | **3.45 GiB** (3.5× less, 16 % faster) |
+| 10 M × 1024-d on a 61 GiB host | **OOM-killed** (`anon-rss` 58.5 GiB) | **completes at 11.20 GiB** in 70 min |
+
+**Scope, stated plainly:** the post-fix numbers are 1024-d. We have **not**
+re-measured 10 M × **1536-d**, which is what the 121 GiB figure was, so treat
+that specific number as superseded-in-mechanism but not yet re-measured at its
+original dimension.
+
+#### "HNSW is faster on query latency"
+
+**True, and we don't dispute it.** A flat pg_turbovec scan is `O(n·dim)`; HNSW
+is sublinear. If p50 latency is your binding constraint and your corpus fits
+in RAM, **pgvector HNSW is the better choice today** — see the honest latency
+note immediately below, which we keep at the top of this README on purpose.
+
+Where we are measurably better: **storage** (4.4–20× smaller), **build time**
+(2.6× faster), **larger-than-RAM corpora** (IVF is out-of-core end-to-end),
+and **exact recall** when you need R@10 = 1.000 rather than 0.96.
+
+---
+
+## Choosing `lists` — the ANN tuning knob
+
+`lists` is the IVF coarse-cell count (`nlist`). **The default is `0`, which
+means a flat exact scan.** We keep it at `0` deliberately: on our own
+measurements, enabling IVF at the default `bit_width = 4` makes things
+*worse* up to at least 1 M rows.
+
+### First: do you want IVF at all?
+
+At 1 M × 1024-d with the default `bit_width = 4`
+([`docs/BQ_RECALL_BENCH.md`](docs/BQ_RECALL_BENCH.md) § 0.6g):
+
+| config | latency | recall@10 |
+|---|---:|---:|
+| **flat** (`lists = 0`, the default) | **6.08 ms** | **1.000** |
+| `lists = 1024` (≈ √n) | 16.04 ms (62 % slower) | **capped at 0.959** |
+
+That recall cap is the important half: at `probes = 128`, widening the rerank
+window from 32 to 2000 left recall at **exactly 0.959** across all eight
+windows. It is a per-probe ceiling, it is CPU-independent, and **no amount of
+tuning removes it.** So IVF is not a free "make it faster" switch — it trades
+a recall ceiling for a smaller scan.
+
+Our measured decision rule:
+
+| your situation | use |
+|---|---|
+| `bit_width ≥ 2` (incl. the default 4), n ≲ 1 M | **`lists = 0`** (flat) — faster *and* exact |
+| `bit_width = 1`, n ≳ 1 M, target recall ≲ 0.95 | **`lists ≈ √n`** — measured 38–47 % faster |
+| `bit_width = 1`, target recall ≳ 0.98 | **`lists = 0`** — IVF cannot reach it |
+| index larger than RAM | **`lists ≈ √n`** — IVF is the only out-of-core query path |
+| n ≫ 1 M with `bit_width ≥ 2` | **measure it** — we have no data above 1 M here |
+
+### Second: if you do want it, pick `lists ≈ √n`
+
+```sql
+-- 1 M rows -> lists = 1000;  10 M -> 3162;  100 M -> 10000.
+SELECT round(sqrt(count(*)))::int AS suggested_lists FROM items;
+
+CREATE INDEX ON items USING turbovec (embedding vec_cosine_ops)
+  WITH (lists = 1000);            -- substitute the value above
+```
+
+**`√n` is a ceiling, not a target.** At 1 M we measured `lists = 4096`
+(4× √n) as worse than `lists = 1024` on *every* axis: **11× the build time**
+and ~50 % higher latency. Each cell holds proportionally fewer rows, so a
+given recall needs proportionally more `probes` — you pay twice. If in doubt,
+go *under* `√n`.
+
+### Third: tune `probes` at query time, not `lists`
+
+`lists` is baked in at build time; `probes` is a per-session GUC, so this is
+the knob to sweep:
+
+```sql
+SET turbovec.probes = 16;          -- cells scanned per query (default 16)
+SET turbovec.oversample = 2.0;     -- widen the exact-rerank window
+```
+
+Recall rises with `probes` and saturates at the per-probe ceiling described
+above. Sweep `probes` (8, 16, 32, 64, …) against **your own** ground truth and
+stop at the first value that meets your recall target; everything beyond that
+is latency you are paying for nothing.
+
+### Fourth: measure on your own data
+
+Our 1 M and 250 k figures come from *different corpora*, so cross-scale deltas
+in our docs are suggestive rather than measured. Your corpus is the only
+authority for your workload.
+[`docs/PRODUCTION.md`](docs/PRODUCTION.md) has a 20-minute experiment that
+settles flat-vs-IVF on your data, comparing **at matched recall** (comparing
+at matched `probes` instead is the classic way to get a flattering, wrong
+answer).
+
+## Honest latency note (read this)
 
 pg_turbovec's **flat** kind is an `O(n·dim)` quantized full scan — at
 1 M rows its warm p50 is **~2.5 s on AVX2**, and pgvector HNSW (a

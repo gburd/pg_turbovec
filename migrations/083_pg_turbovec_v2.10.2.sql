@@ -1,0 +1,21 @@
+-- pg_turbovec v2.10.2
+--
+-- PATCH: documentation plus one NOTICE at build time. No SQL surface change,
+-- no GUC change, no wire-format change (MetaPageData::version stays 8), and
+-- the on-disk index bytes are unchanged. `ALTER EXTENSION pg_turbovec UPDATE`
+-- is sufficient; no REINDEX.
+--
+-- Discoverability fix. `lists` defaults to 0, so a plain
+-- `CREATE INDEX ... USING turbovec` builds a FLAT exact scan -- and nothing
+-- told the user that an approximate, cell-pruned IVF layer is one reloption
+-- away. An evaluator concluded from exactly that experience that pg_turbovec
+-- "does not support ANN" and chose a different extension.
+--
+-- A flat build over 100k rows now emits a NOTICE naming
+-- `WITH (lists = N)`. Deliberately a NOTICE, not a WARNING: flat is often the
+-- BETTER choice (measured at 1M x 1024-d with the default bit_width = 4, flat
+-- is 6.08 ms at recall 1.000 while lists = 1024 is 62 % slower and capped at
+-- 0.959), so it must not read as a fault to fix.
+--
+-- The DEFAULT IS UNCHANGED at lists = 0, deliberately, because our own
+-- measurements say flat wins at the default bit_width up to at least 1M rows.

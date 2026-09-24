@@ -693,6 +693,36 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         std::ptr::null_mut(),
     );
     state.heap_seen = n_seen as u64;
+
+    // v2.10.2: tell the user the ANN path exists.
+    //
+    // `lists` defaults to 0, so a plain `CREATE INDEX ... USING turbovec`
+    // builds a FLAT exact scan and nothing anywhere says that an approximate,
+    // cell-pruned IVF layer is one reloption away. At least one evaluator
+    // concluded from a default build that pg_turbovec "does not support ANN"
+    // and chose another extension -- a discoverability failure, not a
+    // misreading.
+    //
+    // Deliberately a NOTICE, not a WARNING: flat is a legitimate and often
+    // BETTER choice (measured: at 1M x 1024-d with the default bit_width = 4,
+    // flat is 6.08 ms at recall 1.000 while lists = 1024 is 62 % slower and
+    // capped at 0.959). We are surfacing an option, not diagnosing a fault --
+    // so this must not look like something to fix. The threshold keeps it off
+    // small indexes, where flat is unambiguously right and the message would
+    // be noise.
+    const ANN_HINT_MIN_ROWS: u64 = 100_000;
+    if state.lists == 0 && !state.graph && !state.colbert && state.heap_seen >= ANN_HINT_MIN_ROWS {
+        pgrx::ereport!(
+            pgrx::PgLogLevel::NOTICE,
+            pgrx::PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
+            format!(
+                "turbovec: built a FLAT (exact) index over {} rows",
+                state.heap_seen
+            ),
+            "Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching."
+        );
+    }
+
     // Drain any rows the heap scan left in the staging buffers.
     // (Phase W: heap scan flushes whenever `pending_ids.len() >=
     // chunk_rows`; the trailing partial chunk is flushed here.)

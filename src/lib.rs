@@ -8013,7 +8013,7 @@ mod tests {
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
-            "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1",
+            "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10855,6 +10855,67 @@ mod tests {
             found,
             "the degraded flat scan is still exact for heap-visible rows"
         );
+    }
+
+    /// v2.10.2: a flat build over the row threshold must tell the user the ANN
+    /// path exists — and must stay SILENT when IVF is already in use or the
+    /// index is small.
+    ///
+    /// `lists` defaults to 0, so a plain `CREATE INDEX ... USING turbovec` is
+    /// an exact scan and nothing advertised the IVF option. An evaluator
+    /// concluded from exactly that experience that pg_turbovec "does not
+    /// support ANN" and chose another extension. This is a NOTICE rather than
+    /// a WARNING on purpose: flat is frequently the BETTER choice (measured at
+    /// 1M x 1024-d, `bit_width = 4`: flat 6.08 ms at recall 1.000 vs
+    /// `lists = 1024` 62 % slower and capped at 0.959), so it must not read as
+    /// a fault to be fixed.
+    #[pg_test]
+    fn flat_build_hints_at_the_ann_option() {
+        use_turbovec();
+        // Below the 100k threshold: a small flat index must NOT be nagged.
+        ivf2_make_corpus("ann_hint_small", 500);
+        Spi::run(
+            "CREATE INDEX ann_hint_small_idx ON ann_hint_small \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        // An IVF index must NOT be nagged at any size -- it already IS the
+        // ANN path, so the hint would be actively wrong.
+        Spi::run(
+            "CREATE INDEX ann_hint_ivf_idx ON ann_hint_small \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 8)",
+        )
+        .unwrap();
+
+        // Both builds must have SUCCEEDED (the gate must not break builds) and
+        // produced usable indexes.
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT is_corrupt FROM turbovec.turbovec_check('ann_hint_small_idx'::regclass)"
+            )
+            .unwrap(),
+            Some(false),
+            "the flat build must still produce a healthy index"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT is_corrupt FROM turbovec.turbovec_check('ann_hint_ivf_idx'::regclass)"
+            )
+            .unwrap(),
+            Some(false),
+            "the IVF build must still produce a healthy index"
+        );
+        // And the IVF one really is IVF, so the hint's gate (`lists == 0`)
+        // genuinely excludes it.
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ann_hint_ivf_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = crate::index::relfile::read_meta(rel).expect("meta");
+            assert_eq!(meta.lists, 8, "the IVF fixture must have cells");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+        }
     }
 
     /// Phase Z5 (reporting): `index_degradation()` must quantify the cliff,

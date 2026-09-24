@@ -4,6 +4,79 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.10.2] — 2026-09-24
+
+PATCH: documentation plus one build-time `NOTICE`. **No SQL surface change, no
+GUC change, no wire-format change** (`MetaPageData::version` stays **8**), index
+bytes unchanged. No REINDEX.
+
+### Added
+
+- **A flat build over 100 k rows now emits a `NOTICE` naming
+  `WITH (lists = N)`.** `lists` defaults to `0`, so a plain
+  `CREATE INDEX ... USING turbovec` builds a **flat exact scan** — and nothing
+  told the user that an approximate, cell-pruned IVF layer was one reloption
+  away. An evaluator concluded from exactly that experience that pg_turbovec
+  *"does not support ANN"* and chose a different extension. That is a
+  discoverability failure on our side, not a misreading.
+
+  Deliberately a `NOTICE`, not a `WARNING`: flat is frequently the **better**
+  choice, so it must not read as a fault to fix. Suppressed for IVF, graph and
+  ColBERT builds (already non-flat) and below 100 k rows, where flat is
+  unambiguously right and the message would be noise.
+
+- **README: "Common objections, answered with measurements".** Four things
+  evaluators say, each answered from our own benchmarks — including the two
+  where the objection is *correct*:
+  - *"doesn't support ANN"* — it does; the **default is exact**, which is why
+    it looked absent.
+  - *"HNSW has a high memory footprint and is slow to build"* — **agreed**,
+    which is why we didn't build on it. Measured 10 M × 1536-d: our index is
+    **4.4× smaller** (14.9 vs 65.5 GiB) and builds **2.6× faster** (1 h 24 m
+    vs 3 h 38 m), and our own log shows HNSW slowing **super-linearly past
+    5 M rows**.
+  - *"pg_turbovec's own build memory was worse than HNSW's"* — **true, and now
+    fixed.** That benchmark measured us at **121 GiB peak + 60 GiB swap**
+    against HNSW's 16.9 GiB. Root cause fixed in v2.10.1; measured after:
+    2 M × 1024-d peak **12.16 → 3.45 GiB**, and 10 M × 1024-d went from
+    **OOM-killing a 61 GiB host** to **completing at 11.20 GiB**. Scope stated
+    plainly in the README: the post-fix numbers are 1024-d, and 10 M × **1536-d**
+    (the dimension the 121 GiB figure used) has **not** been re-measured.
+  - *"HNSW is faster on query latency"* — **true, and we don't dispute it.**
+
+- **README: "Choosing `lists` — the ANN tuning knob".** A full tuning guide,
+  because the honest answer is more subtle than "turn on ANN":
+  - **Whether you want IVF at all.** At 1 M × 1024-d with the default
+    `bit_width = 4`, flat is **6.08 ms at recall@10 = 1.000** while
+    `lists = 1024` is **62 % slower and capped at recall 0.959** — a
+    per-probe ceiling that is CPU-independent and that **no amount of tuning
+    removes**. IVF is a trade, not a free speedup.
+  - The measured decision table (by `bit_width`, scale, recall target, and
+    whether the index exceeds RAM).
+  - **`√n` is a ceiling, not a target** — at 1 M, `lists = 4096` measured
+    *worse than 1024 on every axis*: 11× the build time and ~50 % higher
+    latency.
+  - Tune **`probes` at query time**, not `lists` (which is baked in at build).
+  - Measure on your own data, at **matched recall**.
+
+### Unchanged, deliberately
+
+- **`lists` still defaults to `0` (flat).** Changing the default to `√n` was
+  considered and **rejected on our own measurements**: at the default
+  `bit_width = 4` it would ship a configuration that is 62 % slower *and*
+  recall-capped at 0.959 up to at least 1 M rows. The defect was
+  discoverability, not the default value.
+
+### Tests
+
+445 passed / 0 failed / 8 ignored, uniform across pg13–19 native plus the
+classic lane. New: `flat_build_hints_at_the_ann_option`, which also pins the
+silence (IVF builds and sub-threshold indexes must not be nagged).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.10.2';` — nothing else. No REINDEX.
+
 ## [2.10.1] — 2026-09-23
 
 PATCH: build-time memory profile only. **No SQL surface change, no GUC change,

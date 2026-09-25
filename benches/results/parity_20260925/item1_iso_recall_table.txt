@@ -1,0 +1,32 @@
+# Item 1 — IVF-at-recall vs HNSW-at-recall
+host=ip-172-31-22-42 avx2=True latency_publishable=True load_gate=6.0
+corpus=CohereLabs/wikipedia-2023-11-embed-multilingual-v3 en 1M x 1024d
+latency_basis=index_scan_node_actual_total_time_x_loops
+
+recorded rows: 51/51 (dropped: contended or masked-seqscan)
+
+## at R@10 >= 0.90
+  HNSW          :     3.77 ms  R@10=0.9070  qps=236.8  [hnsw_ef120]
+  flat bw4      :     4.67 ms  R@10=1.0000  qps=210.87  [flat_bw4_k32]  (1.24x HNSW)
+  flat bw1      :    24.87 ms  R@10=0.9650  qps=39.85  [flat_bw1_k256]  (6.60x HNSW)
+  IVF1024 bw4   :    29.10 ms  R@10=0.9075  qps=26.89  [ivf1024_bw4_p64_k100]  (7.72x HNSW)
+  IVF1024 bw1   :    10.28 ms  R@10=0.9325  qps=97.72  [ivf1024_bw1_p128_k256]  (2.73x HNSW)
+
+## at R@10 >= 0.95
+  HNSW          :    12.54 ms  R@10=0.9660  qps=78.76  [hnsw_ef400]
+  flat bw4      :     4.67 ms  R@10=1.0000  qps=210.87  [flat_bw4_k32]  (0.37x HNSW)
+  flat bw1      :    24.87 ms  R@10=0.9650  qps=39.85  [flat_bw1_k256]  (1.98x HNSW)
+  IVF1024 bw4   :    86.17 ms  R@10=0.9650  qps=11.53  [ivf1024_bw4_p128_k100]  (6.87x HNSW)
+  IVF1024 bw1   :    18.78 ms  R@10=0.9625  qps=52.58  [ivf1024_bw1_p128_k800]  (1.50x HNSW)
+
+## at R@10 >= 0.98
+  HNSW          : unreachable (no recorded config cleared 0.98; that IS the result)
+  flat bw4      :     4.67 ms  R@10=1.0000  qps=210.87  [flat_bw4_k32]
+  flat bw1      :    27.41 ms  R@10=0.9800  qps=36.22  [flat_bw1_k400]
+  IVF1024 bw4   : unreachable (no recorded config cleared 0.98; that IS the result)
+  IVF1024 bw1   : unreachable (no recorded config cleared 0.98; that IS the result)
+
+## deliverable one-liners
+  R@10>=0.90: HNSW=3.8ms / IVF-bw4=29.1ms / IVF-bw1=10.3ms / flat-bw4=4.7ms
+  R@10>=0.95: HNSW=12.5ms / IVF-bw4=86.2ms / IVF-bw1=18.8ms / flat-bw4=4.7ms
+  R@10>=0.98: HNSW=unreachable / IVF-bw4=unreachable / IVF-bw1=unreachable / flat-bw4=4.7ms

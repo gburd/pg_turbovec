@@ -1,0 +1,1961 @@
+{
+  "meta": {
+    "host": "ip-172-31-22-42",
+    "uname": "Linux-7.0.0-1013-aws-x86_64-with-glibc2.39",
+    "avx2": true,
+    "latency_publishable": true,
+    "pin_cores": "2-5",
+    "load_gate": 6.0,
+    "n_warm": 30,
+    "n_timed_hnsw": 200,
+    "n_timed_tv": 40,
+    "n_queries": 100,
+    "latency_basis": "index_scan_node_actual_total_time_x_loops",
+    "start_loadavg": "0.37 2.69 3.12 2/467 23246",
+    "corpus": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3 en 1M x 1024d",
+    "gt": "exact top-10 cosine seqscan via CTAS, deterministic (dist,id) tie order",
+    "ts": "2026-09-25T17:19:52+0000"
+  },
+  "configs": [
+    {
+      "label": "hnsw_ef20",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 20
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.661,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 1.289,
+      "p95_ms": 4.22,
+      "p99_ms": 15.194,
+      "mean_ms": 2.112,
+      "qps_single_conn": 473.48,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.37,
+        "mem_free": 15050,
+        "mem_avail": 53476,
+        "la1_after": 0.37,
+        "la1_observed": 0.37,
+        "cpu_busy_pct": 3.04,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.45,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "hnsw_ef40",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 40
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.784,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 1.619,
+      "p95_ms": 3.82,
+      "p99_ms": 4.61,
+      "mean_ms": 1.973,
+      "qps_single_conn": 506.89,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.37,
+        "mem_free": 15045,
+        "mem_avail": 53472,
+        "la1_after": 0.37,
+        "la1_observed": 0.37,
+        "cpu_busy_pct": 2.97,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.53,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "hnsw_ef80",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 80
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.874,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 2.687,
+      "p95_ms": 6.159,
+      "p99_ms": 6.884,
+      "mean_ms": 3.175,
+      "qps_single_conn": 315.01,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.42,
+        "mem_free": 15039,
+        "mem_avail": 53465,
+        "la1_after": 0.42,
+        "la1_observed": 0.42,
+        "cpu_busy_pct": 3.04,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.93,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "hnsw_ef120",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 120
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.907,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 3.769,
+      "p95_ms": 7.291,
+      "p99_ms": 8.111,
+      "mean_ms": 4.223,
+      "qps_single_conn": 236.8,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.42,
+        "mem_free": 15032,
+        "mem_avail": 53458,
+        "la1_after": 0.42,
+        "la1_observed": 0.42,
+        "cpu_busy_pct": 3.07,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.38,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "hnsw_ef200",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 200
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.932,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 5.519,
+      "p95_ms": 9.68,
+      "p99_ms": 10.872,
+      "mean_ms": 6.004,
+      "qps_single_conn": 166.55,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.47,
+        "mem_free": 15027,
+        "mem_avail": 53454,
+        "la1_after": 0.47,
+        "la1_observed": 0.47,
+        "cpu_busy_pct": 3.09,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.04,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "hnsw_ef400",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 400
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.966,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 12.543,
+      "p95_ms": 18.765,
+      "p99_ms": 20.782,
+      "mean_ms": 12.697,
+      "qps_single_conn": 78.76,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.47,
+        "mem_free": 15024,
+        "mem_avail": 53450,
+        "la1_after": 0.51,
+        "la1_observed": 0.51,
+        "cpu_busy_pct": 3.1,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 5.64,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "hnsw_ef800",
+      "engine": "pgvector_hnsw",
+      "kind": "hnsw",
+      "index": "docs_hnsw",
+      "param": {
+        "ef_search": 800
+      },
+      "n_queries": 200,
+      "recall_at_10": 0.978,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 23.343,
+      "p95_ms": 32.336,
+      "p99_ms": 37.925,
+      "mean_ms": 23.369,
+      "qps_single_conn": 42.79,
+      "plan": {
+        "index_name": "docs_hnsw",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.55,
+        "mem_free": 15013,
+        "mem_avail": 53439,
+        "la1_after": 0.59,
+        "la1_observed": 0.59,
+        "cpu_busy_pct": 3.15,
+        "cpu_iowait_pct": 0.36,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 9.87,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k32",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 32
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.71,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 20.934,
+      "p95_ms": 21.284,
+      "p99_ms": 21.372,
+      "mean_ms": 20.813,
+      "qps_single_conn": 48.05,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.7,
+        "mem_free": 16763,
+        "mem_avail": 53307,
+        "la1_after": 0.7,
+        "la1_observed": 0.7,
+        "cpu_busy_pct": 3.1,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.92,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k100",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.8825,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 22.505,
+      "p95_ms": 23.58,
+      "p99_ms": 24.461,
+      "mean_ms": 22.594,
+      "qps_single_conn": 44.26,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.7,
+        "mem_free": 16666,
+        "mem_avail": 53210,
+        "la1_after": 0.72,
+        "la1_observed": 0.72,
+        "cpu_busy_pct": 3.11,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.16,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k256",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.965,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 24.869,
+      "p95_ms": 26.366,
+      "p99_ms": 26.749,
+      "mean_ms": 25.095,
+      "qps_single_conn": 39.85,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.72,
+        "mem_free": 16580,
+        "mem_avail": 53124,
+        "la1_after": 0.72,
+        "la1_observed": 0.72,
+        "cpu_busy_pct": 3.12,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.58,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k400",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 400
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.98,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 27.411,
+      "p95_ms": 28.704,
+      "p99_ms": 31.037,
+      "mean_ms": 27.606,
+      "qps_single_conn": 36.22,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.75,
+        "mem_free": 16680,
+        "mem_avail": 53224,
+        "la1_after": 0.75,
+        "la1_observed": 0.75,
+        "cpu_busy_pct": 3.1,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.01,
+        "wall_s": 2.99,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k800",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.9975,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 33.26,
+      "p95_ms": 35.143,
+      "p99_ms": 35.391,
+      "mean_ms": 33.405,
+      "qps_single_conn": 29.94,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.77,
+        "mem_free": 16607,
+        "mem_avail": 53151,
+        "la1_after": 0.77,
+        "la1_observed": 0.77,
+        "cpu_busy_pct": 3.11,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.04,
+        "wall_s": 4.01,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k1024",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 1024
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 36.62,
+      "p95_ms": 38.141,
+      "p99_ms": 39.206,
+      "mean_ms": 36.735,
+      "qps_single_conn": 27.22,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.79,
+        "mem_free": 16539,
+        "mem_avail": 53083,
+        "la1_after": 0.8,
+        "la1_observed": 0.8,
+        "cpu_busy_pct": 3.12,
+        "cpu_iowait_pct": 0.01,
+        "cpu_steal_pct": 0.01,
+        "wall_s": 4.61,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw1_k2000",
+      "engine": "pg_turbovec_flat_bw1",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw1",
+      "param": {
+        "bit_width": 1,
+        "search_k": 2000
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 51.028,
+      "p95_ms": 54.284,
+      "p99_ms": 55.212,
+      "mean_ms": 51.359,
+      "qps_single_conn": 19.47,
+      "plan": {
+        "index_name": "docs_tv_flat_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.8,
+        "mem_free": 16590,
+        "mem_avail": 53134,
+        "la1_after": 0.83,
+        "la1_observed": 0.83,
+        "cpu_busy_pct": 3.12,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 7.15,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k32",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 32
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 4.675,
+      "p95_ms": 5.14,
+      "p99_ms": 5.265,
+      "mean_ms": 4.742,
+      "qps_single_conn": 210.87,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.87,
+        "mem_free": 14802,
+        "mem_avail": 51756,
+        "la1_after": 0.87,
+        "la1_observed": 0.87,
+        "cpu_busy_pct": 42.45,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.64,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k100",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 5.97,
+      "p95_ms": 6.457,
+      "p99_ms": 6.538,
+      "mean_ms": 6.027,
+      "qps_single_conn": 165.93,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 0.96,
+        "mem_free": 14648,
+        "mem_avail": 51602,
+        "la1_after": 0.96,
+        "la1_observed": 0.96,
+        "cpu_busy_pct": 33.02,
+        "cpu_iowait_pct": 0.04,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.84,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k256",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 9.408,
+      "p95_ms": 10.185,
+      "p99_ms": 11.748,
+      "mean_ms": 9.547,
+      "qps_single_conn": 104.74,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 1.05,
+        "mem_free": 14535,
+        "mem_avail": 51489,
+        "la1_after": 1.05,
+        "la1_observed": 1.05,
+        "cpu_busy_pct": 25.23,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.34,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k400",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 400
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 12.532,
+      "p95_ms": 13.593,
+      "p99_ms": 13.995,
+      "mean_ms": 12.686,
+      "qps_single_conn": 78.83,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 1.05,
+        "mem_free": 14479,
+        "mem_avail": 51433,
+        "la1_after": 3.52,
+        "la1_observed": 3.52,
+        "cpu_busy_pct": 22.85,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.8,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k800",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 23.35,
+      "p95_ms": 25.244,
+      "p99_ms": 25.893,
+      "mean_ms": 23.446,
+      "qps_single_conn": 42.65,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.52,
+        "mem_free": 14643,
+        "mem_avail": 51597,
+        "la1_after": 3.32,
+        "la1_observed": 3.52,
+        "cpu_busy_pct": 21.94,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.22,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k1024",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 1024
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 30.572,
+      "p95_ms": 33.162,
+      "p99_ms": 33.856,
+      "mean_ms": 30.863,
+      "qps_single_conn": 32.4,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.14,
+        "mem_free": 14782,
+        "mem_avail": 51735,
+        "la1_after": 3.14,
+        "la1_observed": 3.14,
+        "cpu_busy_pct": 22.72,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 4.13,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "flat_bw4_k2000",
+      "engine": "pg_turbovec_flat_bw4",
+      "kind": "flat",
+      "index": "docs_tv_flat_bw4",
+      "param": {
+        "bit_width": 4,
+        "search_k": 2000
+      },
+      "n_queries": 40,
+      "recall_at_10": 1.0,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 66.349,
+      "p95_ms": 71.968,
+      "p99_ms": 76.129,
+      "mean_ms": 66.986,
+      "qps_single_conn": 14.93,
+      "plan": {
+        "index_name": "docs_tv_flat_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.89,
+        "mem_free": 14963,
+        "mem_avail": 51917,
+        "la1_after": 5.22,
+        "la1_observed": 5.22,
+        "cpu_busy_pct": 27.81,
+        "cpu_iowait_pct": 0.03,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 8.43,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p8_k100",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 8,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.6275,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 5.447,
+      "p95_ms": 5.864,
+      "p99_ms": 6.136,
+      "mean_ms": 5.486,
+      "qps_single_conn": 182.28,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 4.23,
+        "mem_free": 16462,
+        "mem_avail": 53009,
+        "la1_after": 4.23,
+        "la1_observed": 4.23,
+        "cpu_busy_pct": 3.01,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.81,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p8_k256",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 8,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.64,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 7.598,
+      "p95_ms": 8.752,
+      "p99_ms": 8.781,
+      "mean_ms": 7.657,
+      "qps_single_conn": 130.59,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 4.23,
+        "mem_free": 16294,
+        "mem_avail": 52841,
+        "la1_after": 3.97,
+        "la1_observed": 4.23,
+        "cpu_busy_pct": 3.1,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.03,
+        "wall_s": 1.2,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p8_k800",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 8,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.6425,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 16.311,
+      "p95_ms": 17.932,
+      "p99_ms": 19.234,
+      "mean_ms": 16.362,
+      "qps_single_conn": 61.12,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.97,
+        "mem_free": 16301,
+        "mem_avail": 52848,
+        "la1_after": 3.97,
+        "la1_observed": 3.97,
+        "cpu_busy_pct": 3.12,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.63,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p16_k100",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 16,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.7225,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 5.345,
+      "p95_ms": 5.924,
+      "p99_ms": 5.974,
+      "mean_ms": 5.378,
+      "qps_single_conn": 185.93,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.97,
+        "mem_free": 16117,
+        "mem_avail": 52665,
+        "la1_after": 3.73,
+        "la1_observed": 3.97,
+        "cpu_busy_pct": 3.06,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.79,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p16_k256",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 16,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.74,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 7.845,
+      "p95_ms": 8.545,
+      "p99_ms": 8.879,
+      "mean_ms": 7.829,
+      "qps_single_conn": 127.73,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.73,
+        "mem_free": 16105,
+        "mem_avail": 52652,
+        "la1_after": 3.73,
+        "la1_observed": 3.73,
+        "cpu_busy_pct": 3.06,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.21,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p16_k800",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 16,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.75,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 16.398,
+      "p95_ms": 18.058,
+      "p99_ms": 19.144,
+      "mean_ms": 16.388,
+      "qps_single_conn": 61.02,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.73,
+        "mem_free": 16134,
+        "mem_avail": 52682,
+        "la1_after": 3.51,
+        "la1_observed": 3.73,
+        "cpu_busy_pct": 3.11,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.01,
+        "wall_s": 2.62,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p32_k100",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 32,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.7875,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 5.761,
+      "p95_ms": 6.246,
+      "p99_ms": 6.583,
+      "mean_ms": 5.799,
+      "qps_single_conn": 172.44,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.51,
+        "mem_free": 16131,
+        "mem_avail": 52678,
+        "la1_after": 3.51,
+        "la1_observed": 3.51,
+        "cpu_busy_pct": 3.09,
+        "cpu_iowait_pct": 0.04,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.83,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p32_k256",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 32,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.8275,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 8.132,
+      "p95_ms": 8.889,
+      "p99_ms": 9.191,
+      "mean_ms": 8.226,
+      "qps_single_conn": 121.57,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.51,
+        "mem_free": 16141,
+        "mem_avail": 52688,
+        "la1_after": 3.51,
+        "la1_observed": 3.51,
+        "cpu_busy_pct": 3.08,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.25,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p32_k800",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 32,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.84,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 17.156,
+      "p95_ms": 18.853,
+      "p99_ms": 19.469,
+      "mean_ms": 17.194,
+      "qps_single_conn": 58.16,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.31,
+        "mem_free": 15958,
+        "mem_avail": 52506,
+        "la1_after": 3.31,
+        "la1_observed": 3.31,
+        "cpu_busy_pct": 3.11,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.7,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p64_k100",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 64,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.83,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 6.345,
+      "p95_ms": 6.992,
+      "p99_ms": 7.03,
+      "mean_ms": 6.342,
+      "qps_single_conn": 157.69,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.31,
+        "mem_free": 15947,
+        "mem_avail": 52494,
+        "la1_after": 3.31,
+        "la1_observed": 3.31,
+        "cpu_busy_pct": 3.08,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.87,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p64_k256",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 64,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.8875,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 8.629,
+      "p95_ms": 9.632,
+      "p99_ms": 9.861,
+      "mean_ms": 8.708,
+      "qps_single_conn": 114.84,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.13,
+        "mem_free": 15751,
+        "mem_avail": 52299,
+        "la1_after": 3.13,
+        "la1_observed": 3.13,
+        "cpu_busy_pct": 3.11,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.29,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p64_k800",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 64,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.91,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 17.62,
+      "p95_ms": 18.995,
+      "p99_ms": 20.112,
+      "mean_ms": 17.738,
+      "qps_single_conn": 56.38,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.13,
+        "mem_free": 15774,
+        "mem_avail": 52322,
+        "la1_after": 2.96,
+        "la1_observed": 3.13,
+        "cpu_busy_pct": 3.1,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.74,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p128_k100",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 128,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.8675,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 7.554,
+      "p95_ms": 8.434,
+      "p99_ms": 8.605,
+      "mean_ms": 7.605,
+      "qps_single_conn": 131.5,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.96,
+        "mem_free": 15663,
+        "mem_avail": 52211,
+        "la1_after": 2.96,
+        "la1_observed": 2.96,
+        "cpu_busy_pct": 3.1,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 0.98,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p128_k256",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 128,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.9325,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 10.28,
+      "p95_ms": 10.973,
+      "p99_ms": 11.024,
+      "mean_ms": 10.233,
+      "qps_single_conn": 97.72,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.96,
+        "mem_free": 15653,
+        "mem_avail": 52201,
+        "la1_after": 2.96,
+        "la1_observed": 2.96,
+        "cpu_busy_pct": 3.14,
+        "cpu_iowait_pct": 0.33,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.41,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw1_p128_k800",
+      "engine": "pg_turbovec_ivf_bw1",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw1",
+      "param": {
+        "bit_width": 1,
+        "lists": 1024,
+        "probes": 128,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.9625,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 18.776,
+      "p95_ms": 20.242,
+      "p99_ms": 21.394,
+      "mean_ms": 19.018,
+      "qps_single_conn": 52.58,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw1",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.8,
+        "mem_free": 15698,
+        "mem_avail": 52245,
+        "la1_after": 2.8,
+        "la1_observed": 2.8,
+        "cpu_busy_pct": 3.11,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.85,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p8_k100",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 8,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.645,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 7.918,
+      "p95_ms": 8.441,
+      "p99_ms": 9.193,
+      "mean_ms": 7.845,
+      "qps_single_conn": 127.47,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 4.21,
+        "mem_free": 16551,
+        "mem_avail": 52870,
+        "la1_after": 4.21,
+        "la1_observed": 4.21,
+        "cpu_busy_pct": 4.2,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.13,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p8_k256",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 8,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.645,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 10.7,
+      "p95_ms": 12.261,
+      "p99_ms": 59.653,
+      "mean_ms": 12.789,
+      "qps_single_conn": 78.19,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.95,
+        "mem_free": 16567,
+        "mem_avail": 52886,
+        "la1_after": 3.95,
+        "la1_observed": 3.95,
+        "cpu_busy_pct": 4.0,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.51,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p8_k800",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 8,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.645,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 19.465,
+      "p95_ms": 22.482,
+      "p99_ms": 69.128,
+      "mean_ms": 21.731,
+      "qps_single_conn": 46.02,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.95,
+        "mem_free": 16603,
+        "mem_avail": 52922,
+        "la1_after": 3.71,
+        "la1_observed": 3.95,
+        "cpu_busy_pct": 3.66,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.01,
+        "wall_s": 3.01,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p16_k100",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 16,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.7525,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 9.91,
+      "p95_ms": 16.417,
+      "p99_ms": 89.451,
+      "mean_ms": 13.924,
+      "qps_single_conn": 71.82,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.71,
+        "mem_free": 16603,
+        "mem_avail": 52921,
+        "la1_after": 3.71,
+        "la1_observed": 3.71,
+        "cpu_busy_pct": 4.78,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 1.78,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p16_k256",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 16,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.7525,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 13.05,
+      "p95_ms": 90.754,
+      "p99_ms": 92.093,
+      "mean_ms": 18.911,
+      "qps_single_conn": 52.88,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.71,
+        "mem_free": 16607,
+        "mem_avail": 52925,
+        "la1_after": 3.5,
+        "la1_observed": 3.71,
+        "cpu_busy_pct": 4.47,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.07,
+        "wall_s": 2.33,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p16_k800",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 16,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.7525,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 22.255,
+      "p95_ms": 102.115,
+      "p99_ms": 102.424,
+      "mean_ms": 34.011,
+      "qps_single_conn": 29.4,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.5,
+        "mem_free": 16610,
+        "mem_avail": 52928,
+        "la1_after": 3.3,
+        "la1_observed": 3.5,
+        "cpu_busy_pct": 4.15,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.82,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p32_k100",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 32,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.84,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 16.231,
+      "p95_ms": 94.5,
+      "p99_ms": 96.762,
+      "mean_ms": 24.103,
+      "qps_single_conn": 41.49,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.3,
+        "mem_free": 16595,
+        "mem_avail": 52913,
+        "la1_after": 3.11,
+        "la1_observed": 3.3,
+        "cpu_busy_pct": 5.94,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.01,
+        "wall_s": 2.12,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p32_k256",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 32,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.84,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 18.96,
+      "p95_ms": 96.263,
+      "p99_ms": 97.58,
+      "mean_ms": 24.781,
+      "qps_single_conn": 40.35,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 3.11,
+        "mem_free": 16625,
+        "mem_avail": 52943,
+        "la1_after": 3.11,
+        "la1_observed": 3.11,
+        "cpu_busy_pct": 5.53,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 2.55,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p32_k800",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 32,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.84,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 28.898,
+      "p95_ms": 36.563,
+      "p99_ms": 108.008,
+      "mean_ms": 32.736,
+      "qps_single_conn": 30.55,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.94,
+        "mem_free": 16637,
+        "mem_avail": 52955,
+        "la1_after": 2.94,
+        "la1_observed": 2.94,
+        "cpu_busy_pct": 5.04,
+        "cpu_iowait_pct": 0.2,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.97,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p64_k100",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 64,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.9075,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 29.102,
+      "p95_ms": 106.717,
+      "p99_ms": 108.254,
+      "mean_ms": 37.192,
+      "qps_single_conn": 26.89,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.79,
+        "mem_free": 16586,
+        "mem_avail": 52905,
+        "la1_after": 2.79,
+        "la1_observed": 2.79,
+        "cpu_busy_pct": 7.23,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.1,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p64_k256",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 64,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.9075,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 32.127,
+      "p95_ms": 110.019,
+      "p99_ms": 110.457,
+      "mean_ms": 38.206,
+      "qps_single_conn": 26.17,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.64,
+        "mem_free": 16550,
+        "mem_avail": 52869,
+        "la1_after": 2.64,
+        "la1_observed": 2.64,
+        "cpu_busy_pct": 6.79,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 3.55,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p64_k800",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 64,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.9075,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 42.711,
+      "p95_ms": 117.593,
+      "p99_ms": 120.98,
+      "mean_ms": 48.472,
+      "qps_single_conn": 20.63,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.51,
+        "mem_free": 16525,
+        "mem_avail": 52843,
+        "la1_after": 2.63,
+        "la1_observed": 2.63,
+        "cpu_busy_pct": 5.94,
+        "cpu_iowait_pct": 0.01,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 5.06,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p128_k100",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 128,
+        "search_k": 100
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.965,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 86.175,
+      "p95_ms": 92.089,
+      "p99_ms": 94.577,
+      "mean_ms": 86.697,
+      "qps_single_conn": 11.53,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.63,
+        "mem_free": 16558,
+        "mem_avail": 52876,
+        "la1_after": 2.84,
+        "la1_observed": 2.84,
+        "cpu_busy_pct": 8.24,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 7.46,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p128_k256",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 128,
+        "search_k": 256
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.965,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 89.731,
+      "p95_ms": 97.479,
+      "p99_ms": 140.623,
+      "mean_ms": 92.285,
+      "qps_single_conn": 10.84,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.93,
+        "mem_free": 16533,
+        "mem_avail": 52852,
+        "la1_after": 2.78,
+        "la1_observed": 2.93,
+        "cpu_busy_pct": 7.9,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 8.1,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    },
+    {
+      "label": "ivf1024_bw4_p128_k800",
+      "engine": "pg_turbovec_ivf_bw4",
+      "kind": "ivf",
+      "index": "docs_tv_ivf_bw4",
+      "param": {
+        "bit_width": 4,
+        "lists": 1024,
+        "probes": 128,
+        "search_k": 800
+      },
+      "n_queries": 40,
+      "recall_at_10": 0.965,
+      "latency_basis": "index_scan_node_actual_total_time_x_loops",
+      "p50_ms": 100.447,
+      "p95_ms": 177.422,
+      "p99_ms": 178.616,
+      "mean_ms": 113.015,
+      "qps_single_conn": 8.85,
+      "plan": {
+        "index_name": "docs_tv_ivf_bw4",
+        "index_name_matches_arm": true,
+        "saw_seq_scan": false
+      },
+      "contention": {
+        "la1": 2.88,
+        "mem_free": 16469,
+        "mem_avail": 52787,
+        "la1_after": 2.83,
+        "la1_observed": 2.88,
+        "cpu_busy_pct": 6.96,
+        "cpu_iowait_pct": 0.0,
+        "cpu_steal_pct": 0.0,
+        "wall_s": 10.47,
+        "contended_flag": false,
+        "load_gate": 6.0
+      },
+      "recorded": true
+    }
+  ]
+}

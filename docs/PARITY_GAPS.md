@@ -135,12 +135,25 @@ turbovec-indexed table now finishes well under 5 s on debug
 builds (was ~400 s pre-Phase-K).
 
 For large `INSERT ... SELECT` we still pay one full relfile
-rewrite at commit time, which is O(n_vectors). Bulk-build at
-ROWS-per-COMMIT scale is order-of-magnitude better than the
-pre-Phase-K hot loop, but pgvector's HNSW remains O(log n)
-per insert. Tracked as future work; the user-facing
-recommendation is to load via `CREATE INDEX` after the bulk
-`INSERT` rather than the other way around.
+rewrite at commit time, which is O(n_vectors) — confirmed by
+measurement (`benches/results/parity_20260925/item4_bulk_insert_design.md`):
+the PreCommit flush re-reads and rewrites all three chains
+(codes/scales/ids) from offset 0, so the cost is per-commit, not
+per-touched-row. Bulk-build at ROWS-per-COMMIT scale is
+order-of-magnitude better than the pre-Phase-K hot loop, but
+pgvector's HNSW remains O(log n) per insert. Tracked as future work.
+
+**Guidance, two cases:**
+- **One-shot bulk load:** load into the heap first, then
+  `CREATE INDEX` — never the other way around.
+- **Continuous high-ingest into an already-large index** (can't stop
+  to `CREATE INDEX`): the rewrite is per-commit, so **fewer, larger
+  transactions amortize it directly** (batch many rows per commit). For
+  an IVF index, `turbovec.ivf_max_delta_pct` bounds how far the
+  appended tail grows before the index degrades to a flat scan;
+  `REINDEX` on a cadence restores cell pruning. A true incremental /
+  amortized-consolidation write path is L/XL persist-path work under
+  the corruption HARD MANDATE and is deferred pending demand.
 
 ### Recall tuning
 

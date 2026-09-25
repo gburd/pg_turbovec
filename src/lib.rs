@@ -8014,6 +8014,7 @@ mod tests {
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2",
+            "2.10.3",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has

@@ -1,0 +1,22 @@
+-- pg_turbovec v2.10.3
+--
+-- PATCH: cold-scan latency. No SQL surface change, no GUC change, no
+-- wire-format change (MetaPageData::version stays 8), and the on-disk index
+-- bytes are unchanged. `ALTER EXTENSION pg_turbovec UPDATE` is sufficient; no
+-- REINDEX.
+--
+-- The per-backend SIMD-blocked layout (rebuilt at every cold index-open from
+-- the row-major packed codes -- v7+ persists only the codes, halving the
+-- on-disk footprint) is now recomputed IN PARALLEL. It was the dominant term
+-- in cold-scan latency: on a 1M x 1024-d 4-bit flat index, cold-backend p50
+-- dropped from 1766 ms to 566 ms (3.1x) on 16 cores, warm p50 unchanged
+-- (30.4 -> 30.6 ms, within noise). A/B on identical hardware/corpus/index in
+-- benches/results/rebench_20260925/COLDSCAN_FINDINGS.md.
+--
+-- The parallel repack (turbovec fork carry #3) produces BYTE-IDENTICAL output
+-- to the serial version -- pinned by turbovec's
+-- `parallel_repack_is_byte_identical_to_serial` across bit-widths 2/3/4,
+-- sub/above the parallel threshold, and tail-padding shapes. This is a
+-- speed change only; nothing about the persisted format changes.
+--
+-- Intentionally no SQL objects.

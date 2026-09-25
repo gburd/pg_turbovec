@@ -4,6 +4,54 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.10.3] — 2026-09-25
+
+PATCH: **cold-scan latency**. No SQL surface change, no GUC change, **no
+wire-format change** (`MetaPageData::version` stays **8**), index bytes
+unchanged. `ALTER EXTENSION pg_turbovec UPDATE` is sufficient; **no REINDEX**.
+
+### Changed
+
+- **Cold-scan latency cut ~3× by parallelizing the per-backend blocked-layout
+  rebuild.** Every cold backend rebuilds the SIMD-blocked code layout from the
+  row-major packed codes at index-open (v7+ persists only the codes, halving
+  the on-disk footprint). That repack was single-threaded and was the dominant
+  term in cold latency. It now runs in parallel across block-aligned ranges.
+
+  Measured A/B on identical hardware/corpus/index (c7i.4xlarge, 16 vCPU,
+  AVX-512; 1M × 1024-d 4-bit flat, 534 MB): **cold-backend p50 1766 ms → 566 ms
+  (3.1×)**; warm-backend p50 unchanged (30.4 → 30.6 ms, within noise — a warm
+  backend never repays the repack). See
+  `benches/results/rebench_20260925/COLDSCAN_FINDINGS.md`.
+
+  The parallel repack (turbovec fork carry #3, rev `47a26a3`) produces
+  **byte-identical** output to the serial version, pinned by turbovec's
+  `parallel_repack_is_byte_identical_to_serial` (bit-widths 2/3/4, sub/above
+  the parallel threshold, tail-padding shapes). This is a speed change only;
+  the persisted format is untouched.
+
+### Docs
+
+- **RETRACTED the "we LOSE ~490×" latency scoreboard** in `docs/PARITY_GAPS.md`.
+  A corrected end-to-end benchmark (top-level `EXPLAIN(ANALYZE)` Execution Time,
+  **literal** query vectors — a query-vector subquery in the ORDER BY had added
+  ~90 ms of InitPlan overhead to BOTH engines and produced the bogus 2552 ms
+  figure; one warm psql session per arm) on 1M × 1024-d Cohere-wiki shows
+  **flat-bw4 at 5.2 ms / R@10 = 1.000 BEATS pgvector HNSW at R@10 ≥ 0.95**
+  (HNSW 8.6 ms) and is 3× faster at ≥ 0.98. IVF-bw1 is within 2.4–2.8× of HNSW
+  at 58× smaller storage; IVF-bw4 is the weakest arm (confirms flat > IVF for
+  `bit_width ≥ 2` at this scale). Full iso-recall table + corrected harness in
+  `benches/results/rebench_20260925/`.
+- **Documented `turbovec.ivf_max_delta_pct` + "fewer, larger transactions"**
+  guidance for continuous high-ingest into an already-large IVF index
+  (`docs/PARITY_GAPS.md`), and recorded the sparse-ANN and bulk-INSERT design
+  memos (`benches/results/parity_20260925/`).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.10.3';` — that's all. No REINDEX, no
+downtime, index bytes unchanged.
+
 ## [2.10.2] — 2026-09-24
 
 PATCH: documentation plus one build-time `NOTICE`. **No SQL surface change, no

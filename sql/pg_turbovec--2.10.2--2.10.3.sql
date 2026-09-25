@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.10.2 -> 2.10.3
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.10.3';`.
+--
+-- No new or changed SQL objects: this release parallelizes the per-backend
+-- cold-open SIMD-blocked-layout rebuild (a scan/open-time speed change). No
+-- wire-format change (stays v8), no REINDEX, index bytes unchanged.
+-- Intentionally empty apart from this comment.

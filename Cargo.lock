@@ -2526,7 +2526,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 [[package]]
 name = "turbovec"
 version = "1.0.0"
-source = "git+https://github.com/gburd/turbovec.git?rev=f29a2f25aae962fb9e8bc97076f0dd8a8bd6abe1#f29a2f25aae962fb9e8bc97076f0dd8a8bd6abe1"
+source = "git+https://github.com/gburd/turbovec.git?rev=47a26a393b9b1e470de353c60a990afac09933fa#47a26a393b9b1e470de353c60a990afac09933fa"
 dependencies = [
  "ordered-float",
  "rand 0.8.8",

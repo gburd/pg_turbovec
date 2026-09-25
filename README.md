@@ -27,7 +27,7 @@ vectors stay in the table for reranking. Supports:
 - multivector & dense+sparse hybrid — ColBERT-style MaxSim re-rank
   (`max_sim`) + reciprocal rank fusion (`rrf_score`) + named-vector
   schema pattern ([guide](docs/HYBRID_SEARCH.md))
-- pgvector-compatible function names (`to_vec`, `array_to_vec`,
+- pgvector-compatible function names (`to_vector`, `array_to_vector`,
   `subvector`, `vector_dims`, `vector_norm`, `inner_product`,
   `l2_distance`, `cosine_distance`, `l1_distance`)
 - any [language](https://www.postgresql.org/docs/current/external-pl.html)
@@ -258,10 +258,11 @@ pre-AVX2-fix measurement artifact and is retracted (see
   path. It is **IVF, not the graph**, that beats flat's O(n) wall.
 
 Use pg_turbovec when your workload is **cosine / inner-product semantic
-search that is storage-constrained** and you want exact-recall re-ranking
-and Postgres-native ACID/joins — and you use the IVF or graph kind (not
-a bare flat scan) for latency at scale. If you need raw HNSW latency,
-L2/L1 ANN, halfvec/sparse, pgvector + HNSW is the right pick today.
+search that is storage-constrained** and you want full-precision re-ranking
+and Postgres-native ACID/joins — and you use the IVF kind (`WITH (lists = N)`,
+not a bare flat scan) for latency at scale. If you need raw HNSW latency or
+ANN over halfvec/sparse representations, pgvector + HNSW is the right pick
+today.
 
 Feature breakdown:
 
@@ -272,9 +273,9 @@ Feature breakdown:
 | Index kinds                      | flat, IVF (out-of-core), ColBERT, Vamana graph | HNSW, IVFFlat |
 | Filtered search                  | In-kernel SIMD allowlist | Post-filter |
 | Index AM lifecycle               | CREATE / CIC / aminsert / ambulkdelete / VACUUM / REINDEX | same |
-| Distance ops indexed             | `<#>` `<=>` (turbovec kernel) | `<->` `<#>` `<=>` `<+>` (HNSW + IVF) |
-| L2 / L1 distance ANN             | exact only        | indexed via HNSW  |
-| Halfvec, sparsevec, bitvec       | ✗                 | ✓                 |
+| Distance ops indexed             | `<#>` `<=>` `<->` `<+>` (turbovec kernel) | `<->` `<#>` `<=>` `<+>` (HNSW + IVF) |
+| L2 / L1 distance ANN             | indexed (`vec_l2_ops` / `vec_l1_ops`) | indexed via HNSW  |
+| Halfvec, sparsevec, bitvec types | ✓ (exact ops; not AM-indexable) | ✓ |
 | License                          | Apache-2.0        | PostgreSQL        |
 
 *Methodology: recall numbers use exact top-k ground truth; see
@@ -468,7 +469,7 @@ major (`pg_turbovec_13` … `pg_turbovec_19`; `default` = PG18):
 # Build the PG18 extension:
 nix build github:gburd/pg_turbovec#pg_turbovec_18
 # result/lib/pg_turbovec.so
-# result/share/postgresql/extension/pg_turbovec--1.28.1.sql + .control
+# result/share/postgresql/extension/pg_turbovec--2.10.2.sql + .control
 ```
 
 On PostgreSQL 18+ you can point a stock server at the store path
@@ -543,7 +544,7 @@ VALUES ('greeting',
 
 -- Or via the pgvector-style function:
 INSERT INTO items (body, embedding)
-VALUES ('hi',  to_vec('[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]', 8, false));
+VALUES ('hi',  to_vector('[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]', 8, false));
 ```
 
 Get the nearest neighbours by cosine distance:
@@ -604,10 +605,10 @@ INSERT INTO items (id, embedding) VALUES (1, '[1,2,3,4,5,6,7,8]')
 
 | Op    | Meaning                            | Indexed (turbovec AM)? |
 |-------|------------------------------------|------------------------------------------|
-| `<->` | Euclidean (L2) distance            | exact only                               |
+| `<->` | Euclidean (L2) distance            | yes - `vec_l2_ops`                   |
 | `<#>` | negative inner product             | yes - `vec_ip_ops` (default)         |
 | `<=>` | cosine distance (`1 - cos θ`)      | yes - `vec_cosine_ops`               |
-| `<+>` | taxicab (L1) distance              | exact only                               |
+| `<+>` | taxicab (L1) distance              | yes - `vec_l1_ops`                   |
 
 Distances are returned as `double precision`. Distance accumulators
 are `f64` internally - `pg_turbovec`'s `avg(vector)` and `sum(vector)`
@@ -624,10 +625,10 @@ l1_distance(a vector, b vector)            RETURNS double precision
 vector_dims(v vector)                       RETURNS integer
 vector_norm(v vector)                       RETURNS double precision
 
-to_vec(text)                             RETURNS vector
-to_vec(text, integer, boolean)           RETURNS vector  -- with dim check
-array_to_vec(real[])                     RETURNS vector
-array_to_vec(real[], integer, boolean)   RETURNS vector  -- with dim check
+to_vector(text)                          RETURNS vector
+to_vector(text, integer, boolean)        RETURNS vector  -- with dim check
+array_to_vector(real[])                  RETURNS vector
+array_to_vector(real[], integer, boolean) RETURNS vector  -- with dim check
 
 subvector(v vector, start integer, length integer) RETURNS vector
 vec_normalize(vector)                   RETURNS vector
@@ -677,7 +678,7 @@ Reloptions:
 
 | Option      | Default        | Range  | Notes |
 |-------------|----------------|--------|-------|
-| `bit_width` | `turbovec.bit_width_default` (4) | 1, 2, 3, 4 | Lower = smaller index, lower recall. `2/3/4` = TurboQuant. `1` = sign binary quantization (accepted since v1.29.0; **build path not yet implemented — errors clearly**, completed in a later release). |
+| `bit_width` | `turbovec.bit_width_default` (4) | 1, 2, 3, 4 | Lower = smaller index, lower recall. `2/3/4` = TurboQuant. `1` = centered sign binary quantization with full-precision reranking (shipped in v2.6.0; see [1-bit search](#1-bit-search-with-full-precision-reranking)). |
 
 ### Index AM lifecycle
 
@@ -899,8 +900,9 @@ bridge is the supported interop path.
 - **Type:** `vector` (variable dimension, `f32` coordinates, 1..16000)
 - **Schema:** `turbovec` (set on the search_path or fully qualify)
 - **Operator classes:** `vec_ip_ops` (default, `<#>`),
-  `vec_cosine_ops` (`<=>`)
-- **Index AM:** `turbovec` (build with `WITH (bit_width = 2|3|4)`)
+  `vec_cosine_ops` (`<=>`), `vec_l2_ops` (`<->`), `vec_l1_ops` (`<+>`),
+  and `vec_colbert_ops` (multivector MaxSim)
+- **Index AM:** `turbovec` (build with `WITH (bit_width = 1|2|3|4)`)
 - **Aggregates:** `avg(vector)`, `sum(vector)`
 - **Full surface listing:** [`docs/USAGE.md`](docs/USAGE.md) and the
   generated `sql/pg_turbovec--<version>.sql` after
@@ -965,18 +967,22 @@ silently change semantics around normalisation and recall. The
 [migration cookbook](docs/MIGRATING_FROM_PGVECTOR.md) shows the
 explicit `real[]` bridge.
 
-**What about `halfvec`, `sparsevec`, `bit`?**
+**What about `halfvec`, `sparsevec`, `bitvec`?**
 
-Not supported. `pg_turbovec` quantises full-precision `f32` input -
-half-precision halfvec and sparse-vector representations don't map
-cleanly onto the TurboQuant kernel.
+The **types and their distance/arithmetic operators exist** (`halfvec`,
+`sparsevec`, `bitvec` with `<->`, `<#>`, `<=>`, `<+>`, and Hamming/Jaccard
+`<~>`/`<%>` for `bitvec`) and coexist with pgvector's. What they are **not**
+is indexable by the turbovec index AM: the AM quantises full-precision `f32`
+input, and half-precision, sparse, and bit representations don't map onto the
+TurboQuant kernel. Use them as column types and with the exact operators; for
+ANN over those representations, pgvector's HNSW is the right tool.
 
 **What about L2 / L1 ANN?**
 
-The TurboQuant kernel scores inner-product on unit-normalised vectors.
-We expose `l2_distance` / `l1_distance` as exact functions only - there
-is no L2 / L1 index path. For workloads dominated by Euclidean ANN,
-pgvector + HNSW is the right pick.
+Both are indexable by the turbovec AM — `vec_l2_ops` (`<->`) and `vec_l1_ops`
+(`<+>`) drive the kernel and rerank exactly, the same as `vec_ip_ops` /
+`vec_cosine_ops`. `l2_distance` / `l1_distance` are also available as exact
+functions.
 
 **What's not in 1.0?**
 

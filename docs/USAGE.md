@@ -90,8 +90,8 @@ ORDER  BY k.score DESC;
 
 Higher `score` means more similar (raw inner product on unit
 vectors). The function is `STABLE PARALLEL SAFE` and rebuilds the
-in-memory index on every call in v0.2 — caching across calls comes
-in v0.3.
+in-memory index on the first call in a backend, then caches it
+(`turbovec.cache_size_mb`) for subsequent calls in that backend.
 
 ### 5.1 Tuning bit width
 
@@ -155,12 +155,18 @@ Operators on `vector`:
 | GUC                              | Type | Default | Effect |
 |----------------------------------|------|---------|--------|
 | `turbovec.bit_width_default`     | int  | 4       | default `bit_width` for indexes built without an explicit reloption |
-| `turbovec.cache_size_mb`         | int  | 256     | per-backend cache cap for materialised indexes (v0.3+) |
+| `turbovec.cache_size_mb`         | int  | 256     | per-backend cache cap for materialised indexes |
 | `turbovec.warn_on_rebuild`       | bool | true    | NOTICE on rematerialisation |
 | `turbovec.search_concurrency`    | int  | 1       | rayon fan-out cap inside a single batched search |
 | `turbovec.normalize_on_insert`   | bool | true    | unit-normalise on ingestion / query |
 
-All five are `USERSET` — settable per-session.
+These are the GUCs most relevant to the SQL `knn()`/type surface; all are
+`USERSET` (settable per-session). `pg_turbovec` registers **20** GUCs in
+total — the index-scan tuning knobs (`probes`, `search_k`, `oversample`,
+`iterative_scan`, `out_of_core`, `hi_dim_rerank`, `build_parallelism`, …) are
+listed in the README Configuration table and in `src/guc.rs`. Note they are
+registered by the shared library, so `pg_turbovec` must be in
+`shared_preload_libraries` for any `turbovec.*` GUC to exist.
 
 ## 9. Coexisting with pgvector
 
@@ -185,7 +191,7 @@ ALTER TABLE docs RENAME COLUMN embedding_tv TO embedding;
 ## 10. Diagnostics
 
 ```sql
-SELECT turbovec.turbovec_version();          -- '0.3.0'
+SELECT turbovec.turbovec_version();          -- e.g. '2.10.2' (matches the installed extension)
 SELECT turbovec.vector_dims(emb) FROM docs LIMIT 1;
 SELECT turbovec.vector_norm(emb) FROM docs LIMIT 1;
 SELECT turbovec.turbovec_self_score(turbovec.vec_normalize(emb), 4)

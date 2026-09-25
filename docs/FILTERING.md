@@ -63,7 +63,7 @@ is **smaller**.
 
 ```sql
 -- One index per tenant (or per hot category):
-CREATE INDEX items_emb_t5 ON items USING turbovec (embedding turbovec.vector_cosine_ops)
+CREATE INDEX items_emb_t5 ON items USING turbovec (embedding turbovec.vec_cosine_ops)
     WHERE tenant_id = 5;
 
 -- The planner uses items_emb_t5 automatically when the query's WHERE

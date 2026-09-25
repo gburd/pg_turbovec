@@ -1152,7 +1152,7 @@ mod tests {
 
     /// v1.28.4 issue D: `turbovec.turbovec_check(regclass)` reports
     /// integrity for a healthy flat index (no duplicate id, counts
-    /// match, wire v7, kind = single, zero tombstones).
+    /// match, wire v8, kind = single, zero tombstones).
     #[pg_test]
     fn turbovec_check_reports_healthy_flat_index() {
         use_turbovec();

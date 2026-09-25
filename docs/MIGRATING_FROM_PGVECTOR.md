@@ -93,12 +93,12 @@ DROP INDEX docs_emb_idx;
 |-------------------------------------------------------|----------------------------------------------------------|
 | `SELECT id FROM docs ORDER BY embedding <=> $1 LIMIT 10` | `SELECT id FROM docs ORDER BY embedding_tv <=> $1::vector LIMIT 10` |
 | `SELECT id FROM docs ORDER BY embedding <#> $1 LIMIT 10` | `SELECT id FROM docs ORDER BY embedding_tv <#> $1::vector LIMIT 10` |
-| `SELECT id FROM docs ORDER BY embedding <-> $1 LIMIT 10` *(L2)* | exact only — no AM. Use `ORDER BY l2_distance(embedding_tv, $1)` |
-| `embedding <+> $1` *(L1)*                             | exact only — `l1_distance(embedding_tv, $1)`             |
+| `SELECT id FROM docs ORDER BY embedding <-> $1 LIMIT 10` *(L2)* | indexed — build `WITH (turbovec vec_l2_ops)`, or `ORDER BY l2_distance(embedding_tv, $1)` for an exact scan |
+| `embedding <+> $1` *(L1)*                             | indexed — `vec_l1_ops`, or `l1_distance(embedding_tv, $1)` exact |
 
 For ANN-only workloads you can also bypass the index entirely
-and use `turbovec.knn()`, which is the recommended API for large
-corpora until the index AM exits experimental:
+and use `turbovec.knn()`, which is a convenient API for large
+corpora when you want a caller-supplied allowlist without a partial index:
 
 ```sql
 SELECT k.id, d.body
@@ -167,7 +167,7 @@ on corpora ≥ 1 M rows.
 | Default storage          | `extended` | `extended` | both varlena, both TOAST-able          |
 | Storage per 1536-dim row | 6 144 B  | ≈ 388 B (4-bit) | `pg_turbovec` is ~16× smaller    |
 | Distance ops             | `<-> <#> <=> <+>` | `<-> <#> <=> <+>` | dispatch by operand type        |
-| Index AMs                | `ivfflat`, `hnsw` | `turbovec` | one AM, two opclasses (IP, cosine) |
+| Index AMs                | `ivfflat`, `hnsw` | `turbovec` | one AM, five opclasses (`vec_ip_ops`, `vec_cosine_ops`, `vec_l2_ops`, `vec_l1_ops`, `vec_colbert_ops`) |
 | Filtered ANN             | post-filter | partial idx / allowlist `knn()` / iterative scan | three patterns — see [`docs/FILTERING.md`](FILTERING.md) |
 | Halfvec / sparsevec      | yes      | no          | not on roadmap                         |
 | `subvector`              | yes      | yes         | identical SQL signature                |

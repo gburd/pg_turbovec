@@ -356,9 +356,9 @@ unsafe fn require_index_owner(index: pg_sys::Oid) {
 /// the pre-1.28.4 detection gave, and which blocks the whole table).
 ///
 /// Columns:
-/// - `wire_version` — `MetaPageData::version` (7 for current builds;
-///   `< 7` is a pre-Phase-Q-0 legacy index needing REINDEX).
-/// - `kind` — `single` / `colbert` / `graph`.
+/// - `wire_version` — `MetaPageData::version` (8 for current builds;
+///   `< 8` is a legacy index needing REINDEX — see `docs/UPGRADING.md`).
+/// - `kind` — `single` / `colbert` / `graph` / `bq`.
 /// - `n_vectors` — the row count the meta page claims.
 /// - `slot_count` — the number of ids actually present in the ids
 ///   chain. MUST equal `n_vectors`; a mismatch means the meta

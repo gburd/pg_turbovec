@@ -4,22 +4,29 @@
 > writing code. When in doubt, prefer the design here over what
 > `pgvector` does; we intentionally diverge in places.
 
-**Status:** v1.3.0 shipped. The `vector` type, distance
+**Status:** current release **v2.10.2** (see [`CHANGELOG.md`](../CHANGELOG.md)
+for the authoritative per-version log). The `vector` type, distance
 operators + functions, aggregates, casts, the `turbovec` index
 AM (default-on; the `experimental_index_am` and
-`relfile_storage` Cargo features were retired in Phase Q),
+`relfile_storage` Cargo features were retired in Phase Q / v1.3.0),
 halfvec / sparsevec / bitvec types, deferred-commit `aminsert`,
-and the relfile-resident page format with persisted SIMD-
-blocked layout + Lloyd-Max codebook (Phase P) all live in
-`main`. The relfile is the only storage strategy. The roadmap
-history below is truncated; the canonical per-version log is
-[`CHANGELOG.md`](../CHANGELOG.md).
-**Target Postgres:** 13–18 (all six tested in CI; see
-[`docs/PG_VERSION_SUPPORT.md`](PG_VERSION_SUPPORT.md)).
-**Toolchain:** Rust 1.85+, `pgrx = "=0.17.0"`.
-**Upstream:** [`turbovec`](https://crates.io/crates/turbovec) 0.5.x,
-locally vendored under `vendor/turbovec/` with a small patch (see
-`vendor/turbovec/PATCH_NOTES.md`).
+and the relfile-resident page format all live in `main`. The relfile is the
+only storage strategy.
+>
+> **This document has drifted** in places (parts below describe the
+> v1.3.0-era design). For anything that must be exact today, prefer the code
+> and these current references: wire format + meta page — `src/index/page.rs`
+> (`VERSION = 8`); build pipeline — `src/index/build.rs`; the GUC surface —
+> `src/guc.rs` (20 GUCs) and the README Configuration table; index kinds —
+> the `KIND_*` constants in `src/index/page.rs` (flat/single, ColBERT, graph
+> [DEPRECATED v2.5.0], 1-bit BQ) plus IVF (`WITH (lists = N)`).
+**Target Postgres:** 13–18, plus 19beta1 (experimental); every leg tested in
+CI (see [`docs/PG_VERSION_SUPPORT.md`](PG_VERSION_SUPPORT.md)).
+**Toolchain:** Rust 1.96+, `pgrx = "0.19.1"`.
+**Upstream:** [`turbovec`](https://github.com/RyanCodrai/turbovec) 1.0.0,
+pinned via a git fork (`gburd/turbovec`) carrying two additive integration
+commits (`pub pack::repack`; the `IdMapIndex` parts API) — see the pin in
+`Cargo.toml` and `.agent/notes/TURBOVEC_UPSTREAM_RECONCILE_2026-08-25.md`.
 **License:** Apache-2.0 (matches `turbovec`).
 
 ---
@@ -63,13 +70,12 @@ locally vendored under `vendor/turbovec/` with a small patch (see
 
 ### 1.2 Non-goals
 
-- **Drop-in pgvector replacement.** No `vector` type, no `ivfflat` or
-  `hnsw` AM names, no implicit casts. We provide *explicit* casts
-  via `array_to_vec` etc.
-- **L2 / L1 ANN.** TurboQuant scores inner-product on unit vectors;
-  Euclidean and Manhattan are not supported by the index. We expose
-  `l2_distance` / `l1_distance` as exact functions only — no
-  operator class, no index path, brute-force scan only.
+- **Drop-in pgvector replacement.** No `vector` type name collision, no
+  `ivfflat` or `hnsw` AM names, no implicit casts. We provide *explicit*
+  casts via `array_to_vector` etc.
+- **L2 / L1 ANN.** Indexed by the turbovec AM via `vec_l2_ops` (`<->`) and
+  `vec_l1_ops` (`<+>`); `l2_distance` / `l1_distance` are also available as
+  exact functions.
 - **Variable per-row dimensionality inside a single index.** A
   `vector` column may store mixed dims, but a `turbovec` index over
   that column locks dim at first build and rejects mismatches.
@@ -756,9 +762,10 @@ search latency, and on-disk size.
    tablespace provides.
 6. **Cross-version migration.** Dump/restore preserves the
    index relation. The on-disk wire format is versioned in the
-   meta page (currently v2, Phase P). Pre-Phase-P (v1) indexes
-   are detected at scan time and the user is asked to `REINDEX`
-   (the v1.3.0 hard migration boundary).
+   meta page (`MetaPageData::version`, **currently 8**). Older-format
+   indexes are detected at scan time and the user is asked to `REINDEX`;
+   see [`docs/UPGRADING.md`](UPGRADING.md) for the per-version migration
+   matrix.
 7. **Concurrency of `parking_lot::Mutex` inside a Postgres backend.**
    Postgres backends are single-process / single-thread. We use the
    mutex defensively because `rayon` from `turbovec` may spawn

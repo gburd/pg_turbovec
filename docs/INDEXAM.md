@@ -36,19 +36,33 @@ shipped it behind a Cargo feature so users couldn't accidentally
 
 ```
 src/index/
-├── mod.rs         # IndexAmRoutine builder + handler entry point
-├── options.rs     # bit_width / dim reloption parser (amoptions callback)
-├── opclass.rs     # extension_sql! for vec_ip_ops + AM declaration
-├── persist.rs     # SPI helpers for the turbovec.am_storage side table
-├── build.rs       # ambuild + ambuildempty
-├── insert.rs      # aminsert
+├── mod.rs         # IndexAmRoutine builder + handler entry point + opclass DDL
+├── options.rs     # bit_width / dim / lists / assign_dups / graph reloptions
+├── page.rs        # meta page + wire format (MetaPageData, VERSION = 8, KIND_*)
+├── relfile.rs     # relfile-resident page read/write (the storage strategy)
+├── build.rs       # ambuild + ambuildempty (out-of-core spill + per-tuple ctx)
+├── build_pool.rs  # bounded rayon pool for the parallel build phases
+├── insert.rs      # aminsert (deferred-commit)
 ├── scan.rs        # ambeginscan / amrescan / amgettuple / amendscan
 ├── vacuum.rs      # ambulkdelete + amvacuumcleanup
 ├── cost.rs        # amcostestimate
-└── validate.rs    # amvalidate
+├── validate.rs    # amvalidate
+├── ivf.rs         # IVF coarse quantizer (k-means, cell directory)
+├── onebit.rs      # 1-bit centered sign-BQ codec
+└── graph.rs       # Vamana graph kind (DEPRECATED v2.5.0)
 ```
 
-## Storage strategy: side table
+> **The `opclass.rs` / `persist.rs` files and the `turbovec.am_storage` side
+> table below no longer exist.** They were the v0.4–v1.2 experimental design.
+> Since v1.3.0 (Phase Q) storage is **relfile-resident** via PostgreSQL's
+> buffer manager — `ambuild`/`aminsert`/`ambulkdelete` read and write the
+> index relation's own pages through `src/index/relfile.rs`, there is no SPI
+> side table, and the opclass DDL lives in `src/index/mod.rs`. The section
+> below is kept only as historical context for the retired design; read
+> `src/index/relfile.rs` and `src/index/page.rs` for how storage actually
+> works today.
+
+## Storage strategy (historical: retired side table)
 
 ```sql
 CREATE TABLE turbovec.am_storage (

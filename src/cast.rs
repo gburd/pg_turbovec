@@ -69,7 +69,7 @@ fn vec_to_array(v: Vector) -> Vec<f32> {
 fn to_vec_text(s: &str) -> Vector {
     match crate::vec::parse_vec(s) {
         Ok(v) => Vector::from_vec(v),
-        Err(msg) => error!("to_vec: invalid input '{}': {}", s, msg),
+        Err(msg) => error!("to_vector: invalid input '{}': {}", s, msg),
     }
 }
 
@@ -92,7 +92,7 @@ fn to_vector_text(s: &str) -> Vector {
 fn to_vec_text_dim(s: &str, dim: i32, _transpose: bool) -> Vector {
     let v = to_vec_text(s);
     if dim != 0 && v.dim() != dim as usize {
-        error!("to_vec: expected dim {}, got {}", dim, v.dim());
+        error!("to_vector: expected dim {}, got {}", dim, v.dim());
     }
     v
 }
@@ -122,7 +122,7 @@ fn vector_to_float4(v: Vector, dim: i32, _transpose: bool) -> Vec<f32> {
 fn array_to_vec_dim(arr: Vec<Option<f32>>, dim: i32, _transpose: bool) -> Vector {
     let v = array_to_vec(arr);
     if dim != 0 && v.dim() != dim as usize {
-        error!("array_to_vec: expected dim {}, got {}", dim, v.dim());
+        error!("array_to_vector: expected dim {}, got {}", dim, v.dim());
     }
     v
 }

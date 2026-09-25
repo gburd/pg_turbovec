@@ -1,0 +1,24 @@
+# IVF/flat vs HNSW at matched recall — END-TO-END Execution Time
+# cohere-wiki en 1M x 1024d | basis=top_level_EXPLAIN_ANALYZE_Execution_Time_whole_query_one_session
+# recorded 51/51 arms (0 dropped: contended/seqscan/wrong-index)
+
+## at R@10 >= 0.9
+  HNSW          :     4.34 ms  R@10=0.9050  [ef80]
+  flat bw4      :     5.24 ms  R@10=1.0000  [flat_bw4_k32] (1.21x HNSW)
+  flat bw1      :    26.82 ms  R@10=0.9650  [flat_bw1_k256] (6.18x HNSW)
+  IVF1024 bw4   :    30.61 ms  R@10=0.9075  [ivf_bw4_p64_k100] (7.05x HNSW)
+  IVF1024 bw1   :    11.97 ms  R@10=0.9325  [ivf_bw1_p128_k256] (2.76x HNSW)
+
+## at R@10 >= 0.95
+  HNSW          :     8.55 ms  R@10=0.9525  [ef200]
+  flat bw4      :     5.24 ms  R@10=1.0000  [flat_bw4_k32] (0.61x HNSW)
+  flat bw1      :    26.82 ms  R@10=0.9650  [flat_bw1_k256] (3.14x HNSW)
+  IVF1024 bw4   :    90.58 ms  R@10=0.9650  [ivf_bw4_p128_k100] (10.59x HNSW)
+  IVF1024 bw1   :    20.84 ms  R@10=0.9625  [ivf_bw1_p128_k800] (2.44x HNSW)
+
+## at R@10 >= 0.98
+  HNSW          :    16.60 ms  R@10=0.9800  [ef400]
+  flat bw4      :     5.24 ms  R@10=1.0000  [flat_bw4_k32] (0.32x HNSW)
+  flat bw1      :    29.81 ms  R@10=0.9800  [flat_bw1_k400] (1.80x HNSW)
+  IVF1024 bw4   : unreachable (no arm cleared 0.98)
+  IVF1024 bw1   : unreachable (no arm cleared 0.98)

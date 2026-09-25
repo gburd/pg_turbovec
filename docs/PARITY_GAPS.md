@@ -9,33 +9,57 @@ pg_turbovec vs pgvector. They are correctness-OK in every case;
 the trade-off is that the wins (10× less storage, exact recall)
 come paired with these losses.
 
-> **2026-06-15 correction — read this first.** An isolated, AVX2,
+> **2026-09-25 re-measurement — this SUPERSEDES the 2026-06-15
+> correction below.** The 2026-06-15 "~2552 ms / we LOSE ~490×"
+> line was itself flawed: the harness put the query vector in an
+> ORDER BY **subquery** (`... <=> (SELECT emb FROM query_set
+> WHERE qid=$N)`), which adds ~90 ms of InitPlan/materialize
+> overhead OUTSIDE the index scan on BOTH engines (measured: HNSW
+> ef80 is 2.3 ms with a literal query vector vs 93.9 ms with the
+> subquery, same plan), and it timed only the Index-Scan node.
+> A corrected end-to-end benchmark (top-level `EXPLAIN(ANALYZE)`
+> Execution Time, literal query vectors, one warm session per arm;
+> c7i.8xlarge AVX2, Cohere-wiki 1M × 1024-d, 100 held-out queries,
+> exact top-10 GT; `benches/results/rebench_20260925/`) shows:
+> **flat-bw4 is 5.2 ms at R@10 = 1.000 and BEATS HNSW at R@10 ≥
+> 0.95** (HNSW 8.6 ms) and is 3× faster at ≥0.98 (HNSW 16.6 ms,
+> and HNSW needs ef=400 to reach 0.98 while flat is already at
+> 1.000). IVF-bw1 is within 2.4–2.8× of HNSW at 58× smaller
+> storage; IVF-bw4 is the weakest arm (flat wins over IVF for
+> bit_width ≥ 2 at this scale, as our own guidance says). So at
+> 1M × 1024-d, warm, single-connection, all-in-RAM, **pg_turbovec
+> flat is competitive-to-better than HNSW on latency AND wins
+> 14.6–58× on storage AND hits perfect recall.** The remaining
+> real gaps are COLD latency (flat cold ≈ 1.9 s — separate work,
+> parallel repack) and QPS-under-load / >10M scale (unmeasured).
+> The pre-AVX2 scalar-fallback caveat below still stands as
+> history.
+
+> **2026-06-15 correction (SUPERSEDED 2026-09-25, kept for the
+> record).** An isolated, AVX2,
 > contention-controlled benchmark on `arnold` (Cohere-wiki 1M ×
 > 1024-d; see `docs/BENCHMARKS.md`) overturned the earlier "we win
 > warm p50" claim. pg_turbovec is a **flat quantized full-scan**
-> index: `O(n·dim)` per query. At 1M rows its warm p50 is
-> **~2.5 s** (AVX2) vs pgvector HNSW's **~5 ms** — HNSW is ~490×
-> faster because it's a sublinear graph traversal. The old
+> index: `O(n·dim)` per query. At 1M rows its warm p50 was reported
+> **~2.5 s** (AVX2) vs pgvector HNSW's **~5 ms** — but that 2.5 s
+> was inflated by the subquery measurement artifact described in
+> the 2026-09-25 note above; the true end-to-end flat-bw4 number is
+> ~5 ms. The old
 > "26.8 ms on meh / we win 2.3×" numbers were produced by the
 > **pre-AVX2 scalar-fallback bug** (fixed in v1.7.3) that returned
 > fast-but-WRONG results, so they never represented correct
-> behaviour. **pg_turbovec's real wins are storage (10–15×),
-> exact recall (1.000 vs HNSW's ~0.96), and build memory — NOT
-> query latency at scale.** It is the right choice when storage
-> and exactness matter more than raw QPS, or at corpus sizes /
-> with pre-filters where an `O(n)` scan is acceptable. It is the
-> wrong choice for low-latency ANN over millions of rows — use a
-> graph index (pgvector HNSW) there. Positioning corrected to
-> "best storage efficiency + exact recall for PG vector search
-> where an O(n) scan fits the latency budget," NOT "beat HNSW on
-> latency."
+> behaviour. pg_turbovec's wins are storage (14.6–58×),
+> exact recall (1.000 vs HNSW's ~0.96), build memory, AND —
+> as of the 2026-09-25 re-measure — warm latency at 1M × 1024-d.
+> The wrong choice remains COLD low-latency ANN before the
+> per-backend cache warms; that is separate (parallel-repack) work.
 
 | Metric (1 M × 384-d cosine, release build, arnold) | pgvector HNSW | pg_turbovec | Status |
 |---|---:|---:|---|
 | Storage | 1 953 MiB | 195 MiB (4-bit) | ✅ we win 10× |
 | Build time | 8 m 13 s | 33 s | ✅ we win 15× (at 384-d; 1.9–2.1× at 1024-d) |
 | Warm scan p50 (1 M × 384-d, GloVe) | 100 ms | 22 ms (v1.0.0) | ✅ we win 5× |
-| **Warm scan p50 (1 M × 1024-d, Cohere-wiki, AVX2 `arnold`)** | ~5.2 ms (ef=200, R@10 0.96) | **~2552 ms (2-bit/4-bit, R@10 1.000)** | ❌ **we LOSE ~490×.** This is the corrected, contention-controlled AVX2 number (`docs/BENCHMARKS.md`, 2026-06-15). pg_turbovec is a flat `O(n·dim)` quantized scan; HNSW is a sublinear graph. The earlier "26.8 ms on `meh` / we win 2.3×" figure was the **pre-AVX2 scalar-fallback bug** (fast-but-WRONG, fixed v1.7.3) and is retracted. AVX2 makes the correct scan ~15–25× faster than meh's scalar fallback (2.55 s vs 41.6 s), but a 1M-row flat scan is seconds, not ms, by design. The latency knob is corpus size / pre-filter selectivity, not search_k (latency is flat across search_k). Use a graph index for low-latency ANN over millions of rows; use pg_turbovec for exact recall + 10–15× storage where an O(n) scan fits the budget. |
+| **Warm scan p50 (1 M × 1024-d, Cohere-wiki, AVX2, END-TO-END, 2026-09-25)** | 4.3 ms @0.90 · 8.6 ms @0.95 · 16.6 ms @0.98 | **flat-bw4: 5.2 ms @ R@10 1.000** (beats HNSW at ≥0.95, 3× faster at ≥0.98); IVF-bw1: 12–21 ms @0.90–0.96 | ✅ **flat WINS at high recall; IVF-bw1 within 2.4–2.8×.** Correctly measured: top-level Execution Time, literal query vectors (a subquery in the ORDER BY inflated the OLD 2552 ms figure by ~90 ms on both engines), one warm psql session per arm. Full iso-recall table + corrected harness in `benches/results/rebench_20260925/`. The old "~2552 ms / LOSE 490×" row was a measurement artifact and is RETRACTED. |
 | Cold scan p50 (after backend restart) | ~100 ms | 1 256 ms (1 M × 1536-d, post-Phase-P, commit a801f38); v1.7.3 defers the per-backend `id_to_slot` HashMap build off the read-only scan path (parity gap #3) | ⚠️ **21× speedup vs. pre-fix v1.0.x side-table path**; remaining gap to HNSW is acceptable since subsequent queries warm to ~87 ms in the same backend. v1.7.3 cuts the dominant residual cache-fill term: the read-only scan path now materialises a `ReadOnlyIndex` (positional `TurboQuantIndex` + `slot_to_id` Vec) instead of a full `IdMapIndex`, skipping the O(n) `id_to_slot` HashMap build (~50 ms debug / 200 k rows, scales with n; the dominant cache-fill phase once Phase P pre-baked the blocked layout). The HashMap is deferred to the first mutation, which still needs it. The relfile-resident format is the only storage strategy as of v1.3.0; the side-table path is gone. |
 | INSERT throughput (per row, into a 1 M-row index) | ~0.5 ms (HNSW O(log n)) | **0.13 ms (post-Phase-K, deferred-commit on the relfile path)** | ✅ **we win 4×** — v1.0.x had ~200 ms/row (full re-serialise per row) and we lost 400×; v1.1.0 (Phase K) shipped the deferred-commit pattern that mutates the cached `Arc<RwLock<IdMapIndex>>` per-row and persists once at xact commit, taking 1k-row bulk inserts from ~400 s to ~136 ms. v1.3.0 (Phase Q) extended the same pattern to the relfile path. |
 | Recall on uniform-random | 0.03 | 1.000 | ✅ (but synthetic; real-world recall varies) |

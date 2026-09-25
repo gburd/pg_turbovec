@@ -4,10 +4,14 @@ Open-source vector similarity search for PostgreSQL, backed by Google
 Research's [TurboQuant](https://arxiv.org/abs/2504.19874) algorithm
 via the [`turbovec`](https://crates.io/crates/turbovec) Rust crate.
 
-Store your vectors in 2- or 4-bit-quantised form alongside the rest of
-your data. Supports:
+Store compact vector indexes alongside your PostgreSQL data: **1-bit sign-BQ
+with full-precision reranking**, or **2/3/4-bit TurboQuant**. The original
+vectors stay in the table for reranking. Supports:
 
-- exact and approximate nearest-neighbour search
+- approximate nearest-neighbour search with full-precision candidate reranking;
+  exact search through PostgreSQL's distance operators and a sequential scan
+- **1-bit + rerank**, including IVF: `WITH (bit_width = 1, lists = N)`;
+  see [the 1-bit example](#1-bit-search-with-full-precision-reranking)
 - **three index kinds**: a **flat** quantized scan (exact-recall-
   capable), an opt-in **IVF** layer (`WITH (lists = N)`) that is
   out-of-core end-to-end so a larger-than-RAM index can be built and
@@ -74,11 +78,14 @@ caused, one is true-and-fixed, one is true-and-stands.
 
 #### "pg_turbovec doesn't support ANN"
 
-It does — but **the default index is exact, not approximate**, and that is
-almost certainly why you concluded otherwise:
+It does. The default (`lists = 0`) scans all **quantized codes**, selects a
+candidate set, and reranks candidates using the original vectors. Quantization
+can exclude a true neighbour from that set, so even this flat index is an
+approximate search. IVF additionally restricts candidate search to selected
+cells:
 
 ```sql
--- Exact quantized scan. O(n·dim). Recall@10 = 1.000. This is the DEFAULT.
+-- Flat quantized search with full-precision candidate reranking (DEFAULT).
 CREATE INDEX ON items USING turbovec (embedding vec_cosine_ops);
 
 -- Approximate, cell-pruned IVF scan. This is the ANN path.
@@ -149,7 +156,8 @@ and **exact recall** when you need R@10 = 1.000 rather than 0.96.
 ## Choosing `lists` — the ANN tuning knob
 
 `lists` is the IVF coarse-cell count (`nlist`). **The default is `0`, which
-means a flat exact scan.** We keep it at `0` deliberately: on our own
+means a flat quantized scan, not guaranteed exact top-k.** We keep it at `0`
+deliberately: on our own
 measurements, enabling IVF at the default `bit_width = 4` makes things
 *worse* up to at least 1 M rows.
 
@@ -327,6 +335,41 @@ workloads pgvector's HNSW on `bit_hamming_ops` is the right tool
 and there is no reason to use pg_turbovec instead.
 
 ## Choose your `bit_width`
+
+### 1-bit search with full-precision reranking
+
+**pg_turbovec supports 1-bit binary quantization followed by reranking.**
+`bit_width = 1` uses centered sign-BQ in pg_turbovec, separate from upstream
+TurboQuant's 2/3/4-bit codec. Hamming distance selects candidates; PostgreSQL
+fetches their original vectors from the heap and recomputes the requested
+distance. Reranking is automatic on the index-AM query path: no separate
+binary-vector column or manual reranking CTE is required.
+
+```sql
+-- Assuming items(id, embedding) contains turbovec.vector values.
+CREATE INDEX items_embedding_bq ON items
+  USING turbovec (embedding turbovec.vec_cosine_ops)
+  WITH (bit_width = 1, lists = 0);
+
+BEGIN;
+SET LOCAL turbovec.search_k = 800;  -- example candidate budget; tune for your data
+SET LOCAL turbovec.oversample = 1.0;
+SELECT id FROM items
+ORDER BY embedding OPERATOR(turbovec.<=>)
+  (SELECT embedding FROM items WHERE id = 42)
+LIMIT 10;
+COMMIT;
+```
+
+Use `EXPLAIN` to confirm index use. `search_k` controls the initial candidate
+budget, `oversample` multiplies it, and `hi_dim_rerank` may raise its floor.
+**Exact candidate distances do not guarantee exact top-k recall:** reranking
+cannot recover a neighbour omitted by Hamming selection.
+
+`WITH (bit_width = 1, lists = 1000)` also supports IVF with reranking. Tune
+`probes` for cell coverage as well as the candidate budget; increasing only
+`search_k` cannot recover neighbours in unprobed cells. Keep `lists = 0`
+unless measurements justify IVF. See the storage/recall trade-offs below.
 
 | Workload | Recommended | Storage / 1536-dim (measured) | R@10 (1 M dbpedia) |
 |---|---|---:|---:|

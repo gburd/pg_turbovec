@@ -20,5 +20,5 @@
   HNSW          :    16.60 ms  R@10=0.9800  [ef400]
   flat bw4      :     5.24 ms  R@10=1.0000  [flat_bw4_k32] (0.32x HNSW)
   flat bw1      :    29.81 ms  R@10=0.9800  [flat_bw1_k400] (1.80x HNSW)
-  IVF1024 bw4   : unreachable (no arm cleared 0.98)
-  IVF1024 bw1   : unreachable (no arm cleared 0.98)
+  IVF1024 bw4   : not cleared by the swept grid (max R@10=0.9650 at the sweep's probe/search_k ceiling; widen the grid to confirm it is a limit, not a missing config)
+  IVF1024 bw1   : not cleared by the swept grid (max R@10=0.9625 at the sweep's probe/search_k ceiling; widen the grid to confirm it is a limit, not a missing config)

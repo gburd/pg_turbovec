@@ -35,7 +35,22 @@ exact top-10 GT via CTAS. Warm p50, single connection.
 |---|---|---|---|---|---|
 | R@10≥0.90 | 4.3 ms (0.905) | 5.2 ms (1.000) | 26.8 ms | 30.6 ms | 12.0 ms |
 | R@10≥0.95 | 8.6 ms (0.953) | **5.2 ms (1.000)** | 26.8 ms | 90.6 ms | 20.8 ms |
-| R@10≥0.98 | 16.6 ms (0.980) | **5.2 ms (1.000)** | 29.8 ms | unreachable | unreachable |
+| R@10≥0.98 | 16.6 ms (0.980) | **5.2 ms (1.000)** | 29.8 ms | unreachable¹ | unreachable¹ |
+
+¹ **"unreachable" here means GRID-LIMITED, not a capability limit.** The IVF
+sweep capped `probes` at 128 (of `lists = 1024`), so it only ever scanned ⅛ of
+the cells. Recall was still climbing monotonically in `probes` when the sweep
+stopped — IVF-bw1 at fixed search_k=800 rose 0.64 → 0.75 → 0.84 → 0.91 → 0.9625
+as probes went 8 → 16 → 32 → 64 → 128; it never plateaued below 0.98, it ran out
+of probe values. It is NOT a bug and NOT a quantization wall: the SAME 1-bit
+codes scanned exhaustively (flat-bw1) reach R@10 = 1.000, and by construction
+IVF with `probes = lists` scans every vector and equals flat. The recall gap is
+purely the cells the probe budget skipped. Raising probes to ~256–512 would
+clear 0.98 — but at that probe fraction IVF's pruning stops paying (its cost
+approaches flat-bw1's ~40 ms with no benefit), which is itself the finding:
+**at 1M/1024-d, once you need ≥0.98 from 1-bit codes you need enough probes that
+you should just use flat-bw1 (40 ms) or flat-bw4 (5.2 ms).** Consistent with the
+overall result that flat wins at this scale. Same reasoning applies to IVF-bw4.
 
 Index sizes: HNSW **7806 MB**, flat/IVF-bw4 **534 MB** (14.6× smaller),
 flat/IVF-bw1 **134–138 MB** (58× smaller).

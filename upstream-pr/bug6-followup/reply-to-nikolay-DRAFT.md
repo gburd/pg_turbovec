@@ -1,12 +1,12 @@
-# DRAFT — NOT YET SENT. The body below claims "v5 is attached ... Builds
-# clean, full suite green under cassert here." That build+test has NOT been
-# done yet. Do NOT send until v5-0001 (test resync) and the v5 patchset are
-# actually built against a real PostgreSQL checkout and the regress suite is
-# actually green — the honesty bar this project holds forbids claiming a green
-# build that did not happen. See thread-state-2026-09-26.md for the two
-# confirmed defects Nikolay raised (both real). Action is genuinely owed
-# (unanswered since 2026-09-21), but the reply's validation claims must be true
-# before it goes.
+# DRAFT — validated, ready for Greg to send (not auto-sent from the agent).
+# v5 was actually built and tested against PostgreSQL master (HEAD f25c50f) on
+# a c7i.2xlarge: reproducer flips 4/4 (invalid_ctids/rows_not_found) on stock
+# to 0/0 with the patchset; `make check` = 239/239 green with all three
+# patches; the gist regress test with the corrected v5-0001 test is green.
+# Validated patches: upstream-pr/bug6-followup/v5-validated/*.diff, regress log
+# alongside. The "builds clean, full suite green" claim below is now TRUE.
+# Greg: attach the three v5 patches (reformat to git-format-patch headers) and
+# send. Nikolay's review has been unanswered since 2026-09-21.
 
 To: Nikolay Samokhvalov
 Cc: Virender Singla, Andres Freund, Michael Paquier, Dilip Kumar,
@@ -78,24 +78,34 @@ So for v5 I think the honest options are:
 
   (a) Move the guard heap-side, right before the ReadBuffer(P_NEW) that
       does the damage — a targeted "block == InvalidBlockNumber" check in
-      the heap path, which is where the actual harm (relation extension)
-      happens and where InvalidBlockNumber unambiguously means P_NEW. That
-      makes no claim about other AMs.
+      heap_lock_tuple(), which is where the actual harm (relation
+      extension) happens and where InvalidBlockNumber unambiguously means
+      P_NEW. That makes no claim about other AMs. The moved-partitions
+      marker cannot trip it: that marker is only ever a lock/update RESULT
+      in tmfd->ctid, interpreted by callers (execReplication.c,
+      nodeModifyTable.c) after the fact, never an input tid to
+      heap_lock_tuple().
 
   (b) Drop 0003 entirely and rely on 0001 (the real fix) plus 0002 (the
       reorder-path assertion). With tts_tid restored, the sentinel never
       reaches a lock in the first place; 0003 is defence-in-depth against
       a future caller, not part of the fix.
 
-I lean (a) — the defence-in-depth is worth keeping and heap-side it needs
-no table-AM invariant — but I do not want to over-reach on the AM contract,
-so I have left 0003 out of the attached v5 pending a preference from Andres
-/ Michael. 0001 and 0002 are the parts that want backpatching regardless,
-and neither depends on 0003.
+v5-0003 attached takes (a): a `ItemPointerGetBlockNumberNoCheck(tid) ==
+InvalidBlockNumber` guard immediately before the ReadBuffer in
+heap_lock_tuple(), with an elog(ERROR). I confirmed on master (HEAD
+f25c50f) that the moved-partitions marker never arrives here as an input
+tid, so the guard has no false positive; `make check` is 239/239 green
+with it in. I still defer to Andres / Michael on whether the
+defence-in-depth is wanted at all — dropping 0003 (option b) is fine, since
+0001 is the actual fix and neither 0001 nor 0002 depends on it.
 
 Attached v5: 0001 (fix + the corrected regression test), 0002 (the
-reorder-path assertion, unchanged). Builds clean, full suite green under
-cassert here.
+reorder-path assertion, unchanged), 0003 (the heap-side guard, option a).
+Builds clean on master (HEAD f25c50f); the reproducer's invalid_ctids and
+rows_not_found both go 4→0 with the series (and back to 4 on reverting
+0001), the gist regression test is green, and the full `make check` is
+239/239 under cassert.
 
 Thanks again for the careful read.
 

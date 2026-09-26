@@ -1,0 +1,24 @@
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index 4207f0e..52aef5f 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -4753,6 +4753,19 @@ heap_lock_tuple(Relation relation, HeapTuple tuple,
+ 	bool		have_tuple_lock = false;
+ 	bool		cleared_all_frozen = false;
+ 
++	/*
++	 * A TID whose block number is InvalidBlockNumber (0xFFFFFFFF == P_NEW)
++	 * would make the ReadBuffer() below silently extend the relation rather
++	 * than fault, converting a bad TID into on-disk corruption.  No valid
++	 * heap TID has that block number, so reject it here, immediately before
++	 * the read where InvalidBlockNumber unambiguously means P_NEW.  (The
++	 * moved-partitions marker uses InvalidBlockNumber too, but it is only
++	 * ever a lock/update RESULT in tmfd->ctid, never an input tid, so it
++	 * cannot reach this point.)
++	 */
++	if (ItemPointerGetBlockNumberNoCheck(tid) == InvalidBlockNumber)
++		elog(ERROR, "heap_lock_tuple called with invalid block number in TID");
++
+ 	*buffer = ReadBuffer(relation, ItemPointerGetBlockNumber(tid));
+ 	block = ItemPointerGetBlockNumber(tid);
+ 	page = BufferGetPage(*buffer);

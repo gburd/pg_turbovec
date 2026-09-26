@@ -1,0 +1,143 @@
+diff --git a/src/backend/executor/execTuples.c b/src/backend/executor/execTuples.c
+index b8e8f52..d38583a 100644
+--- a/src/backend/executor/execTuples.c
++++ b/src/backend/executor/execTuples.c
+@@ -1768,6 +1768,12 @@ ExecForceStoreHeapTuple(HeapTuple tuple,
+ 		slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+ 		MemoryContextSwitchTo(oldContext);
+ 
++		/*
++		 * ExecClearTuple() above reset tts_tid, so restore it from the tuple
++		 * we just stored, the same way the tts_*_store_tuple() callbacks do.
++		 */
++		slot->tts_tid = tuple->t_self;
++
+ 		if (shouldFree)
+ 			pfree(tuple);
+ 	}
+diff --git a/src/test/regress/expected/gist.out b/src/test/regress/expected/gist.out
+index ac79f94..dc48620 100644
+--- a/src/test/regress/expected/gist.out
++++ b/src/test/regress/expected/gist.out
+@@ -463,3 +463,65 @@ create index gist_tbl_box_index on gist_tbl using gist (b);
+ insert into gist_tbl
+   select box(point(0.05*i, 0.05*i)) from generate_series(0,10) as i;
+ drop table gist_tbl;
++-- Test that tuples passing through nodeIndexscan.c's reorder queue keep their
++-- real ctid.  poly_ops' distance is only a lower bound (the bounding box), so
++-- gist_poly_consistent sets recheck and the ORDER BY value is recomputed; thin
++-- diagonal triangles make the estimate strictly low, forcing the requeue path,
++-- which re-stores the tuple with ExecForceStoreHeapTuple().  Note the first
++-- tuple is returned without queueing, so any check must look past LIMIT 1.
++create table gist_knn_ctid (id int, p polygon);
++insert into gist_knn_ctid
++select i, format('((%s,0),(%s,9),(%s,0))', i * 10, i * 10 + 9, i * 10 + 9)::polygon
++from generate_series(1,20) i;
++create index gist_knn_ctid_idx on gist_knn_ctid using gist (p);
++vacuum analyze gist_knn_ctid;
++set enable_seqscan = off;
++-- the reorder queue is only reached through an ORDER BY-op index scan, so pin
++-- the plan that the checks below depend on
++explain (costs off)
++select ctid, id from gist_knn_ctid order by p <-> point(100,4) limit 5;
++                        QUERY PLAN                         
++-----------------------------------------------------------
++ Limit
++   ->  Index Scan using gist_knn_ctid_idx on gist_knn_ctid
++         Order By: (p <-> '(100,4)'::point)
++(3 rows)
++
++-- Materialize the ordered result before checking it.  Filtering the ordered
++-- subquery directly would let the planner push the qual into the scan, which
++-- would no longer exercise the same path.
++create temp table gist_knn_ctid_res as
++select ctid as c, id from gist_knn_ctid order by p <-> point(100,4) limit 5;
++-- no row may report the invalid-tid sentinel
++select count(*) as invalid_ctids from gist_knn_ctid_res
++where c = '(4294967295,0)'::tid;
++ invalid_ctids 
++---------------
++             0
++(1 row)
++
++-- every row must be findable by the ctid it reported; written as NOT EXISTS
++-- so that a correct fix reads zero
++select count(*) as rows_not_found
++from gist_knn_ctid_res r
++where not exists (select 1 from gist_knn_ctid t
++                  where t.ctid = r.c and t.id = r.id);
++ rows_not_found 
++----------------
++              0
++(1 row)
++
++-- and row locking must not be handed the invalid tid, which would ask
++-- ReadBuffer() for InvalidBlockNumber == P_NEW and extend the relation
++begin;
++select count(*) as locked
++from (select id from gist_knn_ctid order by p <-> point(100,4) limit 5
++      for update) s;
++ locked 
++--------
++      5
++(1 row)
++
++rollback;
++reset enable_seqscan;
++drop table gist_knn_ctid_res;
+diff --git a/src/test/regress/sql/gist.sql b/src/test/regress/sql/gist.sql
+index 57dcc08..b93d67a 100644
+--- a/src/test/regress/sql/gist.sql
++++ b/src/test/regress/sql/gist.sql
+@@ -236,3 +236,51 @@ create index gist_tbl_box_index on gist_tbl using gist (b);
+ insert into gist_tbl
+   select box(point(0.05*i, 0.05*i)) from generate_series(0,10) as i;
+ drop table gist_tbl;
++
++-- Test that tuples passing through nodeIndexscan.c's reorder queue keep their
++-- real ctid.  poly_ops' distance is only a lower bound (the bounding box), so
++-- gist_poly_consistent sets recheck and the ORDER BY value is recomputed; thin
++-- diagonal triangles make the estimate strictly low, forcing the requeue path,
++-- which re-stores the tuple with ExecForceStoreHeapTuple().  Note the first
++-- tuple is returned without queueing, so any check must look past LIMIT 1.
++create table gist_knn_ctid (id int, p polygon);
++insert into gist_knn_ctid
++select i, format('((%s,0),(%s,9),(%s,0))', i * 10, i * 10 + 9, i * 10 + 9)::polygon
++from generate_series(1,20) i;
++create index gist_knn_ctid_idx on gist_knn_ctid using gist (p);
++vacuum analyze gist_knn_ctid;
++
++set enable_seqscan = off;
++
++-- the reorder queue is only reached through an ORDER BY-op index scan, so pin
++-- the plan that the checks below depend on
++explain (costs off)
++select ctid, id from gist_knn_ctid order by p <-> point(100,4) limit 5;
++
++-- Materialize the ordered result before checking it.  Filtering the ordered
++-- subquery directly would let the planner push the qual into the scan, which
++-- would no longer exercise the same path.
++create temp table gist_knn_ctid_res as
++select ctid as c, id from gist_knn_ctid order by p <-> point(100,4) limit 5;
++
++-- no row may report the invalid-tid sentinel
++select count(*) as invalid_ctids from gist_knn_ctid_res
++where c = '(4294967295,0)'::tid;
++
++-- every row must be findable by the ctid it reported; written as NOT EXISTS
++-- so that a correct fix reads zero
++select count(*) as rows_not_found
++from gist_knn_ctid_res r
++where not exists (select 1 from gist_knn_ctid t
++                  where t.ctid = r.c and t.id = r.id);
++
++-- and row locking must not be handed the invalid tid, which would ask
++-- ReadBuffer() for InvalidBlockNumber == P_NEW and extend the relation
++begin;
++select count(*) as locked
++from (select id from gist_knn_ctid order by p <-> point(100,4) limit 5
++      for update) s;
++rollback;
++
++reset enable_seqscan;
++drop table gist_knn_ctid_res;

@@ -1,0 +1,22 @@
+=== reproducer (should be 0/0 with all 3 patches) ===
+ invalid_ctids 
+---------------
+             0
+--
+ rows_not_found 
+----------------
+              0
+=== core regress suite (parallel) — 0003's elog must not break anything ===
+ok 232       + compression_lz4                             6 ms
+ok 233       + compression_pglz                            6 ms
+ok 234       + cluster                                   170 ms
+# parallel group (2 tests):  oidjoins event_trigger
+ok 235       + oidjoins                                  108 ms
+ok 236       + event_trigger                             135 ms
+ok 237       - event_trigger_login                        14 ms
+ok 238       - fast_default                              127 ms
+ok 239       - tablespace                                278 ms
+1..239
+# All 239 tests passed.
+make[1]: Leaving directory '/home/ubuntu/pg/src/test/regress'
+FINALCHECK_DONE

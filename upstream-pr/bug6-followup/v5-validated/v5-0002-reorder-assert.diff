@@ -1,0 +1,37 @@
+diff --git a/src/backend/executor/nodeIndexscan.c b/src/backend/executor/nodeIndexscan.c
+index 129d005..4bd5240 100644
+--- a/src/backend/executor/nodeIndexscan.c
++++ b/src/backend/executor/nodeIndexscan.c
+@@ -250,11 +250,32 @@ IndexNextWithReorder(IndexScanState *node)
+ 								node) <= 0)
+ 			{
+ 				HeapTuple	tuple;
++				ItemPointerData tid PG_USED_FOR_ASSERTS_ONLY;
+ 
+ 				tuple = reorderqueue_pop(node);
+ 
++				/* Remember the TID; the store below frees the tuple. */
++				tid = tuple->t_self;
++
+ 				/* Pass 'true', as the tuple in the queue is a palloc'd copy */
+ 				ExecForceStoreHeapTuple(tuple, slot, true);
++
++				/*
++				 * The tuple came from the heap through this scan, so the slot
++				 * must advertise the TID it was fetched from.  If the two
++				 * diverge the scan projects a different ctid than the row it
++				 * returned, which changes query results.  This does not hold
++				 * for slots in general, since HOT can legitimately make them
++				 * differ, so assert it only here.
++				 *
++				 * Compare with the NoCheck accessors so that a slot left
++				 * holding the invalid-TID sentinel trips this assertion rather
++				 * than the validity one inside ItemPointerEquals().
++				 */
++				Assert(ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) ==
++					   ItemPointerGetBlockNumberNoCheck(&tid) &&
++					   ItemPointerGetOffsetNumberNoCheck(&slot->tts_tid) ==
++					   ItemPointerGetOffsetNumberNoCheck(&tid));
+ 				return slot;
+ 			}
+ 		}

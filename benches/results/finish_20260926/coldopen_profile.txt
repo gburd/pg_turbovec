@@ -1,0 +1,8 @@
+# TVSCAN cold-open profile: 1M x 1024d x 4-bit flat, c7i.8xlarge (32 vCPU AVX-512), pg_turbovec v2.10.3 (parallel repack)
+# fresh backend per query (cold per-backend cache). First line = cold-disk outlier.
+read_full_consistent=491417us prepare_repack=2058us n=1000000 bw=4 dim=1024
+read_full_consistent=286618us prepare_repack=1947us n=1000000 bw=4 dim=1024
+read_full_consistent=279186us prepare_repack=1984us n=1000000 bw=4 dim=1024
+read_full_consistent=283558us prepare_repack=1943us n=1000000 bw=4 dim=1024
+read_full_consistent=280209us prepare_repack=1976us n=1000000 bw=4 dim=1024
+read_full_consistent=280373us prepare_repack=1928us n=1000000 bw=4 dim=1024

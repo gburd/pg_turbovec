@@ -1,0 +1,49 @@
+gt cached 100 queries
+### IVF bw1 high-probe sweep
+NOTICE:  index "docs_tv_flat_bw1" does not exist, skipping
+NOTICE:  index "docs_tv_ivf_bw4" does not exist, skipping
+NOTICE:  index "docs_tv_ivf_bw1" does not exist, skipping
+ pg_size_pretty 
+----------------
+ 138 MB
+(1 row)
+
+  ivf_bw1 probes=128 k=256: R@10=0.9620 p50=22.93ms
+  ivf_bw1 probes=128 k=800: R@10=0.9620 p50=22.91ms
+  ivf_bw1 probes=128 k=2000: R@10=0.9650 p50=37.40ms
+  ivf_bw1 probes=256 k=256: R@10=0.9870 p50=25.78ms
+  ivf_bw1 probes=256 k=800: R@10=0.9870 p50=25.60ms
+  ivf_bw1 probes=256 k=2000: R@10=0.9900 p50=40.55ms
+  ivf_bw1 probes=512 k=256: R@10=0.9970 p50=31.33ms
+  ivf_bw1 probes=512 k=800: R@10=0.9970 p50=31.40ms
+  ivf_bw1 probes=512 k=2000: R@10=1.0000 p50=46.33ms
+### IVF bw4 high-probe sweep
+NOTICE:  index "docs_tv_flat_bw4" does not exist, skipping
+NOTICE:  index "docs_tv_flat_bw1" does not exist, skipping
+NOTICE:  index "docs_tv_ivf_bw4" does not exist, skipping
+ pg_size_pretty 
+----------------
+ 538 MB
+(1 row)
+
+  ivf_bw4 probes=128 k=256: R@10=0.9650 p50=97.72ms
+  ivf_bw4 probes=128 k=800: R@10=0.9650 p50=96.24ms
+  ivf_bw4 probes=128 k=2000: R@10=0.9650 p50=117.50ms
+  ivf_bw4 probes=256 k=256: R@10=0.9900 p50=175.53ms
+  ivf_bw4 probes=256 k=800: R@10=0.9900 p50=173.95ms
+  ivf_bw4 probes=256 k=2000: R@10=0.9900 p50=209.45ms
+  ivf_bw4 probes=512 k=256: R@10=1.0000 p50=364.45ms
+  ivf_bw4 probes=512 k=800: R@10=1.0000 p50=365.99ms
+  ivf_bw4 probes=512 k=2000: R@10=1.0000 p50=409.26ms
+### flat bw1 reference (probes=lists equivalent = full scan)
+NOTICE:  index "docs_tv_flat_bw4" does not exist, skipping
+NOTICE:  index "docs_tv_flat_bw1" does not exist, skipping
+NOTICE:  index "docs_tv_ivf_bw1" does not exist, skipping
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+ pg_size_pretty 
+----------------
+ 134 MB
+(1 row)
+
+IVF098_DONE

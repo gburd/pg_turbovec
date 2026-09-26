@@ -37,20 +37,21 @@ exact top-10 GT via CTAS. Warm p50, single connection.
 | R@10≥0.95 | 8.6 ms (0.953) | **5.2 ms (1.000)** | 26.8 ms | 90.6 ms | 20.8 ms |
 | R@10≥0.98 | 16.6 ms (0.980) | **5.2 ms (1.000)** | 29.8 ms | unreachable¹ | unreachable¹ |
 
-¹ **"unreachable" here means GRID-LIMITED, not a capability limit.** The IVF
-sweep capped `probes` at 128 (of `lists = 1024`), so it only ever scanned ⅛ of
-the cells. Recall was still climbing monotonically in `probes` when the sweep
-stopped — IVF-bw1 at fixed search_k=800 rose 0.64 → 0.75 → 0.84 → 0.91 → 0.9625
-as probes went 8 → 16 → 32 → 64 → 128; it never plateaued below 0.98, it ran out
-of probe values. It is NOT a bug and NOT a quantization wall: the SAME 1-bit
-codes scanned exhaustively (flat-bw1) reach R@10 = 1.000, and by construction
-IVF with `probes = lists` scans every vector and equals flat. The recall gap is
-purely the cells the probe budget skipped. Raising probes to ~256–512 would
-clear 0.98 — but at that probe fraction IVF's pruning stops paying (its cost
-approaches flat-bw1's ~40 ms with no benefit), which is itself the finding:
-**at 1M/1024-d, once you need ≥0.98 from 1-bit codes you need enough probes that
-you should just use flat-bw1 (40 ms) or flat-bw4 (5.2 ms).** Consistent with the
-overall result that flat wins at this scale. Same reasoning applies to IVF-bw4.
+¹ **"unreachable" here means GRID-LIMITED, not a capability limit — now
+CONFIRMED by a follow-up high-probe sweep (`benches/results/finish_20260926/`).**
+The original sweep capped `probes` at 128 (of `lists = 1024`), so it only ever
+scanned ⅛ of the cells. Extending to probes ∈ {256, 512} pins the crossover:
+IVF-bw1 clears 0.98 at **probes=256 (R@10=0.987, 25.6 ms)** and reaches 1.000 at
+probes=512 (46 ms); IVF-bw4 clears 0.98 at probes=256 (0.990, 174 ms), 1.000 at
+probes=512 (364 ms). So it is NOT a bug and NOT a quantization wall — recall was
+simply still climbing in `probes` when the first sweep stopped, and the SAME
+1-bit codes scanned exhaustively (flat-bw1) reach 1.000. But the measured
+crossover is itself the finding: at ≥0.98, IVF-bw1's 25.6 ms barely beats
+flat-bw1's 29.8 ms full scan, and at R@10=1.000 IVF-bw1 (46 ms) is SLOWER than
+flat-bw1 (40 ms); IVF-bw4 at ≥0.98 (174 ms) is ~33× slower than flat-bw4
+(5.2 ms). **Once you need ≥0.98 from these codes you must probe enough cells
+that IVF's pruning stops paying — use flat.** Consistent with "flat wins at this
+scale."
 
 Index sizes: HNSW **7806 MB**, flat/IVF-bw4 **534 MB** (14.6× smaller),
 flat/IVF-bw1 **134–138 MB** (58× smaller).

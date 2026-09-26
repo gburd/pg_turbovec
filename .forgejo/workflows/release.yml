@@ -2,10 +2,13 @@ name: Release
 
 # Codeberg (Forgejo Actions) tag-triggered publish. Codeberg is the canonical
 # origin; a vX.Y.Z tag here builds + gates + produces the PGXN *source* dist
-# zip, attaches it to a Codeberg release, publishes the distribution to PGXN,
-# and submits a release announcement to the postgresql.org news system (which
-# feeds pgsql-announce). The GitHub mirror's release workflow (if any) must NOT
-# publish to PGXN or announce -- those happen ONCE, here.
+# zip, attaches it to a Codeberg release, and submits a release announcement
+# to the postgresql.org news system (which feeds pgsql-announce).
+#
+# PGXN uploads happen on GitHub (.github/workflows/pgxn-release.yml). The
+# PGXN step below stays for reference but skips, because PGXN_USER and
+# PGXN_PASSWORD are deliberately not set on Codeberg. Do not set them here
+# too, or each version is uploaded twice.
 #
 # RUNNER: this MUST run on a SELF-HOSTED Forgejo runner. Codeberg's hosted
 # runners have a 10-minute job cap (see .forgejo/workflows/test.yml), and a
@@ -19,7 +22,7 @@ name: Release
 # SECRETS the maintainer must set on the Codeberg repo (Settings -> Actions ->
 # Secrets):
 #   RELEASE_TOKEN                 - Codeberg token with repo/release write (for the release attach)
-#   PGXN_USER, PGXN_PASSWORD      - PGXN Manager credentials (username/password; PGXN has no tokens)
+#   PGXN_USER, PGXN_PASSWORD      - leave unset; PGXN uploads run on GitHub
 #   PGORG_USER, PGORG_PASSWORD    - postgresql.org password-login account (optional; announce degrades to a printed draft if unset)
 #   PGORG_ORG_ID, PGORG_EMAIL_ID, PGORG_TAGS - postgresql.org org/email/newstag ids (optional; see ci/announce.sh)
 on:

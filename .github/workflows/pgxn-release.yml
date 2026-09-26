@@ -1,0 +1,89 @@
+name: pgxn-release
+
+# Publish the tagged release to PGXN. Needs the PGXN_USERNAME and
+# PGXN_PASSWORD repository secrets (a https://manager.pgxn.org account);
+# without them the job skips instead of failing.
+#
+# PGXN uploads happen here, on GitHub. .forgejo/workflows/release.yml also
+# has a PGXN step, but it only runs if its secrets are set on Codeberg, and
+# they are deliberately not, so each version is uploaded exactly once.
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  pgxn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip if PGXN secrets are not set
+        id: check
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          if [ -z "$PGXN_USERNAME" ] || [ -z "$PGXN_PASSWORD" ]; then
+            echo "::notice::PGXN_USERNAME/PGXN_PASSWORD not set; skipping PGXN upload."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip != 'true'
+
+      - name: Check Cargo.toml and control file match the tag
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          CTL_VER="$(sed -n "s/^default_version *= *'\(.*\)'/\1/p" pg_turbovec.control)"
+          if [ "$CARGO_VER" != "$VER" ] || [ "$CTL_VER" != "$VER" ]; then
+            echo "::error::tag $VER, Cargo.toml $CARGO_VER, pg_turbovec.control $CTL_VER"
+            exit 1
+          fi
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.check.outputs.skip != 'true'
+        with:
+          toolchain: stable
+          rustflags: ""
+
+      - name: Install build deps
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+              build-essential pkg-config libssl-dev libreadline-dev zlib1g-dev \
+              libicu-dev libxml2-dev libxslt1-dev liblz4-dev libzstd-dev \
+              libclang-dev clang flex bison libopenblas-dev gfortran zip
+
+      - name: Install cargo-pgrx
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          PGRX_VER="$(grep -m1 '^pgrx = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          cargo install --locked cargo-pgrx --version "$PGRX_VER"
+          cargo pgrx init --pg16 download
+
+      # Renders META.json from META.json.in, generates the install SQL with
+      # cargo pgrx schema, and zips a PGXN source distribution.
+      - name: Build distribution
+        if: steps.check.outputs.skip != 'true'
+        run: bash scripts/make-dist.sh pg16
+
+      - name: Upload to PGXN
+        if: steps.check.outputs.skip != 'true'
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: |
+          archive="pg_turbovec-${GITHUB_REF_NAME#v}.zip"
+          # 2xx/3xx: accepted.  409: this version is already on PGXN.
+          code=$(curl -sS -o /tmp/pgxn_resp.txt -w '%{http_code}' \
+            --user "$PGXN_USERNAME:$PGXN_PASSWORD" \
+            -F "archive=@${archive};type=application/zip" \
+            https://manager.pgxn.org/upload)
+          echo "PGXN upload HTTP $code"; cat /tmp/pgxn_resp.txt || true
+          case "$code" in
+            2*|3*) echo "PGXN upload accepted." ;;
+            409)   echo "::warning::this version is already on PGXN." ;;
+            *)     echo "::error::PGXN upload failed (HTTP $code)"; exit 1 ;;
+          esac

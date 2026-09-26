@@ -1,0 +1,13 @@
+=== [baseline] load 1M x 1024d + 20 queries (idempotent) ===
+already loaded
+=== [baseline] (re)build flat bw4 ===
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+ pg_size_pretty 
+----------------
+ 534 MB
+(1 row)
+
+RESULT[baseline] cold_backend_warmOS: p50=857.9 p95=868.7 min=841.6 n=10
+RESULT[baseline] true_cold_disk:      p50=6209.1 p95=6312.1 min=5804.2 n=10
+PF_DONE_baseline

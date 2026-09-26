@@ -1,0 +1,14 @@
+=== [prefetch] load 1M x 1024d + 20 queries (idempotent) ===
+loaded
+=== [prefetch] (re)build flat bw4 ===
+NOTICE:  index "docs_tv" does not exist, skipping
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+ pg_size_pretty 
+----------------
+ 534 MB
+(1 row)
+
+RESULT[prefetch] cold_backend_warmOS: p50=870.2 p95=885.9 min=854.0 n=10
+RESULT[prefetch] true_cold_disk:      p50=10756.9 p95=10945.7 min=10486.4 n=10
+PF_DONE_prefetch

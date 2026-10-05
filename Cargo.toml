@@ -44,14 +44,15 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.1"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "96386516d329b4190a7fa10afed18ffe95ba19b6", features = ["mask-skip-counter"] }
-# ^ turbovec 1.1.1 (upstream 60efd4d: staged 2/4-bit planes search) + THREE
-#   additive fork carries, cherry-picked unchanged onto branch
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "ba9295846f3f18eb5a403004e3f9ff6448ec5de0", features = ["mask-skip-counter"] }
+# ^ turbovec 1.1.1 (upstream 60efd4d: staged 2/4-bit planes search) + FOUR
+#   additive fork carries (the first three cherry-picked unchanged) on branch
 #   gburd/turbovec@pgtv-2.11.0-port: `pub fn repack` (3ed5708), the
-#   re-exposed IdMapIndex parts API (be133b8), and the parallel cold-open
-#   repack (9638651, byte-identical to serial — pinned by turbovec's
-#   `parallel_repack_is_byte_identical_to_serial`). Upstream issues
-#   #545/#546/#547. We persist only packed codes, never turbovec's v8 file
+#   re-exposed IdMapIndex parts API (be133b8), the parallel cold-open
+#   repack (9638651), and NEW carry #4, the parallel planes cold-open
+#   repack (ba92958) — both byte-identical to serial, pinned by turbovec's
+#   `parallel_{,planes_}repack_is_byte_identical_to_serial`. Upstream
+#   issues #545/#546/#547. We persist only packed codes, never turbovec's v8 file
 #   container, so 1.1's v8 *file* format does not touch our wire format.
 #   Pinned by git rev so the port builds anywhere.
 parking_lot = "0.12"

@@ -922,6 +922,161 @@ mod tests {
         );
     }
 
+    /// turbovec 1.1 adoption guard: the TurboQuant persist path must stay
+    /// byte-exact when the inner index is in 1.1's staged-search "planes"
+    /// cache layout. 1.1 builds that layout at >= 32,768 vectors on hosts
+    /// with the kernels (aarch64 dotprod, x86 AVX-512 VBMI+VNNI) and, after
+    /// an `add`, reconstructs `packed_codes()` -- the bytes we persist --
+    /// FROM that cache. A wrong reconstruction would write silently
+    /// different codes. So: load 40k rows (past the gate), mutate them
+    /// through the real `add_with_ids`/`remove` + PreCommit flush, reload,
+    /// and require every surviving row's persisted code row and scale to
+    /// equal the pre-mutation bytes, the appended rows to equal a fresh
+    /// encode, and the index to check clean and scan. On a host without
+    /// the kernels this exercises the classic layout (still a valid
+    /// guard); the EC2 aarch64 qualification runs it where planes engage.
+    #[pg_test]
+    fn persist_is_byte_exact_through_planes_layout() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        const N: i64 = 40_000; // > turbovec's PLANES_MIN_VECTORS (32,768)
+        const DIM: usize = 64; // multiple of 32: planes-eligible at 2 and 4 bits
+        Spi::run("CREATE TABLE t_planes (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_planes SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.37 + s * 1.13)::float8 FROM generate_series(1, {DIM}) s), ',') \
+                || ']')::turbovec.vector FROM generate_series(1, {N}) g"
+        ))
+        .unwrap();
+        for bw in [4, 2] {
+            let name = format!("t_planes_bw{bw}");
+            Spi::run(&format!(
+                "CREATE INDEX {name} ON t_planes USING turbovec \
+                 (emb turbovec.vec_cosine_ops) WITH (bit_width = {bw})"
+            ))
+            .unwrap();
+            let oid: pg_sys::Oid = Spi::get_one(&format!("SELECT '{name}'::regclass::oid"))
+                .unwrap()
+                .expect("oid");
+            let read = || unsafe {
+                let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+                let m = relfile::read_meta(rel).expect("meta");
+                let (c, s, i) = relfile::read_full(rel, &m);
+                let tq = relfile::read_tqplus(rel, &m);
+                pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+                (m, c, s, i, tq)
+            };
+            let (m0, codes0, scales0, ids0, (sh, sc)) = read();
+            let stride = m0.stride_bytes as usize;
+            let row0: std::collections::HashMap<u64, (Vec<u8>, u32)> = ids0
+                .iter()
+                .enumerate()
+                .map(|(s, &id)| {
+                    (id, (codes0[s * stride..(s + 1) * stride].to_vec(), scales0[s].to_bits()))
+                })
+                .collect();
+
+            let mut idx = IdMapIndex::from_id_map_parts(
+                bw, DIM, m0.n_vectors as usize, codes0, scales0, ids0.clone(), sh.clone(), sc.clone(),
+            )
+            .expect("from_id_map_parts");
+            idx.prepare(); // build the search cache: planes where the host has the kernels
+            let mut state = PersistState {
+                bit_width: bw as i32,
+                dim: DIM as i32,
+                n_vectors: m0.n_vectors as i64,
+                version: m0.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            // Remove 300 rows spread over the index (swap-remove moves the
+            // tail rows into the holes), then append 200 new ones. Removes
+            // are NOT recorded as touched: on disk, removal is VACUUM's job
+            // and the reconcile flush skips a touched id absent from the
+            // snapshot (the same contract aminsert keeps). They matter here
+            // because they rearrange the in-memory planes cache that
+            // `packed_codes()` is reconstructed from.
+            let removed: Vec<u64> = ids0.iter().step_by(131).take(300).copied().collect();
+            for &id in &removed {
+                assert!(idx.remove(id));
+            }
+            let new_rows: Vec<(u64, Vec<f32>)> = (0..200u64)
+                .map(|j| {
+                    let id = 0x7000_0000_0000 + j;
+                    (id, (0..DIM).map(|s| ((j as f32) * 0.71 + s as f32 * 0.29).cos()).collect())
+                })
+                .collect();
+            for (id, v) in &new_rows {
+                idx.add_with_ids(v, &[*id]).expect("add");
+                state.touched_ids.push(*id);
+            }
+            state.live_ids = idx.slot_to_id().to_vec();
+            state.n_vectors = state.live_ids.len() as i64;
+            state.version += 1;
+            // Same-calibration reference encoder for the appended rows.
+            let mut fresh = IdMapIndex::from_id_map_parts(bw, DIM, 0, vec![], vec![], vec![], sh, sc)
+                .expect("fresh");
+            for (id, v) in &new_rows {
+                fresh.add_with_ids(v, &[*id]).expect("fresh add");
+            }
+            let removed: std::collections::HashSet<u64> = removed.into_iter().collect();
+            // Expected bytes for a row. `in_mem` rejects a removed id.
+            let want = |id: u64, in_mem: bool| -> (Vec<u8>, u32) {
+                assert!(!(in_mem && removed.contains(&id)), "bw{bw}: removed id {id} still in memory");
+                if let Some(r) = row0.get(&id) {
+                    return r.clone();
+                }
+                let fs = fresh.slot_to_id().iter().position(|&x| x == id).expect("unknown id");
+                (fresh.packed_codes()[fs * stride..(fs + 1) * stride].to_vec(), fresh.scales()[fs].to_bits())
+            };
+            // (1) DIRECT: the in-memory packed_codes() turbovec reconstructs
+            // after add/remove (from the planes cache, where planes engaged)
+            // is exactly the bytes every row should have.
+            {
+                let (pc, ps) = (idx.packed_codes(), idx.scales());
+                for (s, &id) in idx.slot_to_id().iter().enumerate() {
+                    let w = want(id, true);
+                    assert_eq!(
+                        (&pc[s * stride..(s + 1) * stride], ps[s].to_bits()),
+                        (&w.0[..], w.1),
+                        "bw{bw}: in-memory row {id} (slot {s}) differs"
+                    );
+                }
+            }
+            unsafe { crate::xact::flush_to_relfile_for_test(oid, &idx, &state) };
+
+            let (m1, codes1, scales1, ids1, _) = read();
+            assert_eq!(m1.n_vectors as usize, ids1.len(), "bw{bw}: meta vs ids chain");
+            // Disk keeps the removed rows (VACUUM removes on disk) plus the
+            // 200 appended ones.
+            assert_eq!(ids1.len(), N as usize + 200, "bw{bw}: row count");
+            assert_eq!(crate::index::scan::first_duplicate_id(&ids1), None, "bw{bw}: dup id");
+            // (2) PERSISTED: same check on what the flush wrote.
+            let mut added = 0usize;
+            for (s, &id) in ids1.iter().enumerate() {
+                let w = want(id, false);
+                assert_eq!(
+                    (&codes1[s * stride..(s + 1) * stride], scales1[s].to_bits()),
+                    (&w.0[..], w.1),
+                    "bw{bw}: persisted row {id} differs"
+                );
+                added += usize::from(!row0.contains_key(&id));
+            }
+            assert_eq!(added, 200, "bw{bw}: appended rows persisted");
+
+            crate::cache::invalidate_all();
+            let (corrupt, reason): (Option<bool>, Option<String>) = Spi::get_two(&format!(
+                "SELECT is_corrupt, reason FROM turbovec.turbovec_check('{name}'::regclass)"
+            ))
+            .unwrap();
+            assert_eq!((corrupt, reason), (Some(false), None), "bw{bw}: turbovec_check");
+            Spi::run(&format!("DROP INDEX {name}")).unwrap();
+        }
+    }
+
     /// v1.29.4 regression: VACUUM-INDEPENDENT torn-write on interrupt.
     ///
     /// ROOT CAUSE (proven on EC2, 1.84M-row 768d bit_width=4 partial flat

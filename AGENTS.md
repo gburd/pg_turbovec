@@ -252,6 +252,12 @@ rustup `stable` toolchain's bundled `gcc-ld/ld.lld` wrapper
 references a GC'd rustup store path on this box; bfd is the system
 fallback.
 
+**turbovec >= 1.1 does NOT build with the nix-profile `rustc` 1.97.0**
+(system LLVM 21): `intrinsic signature mismatch for
+llvm.x86.avx512.vpdpbusd.512`. Use a rustup toolchain (LLVM 22):
+`TC=~/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu; export
+PATH=$TC/bin:$PATH RUSTC=$TC/bin/rustc`. CI's rustup `stable` is fine.
+
 Pre-test cleanup:
 ```bash
 pkill -9 -f "test-pgdata"; sleep 2

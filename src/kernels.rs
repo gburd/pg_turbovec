@@ -11,76 +11,58 @@
 //!
 //! # Precision
 //!
-//! `dot`, `norm2`, `l2_sq` and `l1_abs` sum in 16 independent `f32`
-//! lanes, which LLVM vectorizes (SSE2 on the portable x86-64 target,
-//! NEON on aarch64), and flush the lanes into `f64` every 128 elements.
-//! Whatever the dimension, a term goes through at most 9 `f32`
-//! roundings before it reaches `f64` (8 for `dot`, `norm2`, `l1_abs`),
-//! so the error is at most `γ₉ ≈ 5.4e-7` times `Σ|term|`, plus ~1e-14
-//! from the `f64` part (Higham, *Accuracy and Stability of Numerical
-//! Algorithms*, §3.1, §4.2). For `norm2`, `l2_sq` and `l1_abs` every
-//! term is non-negative, so that is a relative error. For `dot` it is
-//! relative to `Σ|aᵢbᵢ|`, the usual condition-scaled bound: near an
-//! exact zero no finite-precision dot product, the old serial `f64` one
-//! included, has a bounded relative error. Measured max against an
-//! exact compensated-`f64` reference, dims 1 to 16 000, unit-norm and
-//! ±1e3 data: 7.4e-8; adversarial constant vectors: 2.3e-7
-//! (`kernels_match_exact_reference`).
+//! These compute the EXACT distance the `ORDER BY` recheck ranks by, so
+//! they accumulate in `f64`. Each `f32` input widens to `f64` exactly (and
+//! an `f32 * f32` product is exact in `f64`), so the only error is the
+//! `f64` summation; the largest square of a finite `f32` (~1.2e77) cannot
+//! overflow it. The sum runs over 8 independent `f64` lanes so LLVM can
+//! vectorize it (packed `cvtps2pd`/`mulpd`/`addpd`, 2 doubles per op, at
+//! the portable x86-64 SSE2 target; `fcvtl`/`fmul`/`fadd .2d` on aarch64
+//! NEON). The old single serial chain could not be reordered, so it ran
+//! scalar. Splitting the chain 8 ways only shortens it: the error bound
+//! drops from `γₙ` to `γ₍ₙ/₈₊₃₎` times `Σ|term|` (Higham, *Accuracy and
+//! Stability of Numerical Algorithms*, §4.2).
 //!
-//! A lane result that is non-finite or below 1e-20 (an `f32` term may
-//! have overflowed or underflowed: inputs beyond ~1e19 or below ~1e-19)
-//! is recomputed with the old serial `f64` loop, so such inputs give the
-//! same answers as before. Dimensions below 16 never enter the `f32`
-//! lanes and are bit-identical to the old serial `f64` loop. A cosine
-//! distance below 1e-3, where `1 - cos θ` cancels, is recomputed in
-//! serial `f64` too (see [`cosine_distance_with_qnorm`]).
+//! Measured against an exact compensated-`f64` reference (dims 1 to
+//! 16 000; unit-norm, ±1e3 and constant vectors; 1e15, 3e38 and
+//! subnormal magnitudes), the max relative error is 5.5e-14 for constant
+//! vectors (the worst case) and ≤ 3.4e-15 otherwise
+//! (`kernels_match_exact_reference`); the old serial loop measured up to
+//! 4.4e-13 on the same data. `dot`'s error is relative to
+//! `Σ|aᵢbᵢ|`: near an exact zero no finite-precision dot product has a
+//! bounded relative error. Dimensions below 8 never enter the lanes and
+//! are bit-identical to the old serial loop.
 //!
-//! What this does NOT cover: `dot` on near-duplicate unit vectors. Two
-//! inner products that differ by less than ~1e-7 relative (e.g. a row
-//! and its 1e-10-distant near-duplicate under `<#>`) can now compare in
-//! either order; the old serial `f64` sum resolved ~1e-16. pgvector's
-//! `f32` inner product has the same limit. L2 has no cancellation (it
-//! subtracts before squaring) and keeps full relative precision.
-//!
-//! These kernels used to accumulate in serial `f64` on the grounds that
-//! "`f32` accumulation drops 2–3 decimal digits on corpora of ≥ 10⁶
-//! vectors". That conflated a per-vector sum (at most 16 000 terms) with
-//! a corpus-sized one. The single dependent add chain cannot be
-//! reordered by LLVM, so it was ~4-10x slower at 1024-d.
+//! The old serial loop was justified as "`f32` accumulation drops 2–3
+//! decimal digits on corpora of ≥ 10⁶ vectors". That conflated a
+//! per-vector sum (at most 16 000 terms) with a corpus-sized one. `f32`
+//! lanes were tried and rejected: their ~1e-7 relative error reordered
+//! inner-product top-10s on tight clusters and collapsed near-duplicate
+//! cosine distances to 0 (`inner_product_top10_order_exact_on_tight_cluster`,
+//! `cosine_resolves_near_duplicates`).
 
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    lane_sum(a, b, |x, y| x * y, |x, y| x * y)
+    lane_sum(a, b, |x, y| x * y)
 }
 
 #[inline]
 pub fn l2_sq(a: &[f32], b: &[f32]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    lane_sum(
-        a,
-        b,
-        |x, y| {
-            let d = x - y;
-            d * d
-        },
-        |x, y| {
-            let d = x - y;
-            d * d
-        },
-    )
+    lane_sum(a, b, |x, y| (x - y) * (x - y))
 }
 
 #[inline]
 pub fn l1_abs(a: &[f32], b: &[f32]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    lane_sum(a, b, |x, y| (x - y).abs(), |x, y| (x - y).abs())
+    lane_sum(a, b, |x, y| (x - y).abs())
 }
 
 /// Squared L2 norm.
 #[inline]
 pub fn norm2(a: &[f32]) -> f64 {
-    lane_sum(a, a, |x, _| x * x, |x, _| x * x)
+    lane_sum(a, a, |x, _| x * x)
 }
 
 /// Cosine distance: `1 - cos θ`. Returns `NaN` if either operand has
@@ -97,18 +79,9 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
 /// zero, `cos θ` clamped to `[-1, 1]`. The norm of `a` is always
 /// computed; rows are not assumed to be unit length.
 ///
-/// `1 - cos θ` cancels as the distance approaches 0, and the lane
-/// kernels' absolute error in `cos θ` (at most ~1e-6, measured ≤ 2.1e-7)
-/// would then swamp it: near-duplicates 1e-10 apart all come out as
-/// exactly 0 and a self-match query returns an arbitrary one of them. A
-/// result below [`COSINE_EXACT_BELOW`] is therefore recomputed with the
-/// old serial `f64` code and is bit-identical to it. Neighbours in real
-/// embeddings (cosine distance ≳ 0.05) never take that path.
-///
 /// `dot` and `norm2(a)` are two passes rather than one fused loop on
-/// purpose: on the portable SSE2 target the fused loop needs 32 live
-/// accumulator registers, spills, and measured ~20% slower than two
-/// passes over a vector that is already in L1.
+/// purpose: on the portable SSE2 target the fused loop is about 2x
+/// slower than two passes over a vector that is already in L1.
 #[inline]
 pub fn cosine_distance_with_qnorm(a: &[f32], b: &[f32], qnorm2: f64) -> f64 {
     debug_assert_eq!(a.len(), b.len());
@@ -116,134 +89,46 @@ pub fn cosine_distance_with_qnorm(a: &[f32], b: &[f32], qnorm2: f64) -> f64 {
     if na == 0.0 || qnorm2 == 0.0 {
         return f64::NAN;
     }
-    let dist = 1.0 - (dot(a, b) / (na.sqrt() * qnorm2.sqrt())).clamp(-1.0, 1.0);
-    if dist < COSINE_EXACT_BELOW {
-        cosine_distance_serial(a, b)
-    } else {
-        dist
-    }
-}
-
-/// Cosine distances below this are recomputed in serial `f64` (see
-/// [`cosine_distance_with_qnorm`]). The fast path's absolute error is
-/// ≤ ~1e-6, so above this it is ≤ 0.1% relative.
-const COSINE_EXACT_BELOW: f64 = 1e-3;
-
-/// The pre-2.11.1 cosine distance, bit for bit: three serial `f64` sums.
-#[cold]
-#[inline(never)]
-fn cosine_distance_serial(a: &[f32], b: &[f32]) -> f64 {
-    let na = serial_sum(a, a, |x, _| x * x);
-    let nb = serial_sum(b, b, |x, _| x * x);
-    if na == 0.0 || nb == 0.0 {
-        return f64::NAN;
-    }
-    let cos = (serial_sum(a, b, |x, y| x * y) / (na.sqrt() * nb.sqrt())).clamp(-1.0, 1.0);
+    let cos = (dot(a, b) / (na.sqrt() * qnorm2.sqrt())).clamp(-1.0, 1.0);
     1.0 - cos
 }
 
-/// Independent `f32` accumulator lanes. 16 = four 128-bit registers,
-/// enough independent add chains to hide the FP-add latency.
-const LANES: usize = 16;
-/// Elements summed in `f32` before the lanes are flushed into `f64`.
-const BLOCK: usize = 8 * LANES;
+/// Independent `f64` accumulator lanes. 8 measured fastest or tied
+/// (4/8/16/32 tried) on Sapphire Rapids at 384-3072 dims; 32 spills.
+const LANES: usize = 8;
 
-/// Below this magnitude a lane result may have lost terms to `f32`
-/// underflow. Each `f32` operation loses at most `2^-126 ≈ 1.2e-38`
-/// absolute to underflow, even with flush-to-zero set (which a library
-/// built with `-ffast-math` can turn on in the backend). With at most
-/// ~32 000 operations (16 000 dims) that is < 4e-34 absolute, so a
-/// result above 1e-20 carries < 4e-14 relative underflow error.
-const LANE_TINY: f64 = 1e-20;
-
-/// `Σ term(a[i], b[i])`: blocks of [`BLOCK`] in `f32` lanes flushed into
-/// `f64`, then 16-wide chunks, then the last < 16 elements as exact
-/// `f64` terms via `exact`.
-///
-/// If the lane result is non-finite (an `f32` term or lane overflowed:
-/// with finite inputs that is the only way to get inf/NaN, and it cannot
-/// be masked), zero, or below [`LANE_TINY`] (terms may have
-/// underflowed), it is recomputed by [`serial_sum`], the old serial
-/// `f64` loop, which returns its exact old bits. Real embeddings never
-/// take that branch; it keeps inputs beyond ~1e19 or below ~1e-19, which
-/// the type accepts, giving the same answers as before.
+/// `Σ term(a[i], b[i])` in `f64`, over [`LANES`] independent lanes, then
+/// the last < [`LANES`] elements.
 #[inline]
-fn lane_sum(
-    a: &[f32],
-    b: &[f32],
-    term: impl Fn(f32, f32) -> f32 + Copy,
-    exact: impl Fn(f64, f64) -> f64 + Copy,
-) -> f64 {
+fn lane_sum(a: &[f32], b: &[f32], term: impl Fn(f64, f64) -> f64) -> f64 {
     let n = a.len().min(b.len());
-    let (blocks_a, tail_a) = a[..n].as_chunks::<BLOCK>();
-    let (blocks_b, tail_b) = b[..n].as_chunks::<BLOCK>();
-    let mut wide = [0.0_f64; LANES];
-    for (x, y) in blocks_a.iter().zip(blocks_b) {
-        let p = block_lanes(x, y, term);
-        for i in 0..LANES {
-            wide[i] += f64::from(p[i]);
-        }
-    }
-    let (chunks_a, rest_a) = tail_a.as_chunks::<LANES>();
-    let (chunks_b, rest_b) = tail_b.as_chunks::<LANES>();
-    let mut lanes = [0.0_f32; LANES];
+    let (chunks_a, rest_a) = a[..n].as_chunks::<LANES>();
+    let (chunks_b, rest_b) = b[..n].as_chunks::<LANES>();
+    let mut lanes = [0.0_f64; LANES];
     for (x, y) in chunks_a.iter().zip(chunks_b) {
         for i in 0..LANES {
-            lanes[i] += term(x[i], y[i]);
+            lanes[i] += term(f64::from(x[i]), f64::from(y[i]));
         }
     }
     let mut s = 0.0_f64;
-    for i in 0..LANES {
-        s += wide[i] + f64::from(lanes[i]);
+    for v in lanes {
+        s += v;
     }
     for (x, y) in rest_a.iter().zip(rest_b) {
-        s += exact(f64::from(*x), f64::from(*y));
+        s += term(f64::from(*x), f64::from(*y));
     }
-    if s.abs() >= LANE_TINY && s.abs() < f64::INFINITY {
-        s
-    } else {
-        serial_sum(&a[..n], &b[..n], exact)
-    }
-}
-
-/// One [`BLOCK`] in [`LANES`] independent `f32` accumulators.
-///
-/// Kept out of line on purpose: compiled on its own, the fixed-size body
-/// vectorizes to packed SIMD on both x86-64 (SSE2) and aarch64 (NEON) for
-/// every `term`. Inlined into its caller, LLVM's SLP vectorizer was seen
-/// to fall back to 2-wide shuffled loads for `dot` alone, at 2.2x the
-/// cost. One call per 128 elements is noise next to that.
-#[inline(never)]
-fn block_lanes(x: &[f32; BLOCK], y: &[f32; BLOCK], term: impl Fn(f32, f32) -> f32) -> [f32; LANES] {
-    let mut lanes = [0.0_f32; LANES];
-    for k in (0..BLOCK).step_by(LANES) {
-        for i in 0..LANES {
-            lanes[i] += term(x[k + i], y[k + i]);
-        }
-    }
-    lanes
-}
-
-/// The pre-2.11.1 kernel: one serial `f64` add chain.
-#[cold]
-#[inline(never)]
-fn serial_sum(a: &[f32], b: &[f32], exact: impl Fn(f64, f64) -> f64) -> f64 {
-    let mut acc = 0.0_f64;
-    for (x, y) in a.iter().zip(b) {
-        acc += exact(f64::from(*x), f64::from(*y));
-    }
-    acc
+    s
 }
 
 /// Write a unit-normalised copy of `src` into `dst`. If `src` is the
 /// zero vector, `dst` is filled with `src` unchanged. Returns the
 /// L2 norm of the input (caller may want it for further bookkeeping).
 ///
-/// The norm is summed in serial `f64`, not with the lane kernel: the
-/// output is what gets quantized and persisted, so it must stay
-/// bit-identical across releases (an ulp of difference can move a code
-/// across a quantization boundary). It runs once per row or query, not
-/// per candidate, so its speed does not matter.
+/// The norm is summed in one serial `f64` chain, not with [`norm2`]'s
+/// lanes: the output is what gets quantized and persisted, so it must
+/// stay bit-identical across releases (an ulp of difference can move a
+/// code across a quantization boundary). It runs once per row or query,
+/// not per candidate, so its speed does not matter.
 pub fn normalise_into(dst: &mut [f32], src: &[f32]) -> f64 {
     debug_assert_eq!(dst.len(), src.len());
     let n2: f64 = src
@@ -441,15 +326,15 @@ mod tests {
         1.0 - cos
     }
 
-    /// Below 16 dims nothing enters the f32 lanes: results are
-    /// bit-identical to the old serial f64 kernels, so small-dim SQL
-    /// outputs and tie orders cannot move.
+    /// Below 8 dims nothing enters the lanes: results are bit-identical
+    /// to the old serial f64 kernels, so small-dim SQL outputs and tie
+    /// orders cannot move.
     #[test]
     #[allow(clippy::float_cmp)] // exact results are the point
     fn small_dims_bit_identical_to_old_kernels() {
         let mut rng = Rng(42);
         for kind in ["unit", "signed1e3", "positive1e3"] {
-            for dim in 0..16 {
+            for dim in 0..LANES {
                 for _ in 0..50 {
                     let a = rng.vector(kind, dim);
                     let b = rng.vector(kind, dim);
@@ -528,10 +413,11 @@ mod tests {
     /// term is non-negative, so this IS the ordinary relative error. For
     /// dot it is the standard condition-scaled error: relative error
     /// against a near-zero dot (near-orthogonal vectors) is unbounded for
-    /// any finite-precision sum, the old f64 one included.
-    const KERNEL_REL_BOUND: f64 = 1e-6;
+    /// any finite-precision sum, the old f64 one included. Rigorous bound
+    /// at 16 000 dims: γ₂₀₀₃ ≈ 2.2e-13; measured max 5.5e-14.
+    const KERNEL_REL_BOUND: f64 = 1e-13;
     /// Absolute bound on `cosine_distance` (a value in [0, 2]).
-    const COSINE_ABS_BOUND: f64 = 2e-6;
+    const COSINE_ABS_BOUND: f64 = 1e-13;
 
     #[test]
     fn kernels_match_exact_reference() {
@@ -628,16 +514,23 @@ mod tests {
         assert_eq!(cosine_distance(&[3.0], &[5.0]), 0.0);
     }
 
-    /// `1 - cos θ` cancels near 0, so an f32-lane cosine (absolute error
-    /// ~1e-7) cannot resolve near-duplicates: rows 3e-10 apart all come
-    /// out as exactly 0 and a self-match query (`ORDER BY emb <=> (SELECT
-    /// emb ... WHERE id = k)`) returns an arbitrary near-duplicate.
-    /// Pure-Rust reproduction of the `onebit_all_positive_corpus_*`
-    /// fixture, where row 29 is 3.3e-10 from row 100. Below the
-    /// near-duplicate threshold the result must be the old serial f64
-    /// value, bit for bit.
+    /// Exact cosine distance from compensated sums.
+    fn cosine_exact(a: &[f32], b: &[f32]) -> f64 {
+        let d = oracle(a, b, |x, y| x * y);
+        let (na, nb) = (oracle(a, a, |x, _| x * x), oracle(b, b, |x, _| x * x));
+        1.0 - (d / (na.sqrt() * nb.sqrt())).clamp(-1.0, 1.0)
+    }
+
+    /// `1 - cos θ` cancels near 0, so a cosine with absolute error ~1e-7
+    /// (f32 accumulation) cannot resolve near-duplicates: rows 3e-10
+    /// apart all come out as exactly 0 and a self-match query (`ORDER BY
+    /// emb <=> (SELECT emb ... WHERE id = k)`) returns an arbitrary
+    /// near-duplicate. Pure-Rust reproduction of the
+    /// `onebit_all_positive_corpus_*` fixture, where row 29 is 3.3e-10
+    /// from row 100; then perturbations of 1e-6..1e-3 at every dim, whose
+    /// distances (~1e-13..1e-7) must come out in exact order.
     #[test]
-    fn cosine_resolves_near_duplicates_like_old() {
+    fn cosine_resolves_near_duplicates() {
         let row = |g: i64| -> Vec<f32> {
             (1..=32)
                 .map(|s| (10.0 + ((g * 31 + s * 17) % 100) as f64 / 100.0) as f32)
@@ -656,38 +549,99 @@ mod tests {
             best.1
         };
         assert_eq!(nearest(&cosine_old), 100, "fixture: old kernel finds self");
-        assert_eq!(
-            nearest(&cosine_distance),
-            100,
-            "new kernel must find self too"
-        );
+        assert_eq!(nearest(&cosine_distance), 100, "new kernel must find self");
         let qn = norm2(&q);
         assert_eq!(
             nearest(&|a, b| cosine_distance_with_qnorm(a, b, qn)),
             100,
-            "with_qnorm must find self too"
+            "with_qnorm must find self"
         );
-        // Random near-duplicates at every dim: perturbations from 1e-7 to
-        // 1e-3 relative, so true distances span ~1e-14 to ~1e-6.
         let mut rng = Rng(11);
-        for &dim in &PRECISION_DIMS {
+        let (mut worst, mut worst_old) = (0.0_f64, 0.0_f64);
+        for &dim in &PRECISION_DIMS[4..] {
             for kind in ["unit", "signed1e3", "positive1e3"] {
                 let a = rng.vector(kind, dim);
-                for eps in [1e-7, 1e-5, 1e-3] {
+                let u: Vec<f64> = (0..dim).map(|_| rng.unif() * 2.0 - 1.0).collect();
+                let mut prev = (-1.0_f64, -1.0_f64);
+                for eps in [1e-6, 1e-5, 1e-4, 1e-3] {
                     let b: Vec<f32> = a
                         .iter()
-                        .map(|x| x * (1.0 + (eps * (rng.unif() * 2.0 - 1.0)) as f32))
+                        .zip(&u)
+                        .map(|(x, w)| (f64::from(*x) * (1.0 + eps * w)) as f32)
                         .collect();
-                    for (x, y) in [(&a, &b), (&b, &a), (&a, &a)] {
-                        let (new, old) = (cosine_distance(x, y), cosine_old(x, y));
-                        assert_eq!(new.to_bits(), old.to_bits(), "{kind} dim {dim} eps {eps}");
-                        let qn = norm2(y);
-                        let nq = cosine_distance_with_qnorm(x, y, qn);
-                        assert_eq!(nq.to_bits(), old.to_bits(), "{kind} dim {dim} eps {eps}");
-                    }
+                    let (got, exact) = (cosine_distance(&b, &a), cosine_exact(&b, &a));
+                    let qn = norm2(&a);
+                    assert_eq!(
+                        cosine_distance_with_qnorm(&b, &a, qn).to_bits(),
+                        got.to_bits()
+                    );
+                    // `1 - cos` inherits cos's few-ulp-of-1 error (old
+                    // serial kernel included): bound it absolutely.
+                    let old = cosine_old(&b, &a);
+                    worst = worst.max((got - exact).abs());
+                    worst_old = worst_old.max((old - exact).abs());
+                    assert!(
+                        (got - exact).abs() <= 1e-14,
+                        "{kind} dim {dim} eps {eps}: {got:e} vs exact {exact:e}"
+                    );
+                    assert!(
+                        got > prev.0 && exact > prev.1,
+                        "{kind} dim {dim} eps {eps}: order lost ({got:e} after {:e})",
+                        prev.0
+                    );
+                    prev = (got, exact);
                 }
             }
         }
+        println!("near-dup cosine abs err: new {worst:e}, old serial {worst_old:e}");
+    }
+
+    /// Inner product on a tight cluster: unit vectors around a few
+    /// centres, nearest cosine distance ~7e-5, adjacent top-10 scores
+    /// ~1e-10 apart. f32 accumulation (relative error ~1e-7) reordered
+    /// the top-10 in 7 of 100 queries here; the exact recheck must not.
+    /// The top-10 ORDER by `-dot` must match the compensated-f64 oracle
+    /// for every query (ties broken by row index in both).
+    #[test]
+    fn inner_product_top10_order_exact_on_tight_cluster() {
+        let (n, dim, centres, spread) = (1000_usize, 384_usize, 10_usize, 0.01_f64);
+        let mut rng = Rng(5);
+        let c: Vec<Vec<f64>> = (0..centres)
+            .map(|_| (0..dim).map(|_| rng.gauss()).collect())
+            .collect();
+        let sample = |rng: &mut Rng| -> Vec<f32> {
+            let k = (rng.next() % centres as u64) as usize;
+            let v: Vec<f64> = c[k].iter().map(|x| x + spread * rng.gauss()).collect();
+            let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            v.iter().map(|x| (x / norm) as f32).collect()
+        };
+        let corpus: Vec<Vec<f32>> = (0..n).map(|_| sample(&mut rng)).collect();
+        let top10 = |scores: &[f64]| -> Vec<usize> {
+            let mut idx: Vec<usize> = (0..scores.len()).collect();
+            idx.sort_by(|&i, &j| scores[i].total_cmp(&scores[j]).then(i.cmp(&j)));
+            idx.truncate(10);
+            idx
+        };
+        let mut nearest = f64::INFINITY;
+        for qi in 0..100 {
+            let q = sample(&mut rng);
+            let exact: Vec<f64> = corpus
+                .iter()
+                .map(|v| -oracle(v, &q, |x, y| x * y))
+                .collect();
+            let got: Vec<f64> = corpus.iter().map(|v| -dot(v, &q)).collect();
+            let want = top10(&exact);
+            nearest = nearest.min(1.0 + exact[want[0]]);
+            assert_eq!(
+                top10(&got),
+                want,
+                "query {qi}: top-10 order differs from exact"
+            );
+        }
+        assert!(
+            nearest < 2e-4,
+            "fixture not tight: nearest cos distance {nearest:e}"
+        );
     }
 
     /// Cosine stays inside [0, 2] for parallel / antiparallel inputs,
@@ -712,7 +666,8 @@ mod tests {
 
     /// Magnitudes whose squares leave the f32 range (overflow above
     /// ~1.8e19, underflow / subnormal below ~1e-19) and subnormal inputs
-    /// must give the same FINITE answers the f64 kernels always gave:
+    /// must give FINITE, exact-to-rounding answers: f64 accumulation has
+    /// the range for all of them (3e38^2 ~ 1e77), with no fallback.
     /// `normalise_on_insert` and every distance operator run through
     /// these, and an inf / 0 here would silently mis-encode or mis-rank.
     #[test]
@@ -732,8 +687,7 @@ mod tests {
                 },
                 vec![1e19; 300],
             ),
-            // Most terms underflow f32 but the sum is dominated by
-            // normal ones: stays on the lane path, error ~1e-48.
+            // Terms whose squares underflow f32, next to normal ones.
             (
                 {
                     let mut v = vec![1e-25_f32; 300];

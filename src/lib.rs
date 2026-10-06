@@ -6352,12 +6352,27 @@ mod tests {
             )
         };
         Spi::run(&rows_sql(1, 1)).unwrap();
+        // Same CBOR width as the coordinate it replaces (f16-exact vs f32),
+        // so only the payload's last bytes differ, and big enough that a
+        // stale decode is far outside the comparison tolerance.
+        let tail = if quantize { "100.25" } else { "100.123457" };
         Spi::run(&format!(
             "INSERT INTO {table} SELECT {n} + 1, ('[' || array_to_string(\
-                (tv::real[])[1:{dim} - 1] || ARRAY[42.5::real], ',') || ']')::vector \
+                (tv::real[])[1:{dim} - 1] || ARRAY[{tail}::real], ',') || ']')::vector \
              FROM {table} WHERE id = 1"
         ))
         .unwrap();
+        let same_len: Option<bool> = Spi::get_one(&format!(
+            "SELECT pg_column_size(a.tv::text::vector) = pg_column_size(b.tv::text::vector) \
+                    AND a.tv::text <> b.tv::text \
+             FROM {table} a, {table} b WHERE a.id = 1 AND b.id = {n} + 1"
+        ))
+        .unwrap();
+        assert_eq!(
+            same_len,
+            Some(true),
+            "{table}: tail row must differ only in content"
+        );
         Spi::run(&rows_sql(2, 2)).unwrap();
         Spi::run(&format!(
             "INSERT INTO {table} SELECT {n} + 2, tv FROM {table} WHERE id = 2"
@@ -6398,13 +6413,13 @@ mod tests {
         ops.to_vec()
     }
 
-    /// Relative 1e-6: survives a reassociated f32 (vectorised) kernel, still
+    /// Relative 1e-5: survives a reassociated f32 (vectorised) kernel, still
     /// orders of magnitude below what a wrong (stale) operand produces.
     fn qc_close(got: f64, want: f64) -> bool {
         if want.is_nan() {
             return got.is_nan(); // cosine against a zero row
         }
-        (got - want).abs() <= 1e-6 * want.abs().max(1.0)
+        (got - want).abs() <= 1e-5 * want.abs().max(1.0)
     }
 
     fn qc_agg(sql: &str) -> Vec<f64> {
@@ -6447,6 +6462,20 @@ mod tests {
                         got[i]
                     );
                 }
+            }
+            // Correlated subplan: one FmgrInfo for the whole statement, its
+            // Param operand changing per outer row (a constant per rescan).
+            let got = qc_agg(&format!(
+                "SELECT array_agg((SELECT sum({}) FROM {table} y) ORDER BY x.id) FROM {table} x",
+                e("y.tv", "x.tv")
+            ));
+            for i in 0..n {
+                let want: f64 = rows.iter().map(|r| reference(r, &rows[i])).sum();
+                assert!(
+                    qc_close(got[i], want),
+                    "{table} {tmpl} subplan row {i}: {} vs {want}",
+                    got[i]
+                );
             }
             for (a, b) in [("x.tv", "y.tv"), ("y.tv", "x.tv")] {
                 let expr = e(a, b);
@@ -6564,13 +6593,15 @@ mod tests {
 
     /// Dimension-mismatch errors are unchanged, including when the
     /// mismatching row arrives after the constant is already cached.
-    fn qc_mismatch(op: &str) {
+    fn qc_mismatch(table: &str, op: &str) {
         use_turbovec();
-        Spi::run("CREATE TABLE qc_mm (id int, tv vector)").unwrap();
-        Spi::run("INSERT INTO qc_mm VALUES (1, '[1,2,3]'), (2, '[4,5,6]'), (3, '[1,2,3,4]')")
-            .unwrap();
+        Spi::run(&format!("CREATE TABLE {table} (id int, tv vector)")).unwrap();
         Spi::run(&format!(
-            "SELECT array_agg({} ORDER BY id) FROM qc_mm",
+            "INSERT INTO {table} VALUES (1, '[1,2,3]'), (2, '[4,5,6]'), (3, '[1,2,3,4]')"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "SELECT array_agg({} ORDER BY id) FROM {table}",
             op.replace("{a}", "tv").replace("{b}", "'[1,1,1]'::vector")
         ))
         .unwrap();
@@ -6579,25 +6610,25 @@ mod tests {
     #[pg_test]
     #[should_panic(expected = "different vector dimensions 4 and 3 for operator '<->'")]
     fn distance_cache_mismatch_l2() {
-        qc_mismatch("{a} <-> {b}");
+        qc_mismatch("qc_mm_l2", "{a} <-> {b}");
     }
 
     #[pg_test]
     #[should_panic(expected = "different vector dimensions 4 and 3 for operator '<#>'")]
     fn distance_cache_mismatch_ip() {
-        qc_mismatch("{a} <#> {b}");
+        qc_mismatch("qc_mm_ip", "{a} <#> {b}");
     }
 
     #[pg_test]
     #[should_panic(expected = "different vector dimensions 3 and 4 for operator '<=>'")]
     fn distance_cache_mismatch_cosine_const_left() {
-        qc_mismatch("{b} <=> {a}");
+        qc_mismatch("qc_mm_cosine_const_left", "{b} <=> {a}");
     }
 
     #[pg_test]
     #[should_panic(expected = "different vector dimensions 4 and 3 for operator '<+>'")]
     fn distance_cache_mismatch_l1() {
-        qc_mismatch("{a} <+> {b}");
+        qc_mismatch("qc_mm_l1", "{a} <+> {b}");
     }
 
     #[pg_test]
@@ -6605,13 +6636,13 @@ mod tests {
         expected = "different vector dimensions 4 and 3 for operator 'l2_squared_distance'"
     )]
     fn distance_cache_mismatch_l2_squared() {
-        qc_mismatch("turbovec.l2_squared_distance({a}, {b})");
+        qc_mismatch("qc_mm_l2_squared", "turbovec.l2_squared_distance({a}, {b})");
     }
 
     #[pg_test]
     #[should_panic(expected = "different vector dimensions 4 and 3 for operator 'inner_product'")]
     fn distance_cache_mismatch_inner_product() {
-        qc_mismatch("turbovec.inner_product({a}, {b})");
+        qc_mismatch("qc_mm_inner_product", "turbovec.inner_product({a}, {b})");
     }
 
     /// NULL in, NULL out (STRICT), on either side and mid-scan, and the
@@ -6649,8 +6680,7 @@ mod tests {
              WHERE pronamespace = 'turbovec'::regnamespace \
                AND proname IN ('l2_distance', 'negative_inner_product', 'cosine_distance', \
                                'l1_distance', 'l2_squared_distance', 'inner_product') \
-               AND proargtypes::oid[] = ARRAY['turbovec.vector'::regtype::oid, \
-                                              'turbovec.vector'::regtype::oid] \
+               AND pg_get_function_arguments(oid) = 'a vector, b vector' \
                AND proisstrict AND provolatile = 'i' AND proparallel = 's' \
                AND prorettype = 'float8'::regtype AND pronargs = 2",
         )

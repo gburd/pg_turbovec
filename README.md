@@ -235,12 +235,15 @@ answer).
 > **v2.11.0 (turbovec 1.1.1):** on aarch64 (Graviton, Ampere, Apple) and x86
 > with AVX-512 VBMI+VNNI, flat 4-bit queries are **1.14–1.17× faster
 > end-to-end** at 1M × 1024-d (Graviton4: 7.88 → 6.72 ms at `search_k=32`),
-> recall unchanged; the scan kernel itself is 3–6.5× faster (~1 ms), so at
-> large `search_k` the per-candidate recheck dominates. That recheck measured
-> ~17–18 µs per candidate at 1024-d on x86, ~1–2 µs of it PostgreSQL core and
-> the rest pg_turbovec's vector decode, TOAST fetch and distance kernel
+> recall unchanged; the scan kernel itself is 3–6.5× faster (~1 ms per query
+> at 32 threads), so at large `search_k` the per-candidate recheck dominates.
+> On x86 (200k × 1024-d, `search_k = 1024`) that recheck measured ~17–18 µs of
+> backend CPU per candidate, ~1–2 µs of it PostgreSQL core and the rest
+> pg_turbovec's vector decode, TOAST fetch and distance kernel; it has not been
+> broken down on Graviton4
 > ([recheck attribution](benches/results/recheck_20261006/FINDINGS.md)).
-> AVX2-only x86 is unchanged; there the scan is still roughly half of a query.
+> AVX2-only x86 is unchanged; in the AVX2 run above the scan was still roughly
+> half of the query.
 > [docs/BENCHMARKS.md](docs/BENCHMARKS.md#turbovec-111-staged-search-on-graviton4-v2110-2026-10-05).
 > v2.11.0 also fixes a **silent index-entry corruption under concurrent writes
 > + VACUUM** present since v1.29.1 -- upgrade, then `REINDEX` indexes that took

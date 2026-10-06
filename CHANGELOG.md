@@ -17,8 +17,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   pg_turbovec's own code: two serde-CBOR decodes per candidate (~8 µs), the
   TOAST fetch of the candidate vector (~5 µs) and the scalar distance kernel
   (~3 µs). On Graviton4 after turbovec 1.1 the scan is ~1 ms, so at large
-  `search_k` the per-candidate recheck dominates; on AVX2 hosts the scan is
-  still roughly half of a query. Corrected in the [2.11.0] entry below (marked
+  `search_k` the per-candidate recheck dominates (the per-candidate breakdown
+  was not measured there); in the x86 AVX2 run (200k rows, `search_k = 1024`)
+  the scan was still roughly half of the query. The ~48 µs and ~17–18 µs
+  figures are not directly comparable (wall-clock on Graviton4 at 1M rows vs
+  backend CPU on x86 at 200k rows); what was wrong was attributing the cost to
+  PostgreSQL's recheck rather than to pg_turbovec's own code. Corrected in the [2.11.0] entry below (marked
   as a correction), `README.md`, `docs/BENCHMARKS.md` and
   `benches/results/tv111_arm_20261005/FINDINGS.md`.
 - **README feature table: pgvector does not re-rank against the heap.** The
@@ -78,8 +82,12 @@ the **candidate set** an index scan returns can differ slightly from 2.10.3's
   PostgreSQL core and the rest pg_turbovec's own code (two serde-CBOR decodes
   ~8 µs, TOAST fetch ~5 µs, scalar distance kernel ~3 µs). The bottleneck
   statement holds on Graviton4, where the scan is now ~1 ms, at large
-  `search_k`; it does not hold on AVX2 hosts, where the scan is still roughly
-  half of a query.
+  `search_k` (the per-candidate breakdown was not measured there); in the x86
+  AVX2 run (200k rows, `search_k = 1024`) the scan was still roughly half of
+  the query. The 48 µs (wall-clock, Graviton4, 1M rows) and 17–18 µs (backend
+  CPU, x86, 200k rows) are different measurements; the error was the
+  attribution, not just the number: most of the per-candidate cost is
+  pg_turbovec's, not inherent to PostgreSQL's recheck.
 
 - **Cold-backend latency kept (and slightly improved) via a new fork carry.**
   Stock 1.1.1 builds the planes cache with a serial `planes_repack`, bypassing

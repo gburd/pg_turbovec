@@ -96,15 +96,19 @@ deserialize + exact recheck. A straight-line fit of §2 from k=32 to k=1024
 gives about 4.5 ms + ~48 µs per candidate.
 
 **Correction (2026-10-06):** an earlier version of this paragraph presented
-that ~48 µs slope as the per-candidate recheck cost. It is a fit to
-end-to-end latency, not a measurement. A real-query attribution
+that ~48 µs slope as the cost of PostgreSQL's per-candidate recheck. The slope
+is real wall-clock marginal cost on this host at 1M rows, but the attribution
+was wrong. A real-query attribution
 ([`../recheck_20261006/FINDINGS.md`](../recheck_20261006/FINDINGS.md))
 measured ~17–18 µs per candidate at 1024-d on x86: ~1–2 µs PostgreSQL core
 (heap fetch, reorder queue, executor), the rest pg_turbovec's own code (two
 serde-CBOR decodes ~8 µs, TOAST fetch ~5 µs, scalar distance kernel ~3 µs).
 The per-candidate cost was not measured on this Graviton4 host. With the scan
 now ~1 ms here, the per-candidate recheck dominates a flat-index query at
-large `search_k`; on AVX2 hosts the scan is still roughly half of a query.
+large `search_k`; in the x86 AVX2 run (200k rows, `search_k = 1024`) the scan
+was still roughly half of the query. The 48 µs here and the 17–18 µs there are
+different measurements (wall-clock at 1M rows vs backend CPU at 200k rows); a
+1M-row per-candidate breakdown is part of the follow-up benchmark.
 The next lever is fewer candidates at equal recall or a cheaper recheck, not a
 further kernel speedup.
 

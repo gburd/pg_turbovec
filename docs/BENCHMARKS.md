@@ -36,18 +36,19 @@ raw data, cold-backend and candidate-agreement numbers:
 
 turbovec kernel alone (no PostgreSQL), same corpus and host, single query, 32
 threads: 4-bit k=10 **1.84 → 0.62 ms (3.0×)**, k=1024 **8.29 → 1.28 ms (6.5×)**.
-The end-to-end saving equals the kernel saving in milliseconds; what is left
-(per-query overhead plus the per-candidate heap fetch + exact recheck) this
-release does not change. An earlier version of this paragraph put that at
-"~4.5 ms + ~48 µs per candidate"; that was a slope fitted to end-to-end
-latency against `search_k`, not a measurement. A real-query attribution
-measured ~17–18 µs per candidate at 1024-d on x86: ~1–2 µs PostgreSQL core,
-the rest pg_turbovec's own code (two serde-CBOR decodes ~8 µs, TOAST fetch
-~5 µs, scalar distance kernel ~3 µs); see
-[`benches/results/recheck_20261006/FINDINGS.md`](../benches/results/recheck_20261006/FINDINGS.md)
-(not measured on Graviton4). With the scan at ~1 ms here, the recheck
-dominates at large `search_k`; on AVX2 hosts the scan is still roughly half of
-a query. Applies to aarch64 (dotprod) and x86 AVX-512 VBMI+VNNI only;
+The end-to-end saving equals the kernel saving in milliseconds; this release
+does not change the rest of the query (per-query overhead plus the
+per-candidate heap fetch and exact recheck). On Graviton4 a straight-line fit
+of the table above gives about 4.5 ms + ~48 µs per candidate (wall-clock, 1M
+rows); an earlier version of this paragraph attributed that slope to
+PostgreSQL's recheck, which was wrong. A real-query attribution on x86 (not on
+Graviton4) measured ~17–18 µs of backend CPU per candidate at 1024-d and 200k
+rows: ~1–2 µs PostgreSQL core, the rest pg_turbovec's own code (two serde-CBOR
+decodes ~8 µs, TOAST fetch ~5 µs, scalar distance kernel ~3 µs); see
+[`benches/results/recheck_20261006/FINDINGS.md`](../benches/results/recheck_20261006/FINDINGS.md).
+On Graviton4, with the scan at ~1 ms, the recheck dominates at large
+`search_k`; in the x86 AVX2 run the scan was still roughly half of the query.
+The staged search applies to aarch64 (dotprod) and x86 AVX-512 VBMI+VNNI only;
 **AVX2-only x86 (including `arnold`) is unchanged.**
 
 ## Methodology

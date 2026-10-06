@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.10.3 -> 2.11.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.11.0';`.
+--
+-- No new or changed SQL objects: this release adopts upstream turbovec 1.1.1
+-- (staged 2/4-bit search kernels), a library-only change. No wire-format
+-- change (stays v8), no REINDEX, index bytes unchanged. Intentionally empty
+-- apart from this comment.

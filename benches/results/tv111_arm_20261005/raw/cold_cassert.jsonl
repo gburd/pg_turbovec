@@ -1,0 +1,9 @@
+{"arm": "old", "round": 1, "cold_p50_ms": 524.4, "cold_min_ms": 437.7, "n": 20}
+{"arm": "new", "round": 1, "cold_p50_ms": 613.2, "cold_min_ms": 521.5, "n": 20}
+{"arm": "new+planes_off", "round": 1, "cold_p50_ms": 538.6, "cold_min_ms": 443.7, "n": 20}
+{"arm": "old", "round": 2, "cold_p50_ms": 544.2, "cold_min_ms": 445.5, "n": 20}
+{"arm": "new", "round": 2, "cold_p50_ms": 612.4, "cold_min_ms": 522.7, "n": 20}
+{"arm": "new+planes_off", "round": 2, "cold_p50_ms": 540.2, "cold_min_ms": 447.5, "n": 20}
+{"arm": "old", "round": 3, "cold_p50_ms": 544.0, "cold_min_ms": 448.3, "n": 20}
+{"arm": "new", "round": 3, "cold_p50_ms": 603.5, "cold_min_ms": 523.6, "n": 20}
+{"arm": "new+planes_off", "round": 3, "cold_p50_ms": 542.1, "cold_min_ms": 450.7, "n": 20}

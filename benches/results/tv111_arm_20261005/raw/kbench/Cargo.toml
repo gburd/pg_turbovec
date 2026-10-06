@@ -1,0 +1,7 @@
+[package]
+name = "kbench"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "REV" }
+rayon = "1.12"

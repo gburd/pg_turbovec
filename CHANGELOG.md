@@ -4,6 +4,115 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.11.0] — 2026-10-05
+
+MINOR: **adopt upstream turbovec 1.1.1 (staged 2/4-bit search)**. No SQL
+surface change, no GUC change, **no wire-format change** (`MetaPageData::version`
+stays **8**), index bytes unchanged. `ALTER EXTENSION pg_turbovec UPDATE` plus a
+restart is sufficient; **no REINDEX**.
+
+Minor rather than patch for one reason: on hosts where the new search engages,
+the **candidate set** an index scan returns can differ slightly from 2.10.3's
+(scores are exact; recall@10 measured unchanged). Details below.
+
+### Changed
+
+- **turbovec 1.0.0 → 1.1.1.** For an index of **≥ 32,768 rows** on **aarch64
+  (dotprod: Graviton2+, Ampere, Apple)** or **x86 with AVX-512 VBMI+VNNI (Ice
+  Lake server+, Zen 4+)**, turbovec now keeps its in-memory search cache as
+  separate bit planes and searches in stages: a sign-plane pass for a
+  shortlist, ranking on the lower planes, then an exact rescore. On AVX2-only
+  x86 (and below 32,768 rows) the scan is unchanged.
+
+  Measured on **Graviton4** (c8gd.8xlarge, Debian 13, PG 16.15 non-assert),
+  **1M × 1024-d real Cohere embeddings**, flat index, warm, whole-query
+  `EXPLAIN ANALYZE` p50, 3 alternated A/B rounds on one index:
+
+  | | search_k=32 | 100 | 256 | 1024 |
+  |---|---|---|---|---|
+  | 4-bit: 2.10.3 → **2.11.0** | 7.88 → **6.72 ms (1.17×)** | 10.88 → **9.52 (1.14×)** | 18.32 → **15.96 (1.15×)** | 62.17 → **54.57 (1.14×)** |
+  | 2-bit: 2.10.3 → **2.11.0** | 7.22 → **6.86 (1.05×)** | 10.45 → **9.78 (1.07×)** | 17.81 → **16.51 (1.08×)** | 61.67 → **55.11 (1.12×)** |
+
+  Recall@10 unchanged in every cell (1.000, or 0.993 at 2-bit k=32 for both).
+  p95 improves by the same margin.
+
+  **The turbovec kernel itself is 3–6.5× faster** on this host (pure kernel,
+  same corpus: 4-bit single-query k=10 1.84 → 0.62 ms at 32 threads, 22.7 →
+  6.6 ms at one thread; k=1024 8.29 → 1.28 ms). End-to-end gains are smaller
+  because the kernel is now a minor share of a flat-index query: the saving in
+  milliseconds is the same, but the rest — the per-candidate heap fetch and
+  exact recheck, ~48 µs per candidate — is unchanged. For flat indexes the
+  recheck, not the scan, is now the bottleneck.
+
+- **Cold-backend latency kept (and slightly improved) via a new fork carry.**
+  Stock 1.1.1 builds the planes cache with a serial `planes_repack`, bypassing
+  the parallel cold-open repack that gave v2.10.3 its 3.1× cold-scan cut — it
+  takes 279 ms (4-bit) / 1,092 ms (2-bit) at 1M × 1024-d. **Fork carry #4**
+  parallelizes it (18–21 ms / 32 ms), byte-identical to the serial body
+  (`parallel_planes_repack_is_byte_identical_to_serial`, x86_64 + aarch64).
+  Cold-backend p50 on Graviton4, 1M × 1024-d: 4-bit **513.7 → 476.9 ms**,
+  2-bit 327.0 → 319.8 ms.
+
+### Behaviour change: approximate candidate set
+
+The staged search returns **bit-exact scores** but may miss a candidate whose
+sign bits alone rank it outside the shortlist. On the Cohere corpus above,
+staged vs whole-index scan returns the identical top-10 id set for 98.5–100% of
+queries (≥99.6% mean overlap), and the identical top-100 for 73.5–99% (≥99.6%
+mean overlap — a tail candidate or two swapped). The exact heap recheck
+re-ranks what turbovec returns, and recall@10 against exact ground truth is
+unchanged at every measured `search_k`. To restore the whole-index scan, set
+**`TURBOVEC_4BIT_PLANES=0`** and/or **`TURBOVEC_2BIT_PLANES=0`** in the
+postmaster's environment (read once per process).
+
+### Safety
+
+The new risk is that after an `INSERT`/`DELETE`, turbovec reconstructs the
+packed codes we persist from the planes cache. Gates:
+
+- **Byte-identical persisted index**: the same 1M × 1024-d heap indexed by
+  2.10.3 and by 2.11.0 on Graviton4 has identical meta + codes/scales/ids
+  chains (sha256).
+- New `#[pg_test]` **`persist_is_byte_exact_through_planes_layout`**: 40k rows
+  (past the planes gate), real remove/add + PreCommit flush, every row's
+  in-memory and persisted bytes checked at 2 and 4 bits. Confirmed to take the
+  planes layout on Graviton4.
+- `cargo pgrx test pg16`: **446 passed / 0 failed / 8 ignored** on both
+  aarch64 (Graviton4) and x86_64.
+- **90-minute sustained-insert soak** on Graviton4 with mid-flush
+  `pg_terminate_backend`, periodic VACUUM and UPDATE churn, then a byte-level
+  comparison of every live row's persisted code against a fresh REINDEX:
+  see `benches/results/tv111_arm_20261005/FINDINGS.md` §6.
+
+turbovec's own suite: 523 passed / 0 failed on Graviton4.
+
+### Fork
+
+Pinned to `gburd/turbovec@pgtv-2.11.0-port` (`455549f`): upstream 1.1.1 + carries
+#1–#3 cherry-picked unchanged (`pub repack`, IdMapIndex parts API, parallel
+repack; upstream issues #545–#547) + new carry #4 (parallel planes repack).
+
+### Not measured
+
+x86 AVX-512 VBMI+VNNI hosts (no measurement here; upstream reports similar
+kernel gains); IVF and ColBERT latency; indexes under 32,768 rows (unchanged by
+construction).
+
+### Build note
+
+turbovec 1.1 needs LLVM ≥ 22 for its AVX-512 VNNI intrinsics; the nix-packaged
+`rustc` 1.97.0 (LLVM 21) fails with `intrinsic signature mismatch`. Any
+rustup toolchain ≥ 1.89 works (CI uses rustup `stable`). On aarch64 Linux,
+`cargo pgrx test` (debug profile) fails to assemble `gemm-common`'s fp16 inline
+asm without `RUSTFLAGS="-C target-feature=+fp16"`; the `--release` build
+(`cargo pgrx install --release`, what ships) compiled cleanly without it. This
+is pre-existing (`gemm` 0.18.2, unchanged by this release).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.11.0';` and restart PostgreSQL. No
+REINDEX. Evidence: `benches/results/tv111_arm_20261005/`.
+
 ## [2.10.3] — 2026-09-25
 
 PATCH: **cold-scan latency**. No SQL surface change, no GUC change, **no

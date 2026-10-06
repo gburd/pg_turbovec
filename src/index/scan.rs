@@ -887,10 +887,34 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
     true
 }
 
-/// `amendscan`: nothing to do - palloc'd memory is freed by the scan
-/// memory context teardown.
+/// `amendscan`: drop the Rust-owned state in `ScanOpaque`.
+///
+/// `ScanOpaque` lives in palloc'd memory (freed by the scan memory context),
+/// but it OWNS heap allocations PostgreSQL knows nothing about: `Vec`s, the
+/// `emitted` / `allow` `HashSet`s, the IVF context, and -- the expensive one --
+/// `arc`, an `Arc` clone of the backend cache's whole-index handle. Freeing the
+/// palloc chunk never runs their destructors, so before this fix every scan
+/// leaked them. The `Arc` leak is the dangerous part: while the cache entry is
+/// current the leaked clone just shares the entry's allocation, but once another
+/// session commits, the next scan evicts the stale entry and installs a fresh
+/// one, and the leaked clone keeps the OLD index alive forever. A long-lived
+/// backend scanning an index under concurrent writes therefore grew by ~one
+/// whole in-memory index per commit it observed, until the OOM killer took it
+/// -- and with it the postmaster (crash recovery). Found by the v2.11.0
+/// sustained-insert soak; present since the scan opaque first held an `Arc`
+/// (v1.8.0). Repro: `amendscan_releases_cached_index_handle`.
+///
+/// `std::ptr::read` moves the struct out (the palloc'd bytes are left as-is
+/// and freed with the context); nulling `opaque` makes a second call a no-op.
 #[pgrx::pg_guard]
-pub(crate) unsafe extern "C-unwind" fn amendscan(_scan: pg_sys::IndexScanDesc) {}
+pub(crate) unsafe extern "C-unwind" fn amendscan(scan: pg_sys::IndexScanDesc) {
+    if scan.is_null() || (*scan).opaque.is_null() {
+        return;
+    }
+    let opaque = (*scan).opaque as *mut ScanOpaque;
+    (*scan).opaque = std::ptr::null_mut();
+    drop(std::ptr::read(opaque));
+}
 
 /// Build and install the whole-index `ReadOnlyIndex` cache entry
 /// (the pre-Phase-B-1 behaviour: O(n) resident). Used for flat

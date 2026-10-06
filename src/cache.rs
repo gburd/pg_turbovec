@@ -1460,6 +1460,30 @@ impl Stored {
             Stored::Bq(a) => ScanHandle::Bq(a.clone()),
         }
     }
+
+    /// Live `Arc` references to the materialised index (the cache's own
+    /// plus every outstanding [`ScanHandle`]). Test-only leak probe.
+    #[cfg(any(test, feature = "pg_test"))]
+    fn strong_count(&self) -> usize {
+        match self {
+            Stored::Mutable(a) => Arc::strong_count(a),
+            Stored::ReadOnly(a) => Arc::strong_count(a),
+            Stored::Ooc(a) => Arc::strong_count(a),
+            Stored::Graph(a) => Arc::strong_count(a),
+            Stored::Bq(a) => Arc::strong_count(a),
+        }
+    }
+}
+
+/// Test-only: `Arc::strong_count` of the cached index-AM entry for
+/// `rel_oid` (`attnum = 0`), or `None` if nothing is cached. A count above 1
+/// with no scan in flight means a scan leaked its handle.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn am_entry_strong_count(rel_oid: pg_sys::Oid) -> Option<usize> {
+    let g = CACHE.lock();
+    g.iter()
+        .find(|(k, _)| k.rel_oid == rel_oid && k.attnum == 0)
+        .map(|(_, e)| e.index.strong_count())
 }
 
 struct Entry {

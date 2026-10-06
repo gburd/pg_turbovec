@@ -120,22 +120,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.7.3, 2026-09-08)
+### Current (as of v2.11.0, 2026-10-05)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.7.3  | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.7.2 | 2.7.3  | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.11.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.10.3 | 2.11.0 | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.7.3)
+### Where the project actually is (v2.11.0)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -155,6 +155,16 @@ It is IVF, not the graph, that beats flat's O(n) wall. For 1-bit: only when
 storage is the binding constraint and latency has slack (measured 3.98×
 smaller than 4-bit but 2.7–6.1× slower at matched recall, and at 250k flat BQ
 dominates IVF+BQ).
+
+**turbovec 1.1 staged ("planes") search (v2.11.0).** On aarch64 dotprod and x86
+AVX-512 VBMI+VNNI, an index of >= 32,768 rows keeps its in-memory cache as bit
+planes, and after a mutation `packed_codes()` (what we persist) is RECONSTRUCTED
+from that cache. `persist_is_byte_exact_through_planes_layout` guards it, but it
+only exercises planes on such a host -- **arnold/meh are AVX2/AVX and never take
+the planes path.** Qualify persist/scan changes on Graviton (EC2 c8g/c8gd).
+Fork carry #4 parallelizes `planes_repack`; if upstream adds another cache-build
+path, check it for the same serial cold-open regression. Candidate sets are
+approximate under planes (scores exact); `TURBOVEC_{4,2}BIT_PLANES=0` disables.
 
 **Corruption history — read before touching persist/scan code.** Five
 distinct root causes have been found and fixed (counter-drift, VACUUM
@@ -309,16 +319,17 @@ than ~60s with `benches/scripts/lib/with-heartbeat.sh`. Poll with
 Bench work on EC2 runs in short-lived burner accounts that **expire without
 warning**, and an expiring account strands whatever it was running.
 
-**Current burner: `lava` → account `769093516156`, region `us-east-2`**
-(configured in `~/.aws/config`).
+**Current burner: `hotdog` → account `170848442262`, region `us-east-2`**
+(configured in `~/.aws/config`; replaced `lava` 2026-10-05). Graviton (`c8g`/`c8gd`)
+is available there and is the host for turbovec planes-path qualification.
 
-Expired/dead, do not use: `bene` (292759875395, expired **2026-09-11 12:03
+Expired/dead, do not use: `lava` (769093516156, replaced 2026-10-05), `bene` (292759875395, expired **2026-09-11 12:03
 UTC**), and before it `chiuso`, `lala`, `fred`, `egret`, `numa`.
 
 Rules, each of which has been paid for at least once:
 
 - **Verify the profile before you launch:** `aws sts get-caller-identity
-  --profile lava`. A launch on a nearly-expired account is money you cannot
+  --profile hotdog`. A launch on a nearly-expired account is money you cannot
   reclaim, because you lose the ability to terminate.
 - **`InvalidClientTokenId` on a profile that worked minutes ago means the
   account expired, not that you broke something.** Do not spend turns retrying
@@ -329,8 +340,8 @@ Rules, each of which has been paid for at least once:
   it churns between Starlink and Comcast ranges), or use SSM with no inbound
   port at all.
 - **Tag every instance `run=<something>`** and touch only your own tag. Other
-  people's untagged instances share these accounts — there is an untagged
-  `i4i.metal` in `lava` right now that is not ours.
+  people's untagged instances share these accounts — `hotdog` has
+  several untagged c7i instances that are not ours.
 - **Pull artefacts down as you go, not at the end.** The 2026-09-11 run survived
   a mid-run account expiry with zero data loss purely because the agent had
   already copied everything locally.
@@ -374,7 +385,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 427 passed,
+3. Pass `cargo pgrx test pg16` cleanly (current count: 446 passed,
    8 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`

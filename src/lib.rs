@@ -922,6 +922,50 @@ mod tests {
         );
     }
 
+    /// v2.11.0 soak finding: `amendscan` was a no-op, so every finished scan
+    /// leaked its `ScanOpaque` -- including an `Arc` clone of the cached
+    /// whole-index handle. Once a later commit made that entry stale and a
+    /// scan replaced it, the leaked clones kept every superseded index alive:
+    /// a long-lived backend grew ~one index per observed commit until the OOM
+    /// killer took the postmaster down. Fail-before: after N completed scans
+    /// the cached entry's strong count is 1 + N. Pass-after: it is 1 (only the
+    /// cache holds it).
+    #[pg_test]
+    fn amendscan_releases_cached_index_handle() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_leak (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_leak SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.37 + s)::float8 FROM generate_series(1, 32) s), ',') \
+                || ']')::turbovec.vector FROM generate_series(1, 2000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_leak_idx ON t_leak USING turbovec \
+             (emb turbovec.vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 't_leak_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+        crate::cache::invalidate_all();
+        for _ in 0..5 {
+            let n: Option<i64> = Spi::get_one(
+                "SELECT count(*) FROM (SELECT id FROM t_leak ORDER BY emb \
+                 OPERATOR(turbovec.<=>) (SELECT emb FROM t_leak WHERE id = 7) LIMIT 10) q",
+            )
+            .unwrap();
+            assert_eq!(n, Some(10));
+        }
+        assert_eq!(
+            crate::cache::am_entry_strong_count(oid),
+            Some(1),
+            "completed scans must release their cache handle in amendscan \
+             (a count of 1 + #scans means each scan leaked an Arc to the index)"
+        );
+    }
+
     /// turbovec 1.1 adoption guard: the TurboQuant persist path must stay
     /// byte-exact when the inner index is in 1.1's staged-search "planes"
     /// cache layout. 1.1 builds that layout at >= 32,768 vectors on hosts
@@ -975,12 +1019,25 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(s, &id)| {
-                    (id, (codes0[s * stride..(s + 1) * stride].to_vec(), scales0[s].to_bits()))
+                    (
+                        id,
+                        (
+                            codes0[s * stride..(s + 1) * stride].to_vec(),
+                            scales0[s].to_bits(),
+                        ),
+                    )
                 })
                 .collect();
 
             let mut idx = IdMapIndex::from_id_map_parts(
-                bw, DIM, m0.n_vectors as usize, codes0, scales0, ids0.clone(), sh.clone(), sc.clone(),
+                bw,
+                DIM,
+                m0.n_vectors as usize,
+                codes0,
+                scales0,
+                ids0.clone(),
+                sh.clone(),
+                sc.clone(),
             )
             .expect("from_id_map_parts");
             idx.prepare(); // build the search cache: planes where the host has the kernels
@@ -1006,7 +1063,12 @@ mod tests {
             let new_rows: Vec<(u64, Vec<f32>)> = (0..200u64)
                 .map(|j| {
                     let id = 0x7000_0000_0000 + j;
-                    (id, (0..DIM).map(|s| ((j as f32) * 0.71 + s as f32 * 0.29).cos()).collect())
+                    (
+                        id,
+                        (0..DIM)
+                            .map(|s| ((j as f32) * 0.71 + s as f32 * 0.29).cos())
+                            .collect(),
+                    )
                 })
                 .collect();
             for (id, v) in &new_rows {
@@ -1017,20 +1079,31 @@ mod tests {
             state.n_vectors = state.live_ids.len() as i64;
             state.version += 1;
             // Same-calibration reference encoder for the appended rows.
-            let mut fresh = IdMapIndex::from_id_map_parts(bw, DIM, 0, vec![], vec![], vec![], sh, sc)
-                .expect("fresh");
+            let mut fresh =
+                IdMapIndex::from_id_map_parts(bw, DIM, 0, vec![], vec![], vec![], sh, sc)
+                    .expect("fresh");
             for (id, v) in &new_rows {
                 fresh.add_with_ids(v, &[*id]).expect("fresh add");
             }
             let removed: std::collections::HashSet<u64> = removed.into_iter().collect();
             // Expected bytes for a row. `in_mem` rejects a removed id.
             let want = |id: u64, in_mem: bool| -> (Vec<u8>, u32) {
-                assert!(!(in_mem && removed.contains(&id)), "bw{bw}: removed id {id} still in memory");
+                assert!(
+                    !(in_mem && removed.contains(&id)),
+                    "bw{bw}: removed id {id} still in memory"
+                );
                 if let Some(r) = row0.get(&id) {
                     return r.clone();
                 }
-                let fs = fresh.slot_to_id().iter().position(|&x| x == id).expect("unknown id");
-                (fresh.packed_codes()[fs * stride..(fs + 1) * stride].to_vec(), fresh.scales()[fs].to_bits())
+                let fs = fresh
+                    .slot_to_id()
+                    .iter()
+                    .position(|&x| x == id)
+                    .expect("unknown id");
+                (
+                    fresh.packed_codes()[fs * stride..(fs + 1) * stride].to_vec(),
+                    fresh.scales()[fs].to_bits(),
+                )
             };
             // (1) DIRECT: the in-memory packed_codes() turbovec reconstructs
             // after add/remove (from the planes cache, where planes engaged)
@@ -1049,11 +1122,19 @@ mod tests {
             unsafe { crate::xact::flush_to_relfile_for_test(oid, &idx, &state) };
 
             let (m1, codes1, scales1, ids1, _) = read();
-            assert_eq!(m1.n_vectors as usize, ids1.len(), "bw{bw}: meta vs ids chain");
+            assert_eq!(
+                m1.n_vectors as usize,
+                ids1.len(),
+                "bw{bw}: meta vs ids chain"
+            );
             // Disk keeps the removed rows (VACUUM removes on disk) plus the
             // 200 appended ones.
             assert_eq!(ids1.len(), N as usize + 200, "bw{bw}: row count");
-            assert_eq!(crate::index::scan::first_duplicate_id(&ids1), None, "bw{bw}: dup id");
+            assert_eq!(
+                crate::index::scan::first_duplicate_id(&ids1),
+                None,
+                "bw{bw}: dup id"
+            );
             // (2) PERSISTED: same check on what the flush wrote.
             let mut added = 0usize;
             for (s, &id) in ids1.iter().enumerate() {
@@ -1072,7 +1153,11 @@ mod tests {
                 "SELECT is_corrupt, reason FROM turbovec.turbovec_check('{name}'::regclass)"
             ))
             .unwrap();
-            assert_eq!((corrupt, reason), (Some(false), None), "bw{bw}: turbovec_check");
+            assert_eq!(
+                (corrupt, reason),
+                (Some(false), None),
+                "bw{bw}: turbovec_check"
+            );
             Spi::run(&format!("DROP INDEX {name}")).unwrap();
         }
     }
@@ -8168,7 +8253,7 @@ mod tests {
             "1.29.0", "1.29.1", "1.29.2", "1.29.3", "1.29.4", "1.29.5", "1.29.6", "1.29.7",
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
-            "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3",
+            "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has

@@ -41,8 +41,10 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v2.0.0 - now built on upstream **turbovec 1.0.0** (wire
-> format v8). The full `#[pg_test]` suite passes against
+> **Status:** v2.11.0 - built on upstream **turbovec 1.1.1** (wire
+> format v8; staged 2/4-bit search on aarch64 and AVX-512 VBMI+VNNI hosts,
+> 1.14-1.17x faster 4-bit end-to-end on Graviton4 at 1M x 1024-d -- see
+> [CHANGELOG](CHANGELOG.md)). The full `#[pg_test]` suite passes against
 > PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally).
 > **v2.0.0 is a MAJOR wire-format break (v7 → v8): upgrading from any
 > 1.x requires `ALTER EXTENSION ... UPDATE` then a one-time `REINDEX

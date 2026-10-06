@@ -17,3 +17,11 @@ BEFORE SUBMITTING:
   1766->566 ms is already independently confirmed (benches/results/rebench_20260925/,
   finish_20260926/coldopen_profile.txt shows repack is now 2ms / 0.7% of cold).
 - Verify current live state of issue #70 and upstream issue numbers on github.
+
+## 2026-10-05: rebased onto 1.1.1 + carry #4
+
+Carries #1-#3 cherry-picked unchanged onto upstream v1.1.1 (branch
+`pgtv-2.11.0-port`). New carry #4 (`04-parallel-planes-repack.md`): 1.1's
+planes cache build is serial and bypassed carry #3 on staged-search hosts
+(279 ms / 1.09 s at 1M x 1024-d on Graviton4 -> 18-32 ms). Not yet filed;
+natural follow-on to #545.

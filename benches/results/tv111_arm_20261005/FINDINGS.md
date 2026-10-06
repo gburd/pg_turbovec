@@ -90,12 +90,22 @@ Upstream measures the turbovec kernel alone. The pure kernel on this host, same
 on rayon's global pool (32 threads here), so the 32-thread row is the
 apples-to-apples one, and the **end-to-end saving equals the kernel saving**:
 4-bit k=1024 saves 7.6 ms end-to-end vs 7.0 ms in the kernel; k=32 saves
-1.16 ms vs 1.36 ms. What remains of a query is PostgreSQL-side and unchanged
-by this release — about **4.5 ms fixed + ~48 µs per candidate** (slope of §2
-from k=32 to k=1024), i.e. the per-candidate heap fetch + vector deserialize +
-exact recheck, plus per-query overhead not broken down here. **For flat-index
-queries the scan is no longer the bottleneck; the recheck is.** That is the
-next lever (fewer candidates at equal recall, or a cheaper recheck), not a
+1.16 ms vs 1.36 ms. What remains of a query is backend-side and unchanged by
+this release: per-query overhead plus, per candidate, the heap fetch + vector
+deserialize + exact recheck. A straight-line fit of §2 from k=32 to k=1024
+gives about 4.5 ms + ~48 µs per candidate.
+
+**Correction (2026-10-06):** an earlier version of this paragraph presented
+that ~48 µs slope as the per-candidate recheck cost. It is a fit to
+end-to-end latency, not a measurement. A real-query attribution
+([`../recheck_20261006/FINDINGS.md`](../recheck_20261006/FINDINGS.md))
+measured ~17–18 µs per candidate at 1024-d on x86: ~1–2 µs PostgreSQL core
+(heap fetch, reorder queue, executor), the rest pg_turbovec's own code (two
+serde-CBOR decodes ~8 µs, TOAST fetch ~5 µs, scalar distance kernel ~3 µs).
+The per-candidate cost was not measured on this Graviton4 host. With the scan
+now ~1 ms here, the per-candidate recheck dominates a flat-index query at
+large `search_k`; on AVX2 hosts the scan is still roughly half of a query.
+The next lever is fewer candidates at equal recall or a cheaper recheck, not a
 further kernel speedup.
 
 ## 3. Cold-backend latency (connection-pool reality)

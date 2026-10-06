@@ -71,7 +71,7 @@ Head-to-head, warm cache, release build. Storage + recall
 | **Storage @ 1 M** | **≈ 412 MB** | ≈ 8 GB (~20× larger) |
 | Build (1 M) | ~minutes | ~5 min |
 | Recall@10 (IVF, tuned) | ~0.90 (R@100 → 0.99) | 0.96–0.99 |
-| Exact re-ranking vs heap | ✓ (`xs_recheckorderby`) | ✓ |
+| Exact distances for returned rows | ✓ (heap recheck via `xs_recheckorderby`; the index holds only codes) | ✓ (index stores full-precision vectors; no heap recheck needed) |
 
 ### Common objections, answered with measurements
 
@@ -235,9 +235,13 @@ answer).
 > **v2.11.0 (turbovec 1.1.1):** on aarch64 (Graviton, Ampere, Apple) and x86
 > with AVX-512 VBMI+VNNI, flat 4-bit queries are **1.14–1.17× faster
 > end-to-end** at 1M × 1024-d (Graviton4: 7.88 → 6.72 ms at `search_k=32`),
-> recall unchanged; the scan kernel itself is 3–6.5× faster, so the
-> per-candidate heap recheck is now most of a query's cost. AVX2-only x86 is
-> unchanged. [docs/BENCHMARKS.md](docs/BENCHMARKS.md#turbovec-111-staged-search-on-graviton4-v2110-2026-10-05).
+> recall unchanged; the scan kernel itself is 3–6.5× faster (~1 ms), so at
+> large `search_k` the per-candidate recheck dominates. That recheck measured
+> ~17–18 µs per candidate at 1024-d on x86, ~1–2 µs of it PostgreSQL core and
+> the rest pg_turbovec's vector decode, TOAST fetch and distance kernel
+> ([recheck attribution](benches/results/recheck_20261006/FINDINGS.md)).
+> AVX2-only x86 is unchanged; there the scan is still roughly half of a query.
+> [docs/BENCHMARKS.md](docs/BENCHMARKS.md#turbovec-111-staged-search-on-graviton4-v2110-2026-10-05).
 > v2.11.0 also fixes a **silent index-entry corruption under concurrent writes
 > + VACUUM** present since v1.29.1 -- upgrade, then `REINDEX` indexes that took
 > writes from long-lived connections. See [CHANGELOG](CHANGELOG.md).

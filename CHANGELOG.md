@@ -4,6 +4,29 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- **Corrected the v2.11.0 "~48 µs per candidate" recheck claim.** That number
+  was a slope fitted to end-to-end latency against `search_k`, not a
+  measurement. A direct real-query attribution
+  ([`benches/results/recheck_20261006/FINDINGS.md`](benches/results/recheck_20261006/FINDINGS.md))
+  measured ~17–18 µs per candidate at 1024-d on x86. ~1–2 µs of that is
+  PostgreSQL core (heap fetch, reorder queue, executor); the rest is
+  pg_turbovec's own code: two serde-CBOR decodes per candidate (~8 µs), the
+  TOAST fetch of the candidate vector (~5 µs) and the scalar distance kernel
+  (~3 µs). On Graviton4 after turbovec 1.1 the scan is ~1 ms, so at large
+  `search_k` the per-candidate recheck dominates; on AVX2 hosts the scan is
+  still roughly half of a query. Corrected in the [2.11.0] entry below (marked
+  as a correction), `README.md`, `docs/BENCHMARKS.md` and
+  `benches/results/tv111_arm_20261005/FINDINGS.md`.
+- **README feature table: pgvector does not re-rank against the heap.** The
+  "Exact re-ranking vs heap" row marked pgvector ✓. pgvector's HNSW and
+  IVFFlat set `xs_recheckorderby = false`: the index stores full-precision
+  vectors and returns exact distances, so no heap recheck is needed.
+  pg_turbovec rechecks because its index stores only quantized codes.
+
 ## [2.11.0] — 2026-10-06
 
 MINOR: **adopt upstream turbovec 1.1.1 (staged 2/4-bit search)**, plus fixes
@@ -46,6 +69,17 @@ the **candidate set** an index scan returns can differ slightly from 2.10.3's
   milliseconds is the same, but the rest — the per-candidate heap fetch and
   exact recheck, ~48 µs per candidate — is unchanged. For flat indexes the
   recheck, not the scan, is now the bottleneck.
+
+  **Correction (2026-10-06):** the ~48 µs per candidate above is a slope
+  fitted to end-to-end latency against `search_k`, not a measurement. A
+  real-query attribution
+  ([`benches/results/recheck_20261006/FINDINGS.md`](benches/results/recheck_20261006/FINDINGS.md))
+  measured ~17–18 µs per candidate at 1024-d on x86, of which ~1–2 µs is
+  PostgreSQL core and the rest pg_turbovec's own code (two serde-CBOR decodes
+  ~8 µs, TOAST fetch ~5 µs, scalar distance kernel ~3 µs). The bottleneck
+  statement holds on Graviton4, where the scan is now ~1 ms, at large
+  `search_k`; it does not hold on AVX2 hosts, where the scan is still roughly
+  half of a query.
 
 - **Cold-backend latency kept (and slightly improved) via a new fork carry.**
   Stock 1.1.1 builds the planes cache with a serial `planes_repack`, bypassing

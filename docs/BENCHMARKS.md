@@ -17,6 +17,30 @@ bespoke single-host claim.
 > **recall@10 = 1.000 on the fixed v1.8.0 build at 1M × 1024-d real
 > embeddings — the pre-AVX2 correctness fix works.**
 
+## turbovec 1.1.1 staged search on Graviton4 (v2.11.0, 2026-10-05)
+
+Flat index, **1M × 1024-d real Cohere embeddings**, c8gd.8xlarge (Graviton4,
+Neoverse-V2), PG 16.15 non-assert, warm whole-query `EXPLAIN ANALYZE` p50,
+3 alternated rounds on one index (bytes identical across arms). Full method,
+raw data, cold-backend and candidate-agreement numbers:
+[`benches/results/tv111_arm_20261005/FINDINGS.md`](../benches/results/tv111_arm_20261005/FINDINGS.md).
+
+| bit_width | search_k | v2.10.3 (turbovec 1.0.0) | **v2.11.0 (turbovec 1.1.1)** | speedup | R@10 |
+|---|---|---|---|---|---|
+| 4 | 32 | 7.88 ms | **6.72 ms** | **1.17×** | 1.000 |
+| 4 | 100 | 10.88 | **9.52** | **1.14×** | 1.000 |
+| 4 | 256 | 18.32 | **15.96** | **1.15×** | 1.000 |
+| 4 | 1024 | 62.17 | **54.57** | **1.14×** | 1.000 |
+| 2 | 100 | 10.45 | **9.78** | 1.07× | 1.000 |
+| 2 | 1024 | 61.67 | **55.11** | 1.12× | 1.000 |
+
+turbovec kernel alone (no PostgreSQL), same corpus and host, single query, 32
+threads: 4-bit k=10 **1.84 → 0.62 ms (3.0×)**, k=1024 **8.29 → 1.28 ms (6.5×)**.
+The end-to-end saving equals the kernel saving in milliseconds; what is left
+(~4.5 ms + ~48 µs per candidate) is the heap fetch + exact recheck, which this
+release does not change. Applies to aarch64 (dotprod) and x86 AVX-512
+VBMI+VNNI only; **AVX2-only x86 (including `arnold`) is unchanged.**
+
 ## Methodology
 
 | Item | Value |

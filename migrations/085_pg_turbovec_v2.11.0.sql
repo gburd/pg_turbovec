@@ -1,7 +1,9 @@
 -- pg_turbovec v2.11.0
 --
--- MINOR: adopt upstream turbovec 1.1.1 (staged 2/4-bit "planes" search), and
--- fix a per-scan memory leak (amendscan never dropped the scan state, so a
+-- MINOR: adopt upstream turbovec 1.1.1 (staged 2/4-bit "planes" search); fix
+-- silent index-entry corruption from re-splicing stale touched_ids on every
+-- flush (since v1.29.1; REINDEX 2/3/4-bit flat/IVF indexes that took writes
+-- from long-lived connections while VACUUM ran); and fix a per-scan memory leak (amendscan never dropped the scan state, so a
 -- long-lived backend scanning under concurrent writes grew ~one in-memory
 -- index per observed commit until OOM-killed; since v1.8.0).
 -- NO SQL-surface change, NO GUC change, NO wire-format change

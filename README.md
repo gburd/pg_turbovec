@@ -41,8 +41,10 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v2.0.0 - now built on upstream **turbovec 1.0.0** (wire
-> format v8). The full `#[pg_test]` suite passes against
+> **Status:** v2.11.0 - built on upstream **turbovec 1.1.1** (wire
+> format v8; staged 2/4-bit search on aarch64 and AVX-512 VBMI+VNNI hosts,
+> 1.14-1.17x faster 4-bit end-to-end on Graviton4 at 1M x 1024-d -- see
+> [CHANGELOG](CHANGELOG.md)). The full `#[pg_test]` suite passes against
 > PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally).
 > **v2.0.0 is a MAJOR wire-format break (v7 → v8): upgrading from any
 > 1.x requires `ALTER EXTENSION ... UPDATE` then a one-time `REINDEX
@@ -229,6 +231,16 @@ at matched `probes` instead is the classic way to get a flattering, wrong
 answer).
 
 ## Honest latency note (read this)
+
+> **v2.11.0 (turbovec 1.1.1):** on aarch64 (Graviton, Ampere, Apple) and x86
+> with AVX-512 VBMI+VNNI, flat 4-bit queries are **1.14–1.17× faster
+> end-to-end** at 1M × 1024-d (Graviton4: 7.88 → 6.72 ms at `search_k=32`),
+> recall unchanged; the scan kernel itself is 3–6.5× faster, so the
+> per-candidate heap recheck is now most of a query's cost. AVX2-only x86 is
+> unchanged. [docs/BENCHMARKS.md](docs/BENCHMARKS.md#turbovec-111-staged-search-on-graviton4-v2110-2026-10-05).
+> v2.11.0 also fixes a **silent index-entry corruption under concurrent writes
+> + VACUUM** present since v1.29.1 -- upgrade, then `REINDEX` indexes that took
+> writes from long-lived connections. See [CHANGELOG](CHANGELOG.md).
 
 pg_turbovec's **flat** kind is an `O(n·dim)` quantized full scan — at
 1 M rows its warm p50 is **~2.5 s on AVX2**, and pgvector HNSW (a

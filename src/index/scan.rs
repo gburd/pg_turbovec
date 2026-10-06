@@ -906,6 +906,12 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
 ///
 /// `std::ptr::read` moves the struct out (the palloc'd bytes are left as-is
 /// and freed with the context); nulling `opaque` makes a second call a no-op.
+///
+/// ponytail: an ERROR/cancel mid-scan aborts without calling `amendscan`, so
+/// that scan's opaque still leaks (bounded: one per errored scan, vs. one per
+/// scan before). Closing it fully means a `MemoryContextRegisterResetCallback`
+/// guard registered in `ambeginscan`; add it if statement_timeout-heavy
+/// workloads show backend RSS growth.
 #[pgrx::pg_guard]
 pub(crate) unsafe extern "C-unwind" fn amendscan(scan: pg_sys::IndexScanDesc) {
     if scan.is_null() || (*scan).opaque.is_null() {

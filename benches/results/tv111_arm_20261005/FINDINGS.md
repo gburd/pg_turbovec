@@ -172,51 +172,80 @@ reconstruction would write silently different codes.
    layout on Graviton4** (probe: `planes=true` at 40k × 64-d for both widths) —
    it is not a classic-layout test passing by default. On x86/AVX2 it exercises
    the classic layout.
-2. **Full suite on aarch64** (`c8gd.4xlarge`): `cargo pgrx test pg16` —
-   **446 passed / 0 failed / 8 ignored** (`raw/pgtest_pg16_aarch64.log`).
-   x86_64 local: 446 / 0 / 8.
-3. **Sustained-insert soak** (`soak.py`): see §6.
+2. **Full suite on aarch64**: `cargo pgrx test pg16` — 446 / 0 / 8 before the
+   two fix tests (`raw/pgtest_pg16_aarch64.log`); on the release branch see
+   `raw/pgtest2_pg16_aarch64.log`. x86_64 local: **448 / 0 / 8**.
+3. **Sustained-insert soaks** with a byte-level oracle: see §6 (found and
+   fixed two pre-existing bugs; the A/B re-run is clean on v2.11.0).
 
 turbovec's own suite on the fork branch: **523 passed / 0 failed** on Graviton4
 (planes tests run, not skipped); 35/35 planes + byte-identity tests under
 `qemu-aarch64 -cpu max` locally.
 
-## 6. Soak — run 1 FAILED (OOM), root-caused to a pre-existing leak, fixed
+## 6. Soak — found two pre-existing bugs; both fixed; A/B re-run clean
 
-`soak.py`: flat 4-bit index seeded with 60k real 1024-d vectors (past the
-planes gate); 3 writer backends commit COPY batches of 1/16/128 new rows plus
-UPDATE churn; the orchestrator `pg_terminate_backend`s a writer every 60–180 s
-(mid-flush); VACUUM every 5 min; every 60 s `turbovec_check` must be clean and
-a scan from a long-lived admin backend must return 10 distinct ids; at the end
-a byte-level comparison of every live row's persisted (code, scale) against a
-fresh `CREATE INDEX` of the same heap.
+`soak2.py` (final form): flat 4-bit index seeded with 60k real 1024-d vectors
+(past the planes gate); 3 writer backends commit COPY batches of 1/16/128 new
+rows plus UPDATE churn; the orchestrator `pg_terminate_backend`s a writer every
+30–90 s (mid-flush); VACUUM every 2 min; every 60 s `turbovec_check` must be
+clean and a scan must return 10 distinct ids. At the end, **byte-level oracle**:
+`CREATE INDEX` again on the same heap and compare every entry (root TID →
+code row + scale) of the soaked index against it via `pageinspect`.
 
-**Run 1 (v2.11.0 pre-fix), 81 min:** 18,005 commits, 42 mid-flush kills, 16
-VACUUMs, 60k → 933k vectors, **every `turbovec_check` clean, every scan 10
-distinct ids** (`raw/soak_run1_oom.log`). Then the **OOM killer took the
-long-lived scanning backend** (52 GB anon RSS) and the postmaster went through
-crash recovery. Not index corruption — memory.
+### Bug 1 — per-scan memory leak (OOM), since v1.8.0
 
-Root cause (`raw/memrepro*.py`): **`amendscan` was a no-op**, so every scan
-leaked its `ScanOpaque` — including an `Arc` to the backend's cached whole
-in-memory index. When another session's commit makes that entry stale, the next
-scan replaces it and the leaked `Arc`s keep every superseded copy alive.
-Measured on a 200k × 1024-d index, one scanning backend, a 128-row commit
-between scans:
+Run 1 (v2.11.0 pre-fix), 81 min, 18,005 commits, 42 kills, 16 VACUUMs,
+60k → 933k rows, every `turbovec_check` clean — then the **OOM killer took a
+long-lived scanning backend at 52 GB** and the postmaster went through crash
+recovery (`raw/soak_run1_oom.log`). Cause: `amendscan` was a no-op, so every
+scan leaked its `ScanOpaque`, including an `Arc` to the cached whole index;
+after a cache replacement those leaked `Arc`s pin every superseded copy
+(`raw/memrepro*.py`, `raw/memrepro_results.txt`):
 
-| binary | scanner RssAnon over 30 commits |
+| binary | scanner RssAnon over 30 commits (200k × 1024-d) |
 |---|---|
 | v2.10.3 | 265 → **6,083 MB** (+200 MB/commit) |
-| v2.11.0 pre-fix | 241 → **6,057 MB** (+200 MB/commit) |
-| v2.11.0 (fixed) | 241 → **248 MB** |
+| v2.11.0 pre-fix | 241 → **6,057 MB** |
+| v2.11.0 fixed | 241 → **248 MB** |
 
-Scans with **no** intervening commit do not grow (245 → 246 MB over 20 scans):
-the leak needs a cache replacement. Pre-existing since v1.8.0 (when the scan
-opaque started holding the handle) — **not** introduced by turbovec 1.1.
-Fixed in 2.11.0 (`amendscan` drops the opaque); fail-before/pass-after test
-`amendscan_releases_cached_index_handle`.
+Fix: `amendscan` drops the opaque. Test `amendscan_releases_cached_index_handle`
+(6 live refs after 5 scans before; 1 after). Run 2 with the fix: 90 min,
+19,553 commits, peak backend RSS ~2 GB at 1M rows (tracks index size, no
+per-commit growth — `raw/rss.log`).
 
-**Run 2 (v2.11.0 fixed):** _(appended at completion)_
+### Bug 2 — stale `touched_ids` re-splice (silent wrong entries), since v1.29.1
+
+Run 2's byte oracle (`raw/soak_run2_fixed.log`, forensics in
+`raw/soak_run2_forensics.txt` via `verify2.py` / `classify.py`) found **0 live
+rows missing, but 818 live rows whose entry carried a DIFFERENT live row's
+exact bytes and 3,402 stale entries** (pointing at heap-only or unused TIDs).
+`turbovec_check` was clean the whole time — ids stay unique. An A/B soak (both
+binaries concurrently, same host, same workload, 40 min) proved it
+**pre-existing**:
+
+| run | binary | commits | wrong codes | stale entries | missing |
+|---|---|---|---|---|---|
+| A/B #1 | v2.10.3 | 12,518 | **530** | **2,369** | 0 |
+| A/B #1 | v2.11.0 (leak fix only) | 12,545 | **721** | **2,564** | 0 |
+| A/B #2 | v2.10.3 | 12,203 | **406** | **2,073** | 0 |
+| **A/B #2** | **v2.11.0 (both fixes)** | **12,387** | **0** | **0** | **0** |
+
+Cause: the deferred flush splices only this transaction's upserted ids
+(`touched_ids`) onto the current on-disk index, but the list was never cleared
+after a successful flush and the cache entry outlives the transaction. A
+long-lived writer therefore re-spliced every id it had ever written, from its
+stale in-memory copy, on every commit. After VACUUM removes such an id and the
+heap reuses its TID for another row, the re-splice overwrites that row's entry
+with old codes (wrong codes) or appends the vacuumed entry back (stale entry).
+Fix: `clear_dirty` empties `touched_ids`. Test
+`flush_does_not_resplice_previous_txn_ids` (two transactions through the real
+cache path with a VACUUM-style on-disk removal between them: fails before —
+the removed id comes back — passes after).
+
+**A/B #2 is the qualifying run: v2.11.0 matched a fresh CREATE INDEX of its
+heap byte-for-byte on all 658,221 entries after 40 min, 12,387 commits, 40
+mid-flush kills and 19 VACUUMs, while v2.10.3 on the identical workload beside
+it corrupted 406 entries and left 2,073 stale ones.**
 
 ## Not claimed
 

@@ -1,0 +1,6 @@
+soak_idx rows=653677 soak_ref rows=651604 | missing=0 mismatch=406 extra=2073
+extra TID heap state: {'LP_NORMAL_heaponly': 2016, 'LP_UNUSED': 57}
+first mismatches: [38654705667, 150323855390, 231928233997, 932007903316, 949187772478]
+MISMATCH 406 {'soak_bytes_equal_another_live_row': 406} code-bytes-differing (of 512): min/median/max 505 510 512
+EXTRA 2073 {'equals_a_live_row(stale old version)': 2073}
+bad-entry slot positions: first [118630, 118631, 118633] median 261555 last [638983, 638985, 638986] of 653677

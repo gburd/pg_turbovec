@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.11.0] — 2026-10-05
+## [2.11.0] — 2026-10-06
 
 MINOR: **adopt upstream turbovec 1.1.1 (staged 2/4-bit search)**, plus fixes
 for **two long-standing bugs found by this release's soak test: one silently

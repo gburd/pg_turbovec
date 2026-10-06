@@ -9,3 +9,5 @@ Teardown:
   aws ec2 delete-key-pair       --profile hotdog --region us-east-2 --key-name tv111-20261005-164703
 NOTE: other running instances in this account are NOT ours (no run= tag). Do not touch.
 second instance (soak + aarch64 pg_test): i-06c26bd9a1c103737 (c8gd.4xlarge). Teardown: add it to terminate-instances.
+
+TEARDOWN DONE 2026-10-06T04:57:03Z: both instances terminated (verified), sg-07e3557ff5cdf722c and key pair deleted, no tagged volumes remain.

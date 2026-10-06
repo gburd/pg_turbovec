@@ -1,0 +1,40 @@
+docs search_k=1024: 200 queries, wall 30.79 ms/query, backend on-CPU 17.38 ms/query
+   TOAST fetch (detoast_attr ...)                   4.690 ms/query     4.58 us/candidate
+   CBOR decode of vector (pgrx serde)               7.948 ms/query     7.76 us/candidate
+   exact cosine kernel                              0.000 ms/query     0.00 us/candidate
+   heap fetch of candidate (core)                   0.664 ms/query     0.65 us/candidate
+   reorder queue push/pop (core)                    0.089 ms/query     0.09 us/candidate
+   turbovec scan, backend share                     3.630 ms/query     3.54 us/candidate
+   other IndexNextWithReorder / expr eval (core)    0.115 ms/query     0.11 us/candidate
+   other (parse/plan/executor startup/libpq)        0.240 ms/query     0.23 us/candidate
+   (wall - backend on-CPU = waiting on scan workers)  13.411 ms/query
+docs_plain search_k=1024: 200 queries, wall 30.54 ms/query, backend on-CPU 13.06 ms/query
+   TOAST fetch (detoast_attr ...)                   0.000 ms/query     0.00 us/candidate
+   CBOR decode of vector (pgrx serde)               7.558 ms/query     7.38 us/candidate
+   exact cosine kernel                              0.000 ms/query     0.00 us/candidate
+   heap fetch of candidate (core)                   0.870 ms/query     0.85 us/candidate
+   reorder queue push/pop (core)                    0.917 ms/query     0.90 us/candidate
+   turbovec scan, backend share                     3.438 ms/query     3.36 us/candidate
+   other IndexNextWithReorder / expr eval (core)    0.042 ms/query     0.04 us/candidate
+   other (parse/plan/executor startup/libpq)        0.234 ms/query     0.23 us/candidate
+   (wall - backend on-CPU = waiting on scan workers)  17.483 ms/query
+docs search_k=1024: 200 queries, wall 34.32 ms/query, backend on-CPU 18.45 ms/query
+   TOAST fetch (detoast_attr ...)                   5.154 ms/query     5.03 us/candidate
+   CBOR decode of vector (pgrx serde)               8.326 ms/query     8.13 us/candidate
+   exact cosine kernel                              0.000 ms/query     0.00 us/candidate
+   heap fetch of candidate (core)                   0.767 ms/query     0.75 us/candidate
+   reorder queue push/pop (core)                    0.092 ms/query     0.09 us/candidate
+   turbovec scan, backend share                     3.730 ms/query     3.64 us/candidate
+   other IndexNextWithReorder / expr eval (core)    0.124 ms/query     0.12 us/candidate
+   other (parse/plan/executor startup/libpq)        0.256 ms/query     0.25 us/candidate
+   (wall - backend on-CPU = waiting on scan workers)  15.866 ms/query
+docs_plain search_k=1024: 200 queries, wall 35.00 ms/query, backend on-CPU 14.03 ms/query
+   TOAST fetch (detoast_attr ...)                   0.000 ms/query     0.00 us/candidate
+   CBOR decode of vector (pgrx serde)               7.989 ms/query     7.80 us/candidate
+   exact cosine kernel                              0.000 ms/query     0.00 us/candidate
+   heap fetch of candidate (core)                   1.006 ms/query     0.98 us/candidate
+   reorder queue push/pop (core)                    1.024 ms/query     1.00 us/candidate
+   turbovec scan, backend share                     3.718 ms/query     3.63 us/candidate
+   other IndexNextWithReorder / expr eval (core)    0.043 ms/query     0.04 us/candidate
+   other (parse/plan/executor startup/libpq)        0.252 ms/query     0.25 us/candidate
+   (wall - backend on-CPU = waiting on scan workers)  20.972 ms/query

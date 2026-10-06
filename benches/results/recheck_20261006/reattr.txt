@@ -1,0 +1,18 @@
+attr_docs_1024.data: backend on-CPU 18.45 ms/query
+   TOAST fetch                                  5.03 us/candidate
+   CBOR decode (pgrx serde)                     8.13 us/candidate
+   reorder queue: tuple copy + heap (core)      0.09 us/candidate
+   heap fetch of candidate (core)               0.75 us/candidate
+   turbovec scan, backend thread                0.66 us/candidate
+   exact distance kernel (ours)                 2.93 us/candidate
+   other executor (core)                        0.12 us/candidate
+   parse/plan/libpq/other                       0.30 us/candidate
+attr_docs_plain_1024.data: backend on-CPU 14.03 ms/query
+   TOAST fetch                                  0.00 us/candidate
+   CBOR decode (pgrx serde)                     7.80 us/candidate
+   reorder queue: tuple copy + heap (core)      1.00 us/candidate
+   heap fetch of candidate (core)               0.98 us/candidate
+   turbovec scan, backend thread                0.65 us/candidate
+   exact distance kernel (ours)                 2.92 us/candidate
+   other executor (core)                        0.04 us/candidate
+   parse/plan/libpq/other                       0.30 us/candidate

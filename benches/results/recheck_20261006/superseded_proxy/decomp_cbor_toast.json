@@ -1,0 +1,26 @@
+{
+ "32": {
+  "e2e": 8.4335,
+  "heapfetch": 0.0175,
+  "detoast_decode": 0.358,
+  "detoast_decode_dist": 0.589
+ },
+ "100": {
+  "e2e": 10.2055,
+  "heapfetch": 0.07050000000000001,
+  "detoast_decode": 1.2955,
+  "detoast_decode_dist": 2.069
+ },
+ "256": {
+  "e2e": 14.028,
+  "heapfetch": 0.119,
+  "detoast_decode": 2.5275,
+  "detoast_decode_dist": 3.915
+ },
+ "1024": {
+  "e2e": 33.8945,
+  "heapfetch": 2.7175000000000002,
+  "detoast_decode": 51.7375,
+  "detoast_decode_dist": 103.1435
+ }
+}

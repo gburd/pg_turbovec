@@ -1,0 +1,8 @@
+[heartbeat] starting: /work/venv/bin/python load.py 1024 ext extl main plain --index
+[heartbeat] interval: 60s
+[heartbeat] label:    python
+t1024_ext copy 11.1s, index 1.6s
+t1024_extl copy 9.9s, index 1.4s
+t1024_main copy 10.7s, index 1.5s
+t1024_plain copy 9.5s, index 1.5s
+[heartbeat] DONE rc=0 (clean exit)

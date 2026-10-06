@@ -1,0 +1,69 @@
+Timing is on.
+CREATE FUNCTION
+Time: 28.325 ms
+psql:alter_after.sql:18: NOTICE:  table "t1024_alt" does not exist, skipping
+DROP TABLE
+Time: 2.775 ms
+CREATE TABLE
+Time: 29.151 ms
+COPY 100000
+Time: 11705.665 ms (00:11.706)
+psql:alter_after.sql:21: NOTICE:  turbovec: built a FLAT (exact) index over 100000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX
+Time: 1474.924 ms (00:01.475)
+VACUUM
+Time: 128.473 ms
+              step              | attstorage | heap_mb | toast_mb | external_rows 
+--------------------------------+------------+---------+----------+---------------
+ 1. loaded with default storage | x          |     6.0 |    558.0 |        100000
+
+Time: 77.526 ms
+ALTER TABLE
+Time: 0.481 ms
+                step                 | attstorage | heap_mb | toast_mb | external_rows 
+-------------------------------------+------------+---------+----------+---------------
+ 2. after ALTER ... SET STORAGE MAIN | m          |     6.0 |    558.0 |        100000
+
+Time: 39.014 ms
+UPDATE 1000
+Time: 201.252 ms
+UPDATE 1000
+Time: 157.131 ms
+VACUUM
+Time: 102.257 ms
+                             step                              | attstorage | heap_mb | toast_mb | external_rows 
+---------------------------------------------------------------+------------+---------+----------+---------------
+ 3. after UPDATE SET id=id (1000 rows) + SET tv=tv (1000 rows) | m          |     6.0 |    558.0 |        100000
+
+Time: 18.688 ms
+UPDATE 1000
+Time: 203.922 ms
+VACUUM
+Time: 2.607 ms
+                         step                          | attstorage | heap_mb | toast_mb | external_rows 
+-------------------------------------------------------+------------+---------+----------+---------------
+ 4. after UPDATE SET tv = l2_normalize(tv) (1000 rows) | m          |    13.6 |    558.0 |         99000
+
+Time: 18.923 ms
+psql:alter_after.sql:33: NOTICE:  turbovec: built a FLAT (exact) index over 100000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+VACUUM
+Time: 4761.723 ms (00:04.762)
+         step         | attstorage | heap_mb | toast_mb | external_rows 
+----------------------+------------+---------+----------+---------------
+ 5. after VACUUM FULL | m          |   781.3 |      0.0 |             0
+
+Time: 0.774 ms
+ knn_rows 
+----------
+       10
+
+Time: 59.795 ms
+ n_vectors | is_corrupt 
+-----------+------------
+    100000 | f
+
+Time: 5.336 ms
+DROP TABLE
+Time: 136.504 ms

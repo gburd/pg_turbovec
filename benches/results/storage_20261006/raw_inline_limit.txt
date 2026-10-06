@@ -1,0 +1,39 @@
+CREATE FUNCTION
+ storage  | dim | extra_bigints | vec_bytes | heap_tuple_len | toast_chunks |       result        
+----------+-----+---------------+-----------+----------------+--------------+---------------------
+ EXTENDED | 384 |             0 |      1933 |           1965 |            0 | inline
+ EXTENDED | 396 |             0 |      1993 |           2025 |            0 | inline
+ EXTENDED | 397 |             0 |      1998 |           2030 |            0 | inline
+ EXTENDED | 398 |             0 |      1997 |             50 |            2 | out of line (TOAST)
+ EXTENDED | 400 |             0 |      2009 |             50 |            2 | out of line (TOAST)
+ EXTERNAL | 384 |             0 |      1933 |           1965 |            0 | inline
+ EXTERNAL | 396 |             0 |      1993 |           2025 |            0 | inline
+ EXTERNAL | 397 |             0 |      1998 |           2030 |            0 | inline
+ EXTERNAL | 398 |             0 |      1999 |             50 |            2 | out of line (TOAST)
+ EXTERNAL | 400 |             0 |      2009 |             50 |            2 | out of line (TOAST)
+
+ storage | dim  | extra_bigints | vec_bytes | heap_tuple_len | toast_chunks |                        result                        
+---------+------+---------------+-----------+----------------+--------------+------------------------------------------------------
+ MAIN    | 1536 |             0 |      7693 |           7725 |            0 | inline
+ MAIN    | 1622 |             0 |      8123 |           8155 |            0 | inline
+ MAIN    | 1623 |             0 |      8128 |           8160 |            0 | inline
+ MAIN    | 1624 |             0 |      8129 |             50 |            5 | out of line (TOAST)
+ MAIN    | 1625 |             0 |      8134 |             50 |            5 | out of line (TOAST)
+ MAIN    | 2048 |             0 |     10249 |             50 |            6 | out of line (TOAST)
+ PLAIN   | 1536 |             0 |      7693 |           7725 |            0 | inline
+ PLAIN   | 1622 |             0 |      8121 |           8153 |            0 | inline
+ PLAIN   | 1623 |             0 |      8128 |           8160 |            0 | inline
+ PLAIN   | 1624 |             0 |           |                |              | ERROR: row is too big: size 8168, maximum size 8160
+ PLAIN   | 1625 |             0 |           |                |              | ERROR: row is too big: size 8176, maximum size 8160
+ PLAIN   | 2048 |             0 |           |                |              | ERROR: row is too big: size 10288, maximum size 8160
+
+ storage  | dim  | extra_bigints | vec_bytes | heap_tuple_len | toast_chunks |                       result                        
+----------+------+---------------+-----------+----------------+--------------+-----------------------------------------------------
+ EXTENDED |  378 |            12 |      1903 |           2031 |            0 | inline
+ EXTENDED |  379 |            12 |      1904 |            146 |            1 | out of line (TOAST)
+ PLAIN    | 1603 |            12 |      8028 |           8156 |            0 | inline
+ MAIN     | 1603 |            12 |      8028 |           8156 |            0 | inline
+ PLAIN    | 1604 |            12 |           |                |              | ERROR: row is too big: size 8168, maximum size 8160
+ MAIN     | 1604 |            12 |      8029 |            146 |            5 | out of line (TOAST)
+
+DROP TABLE

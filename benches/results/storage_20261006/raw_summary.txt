@@ -1,0 +1,47 @@
+== warm kNN, EXPLAIN Execution Time median (ms), default glibc malloc [faults/query]
+  d=384  k=32   ext   0.64 [0] pinned   0.58 | main   0.64 [0] pinned   0.55
+  d=384  k=256  ext   1.97 [0] pinned   1.90 | main   1.91 [0] pinned   1.93
+  d=384  k=1024 ext   6.90 [515] pinned   6.08 | main   6.85 [513] pinned   6.03
+  d=768  k=32   ext   1.04 [0] pinned   1.01 | main   0.85 [0] pinned   0.88
+  d=768  k=256  ext   4.23 [0] pinned   4.14 | main   3.04 [0] pinned   2.96
+  d=768  k=1024 ext  13.44 [0] pinned  13.11 | main   9.43 [0] pinned   9.24
+  d=1024 k=32   ext   1.22 [0] pinned   1.25 | extl   1.19 [0] pinned   1.17 | main   0.95 [0] pinned   1.00 | plain   1.00 [0] pinned   1.00
+  d=1024 k=256  ext   5.05 [0] pinned   4.97 | extl   4.98 [0] pinned   4.98 | main   3.59 [0] pinned   3.57 | plain   3.56 [0] pinned   3.60
+  d=1024 k=1024 ext  16.58 [0] pinned  16.55 | extl  16.59 [0] pinned  17.01 | main  11.56 [0] pinned  11.35 | plain  11.35 [0] pinned  11.38
+  d=1536 k=32   ext   1.51 [0] pinned   1.50 | main   1.22 [0] pinned   1.24
+  d=1536 k=256  ext   6.24 [0] pinned   6.13 | main   4.64 [2] pinned   4.62
+  d=1536 k=1024 ext  21.40 [0] pinned  20.78 | main  18.23 [2079] pinned  15.33
+
+== MAIN - EXTENDED at search_k=1024 (1024 rechecked candidates), and the k=256->1024 slope
+  default d=384  ext   6.90  main   6.85  delta  -0.05 ms = -0.05 us/cand   slope-check +0.00 us/cand (per-cand total ext  6.43, main  6.43)
+  default d=768  ext  13.44  main   9.43  delta  -4.02 ms = -3.92 us/cand   slope-check -3.69 us/cand (per-cand total ext 12.00, main  8.32)
+  default d=1024 ext  16.58  main  11.56  delta  -5.02 ms = -4.90 us/cand   slope-check -4.64 us/cand (per-cand total ext 15.02, main 10.38)
+  default d=1536 ext  21.40  main  18.23  delta  -3.17 ms = -3.10 us/cand   slope-check -2.05 us/cand (per-cand total ext 19.74, main 17.69)
+  pinned  d=384  ext   6.08  main   6.03  delta  -0.05 ms = -0.05 us/cand   slope-check -0.10 us/cand (per-cand total ext  5.45, main  5.34)
+  pinned  d=768  ext  13.11  main   9.24  delta  -3.88 ms = -3.79 us/cand   slope-check -3.52 us/cand (per-cand total ext 11.69, main  8.17)
+  pinned  d=1024 ext  16.55  main  11.35  delta  -5.20 ms = -5.08 us/cand   slope-check -4.95 us/cand (per-cand total ext 15.08, main 10.12)
+  pinned  d=1536 ext  20.78  main  15.33  delta  -5.45 ms = -5.32 us/cand   slope-check -5.13 us/cand (per-cand total ext 19.07, main 13.95)
+  run1    d=384  ext   6.73  main   6.77  delta  +0.04 ms = +0.04 us/cand   slope-check  +nan us/cand (per-cand total ext   nan, main   nan)
+  run1    d=768  ext  13.05  main   9.33  delta  -3.72 ms = -3.63 us/cand   slope-check  +nan us/cand (per-cand total ext   nan, main   nan)
+  run1    d=1024 ext  16.38  main  11.47  delta  -4.91 ms = -4.79 us/cand   slope-check -4.69 us/cand (per-cand total ext 14.80, main 10.11)
+  run1    d=1536 ext  21.03  main  18.28  delta  -2.75 ms = -2.69 us/cand   slope-check  +nan us/cand (per-cand total ext   nan, main   nan)
+
+== defaults (search_k=32, oversample=1, hi_dim_rerank=auto -> 1024 candidates at 1024-d)
+  ext/k32: 16.47 ms  rounds [16.43, 16.493, 16.481]
+  main/k32: 11.35 ms  rounds [11.245, 11.296, 11.514]
+
+== cold (PG restart + drop_caches before every run), 1024-d, median of 3
+  seq/ext    exec     38.0 ms  runs [38, 37, 39]  shared_read    736  io_read    30.8 ms  | same query warm   4.96 ms
+  seq/extl   exec     35.4 ms  runs [35, 35, 37]  shared_read    768  io_read    28.6 ms  | same query warm   4.93 ms
+  seq/main   exec   4311.9 ms  runs [4312, 4179, 4455]  shared_read 100000  io_read  4206.2 ms  | same query warm  46.08 ms
+  seq/plain  exec   4377.1 ms  runs [4373, 4377, 4452]  shared_read 100000  io_read  4265.7 ms  | same query warm  44.88 ms
+  knn/ext    exec   2628.2 ms  runs [2628, 2747, 2616]  shared_read   9568  io_read  2437.1 ms  | same query warm  16.25 ms
+  knn/extl   exec   2467.0 ms  runs [2467, 2683, 2377]  shared_read   9568  io_read  2278.9 ms  | same query warm  17.08 ms
+  knn/main   exec   1444.6 ms  runs [1445, 1443, 1446]  shared_read   7838  io_read  1274.8 ms  | same query warm  13.73 ms
+  knn/plain  exec   1395.0 ms  runs [1395, 1251, 1421]  shared_read   7838  io_read  1227.9 ms  | same query warm  13.95 ms
+
+== COPY 100k x 1024-d, median of 3 (s)
+  ext     10.54
+  extl     9.48
+  main    10.35
+  plain    9.43

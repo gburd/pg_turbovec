@@ -1,0 +1,42 @@
+psql:rewrite_paths.sql:5: NOTICE:  table "rw_src" does not exist, skipping
+psql:rewrite_paths.sql:5: NOTICE:  table "rw_ctas" does not exist, skipping
+psql:rewrite_paths.sql:5: NOTICE:  table "rw_like" does not exist, skipping
+psql:rewrite_paths.sql:5: NOTICE:  table "rw_upd" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+COPY 20000
+CREATE FUNCTION
+ALTER TABLE
+SELECT 20000
+CREATE TABLE
+INSERT 0 20000
+CREATE TABLE
+ALTER TABLE
+INSERT 0 20000
+ALTER TABLE
+  tbl   | attstorage | heap_mb | toast_mb 
+--------+------------+---------+----------
+ rw_upd | m          |     1.2 |    111.6
+
+UPDATE 10000
+VACUUM
+  tbl   | attstorage | heap_mb | toast_mb 
+--------+------------+---------+----------
+ rw_upd | m          |     1.7 |    111.6
+
+UPDATE 10000
+VACUUM
+  tbl   | attstorage | heap_mb | toast_mb 
+--------+------------+---------+----------
+ rw_upd | m          |    79.3 |    111.6
+
+ values_identical 
+------------------
+ t
+
+   tbl   | attstorage | heap_mb | toast_mb 
+---------+------------+---------+----------
+ rw_src  | m          |     1.5 |    111.6
+ rw_ctas | x          |     1.5 |    117.2
+ rw_like | m          |   156.3 |      0.0
+

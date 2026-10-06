@@ -1,0 +1,26 @@
+t1024_main: 200 queries, wall 15.52 ms/query
+    21.61%  pg_turbovec.so        [.] _RINvMs2_NtCsgjQi1v3XCnG_10serde_cbor2deINtB6_12DeserializerNtNtB8_4read9SliceReadE11parse_valueNtNvXs1b_NtNtCsdZvxOXScsF6_10serde_core2de5implsfNtB1G_11Deserialize11deserialize16PrimitiveVisitorECs36gpbz25XlA_11pg_turbovec
+    19.69%  pg_turbovec.so        [.] _RINvMs2_NtCsgjQi1v3XCnG_10serde_cbor2deINtB6_12DeserializerNtNtB8_4read9SliceReadE17recursion_checkedNCINvB2_11parse_arrayINtNvXsh_NtNtCsdZvxOXScsF6_10serde_core2de5implsINtNtCscHgRw1M2fX5_5alloc3vec3VecpENtB27_11Deserialize11deserialize10VecVisitorfEE0IB2J_fEECs36gpbz25XlA_11pg_turbovec
+    15.93%  pg_turbovec.so        [.] _RINvNtNtCsd7zAFJvd9wc_11pgrx_pg_sys10submodules5panic11run_guardedINtNtNtCsc36rpYXAlPq_4core5panic11unwind_safe16AssertUnwindSafeNCNvNtCs36gpbz25XlA_11pg_turbovec8distance23cosine_distance_wrapper0ENtNtCsfHUZJYamrVA_4pgrx5datum5DatumEB29_
+     5.84%  [kernel.kallsyms]     [k] do_user_addr_fault
+     5.50%  [kernel.kallsyms]     [k] _raw_spin_lock
+     3.11%  postgres              [.] hash_search_with_hash_value
+     1.66%  pg_turbovec.so        [.] _RINvNtNtNtNtCsc36rpYXAlPq_4core5slice4sort8unstable9quicksort9partitionTfyENCINvMB8_SB17_22select_nth_unstable_byNCNvNtCsfyQFr6zIZxY_8turbovec6search12compact_half0E0EB1T_
+     1.56%  postgres              [.] heap_page_prune_opt
+     1.41%  [kernel.kallsyms]     [k] _raw_spin_unlock_irqrestore
+     0.96%  postgres              [.] heap_hot_search_buffer
+     0.95%  [kernel.kallsyms]     [k] __list_del_entry_valid_or_report
+     0.95%  postgres              [.] PinBuffer
+     0.92%  postgres              [.] AllocSetAlloc
+     0.70%  pg_turbovec.so        [.] _RNvNtCsfyQFr6zIZxY_8turbovec6search14scan_with_luts
+     0.58%  pg_turbovec.so        [.] _RINvNtNtNtNtCsc36rpYXAlPq_4core5slice4sort8unstable9quicksort9quicksortTfxENCINvMB8_SB17_16sort_unstable_byNCNCNvNtCsfyQFr6zIZxY_8turbovec6search13rerank_legacy0s6_0E0EB1P_
+     0.52%  [kernel.kallsyms]     [k] unmap_page_range
+     0.46%  [kernel.kallsyms]     [k] __pte_offset_map_lock
+     0.43%  [kernel.kallsyms]     [k] __pte_offset_map
+     0.39%  postgres              [.] merge_children.part.0
+     0.38%  libc.so.6             [.] 0x000000000017ba18
+     0.37%  [kernel.kallsyms]     [k] __handle_mm_fault
+     0.35%  postgres              [.] core_yylex
+     0.34%  libc.so.6             [.] malloc
+     0.34%  [kernel.kallsyms]     [k] __mod_memcg_lruvec_state
+     0.32%  [kernel.kallsyms]     [k] mas_walk

@@ -1,0 +1,48 @@
+DROP TABLE
+CREATE TABLE
+CREATE TABLE
+COPY 20000
+COPY 20000
+CREATE INDEX
+CREATE INDEX
+VACUUM
+VACUUM
+CREATE VIEW
+   step   | relname | attstorage | heap_mb | toast_mb | index_entries | degraded 
+----------+---------+------------+---------+----------+---------------+----------
+ 0 loaded | ip_flat | x          |     1.2 |    111.6 |         20000 | f
+ 0 loaded | ip_ivf  | x          |     1.2 |    111.6 |         20000 | f
+
+ALTER TABLE
+ALTER TABLE
+UPDATE 5000
+UPDATE 5000
+                 step                  | relname | attstorage | heap_mb | toast_mb | index_entries | degraded 
+---------------------------------------+---------+------------+---------+----------+---------------+----------
+ 1 after UPDATE of 25% (no VACUUM yet) | ip_flat | m          |    40.2 |    111.6 |         25000 | f
+ 1 after UPDATE of 25% (no VACUUM yet) | ip_ivf  | m          |    40.2 |    111.6 |         25000 | t
+
+VACUUM
+VACUUM
+      step      | relname | attstorage | heap_mb | toast_mb | index_entries | degraded 
+----------------+---------+------------+---------+----------+---------------+----------
+ 2 after VACUUM | ip_flat | m          |    40.2 |    111.6 |         25000 | f
+ 2 after VACUUM | ip_ivf  | m          |    40.2 |    111.6 |         25000 | t
+
+UPDATE 15000
+UPDATE 15000
+VACUUM
+VACUUM
+                step                 | relname | attstorage | heap_mb | toast_mb | index_entries | degraded 
+-------------------------------------+---------+------------+---------+----------+---------------+----------
+ 3 after UPDATE of the rest + VACUUM | ip_flat | m          |   157.4 |      0.0 |         40000 | f
+ 3 after UPDATE of the rest + VACUUM | ip_ivf  | m          |   157.4 |      0.0 |         40000 | t
+
+REINDEX
+               step               | relname | attstorage | heap_mb | toast_mb | index_entries | degraded 
+----------------------------------+---------+------------+---------+----------+---------------+----------
+ 4 after REINDEX of the IVF index | ip_flat | m          |   157.4 |      0.0 |         40000 | f
+ 4 after REINDEX of the IVF index | ip_ivf  | m          |   157.4 |      0.0 |         20000 | f
+
+DROP VIEW
+DROP TABLE

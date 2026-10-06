@@ -1,0 +1,16 @@
+ext    explain  wall  13.757 ms  exec  12.884 ms  minor faults/query     0.2
+ext    select   wall  13.694 ms                      minor faults/query     0.0
+ext    explain  wall  13.878 ms  exec  12.981 ms  minor faults/query     0.0
+ext    select   wall  13.626 ms                      minor faults/query     0.0
+main   explain  wall  10.374 ms  exec   9.447 ms  minor faults/query     6.7
+main   select   wall  10.174 ms                      minor faults/query     0.0
+main   explain  wall  10.308 ms  exec   9.413 ms  minor faults/query     0.0
+main   select   wall   9.762 ms                      minor faults/query     0.0
+ext    explain  wall  21.579 ms  exec  20.354 ms  minor faults/query     0.1
+ext    select   wall  21.269 ms                      minor faults/query     0.0
+ext    explain  wall  21.744 ms  exec  20.483 ms  minor faults/query     0.0
+ext    select   wall  21.294 ms                      minor faults/query     0.0
+main   explain  wall  19.133 ms  exec  17.709 ms  minor faults/query  2084.9
+main   select   wall  18.631 ms                      minor faults/query  2034.2
+main   explain  wall  19.477 ms  exec  17.943 ms  minor faults/query  2086.8
+main   select   wall  18.563 ms                      minor faults/query  2034.2

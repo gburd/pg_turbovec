@@ -1,0 +1,18 @@
+# wall.py 1024 2 200 1024 ext main plain, twice per postmaster start.
+# default = no GLIBC_TUNABLES; trim = GLIBC_TUNABLES=glibc.malloc.trim_threshold=268435456
+default rep1
+   ext 16.988 [16.808, 17.166] faults/q [0.0, 0.0]
+   main 14.601 [14.513, 14.658] faults/q [2034.0, 2034.0]
+   plain 14.697 [14.825, 14.569] faults/q [2034.0, 2034.0]
+default rep2
+   ext 16.908 [16.715, 16.988] faults/q [0.0, 0.0]
+   main 14.831 [14.755, 14.894] faults/q [2034.0, 2034.0]
+   plain 14.885 [14.801, 14.969] faults/q [2034.0, 2034.0]
+trim rep1
+   ext 18.997 [18.816, 19.192] faults/q [1182.8, 1182.8]
+   main 16.22 [16.164, 16.286] faults/q [2887.0, 2883.1]
+   plain 16.233 [16.19, 16.246] faults/q [2977.5, 2961.8]
+trim rep2
+   ext 19.196 [19.026, 19.392] faults/q [1082.8, 1057.3]
+   main 16.398 [16.676, 16.134] faults/q [3094.9, 3094.9]
+   plain 16.217 [16.252, 16.16] faults/q [2989.3, 2910.9]

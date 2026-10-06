@@ -1,0 +1,12 @@
+main   k=1024  fresh           exec median  11.602 ms  minor faults/query   237.5
+main   k=1024  again           exec median  11.111 ms  minor faults/query     0.0
+main   k=32    k32             exec median   0.974 ms  minor faults/query     0.0
+main   k=256   k256            exec median   3.574 ms  minor faults/query     0.0
+main   k=1024  after k32+k256  exec median  11.079 ms  minor faults/query     0.0
+main   k=1024  again           exec median  11.183 ms  minor faults/query     0.0
+ext    k=1024  fresh           exec median  16.462 ms  minor faults/query   208.6
+ext    k=1024  again           exec median  16.234 ms  minor faults/query     0.0
+ext    k=32    k32             exec median   1.232 ms  minor faults/query     0.0
+ext    k=256   k256            exec median   4.965 ms  minor faults/query     0.0
+ext    k=1024  after k32+k256  exec median  16.381 ms  minor faults/query     0.3
+ext    k=1024  again           exec median  16.044 ms  minor faults/query     0.0

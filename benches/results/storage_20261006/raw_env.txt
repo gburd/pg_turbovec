@@ -1,0 +1,16 @@
+a3019fd05887629c7bb83fdc63352ad2  /work/pg16rel_c/lib/postgresql/pg_turbovec.so
+3ff7768 docs: correct the ~48 µs/candidate recheck claim and the pgvector re-rank row
+postgres (PostgreSQL) 16.15
+CPU(s):                                  16
+Model name:                              Intel(R) Xeon(R) Platinum 8488C
+Flags: (avx512_vbmi: 16 cpus, avx512_vnni: 16 cpus)
+               total        used        free      shared  buff/cache   available
+Mem:              30           5          21           5           8          24
+shared_buffers = 128MB			# min 128kB
+shared_buffers = 8GB
+work_mem = 64MB
+max_parallel_maintenance_workers = 4
+max_parallel_workers_per_gather = 0
+jit = off
+turbovec.cache_size_mb = 2048
+pglz

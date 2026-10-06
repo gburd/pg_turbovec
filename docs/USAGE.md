@@ -34,6 +34,10 @@ The TurboQuant kernel additionally requires that **dim be a multiple
 of 8**. Pad your embeddings to the next multiple of 8 if your model
 emits an awkward dimension.
 
+Vectors above ~400 dims are stored out of line (TOAST) by default. For
+the latency vs. table-size trade-off of `SET STORAGE MAIN`, see
+[`PRODUCTION.md` § Column storage](PRODUCTION.md#column-storage-for-vector-columns).
+
 ## 3. Insert and read
 
 ```sql

@@ -1,0 +1,10 @@
+NOTICE:  database "trap" does not exist, skipping
+  attrelid  | attstorage 
+------------+------------
+ per_column | m
+ via_type   | m
+(2 rows)
+
+--- pg_dump -s, storage lines:
+CREATE TABLE public.per_column (
+CREATE TABLE public.via_type (

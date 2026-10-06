@@ -1,0 +1,11 @@
++ grep -E 'PROBE|test result'
+PROBE bits=4 repack(par)=57.756248ms planes_repack(par)=20.073763ms planes_repack_serial=278.814183ms [512000000 512000000]
+PROBE bits=4 repack(par)=53.183647ms planes_repack(par)=20.549322ms planes_repack_serial=279.048504ms [512000000 512000000]
+PROBE bits=4 repack(par)=53.393085ms planes_repack(par)=18.185216ms planes_repack_serial=272.396894ms [512000000 512000000]
+PROBE bits=2 repack(par)=31.592785ms planes_repack(par)=32.726749ms planes_repack_serial=1.094450211s [256000000 256000000]
+PROBE bits=2 repack(par)=31.439493ms planes_repack(par)=32.80789ms planes_repack_serial=1.090398669s [256000000 256000000]
+PROBE bits=2 repack(par)=31.374464ms planes_repack(par)=32.281151ms planes_repack_serial=1.091747802s [256000000 256000000]
+CPU part	: 0xd4f
+CPU(s):                                  32
+Vendor ID:                               ARM
+Model name:                              Neoverse-V2

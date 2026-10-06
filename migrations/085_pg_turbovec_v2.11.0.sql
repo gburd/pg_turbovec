@@ -1,0 +1,23 @@
+-- pg_turbovec v2.11.0
+--
+-- MINOR: adopt upstream turbovec 1.1.1 (staged 2/4-bit "planes" search), and
+-- fix a per-scan memory leak (amendscan never dropped the scan state, so a
+-- long-lived backend scanning under concurrent writes grew ~one in-memory
+-- index per observed commit until OOM-killed; since v1.8.0).
+-- NO SQL-surface change, NO GUC change, NO wire-format change
+-- (MetaPageData::version stays 8) -- existing indexes decode byte-identically
+-- and NO REINDEX is required. `ALTER EXTENSION pg_turbovec UPDATE TO '2.11.0'`
+-- plus a restart (to load the new library) is sufficient.
+--
+-- Persisted bytes are unchanged: a 1M x 1024-d 4-bit index built by v2.10.3
+-- and by v2.11.0 on the same heap has byte-identical meta + codes/scales/ids
+-- chains (sha256-compared on Graviton4; benches/results/tv111_arm_20261005/).
+-- turbovec 1.1's new v8 *file container* is not used: pg_turbovec persists
+-- only packed codes in relfile pages.
+--
+-- Minor rather than patch because the in-memory search on aarch64 (dotprod)
+-- and x86 AVX-512 VBMI+VNNI hosts, for indexes of >= 32,768 rows, now
+-- returns an APPROXIMATE candidate set (scores exact, ids may differ from the
+-- whole-index scan for a few queries). `TURBOVEC_4BIT_PLANES=0` /
+-- `TURBOVEC_2BIT_PLANES=0` in the postmaster environment restores the
+-- whole-index scan. See CHANGELOG.md [2.11.0].

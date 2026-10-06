@@ -1,0 +1,6 @@
+/home/admin/mr.log:old scanner RssAnon MB per round: [265, 465, 666, 866, 1065, 1264, 1463, 1663, 1862, 2062, 2262, 2462, 2662, 2862, 3063, 3263, 3464, 3664, 3865, 4066, 4267, 4468, 4670, 4871, 5073, 5274, 5476, 5678, 5880, 6083]
+/home/admin/mr.log:old growth first->last: 265 -> 6083 MB
+/home/admin/mr.log:new scanner RssAnon MB per round: [241, 441, 642, 841, 1040, 1239, 1439, 1638, 1838, 2037, 2237, 2437, 2637, 2837, 3037, 3238, 3438, 3639, 3840, 4041, 4242, 4443, 4644, 4846, 5048, 5249, 5451, 5653, 5855, 6057]
+/home/admin/mr.log:new growth first->last: 241 -> 6057 MB
+/home/admin/fix.log:fix scanner RssAnon MB per round: [241, 242, 243, 243, 243, 243, 243, 243, 244, 244, 244, 244, 244, 245, 245, 245, 246, 246, 246, 246, 247, 247, 247, 247, 247, 247, 247, 248, 248, 248]
+/home/admin/fix.log:fix growth first->last: 241 -> 248 MB

@@ -922,6 +922,152 @@ mod tests {
         );
     }
 
+    /// v2.11.0 soak finding (pre-existing since v1.29.1): `touched_ids`
+    /// was never cleared after a successful flush, and the cache entry
+    /// outlives the transaction, so a long-lived writer's next flush
+    /// re-spliced every id it had EVER upserted -- from its stale in-memory
+    /// snapshot -- onto current disk. An id VACUUM had since removed came
+    /// back (resurrected stale TID), or, after TID reuse, overwrote the new
+    /// row's codes. Drives the real cache path across two "transactions"
+    /// (am_install -> add -> am_mark_dirty -> flush -> clear_dirty), with an
+    /// on-disk removal of txn 1's id in between (what VACUUM does).
+    /// Fail-before: txn 2's flush resurrects the removed id. Pass-after: it
+    /// stays gone, and txn 2's own id is persisted.
+    #[pg_test]
+    fn flush_does_not_resplice_previous_txn_ids() {
+        use crate::cache::{self, CacheKey, PersistState};
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+        const DIM: usize = 32;
+        Spi::run("CREATE TABLE t_resp (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO t_resp SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.37 + s)::float8 FROM generate_series(1, {DIM}) s), ',') \
+                || ']')::turbovec.vector FROM generate_series(1, 64) g"
+        ))
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_resp_idx ON t_resp USING turbovec \
+             (emb turbovec.vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 't_resp_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+        let disk_ids = || unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let (_c, _s, ids) = relfile::read_full(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            ids
+        };
+        // Load the index into the backend cache exactly like aminsert does.
+        let (key, arc) = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let (c, s, ids) = relfile::read_full(rel, &m);
+            let (sh, sc) = relfile::read_tqplus(rel, &m);
+            let idx =
+                IdMapIndex::from_id_map_parts(4, DIM, m.n_vectors as usize, c, s, ids, sh, sc)
+                    .expect("parts");
+            let key = CacheKey {
+                rel_oid: oid,
+                attnum: 0,
+                bit_width: 4,
+                dim: DIM as u32,
+            };
+            let state = PersistState {
+                bit_width: 4,
+                dim: DIM as i32,
+                n_vectors: m.n_vectors as i64,
+                version: m.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let rfn = cache::relfilenode_from_relation(rel);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (
+                key,
+                cache::am_install(key, idx, 1, rfn, m.am_version as i64, state),
+            )
+        };
+        let v = |j: u64| -> Vec<f32> {
+            (0..DIM)
+                .map(|s| ((j as f32) * 0.3 + s as f32).cos())
+                .collect()
+        };
+        // One simulated transaction: upsert `id`, then the PreCommit flush
+        // + clear_dirty exactly as xact.rs's PreCommit callback does.
+        let txn = |id: u64| {
+            arc.write().add_with_ids(&v(id), &[id]).expect("add");
+            assert!(cache::am_mark_dirty(key, |p| {
+                p.touched_ids.push(id);
+                p.live_ids.push(id);
+                p.n_vectors += 1;
+                p.version += 1;
+            }));
+            let d = cache::drain_dirty()
+                .into_iter()
+                .find(|d| d.key == key)
+                .expect("dirty");
+            unsafe { crate::xact::flush_to_relfile_for_test(oid, &d.index.read(), &d.persist) };
+            cache::clear_dirty(key);
+        };
+        const A: u64 = 0x7100_0000_0001; // txn 1's row
+        const B: u64 = 0x7100_0000_0002; // txn 2's row
+        txn(A);
+        assert!(disk_ids().contains(&A), "txn 1 must persist A");
+        // Between the transactions VACUUM removes A on disk (A's heap row
+        // died). Model it with the same primitives ambulkdelete uses:
+        // swap the last slot into A's, shrink by one.
+        unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::RowExclusiveLock as i32);
+            relfile::lock_relfile_write(rel);
+            let m = relfile::read_meta(rel).expect("meta");
+            let ids = relfile::read_ids_only(rel, &m);
+            let s = ids.iter().position(|&x| x == A).expect("A on disk") as u64;
+            let last = m.n_vectors - 1;
+            if s != last {
+                relfile::copy_slot_in_chain(
+                    rel,
+                    m.codes_first,
+                    m.stride_bytes,
+                    m.rows_per_codes_page,
+                    last,
+                    s,
+                );
+                relfile::copy_slot_in_chain(
+                    rel,
+                    m.scales_first,
+                    4,
+                    m.rows_per_scales_page,
+                    last,
+                    s,
+                );
+                relfile::copy_slot_in_chain(rel, m.ids_first, 8, m.rows_per_ids_page, last, s);
+            }
+            relfile::write_meta_shrink_in_place(rel, &m, last, m.am_version + 1);
+            relfile::unlock_relfile_write(rel);
+            pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);
+        }
+        assert!(!disk_ids().contains(&A), "VACUUM model must remove A");
+        assert_eq!(
+            cache::am_touched_ids(oid),
+            Some(vec![]),
+            "a flushed entry keeps no touched ids"
+        );
+        txn(B);
+        let ids = disk_ids();
+        assert!(ids.contains(&B), "txn 2 must persist its own row");
+        assert!(
+            !ids.contains(&A),
+            "txn 2's flush resurrected id A, which txn 1 already persisted and VACUUM removed"
+        );
+        assert_eq!(crate::index::scan::first_duplicate_id(&ids), None);
+        cache::invalidate_all();
+    }
+
     /// v2.11.0 soak finding: `amendscan` was a no-op, so every finished scan
     /// leaked its `ScanOpaque` -- including an `Arc` clone of the cached
     /// whole-index handle. Once a later commit made that entry stale and a

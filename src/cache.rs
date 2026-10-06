@@ -1920,14 +1920,38 @@ pub fn drain_dirty() -> Vec<DirtyEntry> {
 /// current `persist.version`, so subsequent in-backend lookups hit
 /// without forcing another reload. Called after the relfile
 /// rewrite succeeds.
+///
+/// v2.11.0 corruption fix: also EMPTY `touched_ids`. They have just been
+/// persisted, and the entry outlives the transaction -- the next txn in this
+/// backend reuses it (`am_lookup_for_mutation` deliberately ignores
+/// `am_version`). Before this fix the list only ever grew, so every later
+/// flush re-spliced EVERY id this backend had ever upserted, sourcing codes
+/// from its now-stale in-memory snapshot, onto current disk state. Once
+/// VACUUM had removed such an id and the heap reused its TID for an unrelated
+/// row, that re-splice either overwrote the new row's entry with the old row's
+/// codes (wrong vector for a live row) or appended the vacuumed entry back
+/// (resurrected stale TID). `turbovec_check` stays clean -- ids remain unique
+/// -- so only a byte-level comparison against a fresh build sees it.
+/// Present since v1.29.1 (which introduced `touched_ids`). Repro:
+/// `flush_does_not_resplice_previous_txn_ids`.
 pub fn clear_dirty(key: CacheKey) {
     let mut g = CACHE.lock();
     if let Some(entry) = g.get_mut(&key) {
         entry.dirty = false;
-        if let Some(p) = entry.persist.as_ref() {
+        if let Some(p) = entry.persist.as_mut() {
             entry.n_rows = p.version as i64;
+            p.touched_ids.clear();
         }
     }
+}
+
+/// Test-only: the cached AM entry's `touched_ids` for `rel_oid`.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn am_touched_ids(rel_oid: pg_sys::Oid) -> Option<Vec<u64>> {
+    let g = CACHE.lock();
+    g.iter()
+        .find(|(k, _)| k.rel_oid == rel_oid && k.attnum == 0)
+        .and_then(|(_, e)| e.persist.as_ref().map(|p| p.touched_ids.clone()))
 }
 
 /// Drop every dirty AM-path entry. Called from the `Abort` xact

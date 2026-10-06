@@ -6668,12 +6668,14 @@ mod tests {
                     "{expr}"
                 );
             }
+            // (A `NULL::vector` literal ERRORs in the type's input function,
+            // before any distance function runs, so take NULL from a row.)
             let n: Option<bool> = Spi::get_one(&format!(
-                "SELECT ({}) IS NULL",
-                e("NULL::vector", "'[1,0]'::vector")
+                "SELECT ({}) IS NULL FROM qc_null a, qc_null b WHERE a.id = 2 AND b.id = 4",
+                e("a.tv", "b.tv")
             ))
             .unwrap();
-            assert_eq!(n, Some(true), "{tmpl} with NULL left");
+            assert_eq!(n, Some(true), "{tmpl} with both NULL");
         }
         let marks: Option<i64> = Spi::get_one(
             "SELECT count(*) FROM pg_proc \

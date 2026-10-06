@@ -922,6 +922,50 @@ mod tests {
         );
     }
 
+    /// v2.11.0 soak finding: `amendscan` was a no-op, so every finished scan
+    /// leaked its `ScanOpaque` -- including an `Arc` clone of the cached
+    /// whole-index handle. Once a later commit made that entry stale and a
+    /// scan replaced it, the leaked clones kept every superseded index alive:
+    /// a long-lived backend grew ~one index per observed commit until the OOM
+    /// killer took the postmaster down. Fail-before: after N completed scans
+    /// the cached entry's strong count is 1 + N. Pass-after: it is 1 (only the
+    /// cache holds it).
+    #[pg_test]
+    fn amendscan_releases_cached_index_handle() {
+        use_turbovec();
+        Spi::run("CREATE TABLE t_leak (id bigint, emb turbovec.vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_leak SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.37 + s)::float8 FROM generate_series(1, 32) s), ',') \
+                || ']')::turbovec.vector FROM generate_series(1, 2000) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_leak_idx ON t_leak USING turbovec \
+             (emb turbovec.vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 't_leak_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+        crate::cache::invalidate_all();
+        for _ in 0..5 {
+            let n: Option<i64> = Spi::get_one(
+                "SELECT count(*) FROM (SELECT id FROM t_leak ORDER BY emb \
+                 OPERATOR(turbovec.<=>) (SELECT emb FROM t_leak WHERE id = 7) LIMIT 10) q",
+            )
+            .unwrap();
+            assert_eq!(n, Some(10));
+        }
+        assert_eq!(
+            crate::cache::am_entry_strong_count(oid),
+            Some(1),
+            "completed scans must release their cache handle in amendscan \
+             (a count of 1 + #scans means each scan leaked an Arc to the index)"
+        );
+    }
+
     /// turbovec 1.1 adoption guard: the TurboQuant persist path must stay
     /// byte-exact when the inner index is in 1.1's staged-search "planes"
     /// cache layout. 1.1 builds that layout at >= 32,768 vectors on hosts

@@ -6651,8 +6651,12 @@ mod tests {
     fn distance_cache_null_and_markings_unchanged() {
         use_turbovec();
         Spi::run("CREATE TABLE qc_null (id int, tv vector)").unwrap();
-        Spi::run("INSERT INTO qc_null VALUES (1, '[1,2]'), (2, NULL), (3, '[3,4]'), (4, NULL)")
-            .unwrap();
+        // NULL rows via an omitted column: PG runs a type's input function
+        // even for a NULL literal, and Vector's rejects it (pre-existing).
+        Spi::run("INSERT INTO qc_null VALUES (1, '[1,2]')").unwrap();
+        Spi::run("INSERT INTO qc_null (id) VALUES (2)").unwrap();
+        Spi::run("INSERT INTO qc_null VALUES (3, '[3,4]')").unwrap();
+        Spi::run("INSERT INTO qc_null (id) VALUES (4)").unwrap();
         for (tmpl, reference) in qc_ops() {
             let e = |a: &str, b: &str| tmpl.replace("{a}", a).replace("{b}", b);
             for expr in [e("tv", "'[1,0]'::vector"), e("'[1,0]'::vector", "tv")] {
@@ -6668,8 +6672,6 @@ mod tests {
                     "{expr}"
                 );
             }
-            // (A `NULL::vector` literal ERRORs in the type's input function,
-            // before any distance function runs, so take NULL from a row.)
             let n: Option<bool> = Spi::get_one(&format!(
                 "SELECT ({}) IS NULL FROM qc_null a, qc_null b WHERE a.id = 2 AND b.id = 4",
                 e("a.tv", "b.tv")

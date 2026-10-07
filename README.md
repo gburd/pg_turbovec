@@ -41,7 +41,7 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v2.11.0 - built on upstream **turbovec 1.1.1** (wire
+> **Status:** v2.12.0 - built on upstream **turbovec 1.1.1** (wire
 > format v8; staged 2/4-bit search on aarch64 and AVX-512 VBMI+VNNI hosts,
 > 1.14-1.17x faster 4-bit end-to-end on Graviton4 at 1M x 1024-d -- see
 > [CHANGELOG](CHANGELOG.md)). The full `#[pg_test]` suite passes against

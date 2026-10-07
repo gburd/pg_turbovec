@@ -4,7 +4,15 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.12.0] — 2026-10-07
+
+MINOR: **faster exact-distance recheck** (vectorized kernels; the constant query is
+decoded once per expression), plus documentation corrections and new column-storage
+guidance. No SQL-surface change, no GUC change, **no wire-format change**
+(`MetaPageData::version` stays **8**), index bytes and normalised codes unchanged.
+`ALTER EXTENSION pg_turbovec UPDATE` plus a reconnect is sufficient; **no REINDEX**.
+Minor rather than patch because exact distances can change in the last digits
+(see Changed).
 
 ### Changed
 
@@ -12,17 +20,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `vector` and `halfvec`, their function forms such as `l2_distance` and
   `inner_product`, MaxSim (`max_sim`, `max_sim_cosine`, `colbert_search`'s
   re-rank) and `nearest_partitions` ranking) sum in 8 independent f64 lanes:
-  ~3× faster at 1024-d. Results for vectors of 8 or more dimensions can differ
-  from 2.11.0 by rounding: ≤ ~1e-13 relative to the summed terms (≤ ~2.5e-13
-  absolute for `<=>`), which is the last one or two digits of a typical result.
+  the kernels are ~3× faster per call at 1024-d. Results for vectors of 8 or
+  more dimensions can differ from 2.11.0 by rounding: measured max |new − old|
+  2.1e-13 relative to the summed terms for `<#>`/dot and 1.1e-13 relative for
+  `<->`, over dims 8–16000 including constant vectors (≤ ~2.5e-13 absolute for
+  `<=>`), which is the last one or two digits of a typical result.
   A result made small by cancellation shows more changed digits: `<=>` between
   near-duplicates (measured: 9th significant digit at a distance of 5e-6), and
   `<#>` between near-orthogonal vectors. The new sums' maximum error against an
   exact sum is lower (5.5e-14 vs 4.4e-13). Rows whose exact distances differ by
   less than that, or that sit that close to a `WHERE dist < t` threshold, may
-  change order or membership. Below 8 dimensions results are unchanged. `sparsevec` operators
-  are unchanged. No wire-format or SQL change; normalised codes are
-  byte-identical.
+  change order or membership. Below 8 dimensions results are unchanged.
+  `sparsevec` operators are unchanged. No wire-format or SQL change; normalised
+  codes are byte-identical. This is why this release is a minor, not a patch:
+  `docs/UPGRADING.md` allows kernel changes in a patch only when scoring is
+  bit-identical. Expression indexes, partial-index predicates, stored generated
+  columns and materialized views built on these IMMUTABLE functions over
+  vectors of 8 or more dimensions keep 2.11.0-rounded values; `REINDEX` /
+  `REFRESH` them if exact equality with newly computed values matters.
 - The distance functions (`l2_distance`, `l2_squared_distance`,
   `inner_product`, `negative_inner_product`, `cosine_distance`, `l1_distance`
   and the `<->`, `<#>`, `<=>`, `<+>` operators on `vector`) decode a repeated
@@ -38,6 +53,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   and 11.14 → 7.79 ms (1.43×) with `SET STORAGE MAIN`, recall unchanged (500k ×
   1024-d real embeddings, EC2 c7i, warm shared_buffers;
   [`benches/results/perf_abc_20261006/step5/FINDINGS.md`](benches/results/perf_abc_20261006/step5/FINDINGS.md)).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.12.0';` and reconnect (or restart) so
+backends load the new library. No REINDEX. If you have expression indexes,
+partial-index predicates, stored generated columns or materialized views computed
+from these distance functions over vectors of 8+ dimensions and need them to match
+newly computed values exactly, `REINDEX` / `REFRESH` them.
+
+### Known issues
+
+- An IVF index created on an empty table (or `TRUNCATE`d, or via `CREATE TABLE ...
+  (LIKE t INCLUDING ALL)`) never trains cells and is a silent flat scan, not
+  reported as degraded ([#1](https://github.com/gburd/pg_turbovec/issues/1)).
+  Detection query and workaround (`REINDEX` after loading) are in
+  `docs/PRODUCTION.md`.
+- A query vector that arrives as an external TOAST pointer (e.g.
+  `ORDER BY tv <=> (SELECT tv FROM t WHERE id = 7)` at 1024-d) is still fetched
+  from TOAST on every call; client-sent literals/parameters are not affected
+  ([#2](https://github.com/gburd/pg_turbovec/issues/2)).
+- Each rechecked candidate still pays its own CBOR decode (~3 µs at 1024-d) and,
+  under default storage, a TOAST fetch (~5.9 µs); the CBOR part is the planned
+  raw-varlena format (`docs/design/RAW_VECTOR_VARLENA.md`, design only).
+- Not measured end-to-end: aarch64 and AVX2-only x86, `<->`/`<#>`, halfvec, IVF,
+  ColBERT, 2-bit/1-bit, concurrency, prepared/generic plans, dims other than 1024,
+  PostgreSQL other than 16 (see `benches/results/perf_abc_20261006/step5/FINDINGS.md`).
+
+### Tests
+
+`cargo pgrx test pg16`: 471 passed / 0 failed / 9 ignored (EC2 c7i, Debian 13).
 
 ### Documentation
 
@@ -56,8 +101,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   figures are not directly comparable (wall-clock on Graviton4 at 1M rows vs
   backend CPU on x86 at 200k rows); what was wrong was attributing the cost to
   PostgreSQL's recheck rather than to pg_turbovec's own code. Corrected in the
-  [2.11.0] entry below (marked as a correction), `README.md`, `docs/BENCHMARKS.md` and
-  `benches/results/tv111_arm_20261005/FINDINGS.md`.
+  [2.11.0] entry below (marked as a correction), `README.md`,
+  `docs/BENCHMARKS.md` and `benches/results/tv111_arm_20261005/FINDINGS.md`.
 - **README feature table: pgvector does not re-rank against the heap.** The
   "Exact re-ranking vs heap" row marked pgvector ✓. pgvector's HNSW and
   IVFFlat set `xs_recheckorderby = false`: the index stores full-precision

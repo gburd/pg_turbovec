@@ -1,0 +1,20 @@
+-- pg_turbovec v2.12.0
+--
+-- MINOR: faster exact-distance recheck. No SQL-surface change, no GUC change,
+-- no wire-format change (MetaPageData::version stays 8); index bytes and
+-- normalised codes are unchanged, so NO REINDEX. `ALTER EXTENSION pg_turbovec
+-- UPDATE TO '2.12.0'` plus reconnecting (to load the new library) is
+-- sufficient.
+--
+-- - The exact distance kernels sum in 8 independent f64 lanes (~3x faster per
+--   call at 1024-d). Results for vectors of 8+ dimensions can differ from
+--   2.11.0 by rounding (measured max ~2.1e-13 relative); this is why the
+--   release is a minor, not a patch (docs/UPGRADING.md: patches require
+--   bit-identical scoring).
+-- - The distance functions decode a repeated (constant) operand once per
+--   expression instead of once per call, and cosine reuses its norm.
+-- - Measured together: 1.26x (default storage) / 1.43x (STORAGE MAIN) at
+--   search_k = 1024 on 500k x 1024-d (benches/results/perf_abc_20261006/step5).
+--
+-- Function names, argument types, STRICT/IMMUTABLE/PARALLEL SAFE markings and
+-- C symbols are unchanged (pinned by distance_cache_null_and_markings_unchanged).

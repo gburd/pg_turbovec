@@ -1,0 +1,8 @@
+-- pg_turbovec upgrade 2.11.0 -> 2.12.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.12.0';`.
+--
+-- No new or changed SQL objects: this release speeds up the exact distance
+-- functions (vectorized kernels; the constant operand is decoded once per
+-- expression). The functions keep their names, signatures, markings and C
+-- symbols. No wire-format change (stays v8), no REINDEX. Intentionally empty
+-- apart from this comment.

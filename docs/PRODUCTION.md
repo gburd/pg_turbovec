@@ -1118,8 +1118,8 @@ the degradation **observable** instead of silent:
   A `degraded = true` row means: `REINDEX INDEX <name>;` to restore
   IVF (cell-restricted) query performance.
 
-One case is **not** detected (2.11.0): an IVF index created on an empty
-table, or on a table that is then `TRUNCATE`d, has no cells to keep, and
+One case is **not** detected (2.12.0 and earlier): an IVF index created on an
+empty table, or on a table that is then `TRUNCATE`d, has no cells to keep, and
 rows loaded afterwards leave it a flat scan that reports `degraded = false`
 and `lists = 0` in `turbovec.index_degradation()`. `CREATE TABLE ... (LIKE
 t INCLUDING ALL)` creates exactly this. Create IVF indexes after loading, or

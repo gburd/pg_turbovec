@@ -120,22 +120,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.11.0, 2026-10-06)
+### Current (as of v2.12.0, 2026-10-07)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.11.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.10.3 | 2.11.0 | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.12.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.11.0 | 2.12.0 | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.11.0)
+### Where the project actually is (v2.12.0)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -182,6 +182,14 @@ wrong codes / resurrected entries after VACUUM + TID reuse, since v1.29.1, fixed
 v2.11.0). `turbovec_check` cannot see this class -- ids stay unique. The only
 detector is a byte comparison of the soaked index against a fresh CREATE INDEX
 of the same heap (root TIDs; NOT `SELECT ctid`, which returns heap-only TIDs).
+
+**The exact distance kernels are part of the release contract.** `src/kernels.rs`
+computes the exact distances the ORDER BY recheck sorts by. Since v2.12.0 they sum
+in 8 f64 lanes; f32 lanes were tried and REJECTED (changed inner-product top-10
+order on tight clusters). Any change that alters their bits is a minor, not a
+patch (`docs/UPGRADING.md`: patches require bit-identical scoring), and
+`normalise_into` must stay bit-identical forever (it feeds persisted codes;
+`normalise_bit_identical_to_old` guards it, including the returned norm).
 
 **Corruption history — read before touching persist/scan code.** Six
 distinct root causes have been found and fixed (counter-drift, VACUUM
@@ -402,8 +410,8 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 446 passed,
-   8 ignored, uniform across every CI leg pg13-19).
+3. Pass `cargo pgrx test pg16` cleanly (current count: 471 passed,
+   9 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`
    (mirror). Use `git push origin vX.Y.Z` and `git push github vX.Y.Z`.

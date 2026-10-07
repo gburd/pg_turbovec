@@ -506,13 +506,17 @@ mod tests {
 
     /// Pins the rounding change against the 2.11.0 kernels that the
     /// CHANGELOG and docs/UPGRADING.md publish: max |new - old| <= 4.5e-13
-    /// relative for dot (relative to sum |a_i b_i|) and l2_sq, <= 6.5e-13
+    /// relative for dot (relative to sum |a_i b_i|) and l2_sq, <= 1e-12
     /// absolute for cosine; worst case is constant vectors at 16000-d. If a
     /// kernel change pushes past these, the published bound is stale.
     #[test]
     fn lanes_vs_old_change_is_within_published_bound() {
         let mut rng = Rng(0x2120_0000_0000_0001);
-        let (mut dot_rel, mut l2_rel, mut cos_abs) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut dot_rel, mut l2_rel) = (0.0f64, 0.0f64);
+        // Cosine worst case found by a 400k-pair sweep of constant vectors
+        // (8.58e-13); random sampling alone peaks well below it.
+        let (wa, wb) = (vec![0.663_646_76_f32; 16000], vec![0.403_299_3_f32; 16000]);
+        let mut cos_abs = (cosine_distance(&wa, &wb) - cosine_old(&wa, &wb)).abs();
         for &dim in &[8usize, 64, 1024, 3072, 16000] {
             for trial in 0..200 {
                 let (ca, cb) = (0.1 + rng.unif() as f32, 0.1 + rng.unif() as f32);
@@ -539,12 +543,16 @@ mod tests {
         }
         assert!(dot_rel <= 4.5e-13, "dot max rel change {dot_rel:e}");
         assert!(l2_rel <= 4.5e-13, "l2_sq max rel change {l2_rel:e}");
-        assert!(cos_abs <= 6.5e-13, "cosine max abs change {cos_abs:e}");
+        assert!(cos_abs <= 1e-12, "cosine max abs change {cos_abs:e}");
         // The sample must actually reach the worst case, or the test pins
         // nothing (a weaker sample is how the first published bound was 2x low).
         assert!(
             dot_rel > 2.5e-13,
             "sample missed the worst case: {dot_rel:e}"
+        );
+        assert!(
+            cos_abs > 8e-13,
+            "sample missed the cosine worst case: {cos_abs:e}"
         );
     }
 

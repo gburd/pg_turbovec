@@ -23,10 +23,10 @@ distances can change in the last digits (see Changed).
   the kernels are ~3× faster per call at 1024-d. Results for vectors of 8 or
   more dimensions can differ from 2.11.0 by rounding. Measured max |new − old|
   over dims 8–16000: ≤ 4.5e-13 relative for `<->` and `<#>` (`<#>` relative
-  to Σ|aᵢbᵢ|), ≤ 6.5e-13 absolute for `<=>`, pinned by
+  to Σ|aᵢbᵢ|), ≤ 1e-12 absolute for `<=>`, pinned by
   `lanes_vs_old_change_is_within_published_bound`. The worst case is constant
   vectors at 16000-d, and nearly all of it is the OLD kernel's error. For
-  unit-norm vectors the change is ≤ 2e-14 relative (`<->`) and ≤ 6e-16
+  unit-norm vectors the change is ≤ 3e-14 relative (`<->`) and ≤ 1e-15
   (`<#>`, `<=>`): the last one or two digits.
   A result made small by cancellation shows more changed digits: `<=>` between
   near-duplicates (measured: 9th significant digit at a distance of 5e-6), and
@@ -69,7 +69,8 @@ them to match newly computed values exactly, `REINDEX` / `REFRESH` them.
 
 - An IVF index created on an empty table (or `TRUNCATE`d, or via `CREATE
   TABLE ... (LIKE t INCLUDING ALL)`) never trains cells and is a silent flat
-  scan, not reported as degraded ([#1](https://github.com/gburd/pg_turbovec/issues/1)).
+  scan, not reported as degraded
+  ([#1](https://github.com/gburd/pg_turbovec/issues/1)).
   Detection query and workaround (`REINDEX` after loading) are in
   `docs/PRODUCTION.md`.
 - A query vector that arrives as an external TOAST pointer (e.g.

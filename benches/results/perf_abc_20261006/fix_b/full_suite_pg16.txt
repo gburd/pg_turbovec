@@ -1,0 +1,11 @@
+test result: ok. 458 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 126.85s
+test tests::pg_distance_cache_inline_values_match_reference ... ok
+test tests::pg_distance_cache_null_and_markings_unchanged ... ok
+test tests::pg_distance_cache_decodes_constant_once_per_expression ... ok
+test tests::pg_distance_cache_mismatch_cosine_const_left - should panic ... ok
+test tests::pg_distance_cache_mismatch_inner_product - should panic ... ok
+test tests::pg_distance_cache_mismatch_ip - should panic ... ok
+test tests::pg_distance_cache_mismatch_l1 - should panic ... ok
+test tests::pg_distance_cache_mismatch_l2 - should panic ... ok
+test tests::pg_distance_cache_mismatch_l2_squared - should panic ... ok
+test tests::pg_distance_cache_toasted_values_match_reference ... ok

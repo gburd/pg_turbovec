@@ -134,8 +134,8 @@ much more expensive. Numbers below are from
 [`benches/results/storage_20261006/FINDINGS.md`](../benches/results/storage_20261006/FINDINGS.md)
 (pg_turbovec v2.11.0, PostgreSQL 16, 100k synthetic unit-norm vectors, Intel
 Sapphire Rapids). The per-candidate saving is the TOAST fetch, which the
-2.11.1 kernel and decoding changes don't touch; the millisecond totals were
-measured before those changes and will be lower on 2.11.1.
+2.12.0 kernel and decoding changes don't touch; the millisecond totals were
+measured before those changes and will be lower on 2.12.0.
 
 ### What happens today
 

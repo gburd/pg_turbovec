@@ -6,13 +6,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [2.12.0] — 2026-10-07
 
-MINOR: **faster exact-distance recheck** (vectorized kernels; the constant query is
-decoded once per expression), plus documentation corrections and new column-storage
-guidance. No SQL-surface change, no GUC change, **no wire-format change**
-(`MetaPageData::version` stays **8**), index bytes and normalised codes unchanged.
-`ALTER EXTENSION pg_turbovec UPDATE` plus a reconnect is sufficient; **no REINDEX**.
-Minor rather than patch because exact distances can change in the last digits
-(see Changed).
+MINOR: **faster exact-distance recheck** (vectorized kernels; the constant
+query is decoded once per expression), plus documentation corrections and new
+column-storage guidance. No SQL-surface change, no GUC change, **no
+wire-format change** (`MetaPageData::version` stays **8**), index bytes and
+normalised codes unchanged. `ALTER EXTENSION pg_turbovec UPDATE` plus a
+reconnect is sufficient; **no REINDEX**. Minor rather than patch because exact
+distances can change in the last digits (see Changed).
 
 ### Changed
 
@@ -21,10 +21,13 @@ Minor rather than patch because exact distances can change in the last digits
   `inner_product`, MaxSim (`max_sim`, `max_sim_cosine`, `colbert_search`'s
   re-rank) and `nearest_partitions` ranking) sum in 8 independent f64 lanes:
   the kernels are ~3× faster per call at 1024-d. Results for vectors of 8 or
-  more dimensions can differ from 2.11.0 by rounding: measured max |new − old|
-  2.1e-13 relative to the summed terms for `<#>`/dot and 1.1e-13 relative for
-  `<->`, over dims 8–16000 including constant vectors (≤ ~2.5e-13 absolute for
-  `<=>`), which is the last one or two digits of a typical result.
+  more dimensions can differ from 2.11.0 by rounding. Measured max |new − old|
+  over dims 8–16000: ≤ 4.5e-13 relative for `<->` and `<#>` (`<#>` relative
+  to Σ|aᵢbᵢ|), ≤ 6.5e-13 absolute for `<=>`, pinned by
+  `lanes_vs_old_change_is_within_published_bound`. The worst case is constant
+  vectors at 16000-d, and nearly all of it is the OLD kernel's error. For
+  unit-norm vectors the change is ≤ 2e-14 relative (`<->`) and ≤ 6e-16
+  (`<#>`, `<=>`): the last one or two digits.
   A result made small by cancellation shows more changed digits: `<=>` between
   near-duplicates (measured: 9th significant digit at a distance of 5e-6), and
   `<#>` between near-orthogonal vectors. The new sums' maximum error against an
@@ -56,17 +59,17 @@ Minor rather than patch because exact distances can change in the last digits
 
 ### Migration
 
-`ALTER EXTENSION pg_turbovec UPDATE TO '2.12.0';` and reconnect (or restart) so
-backends load the new library. No REINDEX. If you have expression indexes,
-partial-index predicates, stored generated columns or materialized views computed
-from these distance functions over vectors of 8+ dimensions and need them to match
-newly computed values exactly, `REINDEX` / `REFRESH` them.
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.12.0';` and reconnect (or restart)
+so backends load the new library. No REINDEX. If you have expression indexes,
+partial-index predicates, stored generated columns or materialized views
+computed from these distance functions over vectors of 8+ dimensions and need
+them to match newly computed values exactly, `REINDEX` / `REFRESH` them.
 
 ### Known issues
 
-- An IVF index created on an empty table (or `TRUNCATE`d, or via `CREATE TABLE ...
-  (LIKE t INCLUDING ALL)`) never trains cells and is a silent flat scan, not
-  reported as degraded ([#1](https://github.com/gburd/pg_turbovec/issues/1)).
+- An IVF index created on an empty table (or `TRUNCATE`d, or via `CREATE
+  TABLE ... (LIKE t INCLUDING ALL)`) never trains cells and is a silent flat
+  scan, not reported as degraded ([#1](https://github.com/gburd/pg_turbovec/issues/1)).
   Detection query and workaround (`REINDEX` after loading) are in
   `docs/PRODUCTION.md`.
 - A query vector that arrives as an external TOAST pointer (e.g.
@@ -76,9 +79,10 @@ newly computed values exactly, `REINDEX` / `REFRESH` them.
 - Each rechecked candidate still pays its own CBOR decode (~3 µs at 1024-d) and,
   under default storage, a TOAST fetch (~5.9 µs); the CBOR part is the planned
   raw-varlena format (`docs/design/RAW_VECTOR_VARLENA.md`, design only).
-- Not measured end-to-end: aarch64 and AVX2-only x86, `<->`/`<#>`, halfvec, IVF,
-  ColBERT, 2-bit/1-bit, concurrency, prepared/generic plans, dims other than 1024,
-  PostgreSQL other than 16 (see `benches/results/perf_abc_20261006/step5/FINDINGS.md`).
+- Not measured end-to-end: aarch64 and AVX2-only x86, `<->`/`<#>`, halfvec,
+  IVF, ColBERT, 2-bit/1-bit, concurrency, prepared/generic plans, dims other
+  than 1024, PostgreSQL other than 16 (see
+  `benches/results/perf_abc_20261006/step5/FINDINGS.md`).
 
 ### Tests
 

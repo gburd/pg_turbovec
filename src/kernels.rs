@@ -292,7 +292,7 @@ mod tests {
         s + c
     }
 
-    // The pre-2.11.1 kernels, verbatim: serial f64 accumulation.
+    // The pre-2.12.0 kernels, verbatim: serial f64 accumulation.
     fn dot_old(a: &[f32], b: &[f32]) -> f64 {
         let mut acc: f64 = 0.0;
         for (x, y) in a.iter().zip(b.iter()) {
@@ -502,6 +502,50 @@ mod tests {
             }
         }
         println!("{report}");
+    }
+
+    /// Pins the rounding change against the 2.11.0 kernels that the
+    /// CHANGELOG and docs/UPGRADING.md publish: max |new - old| <= 4.5e-13
+    /// relative for dot (relative to sum |a_i b_i|) and l2_sq, <= 6.5e-13
+    /// absolute for cosine; worst case is constant vectors at 16000-d. If a
+    /// kernel change pushes past these, the published bound is stale.
+    #[test]
+    fn lanes_vs_old_change_is_within_published_bound() {
+        let mut rng = Rng(0x2120_0000_0000_0001);
+        let (mut dot_rel, mut l2_rel, mut cos_abs) = (0.0f64, 0.0f64, 0.0f64);
+        for &dim in &[8usize, 64, 1024, 3072, 16000] {
+            for trial in 0..200 {
+                let (ca, cb) = (0.1 + rng.unif() as f32, 0.1 + rng.unif() as f32);
+                let (a, b): (Vec<f32>, Vec<f32>) = if trial % 2 == 0 {
+                    (vec![ca; dim], vec![cb; dim])
+                } else {
+                    (
+                        (0..dim).map(|_| rng.gauss() as f32).collect(),
+                        (0..dim).map(|_| rng.gauss() as f32).collect(),
+                    )
+                };
+                let mag: f64 = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| (f64::from(*x) * f64::from(*y)).abs())
+                    .sum();
+                dot_rel = dot_rel.max((dot(&a, &b) - dot_old(&a, &b)).abs() / mag);
+                let l2o = l2_sq_old(&a, &b);
+                if l2o > 0.0 {
+                    l2_rel = l2_rel.max((l2_sq(&a, &b) - l2o).abs() / l2o);
+                }
+                cos_abs = cos_abs.max((cosine_distance(&a, &b) - cosine_old(&a, &b)).abs());
+            }
+        }
+        assert!(dot_rel <= 4.5e-13, "dot max rel change {dot_rel:e}");
+        assert!(l2_rel <= 4.5e-13, "l2_sq max rel change {l2_rel:e}");
+        assert!(cos_abs <= 6.5e-13, "cosine max abs change {cos_abs:e}");
+        // The sample must actually reach the worst case, or the test pins
+        // nothing (a weaker sample is how the first published bound was 2x low).
+        assert!(
+            dot_rel > 2.5e-13,
+            "sample missed the worst case: {dot_rel:e}"
+        );
     }
 
     /// Zero vector, empty slices, length 1: exact, and cosine is NaN.

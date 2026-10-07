@@ -440,8 +440,8 @@ thresholds are the same from 13 through 18); Graviton (no reason for a
 different result: the saving is a TOAST fetch, not SIMD code); other
 `bit_width` / IVF settings for the latency A/B (the recheck path is the same);
 latency of `MAIN` and `toast_tuple_target = 8160` set together (placement
-only, § 4.1); `pg_repack` on a table taking writes; pg_turbovec 2.11.1 (the
-millisecond totals here are v2.11.0 and will be lower once the 2.11.1
+only, § 4.1); `pg_repack` on a table taking writes; pg_turbovec 2.12.0 (the
+millisecond totals here are v2.11.0 and will be lower once the 2.12.0
 distance-kernel and query-decoding changes land; those don't touch the TOAST
 fetch, so the per-candidate saving should carry over, but that is untested).
 

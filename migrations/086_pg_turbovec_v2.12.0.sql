@@ -8,7 +8,8 @@
 --
 -- - The exact distance kernels sum in 8 independent f64 lanes (~3x faster per
 --   call at 1024-d). Results for vectors of 8+ dimensions can differ from
---   2.11.0 by rounding (measured max ~2.1e-13 relative); this is why the
+--   2.11.0 by rounding (measured max ~4.5e-13 relative, ~6.5e-13 absolute
+--   for cosine; worst on constant 16000-d vectors); this is why the
 --   release is a minor, not a patch (docs/UPGRADING.md: patches require
 --   bit-identical scoring).
 -- - The distance functions decode a repeated (constant) operand once per

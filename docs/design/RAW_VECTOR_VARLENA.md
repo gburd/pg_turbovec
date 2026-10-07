@@ -942,8 +942,8 @@ path and the only one with a measured cost.
   CPU at `search_k = 1024`, 1024-d.** Basis: 3.73 µs CBOR vs 0.08 µs copy
   (`cbor_bench.rs`). Composed with A+B+C, FINDINGS projects ~6 → ~2 µs per
   candidate (estimate; not measured end to end).
-- **Raw rows only.** A table loaded before the flip and never updated keeps
-  paying CBOR on every legacy row. An optional mitigation, deferred: a
+- **Raw rows only.** A table loaded before `raw` was enabled and never
+  updated keeps paying CBOR on every legacy row. An optional mitigation, deferred: a
   hand-written decoder for exactly the canonical shape, falling back to
   serde for anything else. A prototype measured **0.89–0.91 µs vs serde
   3.02–3.09 µs**, bit-exact on two test vectors. It would need the §7

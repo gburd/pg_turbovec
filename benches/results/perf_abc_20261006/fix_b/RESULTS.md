@@ -60,16 +60,48 @@ each, per-query minimum, median over queries, 5 alternated rounds:
 Default-alignment builds. The per-candidate saving matches the per-call
 micro-measure.
 
+Both rows include a cost this change does not remove: the query vector
+comes from `(SELECT tv FROM t WHERE id = ...)`, and `t` stores it as an
+external TOAST pointer. The cache compares detoasted bytes, so that
+pointer is still fetched from TOAST on every call (the reviewer measured
+300 toast block reads for 300 rows with `(SELECT tv FROM src WHERE id =
+7)`). A query vector sent by the client as a parameter or literal arrives
+inline and does not pay this. Follow-up, not done here: avoid the
+per-call fetch, e.g. by detoasting the constant once before the scan.
+Keying the cache on the TOAST pointer is not safe: the cache can outlive
+a statement (PL/pgSQL simple expressions), and a toast value OID can be
+reused after VACUUM.
+
 ## Correctness
 
-`cargo pgrx test pg16` on the same host: 458 passed, 0 failed, 8 ignored
-(the 448-test baseline plus the 10 `distance_cache_*` tests). Before the
-fix, `distance_cache_decodes_constant_once_per_expression` fails (2 decodes
-per call); the other nine pass both before and after, which pins behaviour.
-Two mutations of the cache key were run against the tests:
-length-only comparison (3 tests fail) and ignoring the last 16 payload
-bytes (2 tests fail).
+`cargo pgrx test pg16` on the same host: 462 passed, 0 failed, 8 ignored
+(the 448-test baseline plus 14 `distance_cache_*` tests;
+`full_suite_pg16.txt`). Before the fix,
+`distance_cache_decodes_constant_once_per_expression` fails (2 decodes
+per call); the others pass both before and after, which pins behaviour.
+
+The stale-cache tests evaluate their expression below an `OFFSET 0`
+fence, so rows reach the cache in physical order. Without the fence PG16+
+sorts the input of `array_agg(... ORDER BY id)` first, and the row that
+differs from row 1 only in its last coordinate never directly follows
+row 1. Further tests cover a LATERAL kNN join (index-scan rescans reuse
+one FmgrInfo while the Param changes per outer row), a PL/pgSQL simple
+expression (its FmgrInfo lives for the whole transaction), the cache
+being freed (a test-only live-cache counter returns to its starting
+value at statement end, cursor close and error), and a parallel plan
+matching the serial sum.
+
+Two deliberately broken builds were run against the tests
+(`broken_build_review.txt`). With a cache key that ignores the last 16
+payload bytes, 4 tests fail: inline and toasted values (every one of 30
+op/shape cases per table: constant left and right, subplan, cross join),
+the LATERAL kNN join and the PL/pgSQL test. In the previous round, before
+the `OFFSET 0` fence, only the subplan shape caught this mutation. With a
+cache stored in `fn_extra` but never freed (no reset callback), the
+freed-cache test fails. An earlier round also tried a length-only key
+comparison (3 tests failed).
 
 Not measured: Graviton/aarch64, other dimensions, and parallel query
-(each parallel worker has its own FmgrInfo, so each decodes the constant
-once).
+timing (each parallel worker has its own FmgrInfo, so each decodes the
+constant once; correctness is covered by
+`distance_cache_parallel_matches_serial`).

@@ -33,7 +33,9 @@ use crate::vec::{MAX_DIM, Vector};
 // pgrx CBOR-decodes every by-value `Vector` argument on every call. In
 // an ORDER BY recheck or `sum(emb <=> q)` the query operand is the same
 // datum for every row, so it was decoded once per candidate (~3.7 us at
-// 1024-d). The distance functions below take `VectorArg` (the raw datum)
+// 1024-d on an AVX2 laptop, ~2.3-2.5 us on EC2 c7i; see
+// benches/results/perf_abc_20261006/fix_b/). The distance functions
+// below take `VectorArg` (the raw datum)
 // and decode through a per-FmgrInfo cache in `fn_extra` instead.
 //
 // Staleness is impossible by construction: a slot is reused only when
@@ -45,8 +47,25 @@ use crate::vec::{MAX_DIM, Vector};
 
 /// A `vector` argument handed to the function undecoded. Same SQL type
 /// as [`Vector`]; only the Rust-side unboxing differs.
+///
+/// PGRX COUPLING: `ArgAbi` and `SqlTranslatable` are pgrx-internal
+/// traits ("very subject to change between versions"). These impls are
+/// sound for pgrx =0.19.1, which Cargo.toml pins exactly: unboxing
+/// mirrors what `#[derive(PostgresType)]` generates for `Vector` minus
+/// the CBOR decode, and the `SqlTranslatable` consts are `Vector`'s, so
+/// the generated CREATE FUNCTION is unchanged (pinned by
+/// `distance_cache_null_and_markings_unchanged`). On any pgrx bump,
+/// diff `cargo pgrx schema` against the last release (order-independent)
+/// and rerun the `distance_cache_*` tests.
 pub struct VectorArg(pg_sys::Datum);
 
+// SAFETY: the six functions taking `VectorArg` are declared STRICT
+// (inferred by pgrx because no argument is `Option`), so Postgres never
+// calls them with a NULL here; a NULL would still panic (ERROR), not be
+// read. The value is kept as a raw `Datum` and only ever read through
+// `pg_detoast_datum_packed` + `Vector::from_datum` in `Slot::get`, the
+// same path pgrx's derived `FromDatum` for `Vector` takes, while the
+// call (and so the argument's memory) is live.
 unsafe impl<'fcx> ArgAbi<'fcx> for VectorArg {
     unsafe fn unbox_arg_unchecked(arg: Arg<'_, 'fcx>) -> Self {
         let index = arg.index();
@@ -56,6 +75,10 @@ unsafe impl<'fcx> ArgAbi<'fcx> for VectorArg {
     }
 }
 
+// SAFETY: every const is `Vector`'s, so SQL sees exactly the `vector`
+// type `Vector` maps to; a `VectorArg` is only ever unboxed from a datum
+// of that type (see the `ArgAbi` impl). It is argument-only: no function
+// returns one.
 unsafe impl SqlTranslatable for VectorArg {
     const TYPE_IDENT: &'static str = <Vector as SqlTranslatable>::TYPE_IDENT;
     const TYPE_ORIGIN: TypeOrigin = <Vector as SqlTranslatable>::TYPE_ORIGIN;
@@ -69,6 +92,10 @@ unsafe impl SqlTranslatable for VectorArg {
 pub(crate) static DECODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(any(test, feature = "pg_test"))]
 pub(crate) static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Test-only: `OperandCache`s currently alive (created minus dropped), to
+/// prove the `fn_mcxt` reset callback really frees them.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) static LIVE_CACHES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// One decoded operand and the exact payload bytes it was decoded from.
 #[derive(Default)]
@@ -111,8 +138,22 @@ impl Slot {
 
 /// Per-FmgrInfo cache, one slot per argument position, so the constant
 /// operand hits whether it is written on the left or the right.
-#[derive(Default)]
 struct OperandCache([Slot; 2]);
+
+impl Default for OperandCache {
+    fn default() -> Self {
+        #[cfg(any(test, feature = "pg_test"))]
+        LIVE_CACHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        OperandCache(Default::default())
+    }
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+impl Drop for OperandCache {
+    fn drop(&mut self) {
+        LIVE_CACHES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// Decode both operands (through the `fn_extra` cache when there is an
 /// FmgrInfo to hang it on) and run `f` on them.

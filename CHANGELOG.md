@@ -35,8 +35,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   measurements in
   [`benches/results/storage_20261006/FINDINGS.md`](benches/results/storage_20261006/FINDINGS.md)).
   Explains when `ALTER TABLE … ALTER COLUMN … SET STORAGE MAIN` helps: it
-  saved 4.9 µs per rechecked candidate at 1024-d (16.5 → 11.4 ms (measured
-  on v2.11.0) at `search_k = 1024`), and nothing at 384-d where vectors are
+  saved 4.9 µs per rechecked candidate at 1024-d (16.5 → 11.4 ms at
+  `search_k = 1024`, measured on v2.11.0), and nothing at 384-d where vectors are
   already inline. Also covers what it costs (heap 6 → 782 MB per
   100k × 1024-d rows, a cold sequential scan of another column 38 ms → 4.3 s,
   34× the WAL on a non-vector update just after a checkpoint, no HOT, and

@@ -174,8 +174,9 @@ any latency A/B on this extension** (flagged for the step-5 A/B in
 
 ### 2.2 `toast_tuple_target = 8160` instead of `MAIN` (`run_ttt.sh`; `raw_warm_ttt_1024.json`, `raw_run_ttt.txt`)
 
-Same `bench.py` (pinned malloc, 200 queries × 5 rotated rounds, n = 1,000
-per cell), with a third table `t1024_ttt`: the column left at the default
+Same `bench.py` (200 queries × 5 rotated rounds, n = 1,000 per cell; the
+postmaster's malloc settings were not recorded, but every cell had 0 minor
+faults per query, so the § 2.1 trim state did not occur), with a third table `t1024_ttt`: the column left at the default
 `EXTENDED`, the table set to `toast_tuple_target = 8160` before the `COPY`
 (`load.py ... ttt`). Same 100k vectors as `t1024_ext` (0 differing,
 `raw_sizes_ttt.txt`).
@@ -334,7 +335,7 @@ TOAST pointer.
   does the same to a healthy IVF index (`lists` 16 → 0 at the `TRUNCATE`,
   still 0 after reloading 3,000 rows).
   `REINDEX` after the load restored the cells. This is a product gap
-  (silent loss of trained structure), reported separately; it is not caused
+  (silent loss of trained structure), not yet filed as an issue; it is not caused
   by column storage. Copy with `EXCLUDING INDEXES` and create the indexes
   after loading.
 - **In-place batched UPDATE is a poor migration path** (`raw_inplace.txt`,

@@ -125,8 +125,10 @@ Cosine is the most common for embedding search.
 
 **Short version:** leave the default unless kNN latency is your bottleneck,
 your vectors are roughly 400–1,616 dims, and the table is rarely scanned or
-updated for any other reason. In that case `SET STORAGE MAIN` on the vector
-column removes about 4–5 µs (3.8 µs at 768-d, 5.3 µs at 1536-d) from every
+updated for any other reason. In that case, storing the vector inline (`SET
+STORAGE MAIN` on the column, or
+[`toast_tuple_target = 8160`](#alternative-toast_tuple_target--8160) on the
+table) removes about 4–5 µs (3.8 µs at 768-d, 5.3 µs at 1536-d) from every
 candidate the index rechecks. The cost is that every other heap access gets
 much more expensive. Numbers below are from
 [`benches/results/storage_20261006/FINDINGS.md`](../benches/results/storage_20261006/FINDINGS.md)
@@ -208,7 +210,7 @@ which an inline 400+-dim vector always is. So any `text`/`jsonb` value
 longer than about 24 bytes in the same row (a title, a URL, a body) goes to
 TOAST. It no longer counts against the limit, but reading it now costs a
 TOAST fetch. If those columns are read often, set them to `MAIN` too (they
-then count against the limit) or keep them in a separate table, or use
+then count against the limit), keep them in a separate table, or use
 [`toast_tuple_target`](#alternative-toast_tuple_target--8160) instead of
 `MAIN`. Measured with a 40-byte title and a 300-byte body: both went to TOAST
 at 1024-d and 1536-d under `MAIN`, and both stayed inline under the default
@@ -390,6 +392,16 @@ Caveats:
 - Existing rows need the same rewrite as for `MAIN`. `VACUUM FULL` and
   `pg_repack` both honoured it in our test; an `UPDATE` that leaves the
   vector unchanged did not move it.
+
+**Which to use.** If the vector is the only wide column in the row, either
+works and measured the same: `toast_tuple_target` takes the weaker lock and
+is dumped whatever the type's storage; `MAIN` affects only the vector column
+and is copied by `LIKE ... INCLUDING ALL`. If the row also has `text` or
+`jsonb` columns that queries read, use `toast_tuple_target = 8160`, because
+`MAIN` alone pushes them to TOAST. If some rows can exceed a page (a long
+body next to the vector), set both: then an oversized row sends the text to
+TOAST and keeps the vector inline (placement measured; latency of the
+combination not measured, though the vector sits inline as under `MAIN`).
 
 ---
 
@@ -1111,7 +1123,16 @@ table, or on a table that is then `TRUNCATE`d, has no cells to keep, and
 rows loaded afterwards leave it a flat scan that reports `degraded = false`
 and `lists = 0` in `turbovec.index_degradation()`. `CREATE TABLE ... (LIKE
 t INCLUDING ALL)` creates exactly this. Create IVF indexes after loading, or
-`REINDEX` once the table is loaded.
+`REINDEX` once the table is loaded. To find affected indexes:
+
+```sql
+-- IVF indexes declared WITH (lists = N) that have no cells
+SELECT c.relname
+  FROM pg_class c JOIN pg_am a ON a.oid = c.relam AND a.amname = 'turbovec',
+       LATERAL turbovec.index_degradation(c.oid) d
+ WHERE d.lists = 0
+   AND EXISTS (SELECT 1 FROM unnest(c.reloptions) o WHERE o ~ '^lists=[1-9]');
+```
 
 ---
 

@@ -1,0 +1,42 @@
+psql:update_cost.sql:8: NOTICE:  table "u_t" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+COPY 100000
+psql:update_cost.sql:17: NOTICE:  turbovec: built a FLAT (exact) index over 100000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX
+VACUUM
+CREATE VIEW
+ storage  | toast_tuple_target |   at   | heap_mb | toast_mb | tv_index_mb 
+----------+--------------------+--------+---------+----------+-------------
+ EXTENDED | 8160               | before |   781.6 |      0.0 |        55.2
+
+CHECKPOINT
+Timing is on.
+UPDATE 10000
+Time: 480.360 ms
+Timing is off.
+ pg_stat_force_next_flush 
+--------------------------
+ 
+
+ storage  | toast_tuple_target |  at   | heap_mb | toast_mb | tv_index_mb | wal_mb 
+----------+--------------------+-------+---------+----------+-------------+--------
+ EXTENDED | 8160               | after |   859.4 |      0.0 |        59.3 |   95.9
+
+ pg_sleep 
+----------
+ 
+
+ n_tup_upd | n_tup_hot_upd 
+-----------+---------------
+     10000 |             0
+
+ n_vectors | slot_count | is_corrupt 
+-----------+------------+------------
+    110000 |     110000 | f
+
+DROP VIEW
+DROP TABLE

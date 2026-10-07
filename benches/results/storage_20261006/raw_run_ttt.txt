@@ -1,0 +1,7 @@
+[heartbeat] starting: sh run_ttt.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    sh
+loadavg before: 0.20 0.13 0.05 1/259 106808
+. [sh 04:06:55 elapsed]
+loadavg after:  1.18 0.53 0.21 4/265 106893
+[heartbeat] DONE rc=0 (clean exit)

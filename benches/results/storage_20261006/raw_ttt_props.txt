@@ -1,0 +1,43 @@
+NOTICE:  extension "pg_repack" already exists, skipping
+           step            | relname | reloptions | heap_mb | toast_mb | ivf_entries | ivf_degraded 
+---------------------------+---------+------------+---------+----------+-------------+--------------
+ 0 loaded, default storage | tt      |            |     1.2 |    111.6 |       20000 | f
+ 0 loaded, default storage | tt2     |            |     1.2 |    111.6 |       20000 | f
+
+                            what                             |           mode           
+-------------------------------------------------------------+--------------------------
+ lock held by ALTER TABLE tt SET (toast_tuple_target = 8160) | ShareUpdateExclusiveLock
+
+                               step                               | relname |        reloptions         | heap_mb | toast_mb | ivf_entries | ivf_degraded 
+------------------------------------------------------------------+---------+---------------------------+---------+----------+-------------+--------------
+ 1 after ALTER + UPDATE of 1,000 rows (vector unchanged) + VACUUM | tt      | {toast_tuple_target=8160} |     1.2 |    111.6 |       21000 | f
+ 1 after ALTER + UPDATE of 1,000 rows (vector unchanged) + VACUUM | tt2     | {toast_tuple_target=8160} |     1.2 |    111.6 |       20000 | f
+
+          step          | relname |        reloptions         | heap_mb | toast_mb | ivf_entries | ivf_degraded 
+------------------------+---------+---------------------------+---------+----------+-------------+--------------
+ 2 tt after VACUUM FULL | tt      | {toast_tuple_target=8160} |   156.3 |      0.0 |       20000 | f
+
+ relname |        reloptions         
+---------+---------------------------
+ tt      | {toast_tuple_target=8160}
+ tt_ctas | 
+ tt_like | 
+
+--- pg_repack -t tt2
+INFO: repacking table "public.tt2"
+         step          | relname |        reloptions         | heap_mb | toast_mb | ivf_entries | ivf_degraded 
+-----------------------+---------+---------------------------+---------+----------+-------------+--------------
+ 3 tt2 after pg_repack | tt2     | {toast_tuple_target=8160} |   156.3 |      0.0 |       20000 | f
+
+--- pg_dump -s -t tt (CREATE TABLE / WITH lines)
+CREATE TABLE public.tt (
+WITH (toast_tuple_target='8160');
+--- HOT for a non-vector UPDATE (hot.sql shape: 20k rows, fillfactor = 50, 2,000 updates), toast_tuple_target = 8160
+ 
+
+ 
+
+ relname | n_tup_upd | n_tup_hot_upd 
+---------+-----------+---------------
+ h_ttt   |      2000 |             0
+

@@ -126,15 +126,22 @@ Cosine is the most common for embedding search.
 **Short version:** leave the default unless kNN latency is your bottleneck,
 your vectors are roughly 400–1,616 dims, and the table is rarely scanned or
 updated for any other reason. In that case `SET STORAGE MAIN` on the vector
-column removes 4–5 µs from every candidate the index rechecks. The cost
-is that every other heap access gets much more expensive. Numbers below are
-from [`benches/results/storage_20261006/FINDINGS.md`](../benches/results/storage_20261006/FINDINGS.md)
-(PostgreSQL 16, 100k rows, Intel Sapphire Rapids).
+column removes about 4–5 µs (3.8 µs at 768-d, 5.3 µs at 1536-d) from every
+candidate the index rechecks. The cost is that every other heap access gets
+much more expensive. Numbers below are from
+[`benches/results/storage_20261006/FINDINGS.md`](../benches/results/storage_20261006/FINDINGS.md)
+(pg_turbovec v2.11.0, PostgreSQL 16, 100k synthetic unit-norm vectors, Intel
+Sapphire Rapids). The per-candidate saving is the TOAST fetch, which the
+2.11.1 kernel and decoding changes don't touch; the millisecond totals were
+measured before those changes and will be lower on 2.11.1.
 
 ### What happens today
 
 `turbovec.vector` is stored as a serde-CBOR varlena of about **13 + 5 × dim
-bytes** (5,133 B at 1024-d, against 4,096 B of raw float32). The type's
+bytes** for full-precision float32 values (5,133 B at 1024-d, against 4,096 B
+of raw float32). Values exactly representable in half precision take 3 bytes
+instead of 5, so check yours with
+`SELECT avg(pg_column_size(emb)) FROM docs;`. The type's
 storage is `EXTENDED`, so once a row exceeds ~2 KB PostgreSQL first tries to
 compress the vector and then moves it to the table's TOAST relation.
 Embedding floats don't compress (no vector was compressed in our tests,
@@ -193,15 +200,25 @@ Measured on 8 KB pages, table `(id bigint, emb vector)`:
 | `PLAIN` | 1,623-d | `INSERT` fails: `row is too big` |
 
 Other fixed-width columns in the row lower both limits by about 1 dim per 5
-bytes (12 extra `bigint`s measured 378-d and 1,603-d). Under `MAIN`, wide
-`text`/`jsonb` columns in the same row are compressed or moved to TOAST before
-the vector is (that is how PostgreSQL orders TOAST work), so they count for
-little against the limit. 1536-d embeddings fit
-inline under `MAIN`. 3072-d embeddings fit under neither mode, so `MAIN` does
-nothing for them and `PLAIN` makes every insert fail. **Prefer `MAIN` over
-`PLAIN`:** at its limit it falls back to today's behaviour instead of
-erroring. These limits are for the current encoding, and a more compact one
-would move them.
+bytes (12 extra `bigint`s measured 378-d and 1,603-d).
+
+Under `MAIN`, PostgreSQL moves every *other* toastable column out of line
+before it touches the vector, and keeps doing so while the row is over ~2 KB,
+which an inline 400+-dim vector always is. So any `text`/`jsonb` value
+longer than about 24 bytes in the same row (a title, a URL, a body) goes to
+TOAST. It no longer counts against the limit, but reading it now costs a
+TOAST fetch. If those columns are read often, set them to `MAIN` too (they
+then count against the limit) or keep them in a separate table, or use
+[`toast_tuple_target`](#alternative-toast_tuple_target--8160) instead of
+`MAIN`. Measured with a 40-byte title and a 300-byte body: both went to TOAST
+at 1024-d and 1536-d under `MAIN`, and both stayed inline under the default
+storage.
+
+1536-d embeddings fit inline under `MAIN`. 3072-d embeddings fit under
+neither mode, so `MAIN` does nothing for them and `PLAIN` makes every insert
+fail. **Prefer `MAIN` over `PLAIN`:** at its limit it falls back to today's
+behaviour instead of erroring. These limits are for the current encoding,
+and a more compact one would move them.
 
 ### When `MAIN` helps
 
@@ -210,8 +227,9 @@ All of these should hold:
 - Query latency is dominated by kNN with many rechecked candidates: a large
   `search_k` or `oversample`, or simply dim ≥ 256 with the default
   `hi_dim_rerank = auto`.
-- Vectors are between ~400 and ~1,616 dims. Below that they are already
-  inline, above it they can't be.
+- The vectors are out of line today (check with the query below) and would
+  fit inline: with only an id beside them that is ~400 to ~1,616 float32
+  dims. Other columns in the row lower both bounds.
 - The inline heap fits in RAM next to everything else. Budget roughly one
   8 KB page per row from ~810-d to 1,616-d, and two rows per page at 768-d
   (an estimate from the measured layouts, for a table with few other
@@ -246,6 +264,7 @@ CREATE TABLE docs (
 );
 ALTER TABLE docs ALTER COLUMN emb SET STORAGE MAIN;   -- before any INSERT/COPY
 -- PG 16+ can also write it inline: emb turbovec.vector STORAGE MAIN
+-- With emb inline, body goes to TOAST (see Inline size limits).
 ```
 
 Existing table. `SET STORAGE` changes only the catalog. **Rows already in
@@ -267,30 +286,46 @@ Step 2, the rewrite. Choose one:
 
 ```sql
 -- Offline: VACUUM FULL holds ACCESS EXCLUSIVE (no reads or writes) for the
--- whole rewrite, needs free disk for a full copy, and rebuilds every index,
--- the turbovec one included (4.8 s for 100k x 1024-d; scales with size).
+-- whole rewrite, needs free disk for the new copy plus its indexes (at
+-- 1024-d the inline copy is ~1.4x the old heap+TOAST), and rebuilds every
+-- index, the turbovec one included (4.8 s for 100k x 1024-d; scales with
+-- size).
 VACUUM FULL docs;
 ```
 
 ```bash
 # Online: pg_repack holds ACCESS EXCLUSIVE only briefly at the start and
-# end. Needs the pg_repack extension, a primary key (or a unique index on
-# NOT NULL columns), and free disk for a full copy. Tested with pg_repack
-# 1.5.3: flat and IVF turbovec indexes came back complete and not degraded.
+# end. Needs the pg_repack extension (superuser, or the owner with
+# --no-superuser-check), a primary key or a unique index on NOT NULL
+# columns, and free disk for the new copy plus its indexes (at 1024-d the
+# inline copy is ~1.4x the old heap+TOAST). Tested with pg_repack 1.5.3 on
+# an idle table: flat and IVF turbovec indexes came back complete and not
+# degraded. Writes made during the repack are replayed as inserts, so on a
+# busy table check turbovec.index_is_degraded() afterwards.
 pg_repack -d mydb -t docs
 ```
 
 Avoid two tempting shortcuts:
 
 - **`CREATE TABLE ... AS SELECT`** gives the new column the type default
-  (`EXTENDED`), not `MAIN`. If you copy into a new table, create it with
-  `(LIKE docs INCLUDING ALL)` or run `SET STORAGE` on it first.
+  (`EXTENDED`), not `MAIN`. To copy into a new table, create it with
+  `(LIKE docs INCLUDING ALL EXCLUDING INDEXES)` (or run `SET STORAGE` on it
+  first), load it, then add the primary key and indexes. An IVF turbovec
+  index created on the empty copy never gets cells and is not reported as
+  degraded.
 - **A batched in-place `UPDATE`** (e.g. `SET emb = emb::real[]::turbovec.vector`)
   does move vectors inline, but each updated row adds a turbovec index
-  entry. The first batch degrades an IVF index to a flat scan until
-  `REINDEX` (see [Detecting a degraded IVF index](#detecting-a-degraded-ivf-index)).
-  In our test, VACUUM's index-bypass also left the flat index holding twice
-  as many entries as rows until `VACUUM (INDEX_CLEANUP ON)`.
+  entry. On an IVF index those entries land outside its cells; once they pass
+  `turbovec.ivf_max_delta_pct` (default 10% of the indexed rows) the index
+  degrades to a flat scan until `REINDEX` (see
+  [Detecting a degraded IVF index](#detecting-a-degraded-ivf-index)). A full
+  migration rewrites every row, so it always crosses that bound.
+  In our test VACUUM also skipped index vacuuming (PostgreSQL 14+ does this
+  when fewer than 2% of heap pages have dead items), leaving the flat index
+  with twice as many entries as rows. Results stay correct, because dead
+  entries fail the heap visibility check, but each one costs a heap fetch and
+  takes a candidate slot until removed. Run `VACUUM (INDEX_CLEANUP ON) docs;`
+  after the last batch.
 
 Check where your vectors are:
 
@@ -304,16 +339,57 @@ SELECT a.attstorage,                                   -- x = EXTENDED, m = MAIN
 
 A large `toast` next to a small `heap` means the vectors are out of line.
 
-**Set storage per column, not on the type.** `ALTER TYPE turbovec.vector SET
-(STORAGE = main)` affects only columns created afterwards. `pg_dump` writes
-`SET STORAGE` only for columns that differ from their type's default, so
-those columns come back as `EXTENDED` after a restore into a fresh install.
-A per-column `ALTER TABLE ... SET STORAGE MAIN` is dumped and restored.
+**Set storage per column, and leave the type alone.** `ALTER TYPE
+turbovec.vector SET (STORAGE = main)` affects only columns created
+afterwards. `pg_dump` writes `SET STORAGE` only for columns whose storage
+differs from their type's current default, so after a type change neither
+those columns nor any column you had already set to `MAIN` by hand appear in
+the dump, and a restore into a fresh `CREATE EXTENSION` brings them back as
+`EXTENDED`. With the type at its default, a per-column `ALTER TABLE ... SET
+STORAGE MAIN` is dumped and restored.
 
 **This is independent of the index.** The turbovec index stores only
 quantized codes computed from the vector's values, which storage does not
-change, and its size was identical under every storage mode. Changing column storage never needs a `REINDEX`. The rewrites
-above rebuild the index only because they rewrite the table.
+change, and its size was identical under every storage mode. Changing column
+storage never needs a `REINDEX`. The rewrites above rebuild the index only
+because they rewrite the table.
+
+### Alternative: `toast_tuple_target = 8160`
+
+Instead of changing the column, you can raise the table's TOAST target to a
+full page and leave the column at its default storage:
+
+```sql
+ALTER TABLE docs SET (toast_tuple_target = 8160);   -- before loading, or rewrite after
+```
+
+PostgreSQL then leaves values inline while the row fits on a page. The
+vector sits in the heap exactly as under `MAIN`, and it measured the same
+(1024-d, `search_k = 1024`, one run with all three arms): 16.2 ms default,
+11.0 ms `MAIN`, 11.1 ms `toast_tuple_target = 8160`. The costs are the
+same as `MAIN` too: a 782 MB heap for 100k rows (so a sequential scan reads
+as many pages; not timed separately), 96 MB of WAL for the 10k-row
+non-vector update, and 0% HOT updates. What differs:
+
+- Other columns stay inline. The 40-byte title and 300-byte body stayed in
+  the row at 1024-d and 1536-d. They do count against the ~8 KB limit.
+- When a row doesn't fit a page anyway, the largest value goes to TOAST
+  first, which is usually the vector (1024-d next to a 3,500-byte body: the
+  vector went out, the body stayed). `MAIN` would move the text instead.
+- It takes `SHARE UPDATE EXCLUSIVE` instead of `ACCESS EXCLUSIVE`, so it
+  doesn't block reads or writes (it does wait for a running `VACUUM` or
+  `ANALYZE`).
+- `pg_dump` writes it (`WITH (toast_tuple_target='8160')`), and it doesn't
+  depend on the type's storage.
+
+Caveats:
+
+- It applies to the whole table, every column.
+- `CREATE TABLE ... (LIKE docs INCLUDING ALL)` and `CREATE TABLE ... AS` don't
+  copy it. Set it on the new table before loading.
+- Existing rows need the same rewrite as for `MAIN`. `VACUUM FULL` and
+  `pg_repack` both honoured it in our test; an `UPDATE` that leaves the
+  vector unchanged did not move it.
 
 ---
 
@@ -1029,6 +1105,13 @@ the degradation **observable** instead of silent:
 
   A `degraded = true` row means: `REINDEX INDEX <name>;` to restore
   IVF (cell-restricted) query performance.
+
+One case is **not** detected (2.11.0): an IVF index created on an empty
+table, or on a table that is then `TRUNCATE`d, has no cells to keep, and
+rows loaded afterwards leave it a flat scan that reports `degraded = false`
+and `lists = 0` in `turbovec.index_degradation()`. `CREATE TABLE ... (LIKE
+t INCLUDING ALL)` creates exactly this. Create IVF indexes after loading, or
+`REINDEX` once the table is loaded.
 
 ---
 

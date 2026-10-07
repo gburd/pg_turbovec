@@ -25,6 +25,11 @@ columns". Nothing here changes code or the type's default storage.
 - `SET STORAGE` on a populated table moves nothing. Existing rows move only
   when they are rewritten (`VACUUM FULL`, `pg_repack`, or an `UPDATE` that
   produces a new datum).
+- Under `MAIN`, every other toastable value in the row longer than ~24 bytes
+  (a 40-byte title, a 300-byte body) goes to TOAST instead (§ 4.1).
+- Leaving the column alone and setting the table's `toast_tuple_target =
+  8160` gave the same latency as `MAIN` (11.07 vs 11.02 ms, same run) and
+  kept those text columns inline (§ 2.2, § 4.1).
 
 ## Setup
 
@@ -35,6 +40,13 @@ columns". Nothing here changes code or the type's default storage.
   could replace the library mid-run). pg_turbovec at `3ff7768`
   (`perf/recheck-abc` = v2.11.0 + docs), `cargo pgrx install --release`,
   `pg_turbovec.so` md5 `a3019fd05887629c7bb83fdc63352ad2` (`raw_env.txt`).
+- The review follow-up runs (2026-10-07: `inline_limit.sql` text cases,
+  `dump_trap.sh`, `ivf_degrade.sql`, `ttt_props.sh`, `run_ttt.sh`) used the
+  same build (`pg_turbovec.so` md5 unchanged) and cluster. The box's other
+  benchmark (`/work/ab`) had been idle for ~5 h, no `cargo pgrx test` was
+  running, and loadavg was 0.20 when `run_ttt.sh` started (1.18 at the end,
+  from the run itself; `raw_run_ttt.txt`), so those timings were not
+  contended.
 - Cluster (`up.sh`): `shared_buffers = 8GB`, `jit = off`,
   `max_parallel_workers_per_gather = 0`, `turbovec.cache_size_mb = 2048`,
   `default_toast_compression = pglz` (the build has no lz4). Own port and
@@ -48,10 +60,15 @@ columns". Nothing here changes code or the type's default storage.
   `(id bigint PRIMARY KEY, tv turbovec.vector)`. `SET STORAGE` was applied
   **before** `COPY` (`load.py`), then `VACUUM ANALYZE`. Index: flat 4-bit
   `vec_cosine_ops`.
-- The vector datum is serde-CBOR: **13 + 5·d bytes** (5,133 B at 1024-d,
-  against 4,096 B of raw f32). CBOR stores an element in 3 bytes when it is
-  exactly representable as f16, so vectors with many such values are a little
-  smaller, but real embeddings almost never are.
+- The vector datum is serde-CBOR: **13 + 5·d bytes** for full-precision
+  float32 values (5,133 B at 1024-d, against 4,096 B of raw f32). CBOR
+  stores an element in 3 bytes when it is exactly representable as f16, so
+  the size depends on the values: a 1024-d vector rounded through
+  `turbovec.halfvec` is **3,085 B** (13 + 3·d; last query in
+  `raw_inline_limit.txt`), and every dimension limit in § 4 moves up by
+  about 5/3 for such data (computed, not measured). How many elements of a
+  real embedding are f16-exact was not measured on any corpus; check yours
+  with `SELECT avg(pg_column_size(emb)) FROM docs;`.
 
 ## 1. Sizes (100k rows; `raw_sizes.txt`, `raw_load_*.txt`)
 
@@ -65,10 +82,13 @@ columns". Nothing here changes code or the type's default storage.
 | 1024 | EXTERNAL | 6.0 MB | 558.0 MB | 570.7 MB | 55.2 MB |
 | 1024 | MAIN | 781.3 MB | 0 | 781.5 MB | 55.2 MB |
 | 1024 | PLAIN | 781.3 MB | 0 | 781.5 MB | 55.2 MB |
+| 1024 | EXTENDED + `toast_tuple_target = 8160` | 781.6 MB | 0 | 781.9 MB | 55.2 MB |
 | 1536 | EXTENDED | 6.0 MB | 781.3 MB | 796.2 MB | 81.2 MB |
 | 1536 | MAIN | 781.5 MB | 0 | 781.8 MB | 81.2 MB |
 
-- Sizes are from `raw_sizes.txt`, taken at the end of the session. A later
+- Sizes are from `raw_sizes.txt`, taken at the end of the session (the
+  `toast_tuple_target` row from `raw_sizes_ttt.txt`, loaded from the same
+  100k vectors on 2026-10-07; `raw_load_ttt.txt`). A later
   `VACUUM` truncated a few empty tail pages, so some heap figures are ~0.3 MB
   below the right-after-load values quoted elsewhere (6.0 / 781.6 MB).
 - With the default storage every vector ≥ 398-d lives in TOAST and the main
@@ -152,6 +172,26 @@ any latency A/B on this extension** (flagged for the step-5 A/B in
 `../perf_abc_20261006/`). Setting only
 `trim_threshold` made it worse (`raw_wall_glibc.txt`), so that is not the fix.
 
+### 2.2 `toast_tuple_target = 8160` instead of `MAIN` (`run_ttt.sh`; `raw_warm_ttt_1024.json`, `raw_run_ttt.txt`)
+
+Same `bench.py` (pinned malloc, 200 queries × 5 rotated rounds, n = 1,000
+per cell), with a third table `t1024_ttt`: the column left at the default
+`EXTENDED`, the table set to `toast_tuple_target = 8160` before the `COPY`
+(`load.py ... ttt`). Same 100k vectors as `t1024_ext` (0 differing,
+`raw_sizes_ttt.txt`).
+
+| `search_k` | EXTENDED | MAIN | EXTENDED + `toast_tuple_target = 8160` |
+|---:|---:|---:|---:|
+| 32 | 1.23 | 0.94 | 0.96 |
+| 256 | 4.97 | 3.47 | 3.49 |
+| 1024 | 16.19 | 11.02 | 11.07 |
+
+Per candidate against EXTENDED: MAIN −5.04 µs ((k=1024 delta) / 1024) and
+−4.78 µs (slope), `toast_tuple_target` −4.99 and −4.74 µs. The vector sits
+inline either way, so the two are the same within noise. 0 minor faults per
+query in every cell. The absolute numbers are a little below the earlier
+runs (16.48 / 11.44 ms); compare within a run.
+
 ## 3. Cold cost (`cold.py`; `raw_cold_1024.json`)
 
 Before **every** measurement: `pg_ctl stop -m fast`, `sync; echo 3 >
@@ -189,24 +229,25 @@ bytes/element), 8 KB pages, table `(id bigint, tv turbovec.vector)`:
 | storage | stays inline up to | first dim that doesn't | what happens then |
 |---|---:|---:|---|
 | EXTENDED (default), EXTERNAL | **397-d** (1,998-byte datum) | 398-d | moved to TOAST (2 chunks) |
-| MAIN | **1,623-d** (8,126-byte datum) | 1,624-d | **silently** moved to TOAST (5 chunks) |
+| MAIN | **1,623-d** (8,128-byte datum) | 1,624-d | **silently** moved to TOAST (5 chunks) |
 | PLAIN | **1,623-d** | 1,624-d | `ERROR: row is too big: size 8168, maximum size 8160` |
 
 - The boundary can move by ±1 dim from row to row. An element that happens
-  to be exactly representable in f16 is encoded in 3 bytes instead of 5 (see
-  `vec_bytes` 8,121 instead of 8,123 at 1622-d in the raw output), and an
-  earlier probe run with a different value generator fit 1,624-d under
-  PLAIN.
+  to be exactly representable in f16 is encoded in 3 bytes instead of 5. In
+  the committed run (re-run 2026-10-07 with `setseed`), MAIN at 1604-d with
+  12 extra bigints came out 8,031 bytes instead of 8,033 and fit inline (an
+  8,159-byte tuple), one dim past the 1,603-d limit; the first run of the
+  same script had put it in TOAST. An earlier probe run with a different
+  value generator fit 1,624-d under PLAIN. (`vec_bytes` of a TOASTed value
+  is 4 bytes below 13 + 5·d because `pg_column_size` reports the external
+  size without the varlena header.)
 - The EXTENDED/EXTERNAL limit is the ~2 KB `TOAST_TUPLE_TARGET` (2,032-byte
   tuple). The MAIN/PLAIN limit is the 8,160-byte maximum heap tuple. Both
   depend on the row's other columns. With 12 extra `bigint NOT NULL` columns
   (96 bytes) the limits measured **378-d** and **1,603-d**: 96 bytes of
   other data cost 19–20 dims at 5 bytes per dim, as predicted.
-- Under `MAIN`, wide `text`/`jsonb` columns in the same row (themselves
-  EXTENDED) are compressed or moved to TOAST before any MAIN column is
-  touched (rounds 1–2 vs 3–4 of `heap_toast_insert_or_update`; from the
-  source, not measured here). The limits above are for fixed-width
-  neighbours.
+- The limits above are for fixed-width neighbours. Text neighbours behave
+  differently (§ 4.1).
 - The turbovec index needs dim to be a multiple of 8, so the largest
   indexable dim that stays inline is **1,616**. 1536-d (OpenAI
   `text-embedding-3-small` / `ada-002`) fits. 3072-d
@@ -216,6 +257,41 @@ bytes/element), 8 KB pages, table `(id bigint, tv turbovec.vector)`:
   behaviour. `PLAIN` turns the same situation into failed INSERTs.
 - These limits are for the current serde-CBOR encoding (5 bytes/element). A
   smaller encoding would move them.
+
+### 4.1 Text columns next to the vector (`inline_limit.sql`, second half; `raw_inline_limit.txt`)
+
+Table `(id bigint, title text, body text, tv turbovec.vector)`, one row,
+random hex text (incompressible). Placement read from the raw heap tuple
+with `heap_page_item_attrs`: an 18-byte value starting with byte `0x01` is a
+TOAST pointer.
+
+| vector storage | `toast_tuple_target` | dim | 40-byte title | 300-byte body | vector |
+|---|---:|---:|---|---|---|
+| EXTENDED | default | 384, 1024, 1536, 3072 | inline | inline | TOAST |
+| MAIN | default | 384 | inline | **TOAST** | inline |
+| MAIN | default | 1024, 1536 | **TOAST** | **TOAST** | inline |
+| MAIN | default | 3072 | TOAST | TOAST | TOAST |
+| EXTENDED | 8160 | 384, 1024, 1536 | inline | inline | inline |
+| EXTENDED | 8160 | 3072 | inline | inline | TOAST |
+| MAIN | 8160 | 1024 | inline | inline | inline |
+
+- Under `MAIN`, PostgreSQL's first two TOAST rounds
+  (`heap_toast_insert_or_update`) move every non-MAIN toastable value larger
+  than ~24 bytes out of line (after a compression attempt), largest first,
+  while the tuple is over `TOAST_TUPLE_TARGET` (2,032 bytes), and only then
+  consider MAIN values. An inline 400+-dim vector keeps the tuple over
+  2,032 bytes, so its text neighbours are always pushed to TOAST. At 384-d
+  the tuple (2,313 bytes with both texts) dropped under the target once the
+  body was gone, so the title stayed.
+- Under the default storage the neighbours stay inline because the vector is
+  the value that gets moved.
+- The default-storage lower bound depends on the row too: a 384-d vector next
+  to a 200-byte text column went to TOAST.
+- With `toast_tuple_target = 8160` the target is the whole page, so nothing
+  moves while the tuple fits. When it doesn't, the largest EXTENDED value
+  goes first, which is usually the vector. 1024-d + a 3,500-byte body:
+  EXTENDED + 8160 put the **vector** in TOAST and kept the body; MAIN +
+  default put both texts in TOAST; MAIN + 8160 moved only the body.
 
 ## 5. Changing storage on an existing table (`alter_after.sql`, `rewrite_paths.sql`, `inplace*.sql`, `repack.sh`)
 
@@ -238,19 +314,42 @@ bytes/element), 8 KB pages, table `(id bigint, tv turbovec.vector)`:
   turbovec index from the heap. `turbovec_check` was clean afterwards and kNN
   returned results. **`pg_repack` 1.5.3** (`raw_repack.txt`) did the same
   rewrite with only brief exclusive locks. Both a flat and an IVF index came
-  back with all 20k entries and the IVF index not degraded.
+  back with all 20k entries and the IVF index not degraded. That was an idle
+  table: writes made during a repack are replayed into the new table as
+  ordinary inserts, which is the append path that degrades an IVF index past
+  `ivf_max_delta_pct`, so on a busy table check `index_is_degraded()`
+  afterwards (not measured). The new inline copy is ~1.4× the old heap +
+  TOAST at 1024-d (781.5 vs 570.5 MB, § 1), plus its indexes.
 - `CREATE TABLE … AS SELECT` gives the new column the **type default**
   (EXTENDED), not the source column's MAIN. `CREATE TABLE … (LIKE src
   INCLUDING ALL)` (or `INCLUDING STORAGE`) copies MAIN, and `INSERT … SELECT`
   into it stores the values inline (`raw_rewrite_paths.txt`).
+- But `LIKE … INCLUDING ALL` also copies an IVF index definition onto the
+  empty table, and **an IVF index built on an empty table never gets cells
+  and is not reported as degraded** (`raw_ivf_degrade.txt`): after
+  `CREATE INDEX … WITH (lists = 16)` on an empty table and a 3,000-row COPY,
+  `index_degradation` reported `lists = 0`, `degraded = f`,
+  `scan_fraction = 1.0`, and a kNN scan raised no WARNING. The `LIKE` copy
+  of a `lists = 64` index loaded with 20,000 rows read the same. A `TRUNCATE`
+  does the same to a healthy IVF index (`lists` 16 → 0 at the `TRUNCATE`,
+  still 0 after reloading 3,000 rows).
+  `REINDEX` after the load restored the cells. This is a product gap
+  (silent loss of trained structure), reported separately; it is not caused
+  by column storage. Copy with `EXCLUDING INDEXES` and create the indexes
+  after loading.
 - **In-place batched UPDATE is a poor migration path** (`raw_inplace.txt`,
   `raw_inplace_vacuum.txt`; 20k rows, `SET STORAGE MAIN` then `UPDATE … SET
   tv = tv::real[]::turbovec.vector` in batches with `VACUUM` between):
-  - every updated row adds a turbovec index entry. On an **IVF index the
-    first batch degrades it to a flat scan** (`index_is_degraded = t`, the
-    documented append behaviour) until `REINDEX`;
+  - every updated row adds a turbovec index entry. On an IVF index, **the
+    25% first batch took it past `turbovec.ivf_max_delta_pct` (10%) and
+    degraded it** to a flat scan (`index_is_degraded = t`) until `REINDEX`.
+    Smaller batches don't avoid this, they only postpone it
+    (`ivf_degrade.sql`, `raw_ivf_degrade.txt`, 20k rows, `lists = 64`):
+    5% and 10% cumulative left it healthy, 15% degraded it. A full
+    migration rewrites every row, so it always crosses the bound;
   - after the update the heap is 30× larger, so the dead rows sit on < 2% of
-    its pages and PostgreSQL's VACUUM *index bypass* skips index cleanup. The
+    its pages and PostgreSQL's VACUUM *index bypass* skips index vacuuming
+    (`ambulkdelete`; `amvacuumcleanup` still runs). The
     flat index still held **40,000 entries for 20,000 rows** after the final
     `VACUUM`. `VACUUM (INDEX_CLEANUP ON)` removed them. Dead entries are
     filtered at the heap, so results are correct, but each one scores the
@@ -259,13 +358,19 @@ bytes/element), 8 KB pages, table `(id bigint, tv turbovec.vector)`:
   - the end state matched a rewrite (157 MB heap, 0 TOAST), but it took the
     WAL of rewriting every vector plus the steps above. Use `pg_repack` or
     `VACUUM FULL` instead.
-- `pg_dump` writes `ALTER TABLE ONLY … SET STORAGE MAIN` for a column whose
-  storage differs from the type's default, so a dump/restore keeps a
-  per-column MAIN. If someone changes the **type** instead (`ALTER TYPE
-  turbovec.vector SET (STORAGE = main)`), columns created afterwards match
-  the type and pg_dump emits nothing for them (`raw_dump_trap.txt`). A
-  restore into a fresh `CREATE EXTENSION` then silently gets EXTENDED again.
-  Set storage per column.
+- `pg_dump` writes `ALTER TABLE ONLY … SET STORAGE MAIN` only for a column
+  whose storage differs from its type's **current** storage
+  (`dump_trap.sh`, `raw_dump_trap.txt`, two dumps of one database):
+  - with the type at its default (`x`), a column set to MAIN by `ALTER TABLE`
+    is dumped with its `SET STORAGE MAIN` line, and restoring that dump into
+    a fresh database gives `m`;
+  - after `ALTER TYPE turbovec.vector SET (STORAGE = main)`, neither that
+    column nor a column created afterwards gets a `SET STORAGE` line, and
+    restoring into a fresh database (fresh `CREATE EXTENSION`, so the type
+    is `x` again) gives `x` for both.
+
+  So changing the type also drops the per-column settings from every later
+  dump. Set storage per column and leave the type alone.
 - Lock: `ALTER TABLE … SET STORAGE` takes `ACCESS EXCLUSIVE`
   (`tablecmds.c`, "may add toast tables"; checked in the PG 16 source), but
   only for a catalog update. PG 16 also accepts `STORAGE MAIN` inline in
@@ -292,7 +397,10 @@ bytes/element), 8 KB pages, table `(id bigint, tv turbovec.vector)`:
   | turbovec index | +4.1 MB (10k new entries) | +4.1 MB |
 
   The new row version carries a full copy of the inline vector. With TOAST it
-  carries a ~20-byte pointer to the same, unchanged TOAST value.
+  carries a ~20-byte pointer to the same, unchanged TOAST value. With the
+  column at EXTENDED and `toast_tuple_target = 8160` the vector is inline too,
+  and the result matched MAIN: 95.9 MB of WAL, 480 ms, heap +77.8 MB, 0 HOT
+  (`raw_update_cost_ttt.txt`, run 2026-10-07).
 - **HOT updates** (`raw_hot.txt`, 20k rows, `fillfactor = 50`): 2,000 of
   2,000 updates were HOT with EXTENDED and **0 of 2,000** with MAIN. A 5 KB
   tuple can't fit a second version on its page even at fillfactor 50. With
@@ -300,6 +408,8 @@ bytes/element), 8 KB pages, table `(id bigint, tv turbovec.vector)`:
   table, the turbovec index included (a new vector the flat index stores and
   scans until VACUUM removes the old one). With TOASTed vectors and some
   free space per page, those updates can be HOT and touch no index.
+  `toast_tuple_target = 8160` behaved like MAIN: 0 of 2,000 HOT
+  (`raw_ttt_props.txt`).
 
 ## What this means for the guidance
 
@@ -312,22 +422,38 @@ doesn't fit in RAM. It does nothing below ~400-d (already inline) or above
 today's `EXTENDED` for latency and size. It skips the futile compression
 attempt, worth ~10 µs per inserted row.
 
+`toast_tuple_target = 8160` with the column left at its default gets the
+same latency and the same costs as `MAIN`, keeps other columns inline while
+the row fits a page, takes a weaker lock (`SHARE UPDATE EXCLUSIVE`,
+`raw_ttt_props.txt`) and is written by `pg_dump` as
+`WITH (toast_tuple_target='8160')`. It applies to the whole table, isn't
+copied by `LIKE … INCLUDING ALL` or `CREATE TABLE … AS`, needs the same
+rewrite for existing rows (`VACUUM FULL` and `pg_repack` both honoured it;
+an `UPDATE` that leaves the vector unchanged did not move it), and, unlike
+`MAIN`, gives up the vector first when a row is over ~8 KB anyway.
+
 Not measured: real embeddings (storage behaviour is content-independent
 except for compressibility, which was nil here as it was for the real Cohere
 corpus); tables much larger than RAM; PG versions other than 16 (the TOAST
 thresholds are the same from 13 through 18); Graviton (no reason for a
 different result: the saving is a TOAST fetch, not SIMD code); other
-`bit_width` / IVF settings for the latency A/B (the recheck path is the same).
+`bit_width` / IVF settings for the latency A/B (the recheck path is the same);
+latency of `MAIN` and `toast_tuple_target = 8160` set together (placement
+only, § 4.1); `pg_repack` on a table taking writes; pg_turbovec 2.11.1 (the
+millisecond totals here are v2.11.0 and will be lower once the 2.11.1
+distance-kernel and query-decoding changes land; those don't touch the TOAST
+fetch, so the per-candidate saving should carry over, but that is untested).
 
 ## Files
 
 Scripts: `up.sh` (cluster), `gen.py` (data), `load.py` (tables), `sizes.sql`,
 `bench.py` (warm A/B), `run_bench.sh` (warm A/B under both malloc configs),
-`cold.py`, `inline_limit.sql`, `alter_after.sql`, `rewrite_paths.sql`,
-`inplace.sql`, `inplace_vacuum.sql`, `repack.sh`, `dump_trap.sh`,
-`copytime.py`, `update_cost.sql`, `hot.sql`, `wall.py` / `faults.py` /
-`faults2.py` / `strace_alloc.py` / `prof.sh` (§ 2.1 investigation),
-`summarize.py` (prints `raw_summary.txt` from the raw JSON).
+`run_ttt.sh` (§ 2.2 arm), `cold.py`, `inline_limit.sql`, `alter_after.sql`,
+`rewrite_paths.sql`, `inplace.sql`, `inplace_vacuum.sql`, `repack.sh`,
+`dump_trap.sh`, `ivf_degrade.sql`, `ttt_props.sh`, `copytime.py`,
+`update_cost.sql` (`-v ttt=8160` for the § 6 row), `hot.sql`, `wall.py` /
+`faults.py` / `faults2.py` / `strace_alloc.py` / `prof.sh` (§ 2.1
+investigation), `summarize.py` (prints `raw_summary.txt` from the raw JSON).
 `raw_wall_glibc.txt` and `raw_faults_glibc.txt` are `wall.py` / `faults.py`
 run from a shell loop that restarted the postmaster with and without
 `GLIBC_TUNABLES` (the settings are printed in each file).

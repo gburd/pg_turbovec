@@ -164,7 +164,7 @@ on corpora ≥ 1 M rows.
 | Item                     | pgvector | pg_turbovec | Notes                                  |
 |--------------------------|---------:|------------:|----------------------------------------|
 | Type name                | `vector` | `vector`   | namespaced under `turbovec`            |
-| Default storage          | `external` | `extended` | both TOAST out of line above ~2 KB; see [column storage](PRODUCTION.md#column-storage-for-vector-columns) |
+| Default storage          | `external` | `extended` | both TOAST out of line above ~2 KB; see [column storage](PRODUCTION.md#column-storage-for-vector-columns) (columns created before pgvector 0.6.0 keep `extended`) |
 | Storage per 1536-dim row | 6 144 B  | ≈ 388 B (4-bit) | `pg_turbovec` is ~16× smaller    |
 | Distance ops             | `<-> <#> <=> <+>` | `<-> <#> <=> <+>` | dispatch by operand type        |
 | Index AMs                | `ivfflat`, `hnsw` | `turbovec` | one AM, five opclasses (`vec_ip_ops`, `vec_cosine_ops`, `vec_l2_ops`, `vec_l1_ops`, `vec_colbert_ops`) |

@@ -1,0 +1,148 @@
+DROP TABLE
+CREATE TABLE
+COPY 20000
+CREATE INDEX
+VACUUM
+ALTER TABLE
+UPDATE 5000
+ storage  |     step     | n_vectors 
+----------+--------------+-----------
+ EXTENDED | after update |     25000
+
+psql:inplace_vacuum.sql:16: INFO:  vacuuming "bench.public.iv"
+psql:inplace_vacuum.sql:16: INFO:  finished vacuuming "bench.public.iv": index scans: 1
+pages: 0 removed, 184 remain, 184 scanned (100.00% of total)
+tuples: 5000 removed, 20000 remain, 0 are dead but not yet removable
+removable cutoff: 1106, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan needed: 37 pages from table (20.11% of total) had 5000 dead item identifiers removed
+index "iv_pkey": pages: 71 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+index "iv_tv": pages: 0 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 30552 hits, 0 misses, 0 dirtied
+WAL usage: 15144 records, 15002 full page images, 123682783 bytes
+system usage: CPU: user: 0.03 s, system: 0.06 s, elapsed: 0.15 s
+psql:inplace_vacuum.sql:16: INFO:  vacuuming "bench.pg_toast.pg_toast_1562686"
+psql:inplace_vacuum.sql:16: INFO:  finished vacuuming "bench.pg_toast.pg_toast_1562686": index scans: 1
+pages: 0 removed, 17858 remain, 17858 scanned (100.00% of total)
+tuples: 15000 removed, 60000 remain, 0 are dead but not yet removable
+removable cutoff: 1106, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan needed: 3572 pages from table (20.00% of total) had 15000 dead item identifiers removed
+index "pg_toast_1562686_index": pages: 207 in total, 40 newly deleted, 40 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.336 MB/s
+buffer usage: 39720 hits, 0 misses, 1 dirtied
+WAL usage: 25126 records, 1 full page images, 1528793 bytes
+system usage: CPU: user: 0.02 s, system: 0.00 s, elapsed: 0.02 s
+VACUUM
+ storage  |     step     | n_vectors 
+----------+--------------+-----------
+ EXTENDED | after VACUUM |     20000
+
+psql:inplace_vacuum.sql:18: INFO:  vacuuming "bench.public.iv"
+psql:inplace_vacuum.sql:18: INFO:  finished vacuuming "bench.public.iv": index scans: 0
+pages: 0 removed, 184 remain, 147 scanned (79.89% of total)
+tuples: 0 removed, 23990 remain, 0 are dead but not yet removable
+removable cutoff: 1106, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 317 hits, 0 misses, 0 dirtied
+WAL usage: 148 records, 0 full page images, 8861 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+psql:inplace_vacuum.sql:18: INFO:  vacuuming "bench.pg_toast.pg_toast_1562686"
+psql:inplace_vacuum.sql:18: INFO:  finished vacuuming "bench.pg_toast.pg_toast_1562686": index scans: 0
+pages: 0 removed, 17858 remain, 1 scanned (0.01% of total)
+tuples: 0 removed, 60000 remain, 0 are dead but not yet removable
+removable cutoff: 1106, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "pg_toast_1562686_index": pages: 207 in total, 0 newly deleted, 40 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 230 hits, 0 misses, 0 dirtied
+WAL usage: 0 records, 0 full page images, 0 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+VACUUM
+ storage  |              step               | n_vectors 
+----------+---------------------------------+-----------
+ EXTENDED | after VACUUM (INDEX_CLEANUP ON) |     20000
+
+ rows_visible 
+--------------
+        20000
+
+DROP TABLE
+DROP TABLE
+CREATE TABLE
+COPY 20000
+CREATE INDEX
+VACUUM
+ALTER TABLE
+UPDATE 5000
+ storage |     step     | n_vectors 
+---------+--------------+-----------
+ MAIN    | after update |     25000
+
+psql:inplace_vacuum.sql:16: INFO:  vacuuming "bench.public.iv"
+psql:inplace_vacuum.sql:16: INFO:  finished vacuuming "bench.public.iv": index scans: 0
+pages: 0 removed, 5147 remain, 5147 scanned (100.00% of total)
+tuples: 5000 removed, 20000 remain, 0 are dead but not yet removable
+removable cutoff: 1114, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan bypassed: 37 pages from table (0.72% of total) have 5000 dead item identifiers
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 10273 hits, 0 misses, 0 dirtied
+WAL usage: 38 records, 0 full page images, 12223 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+psql:inplace_vacuum.sql:16: INFO:  vacuuming "bench.pg_toast.pg_toast_1587694"
+psql:inplace_vacuum.sql:16: INFO:  finished vacuuming "bench.pg_toast.pg_toast_1587694": index scans: 1
+pages: 0 removed, 14286 remain, 14286 scanned (100.00% of total)
+tuples: 15000 removed, 45000 remain, 0 are dead but not yet removable
+removable cutoff: 1114, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan needed: 3572 pages from table (25.00% of total) had 15000 dead item identifiers removed
+index "pg_toast_1587694_index": pages: 166 in total, 40 newly deleted, 40 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.434 MB/s
+buffer usage: 32534 hits, 0 misses, 1 dirtied
+WAL usage: 10840 records, 1 full page images, 685919 bytes
+system usage: CPU: user: 0.01 s, system: 0.00 s, elapsed: 0.01 s
+VACUUM
+ storage |     step     | n_vectors 
+---------+--------------+-----------
+ MAIN    | after VACUUM |     25000
+
+psql:inplace_vacuum.sql:18: INFO:  vacuuming "bench.public.iv"
+psql:inplace_vacuum.sql:18: INFO:  finished vacuuming "bench.public.iv": index scans: 1
+pages: 0 removed, 5147 remain, 5147 scanned (100.00% of total)
+tuples: 0 removed, 20000 remain, 0 are dead but not yet removable
+removable cutoff: 1114, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan needed: 37 pages from table (0.72% of total) had 5000 dead item identifiers removed
+index "iv_pkey": pages: 71 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+index "iv_tv": pages: 0 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 40481 hits, 0 misses, 0 dirtied
+WAL usage: 15107 records, 15002 full page images, 123670748 bytes
+system usage: CPU: user: 0.02 s, system: 0.09 s, elapsed: 0.27 s
+psql:inplace_vacuum.sql:18: INFO:  vacuuming "bench.pg_toast.pg_toast_1587694"
+psql:inplace_vacuum.sql:18: INFO:  finished vacuuming "bench.pg_toast.pg_toast_1587694": index scans: 0
+pages: 0 removed, 14286 remain, 10714 scanned (75.00% of total)
+tuples: 0 removed, 56250 remain, 0 are dead but not yet removable
+removable cutoff: 1114, which was 0 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "pg_toast_1587694_index": pages: 166 in total, 0 newly deleted, 40 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 21620 hits, 0 misses, 0 dirtied
+WAL usage: 10715 records, 0 full page images, 632314 bytes
+system usage: CPU: user: 0.01 s, system: 0.00 s, elapsed: 0.01 s
+VACUUM
+ storage |              step               | n_vectors 
+---------+---------------------------------+-----------
+ MAIN    | after VACUUM (INDEX_CLEANUP ON) |     20000
+
+ rows_visible 
+--------------
+        20000
+
+DROP TABLE

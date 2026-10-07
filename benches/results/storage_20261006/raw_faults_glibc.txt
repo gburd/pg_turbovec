@@ -1,0 +1,18 @@
+== pinned glibc thresholds (mmap 64MB, trim 256MB)
+ext    explain  wall  17.398 ms  exec  16.386 ms  minor faults/query     0.1
+ext    select   wall  16.985 ms                      minor faults/query     0.0
+ext    explain  wall  17.446 ms  exec  16.425 ms  minor faults/query     0.0
+ext    select   wall  16.673 ms                      minor faults/query     0.0
+main   explain  wall  11.972 ms  exec  11.033 ms  minor faults/query     0.0
+main   select   wall  11.955 ms                      minor faults/query     0.0
+main   explain  wall  12.021 ms  exec  11.071 ms  minor faults/query     0.0
+main   select   wall  11.827 ms                      minor faults/query     0.0
+== default glibc (restarted, same script)
+ext    explain  wall  17.760 ms  exec  16.733 ms  minor faults/query     0.2
+ext    select   wall  17.302 ms                      minor faults/query     0.0
+ext    explain  wall  17.313 ms  exec  16.303 ms  minor faults/query     0.0
+ext    select   wall  17.121 ms                      minor faults/query     0.0
+main   explain  wall  12.110 ms  exec  11.116 ms  minor faults/query    12.8
+main   select   wall  11.448 ms                      minor faults/query     0.0
+main   explain  wall  12.007 ms  exec  11.047 ms  minor faults/query     0.0
+main   select   wall  11.648 ms                      minor faults/query     0.0

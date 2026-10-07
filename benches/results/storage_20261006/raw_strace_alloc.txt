@@ -1,0 +1,4 @@
+ext per query: {} mmap sizes: []
+main per query: {'brk': 7.1} mmap sizes: []
+ext per query: {} mmap sizes: []
+main per query: {'brk': 7.0} mmap sizes: []

@@ -1,0 +1,26 @@
+t1024_ext: 200 queries, wall 17.97 ms/query
+    17.81%  pg_turbovec.so        [.] _RINvMs2_NtCsgjQi1v3XCnG_10serde_cbor2deINtB6_12DeserializerNtNtB8_4read9SliceReadE11parse_valueNtNvXs1b_NtNtCsdZvxOXScsF6_10serde_core2de5implsfNtB1G_11Deserialize11deserialize16PrimitiveVisitorECs36gpbz25XlA_11pg_turbovec
+    17.45%  pg_turbovec.so        [.] _RINvMs2_NtCsgjQi1v3XCnG_10serde_cbor2deINtB6_12DeserializerNtNtB8_4read9SliceReadE17recursion_checkedNCINvB2_11parse_arrayINtNvXsh_NtNtCsdZvxOXScsF6_10serde_core2de5implsINtNtCscHgRw1M2fX5_5alloc3vec3VecpENtB27_11Deserialize11deserialize10VecVisitorfEE0IB2J_fEECs36gpbz25XlA_11pg_turbovec
+    13.49%  pg_turbovec.so        [.] _RINvNtNtCsd7zAFJvd9wc_11pgrx_pg_sys10submodules5panic11run_guardedINtNtNtCsc36rpYXAlPq_4core5panic11unwind_safe16AssertUnwindSafeNCNvNtCs36gpbz25XlA_11pg_turbovec8distance23cosine_distance_wrapper0ENtNtCsfHUZJYamrVA_4pgrx5datum5DatumEB29_
+     6.58%  postgres              [.] hash_search_with_hash_value
+     5.02%  postgres              [.] _bt_compare
+     4.48%  postgres              [.] heap_hot_search_buffer
+     3.07%  postgres              [.] heap_page_prune_opt
+     2.54%  postgres              [.] PinBuffer
+     2.13%  libc.so.6             [.] 0x000000000017b9be
+     1.66%  postgres              [.] LWLockAttemptLock
+     1.47%  pg_turbovec.so        [.] _RINvNtNtNtNtCsc36rpYXAlPq_4core5slice4sort8unstable9quicksort9partitionTfyENCINvMB8_SB17_22select_nth_unstable_byNCNvNtCsfyQFr6zIZxY_8turbovec6search12compact_half0E0EB1T_
+     1.16%  postgres              [.] LWLockRelease
+     0.86%  libc.so.6             [.] 0x000000000017b9c6
+     0.74%  postgres              [.] hash_bytes
+     0.73%  libc.so.6             [.] 0x000000000017b9fd
+     0.62%  libc.so.6             [.] 0x000000000017ba04
+     0.60%  postgres              [.] _bt_checkpage
+     0.60%  postgres              [.] _bt_moveright
+     0.59%  pg_turbovec.so        [.] _RNvNtCsfyQFr6zIZxY_8turbovec6search14scan_with_luts
+     0.58%  libc.so.6             [.] 0x000000000017b9f6
+     0.56%  libc.so.6             [.] 0x0000000000172221
+     0.50%  postgres              [.] AllocSetAlloc
+     0.49%  pg_turbovec.so        [.] _RINvNtNtNtNtCsc36rpYXAlPq_4core5slice4sort8unstable9quicksort9quicksortTfxENCINvMB8_SB17_16sort_unstable_byNCNCNvNtCsfyQFr6zIZxY_8turbovec6search13rerank_legacy0s6_0E0EB1P_
+     0.49%  libc.so.6             [.] 0x000000000017ba0b
+     0.48%  libc.so.6             [.] 0x000000000017b80f

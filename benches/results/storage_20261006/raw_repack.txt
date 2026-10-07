@@ -1,0 +1,19 @@
+--- before pg_repack (SET STORAGE MAIN already applied)
+ attstorage | heap_mb | toast_mb | flat_entries | ivf_entries | ivf_degraded 
+------------+---------+----------+--------------+-------------+--------------
+ m          |     1.2 |    111.6 |        20000 |       20000 | f
+(1 row)
+
+INFO: repacking table "public.rp"
+--- after pg_repack
+ attstorage | heap_mb | toast_mb | flat_entries | ivf_entries | ivf_degraded 
+------------+---------+----------+--------------+-------------+--------------
+ m          |   156.3 |      0.0 |        20000 |       20000 | f
+(1 row)
+
+10
+DROP TABLE
+
+pg_repack used by repack.sh:
+pg_repack 1.5.3
+82120316e840773e4521314917a97c26b4b5f520 Fri May 8 17:58:15 2026 +0200

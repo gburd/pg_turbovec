@@ -1,0 +1,5 @@
+[heartbeat] starting: /work/venv/bin/python load.py 1024 ttt --index
+[heartbeat] interval: 60s
+[heartbeat] label:    python
+t1024_ttt copy 10.8s, index 1.7s
+[heartbeat] DONE rc=0 (clean exit)

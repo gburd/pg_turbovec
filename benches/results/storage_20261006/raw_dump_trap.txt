@@ -1,0 +1,25 @@
+=== 1. type at its default; per_column set to MAIN by ALTER TABLE
+type turbovec.vector: typstorage = x
+per_column.tv: attstorage = m
+--- pg_dump -s (BEFORE ALTER TYPE): CREATE EXTENSION / CREATE TABLE / SET STORAGE lines
+CREATE EXTENSION IF NOT EXISTS pg_turbovec WITH SCHEMA turbovec;
+CREATE TABLE public.per_column (
+ALTER TABLE ONLY public.per_column ALTER COLUMN tv SET STORAGE MAIN;
+
+=== 2. after ALTER TYPE turbovec.vector SET (STORAGE = main); via_type created afterwards
+type turbovec.vector: typstorage = m
+per_column.tv: attstorage = m
+via_type.tv: attstorage = m
+--- pg_dump -s (AFTER ALTER TYPE): CREATE EXTENSION / CREATE TABLE / SET STORAGE lines
+CREATE EXTENSION IF NOT EXISTS pg_turbovec WITH SCHEMA turbovec;
+CREATE TABLE public.per_column (
+CREATE TABLE public.via_type (
+
+=== 3. 'before' dump restored into a fresh database (errors shown, if any)
+type turbovec.vector: typstorage = x
+per_column.tv: attstorage = m
+
+=== 3. 'after' dump restored into a fresh database (errors shown, if any)
+type turbovec.vector: typstorage = x
+per_column.tv: attstorage = x
+via_type.tv: attstorage = x

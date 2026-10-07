@@ -49,6 +49,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   IVFFlat set `xs_recheckorderby = false`: the index stores full-precision
   vectors and returns exact distances, so no heap recheck is needed.
   pg_turbovec rechecks because its index stores only quantized codes.
+- **New: column storage guidance for vector columns**
+  ([`docs/PRODUCTION.md` § Column storage for vector columns](docs/PRODUCTION.md#column-storage-for-vector-columns),
+  measurements in
+  [`benches/results/storage_20261006/FINDINGS.md`](benches/results/storage_20261006/FINDINGS.md)).
+  Explains when `ALTER TABLE … ALTER COLUMN … SET STORAGE MAIN` helps: it
+  saved 4.9 µs per rechecked candidate at 1024-d (16.5 → 11.4 ms at
+  `search_k = 1024`, measured on v2.11.0), and nothing at 384-d where vectors are
+  already inline. Also covers what it costs (heap 6 → 782 MB per
+  100k × 1024-d rows, a cold sequential scan of another column 38 ms → 4.3 s,
+  34× the WAL on a non-vector update just after a checkpoint, no HOT, and
+  the row's other text columns pushed to TOAST), the inline limits (397-d by
+  default; 1,623-d under `MAIN`, above which `MAIN` silently uses TOAST and
+  `PLAIN` fails the insert), `toast_tuple_target = 8160` as a measured
+  alternative that keeps other columns inline, and how to rewrite existing
+  rows. Docs only: the type's default storage is unchanged.
+  `MIGRATING_FROM_PGVECTOR.md` now gives pgvector's default storage correctly
+  as `external` (since pgvector 0.6.0), not `extended`.
 
 ## [2.11.0] — 2026-10-06
 

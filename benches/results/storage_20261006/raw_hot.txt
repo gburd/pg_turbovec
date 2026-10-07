@@ -1,0 +1,26 @@
+DROP TABLE
+CREATE TABLE
+CREATE TABLE
+ALTER TABLE
+COPY 20000
+COPY 20000
+CREATE INDEX
+CREATE INDEX
+VACUUM
+VACUUM
+UPDATE 2000
+UPDATE 2000
+ pg_stat_force_next_flush 
+--------------------------
+ 
+
+ pg_sleep 
+----------
+ 
+
+ relname | n_tup_upd | n_tup_hot_upd 
+---------+-----------+---------------
+ h_ext   |      2000 |          2000
+ h_main  |      2000 |             0
+
+DROP TABLE

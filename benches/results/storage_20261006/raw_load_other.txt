@@ -1,0 +1,11 @@
+[heartbeat] starting: sh -c /work/venv/bin/python load.py 384 ext main --index; /work/venv/bin/python load.py 768 ext main --index; /work/venv/bin/python load.py 1536 ext main --index
+[heartbeat] interval: 60s
+[heartbeat] label:    sh
+t384_ext copy 3.8s, index 0.6s
+t384_main copy 3.5s, index 0.5s
+t768_ext copy 8.9s, index 1.2s
+t768_main copy 7.6s, index 1.0s
+t1536_ext copy 17.9s, index 2.2s
+. [sh 20:14:02 elapsed]
+t1536_main copy 15.2s, index 2.0s
+[heartbeat] DONE rc=0 (clean exit)

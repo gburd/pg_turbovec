@@ -1,0 +1,8 @@
+ext    explain  wall  17.121 ms  exec  16.154 ms  minor faults/query     0.1
+ext    select   wall  16.927 ms                      minor faults/query     0.1
+ext    explain  wall  17.062 ms  exec  16.075 ms  minor faults/query     0.0
+ext    select   wall  16.875 ms                      minor faults/query     0.0
+main   explain  wall  15.074 ms  exec  13.840 ms  minor faults/query  2080.3
+main   select   wall  14.810 ms                      minor faults/query  2034.2
+main   explain  wall  14.904 ms  exec  13.666 ms  minor faults/query  2082.8
+main   select   wall  14.633 ms                      minor faults/query  2034.2

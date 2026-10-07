@@ -1,0 +1,83 @@
+ setseed 
+---------
+ 
+
+CREATE FUNCTION
+psql:inline_limit.sql:30: NOTICE:  table "probe_t" does not exist, skipping
+ storage  | dim | extra_bigints | vec_bytes | heap_tuple_len | toast_chunks |       result        
+----------+-----+---------------+-----------+----------------+--------------+---------------------
+ EXTENDED | 384 |             0 |      1933 |           1965 |            0 | inline
+ EXTENDED | 396 |             0 |      1993 |           2025 |            0 | inline
+ EXTENDED | 397 |             0 |      1998 |           2030 |            0 | inline
+ EXTENDED | 398 |             0 |      1999 |             50 |            2 | out of line (TOAST)
+ EXTENDED | 400 |             0 |      2009 |             50 |            2 | out of line (TOAST)
+ EXTERNAL | 384 |             0 |      1933 |           1965 |            0 | inline
+ EXTERNAL | 396 |             0 |      1993 |           2025 |            0 | inline
+ EXTERNAL | 397 |             0 |      1998 |           2030 |            0 | inline
+ EXTERNAL | 398 |             0 |      1999 |             50 |            2 | out of line (TOAST)
+ EXTERNAL | 400 |             0 |      2009 |             50 |            2 | out of line (TOAST)
+
+ storage | dim  | extra_bigints | vec_bytes | heap_tuple_len | toast_chunks |                        result                        
+---------+------+---------------+-----------+----------------+--------------+------------------------------------------------------
+ MAIN    | 1536 |             0 |      7693 |           7725 |            0 | inline
+ MAIN    | 1622 |             0 |      8123 |           8155 |            0 | inline
+ MAIN    | 1623 |             0 |      8128 |           8160 |            0 | inline
+ MAIN    | 1624 |             0 |      8129 |             50 |            5 | out of line (TOAST)
+ MAIN    | 1625 |             0 |      8134 |             50 |            5 | out of line (TOAST)
+ MAIN    | 2048 |             0 |     10247 |             50 |            6 | out of line (TOAST)
+ PLAIN   | 1536 |             0 |      7693 |           7725 |            0 | inline
+ PLAIN   | 1622 |             0 |      8123 |           8155 |            0 | inline
+ PLAIN   | 1623 |             0 |      8128 |           8160 |            0 | inline
+ PLAIN   | 1624 |             0 |           |                |              | ERROR: row is too big: size 8168, maximum size 8160
+ PLAIN   | 1625 |             0 |           |                |              | ERROR: row is too big: size 8176, maximum size 8160
+ PLAIN   | 2048 |             0 |           |                |              | ERROR: row is too big: size 10288, maximum size 8160
+
+ storage  | dim  | extra_bigints | vec_bytes | heap_tuple_len | toast_chunks |                       result                        
+----------+------+---------------+-----------+----------------+--------------+-----------------------------------------------------
+ EXTENDED |  378 |            12 |      1903 |           2031 |            0 | inline
+ EXTENDED |  379 |            12 |      1904 |            146 |            1 | out of line (TOAST)
+ PLAIN    | 1603 |            12 |      8028 |           8156 |            0 | inline
+ MAIN     | 1603 |            12 |      8028 |           8156 |            0 | inline
+ PLAIN    | 1604 |            12 |           |                |              | ERROR: row is too big: size 8168, maximum size 8160
+ MAIN     | 1604 |            12 |      8031 |           8159 |            0 | inline
+
+DROP TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+psql:inline_limit.sql:67: NOTICE:  table "probe_c" does not exist, skipping
+ tv_storage | toast_tuple_target | dim  | title_len | body_len |   title_at    |    body_at     |      tv_at      | heap_tuple_len | toast_chunks 
+------------+--------------------+------+-----------+----------+---------------+----------------+-----------------+----------------+--------------
+ EXTENDED   |                    |  384 |        40 |      300 | inline (41 B) | inline (304 B) | TOAST           |            398 |            1
+ EXTENDED   |                    | 1024 |        40 |      300 | inline (41 B) | inline (304 B) | TOAST           |            398 |            3
+ EXTENDED   |                    | 1536 |        40 |      300 | inline (41 B) | inline (304 B) | TOAST           |            398 |            4
+ EXTENDED   |                    | 3072 |        40 |      300 | inline (41 B) | inline (304 B) | TOAST           |            398 |            8
+ MAIN       |                    |  384 |        40 |      300 | inline (41 B) | TOAST          | inline (1933 B) |           2025 |            1
+ MAIN       |                    | 1024 |        40 |      300 | TOAST         | TOAST          | inline (5133 B) |           5201 |            2
+ MAIN       |                    | 1536 |        40 |      300 | TOAST         | TOAST          | inline (7693 B) |           7761 |            2
+ MAIN       |                    | 3072 |        40 |      300 | TOAST         | TOAST          | TOAST           |             86 |           10
+ EXTENDED   |               8160 |  384 |        40 |      300 | inline (41 B) | inline (304 B) | inline (1933 B) |           2313 |            0
+ EXTENDED   |               8160 | 1024 |        40 |      300 | inline (41 B) | inline (304 B) | inline (5133 B) |           5513 |            0
+ EXTENDED   |               8160 | 1536 |        40 |      300 | inline (41 B) | inline (304 B) | inline (7693 B) |           8073 |            0
+ EXTENDED   |               8160 | 3072 |        40 |      300 | inline (41 B) | inline (304 B) | TOAST           |            398 |            8
+
+ tv_storage | toast_tuple_target | dim | title_len | body_len |   title_at   |    body_at     | tv_at | heap_tuple_len | toast_chunks 
+------------+--------------------+-----+-----------+----------+--------------+----------------+-------+----------------+--------------
+ EXTENDED   |                    | 384 |         0 |      200 | inline (1 B) | inline (204 B) | TOAST |            258 |            1
+
+ tv_storage | toast_tuple_target | dim  | title_len | body_len |   title_at    |     body_at     |      tv_at      | heap_tuple_len | toast_chunks 
+------------+--------------------+------+-----------+----------+---------------+-----------------+-----------------+----------------+--------------
+ EXTENDED   |                    | 1024 |        40 |     3500 | inline (41 B) | TOAST           | TOAST           |            109 |            5
+ MAIN       |                    | 1024 |        40 |     3500 | TOAST         | TOAST           | inline (5133 B) |           5201 |            3
+ EXTENDED   |               8160 | 1024 |        40 |     3500 | inline (41 B) | inline (3504 B) | TOAST           |           3598 |            3
+ MAIN       |               8160 | 1024 |        40 |     3500 | inline (41 B) | TOAST           | inline (5133 B) |           5225 |            2
+
+ tv_storage | toast_tuple_target | dim  | title_len | body_len |   title_at    |    body_at     |      tv_at      | heap_tuple_len | toast_chunks 
+------------+--------------------+------+-----------+----------+---------------+----------------+-----------------+----------------+--------------
+ MAIN       |               8160 | 1024 |        40 |      300 | inline (41 B) | inline (304 B) | inline (5133 B) |           5513 |            0
+
+DROP TABLE
+          element_values          | vec_bytes_1024d 
+----------------------------------+-----------------
+ full float32                     |            5133
+ rounded through turbovec.halfvec |            3085
+

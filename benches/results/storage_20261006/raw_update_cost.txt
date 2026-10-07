@@ -1,0 +1,76 @@
+DROP TABLE
+CREATE TABLE
+ALTER TABLE
+COPY 100000
+CREATE INDEX
+VACUUM
+CREATE VIEW
+ storage  |   at   | heap_mb | toast_mb | tv_index_mb 
+----------+--------+---------+----------+-------------
+ EXTENDED | before |     6.0 |    558.0 |        55.2
+
+CHECKPOINT
+Timing is on.
+UPDATE 10000
+Time: 379.483 ms
+Timing is off.
+ pg_stat_force_next_flush 
+--------------------------
+ 
+
+ storage  |  at   | heap_mb | toast_mb | tv_index_mb | wal_mb 
+----------+-------+---------+----------+-------------+--------
+ EXTENDED | after |     6.3 |    558.0 |        59.3 |    2.8
+
+ pg_sleep 
+----------
+ 
+
+ n_tup_upd | n_tup_hot_upd 
+-----------+---------------
+     10000 |             0
+
+ n_vectors | slot_count | is_corrupt 
+-----------+------------+------------
+    110000 |     110000 | f
+
+DROP VIEW
+DROP TABLE
+DROP TABLE
+CREATE TABLE
+ALTER TABLE
+COPY 100000
+CREATE INDEX
+VACUUM
+CREATE VIEW
+ storage |   at   | heap_mb | toast_mb | tv_index_mb 
+---------+--------+---------+----------+-------------
+ MAIN    | before |   781.6 |      0.0 |        55.2
+
+CHECKPOINT
+Timing is on.
+UPDATE 10000
+Time: 576.451 ms
+Timing is off.
+ pg_stat_force_next_flush 
+--------------------------
+ 
+
+ storage |  at   | heap_mb | toast_mb | tv_index_mb | wal_mb 
+---------+-------+---------+----------+-------------+--------
+ MAIN    | after |   859.4 |      0.0 |        59.3 |   95.9
+
+ pg_sleep 
+----------
+ 
+
+ n_tup_upd | n_tup_hot_upd 
+-----------+---------------
+     10000 |             0
+
+ n_vectors | slot_count | is_corrupt 
+-----------+------------+------------
+    110000 |     110000 | f
+
+DROP VIEW
+DROP TABLE

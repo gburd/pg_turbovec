@@ -1,0 +1,76 @@
+SET
+ turbovec.ivf_max_delta_pct 
+----------------------------
+ 10
+
+psql:ivf_degrade.sql:14: NOTICE:  table "dl" does not exist, skipping
+psql:ivf_degrade.sql:14: NOTICE:  table "em" does not exist, skipping
+psql:ivf_degrade.sql:14: NOTICE:  table "em_like" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+COPY 20000
+CREATE INDEX
+VACUUM
+ALTER TABLE
+CREATE VIEW
+          step           | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+-------------------------+--------+----------+-------------+-------+-----------+---------------
+ a0 built on 20,000 rows | dl_ivf | f        | f           |    64 |     20000 |        0.2500
+
+UPDATE 1000
+           step            | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+---------------------------+--------+----------+-------------+-------+-----------+---------------
+ a1 UPDATE 1,000 rows (5%) | dl_ivf | f        | f           |    64 |     21000 |        0.2500
+
+UPDATE 1000
+            step            | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+----------------------------+--------+----------+-------------+-------+-----------+---------------
+ a2 +1,000 (10% cumulative) | dl_ivf | f        | f           |    64 |     22000 |        0.2500
+
+UPDATE 1000
+            step            | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+----------------------------+--------+----------+-------------+-------+-----------+---------------
+ a3 +1,000 (15% cumulative) | dl_ivf | t        | t           |    64 |     23000 |        1.0000
+
+CREATE TABLE
+CREATE INDEX
+COPY 3000
+                               step                                | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+-------------------------------------------------------------------+--------+----------+-------------+-------+-----------+---------------
+ b1 CREATE INDEX (lists = 16) on empty table, then COPY 3,000 rows | em_ivf | f        | f           |     0 |      3000 |        1.0000
+
+                                                pg_get_indexdef                                                
+---------------------------------------------------------------------------------------------------------------
+ CREATE INDEX em_ivf ON public.em USING turbovec (tv turbovec.vec_cosine_ops) WITH (bit_width='4', lists='16')
+
+ knn_rows 
+----------
+       10
+
+REINDEX
+       step       | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+------------------+--------+----------+-------------+-------+-----------+---------------
+ b2 after REINDEX | em_ivf | f        | f           |    16 |      3000 |        1.0000
+
+CREATE TABLE
+INSERT 0 20000
+                              step                              |     index      | degraded | is_degraded | lists | n_vectors | scan_fraction 
+----------------------------------------------------------------+----------------+----------+-------------+-------+-----------+---------------
+ c1 (LIKE dl INCLUDING ALL), then INSERT ... SELECT 20,000 rows | em_like_tv_idx | f        | f           |     0 |     20000 |        1.0000
+
+                                                      pg_get_indexdef                                                       
+----------------------------------------------------------------------------------------------------------------------------
+ CREATE INDEX em_like_tv_idx ON public.em_like USING turbovec (tv turbovec.vec_cosine_ops) WITH (bit_width='4', lists='64')
+
+TRUNCATE TABLE
+                        step                         | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+-----------------------------------------------------+--------+----------+-------------+-------+-----------+---------------
+ d0 em_ivf after the REINDEX above, then TRUNCATE em | em_ivf | f        | f           |     0 |         0 |        1.0000
+
+COPY 3000
+            step            | index  | degraded | is_degraded | lists | n_vectors | scan_fraction 
+----------------------------+--------+----------+-------------+-------+-----------+---------------
+ d1 COPY 3,000 rows back in | em_ivf | f        | f           |     0 |      3000 |        1.0000
+
+DROP VIEW
+DROP TABLE

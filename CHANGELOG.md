@@ -19,11 +19,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   near-duplicates (measured: 9th significant digit at a distance of 5e-6), and
   `<#>` between near-orthogonal vectors. The new sums' maximum error against an
   exact sum is lower (5.5e-14 vs 4.4e-13). Rows whose exact distances differ by
-  less than that, or
-  that sit that close to a `WHERE dist < t` threshold, may change order or
-  membership. Below 8 dimensions results are unchanged. `sparsevec` operators
+  less than that, or that sit that close to a `WHERE dist < t` threshold, may
+  change order or membership. Below 8 dimensions results are unchanged. `sparsevec` operators
   are unchanged. No wire-format or SQL change; normalised codes are
   byte-identical.
+- The distance functions (`l2_distance`, `l2_squared_distance`,
+  `inner_product`, `negative_inner_product`, `cosine_distance`, `l1_distance`
+  and the `<->`, `<#>`, `<=>`, `<+>` operators on `vector`) decode a repeated
+  operand once per expression instead of once per call. During an index scan's
+  ORDER BY recheck the query vector is the same for every candidate, so it was
+  CBOR-decoded again for each one; it is now decoded once (cached in
+  `fn_extra`, reused only when the argument's bytes are identical), and cosine
+  also reuses its norm. Measured ~2.3 µs saved per candidate at 1024-d. Results
+  are bit-identical to computing without the cache. No SQL change: function
+  signatures, names and markings are unchanged.
+- Together, the two changes above save ~3.5 µs per rechecked candidate at
+  1024-d: 18.96 → 15.27 ms (1.24×) at `search_k = 1024` with default storage
+  and 13.44 → 9.81 ms (1.37×) with `SET STORAGE MAIN`, recall unchanged (500k ×
+  1024-d real embeddings, EC2 c7i;
+  [`benches/results/perf_abc_20261006/step5/FINDINGS.md`](benches/results/perf_abc_20261006/step5/FINDINGS.md)).
 
 ### Documentation
 
@@ -41,8 +55,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the scan was still roughly half of the query. The ~48 µs and ~17–18 µs
   figures are not directly comparable (wall-clock on Graviton4 at 1M rows vs
   backend CPU on x86 at 200k rows); what was wrong was attributing the cost to
-  PostgreSQL's recheck rather than to pg_turbovec's own code. Corrected in the [2.11.0] entry below (marked
-  as a correction), `README.md`, `docs/BENCHMARKS.md` and
+  PostgreSQL's recheck rather than to pg_turbovec's own code. Corrected in the
+  [2.11.0] entry below (marked as a correction), `README.md`, `docs/BENCHMARKS.md` and
   `benches/results/tv111_arm_20261005/FINDINGS.md`.
 - **README feature table: pgvector does not re-rank against the heap.** The
   "Exact re-ranking vs heap" row marked pgvector ✓. pgvector's HNSW and
@@ -55,8 +69,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   [`benches/results/storage_20261006/FINDINGS.md`](benches/results/storage_20261006/FINDINGS.md)).
   Explains when `ALTER TABLE … ALTER COLUMN … SET STORAGE MAIN` helps: it
   saved 4.9 µs per rechecked candidate at 1024-d (16.5 → 11.4 ms at
-  `search_k = 1024`, measured on v2.11.0), and nothing at 384-d where vectors are
-  already inline. Also covers what it costs (heap 6 → 782 MB per
+  `search_k = 1024`, measured on v2.11.0), and nothing at 384-d where vectors
+  are already inline. Also covers what it costs (heap 6 → 782 MB per
   100k × 1024-d rows, a cold sequential scan of another column 38 ms → 4.3 s,
   34× the WAL on a non-vector update just after a checkpoint, no HOT, and
   the row's other text columns pushed to TOAST), the inline limits (397-d by

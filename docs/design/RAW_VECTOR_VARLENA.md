@@ -157,8 +157,10 @@ element.
 Let *O* be every payload any released binary can have stored as a
 `turbovec.vector` datum, on the heap, in TOAST, in an array element, or as a
 catalog `Const` (views and defaults store datum bytes too; **measured**
-`pg_attrdef.adbin` `constvalue 17 [68 0 0 0 -95 100 100 97 116 97 …]`, where
-−95 is `0xA1`).
+`pg_attrdef.adbin` `constvalue 17 [68 0 0 0 -95 100 100 97 116 97 …]` on
+x86). `outDatum` prints each byte as `(int)` of a plain `char`
+(`outfuncs.c:356-363`, 16.14), so `0xA1` prints `-95` (signed `char`, x86)
+or `161` (unsigned `char`, aarch64).
 
 **Claim 1.** For every `p` in *O*, `p[0] = 0xA1`.
 
@@ -210,8 +212,8 @@ else (`de.rs:769`). So no type-directed path ever reads byte 1.
 Independently, initial byte `0xFE` is major type 7 with additional-info 30.
 RFC 8949 §3 reserves additional-info 28–30 and makes an item using them not
 well-formed (31 is the break/indefinite marker), so no conforming CBOR
-decoder accepts it either (verified by review against RFC 8949 §3; the
-review notes it did not re-read the RFC text in that session). The proof
+decoder accepts it either (verified against RFC 8949 §3 (additional
+information 28–30)). The proof
 above doesn't depend on it; it depends only on the one decoder that has
 ever read these datums.
 
@@ -528,8 +530,9 @@ visible through `turbovec.vector_format()` and never corrupts data.
 | ≤ 2.11.x binary | yes (today) | **ERROR**, `UnassignedCode, offset 1`, always (§2.3 claim 3); never a wrong value |
 | 2.12.x+ binary | yes, bit-identical, forever | yes |
 
-**Upgrade** (any 1.x/2.x → 2.12.0): in place, zero rewrite, no REINDEX.
-This satisfies HARD MANDATE #2(b).
+**Upgrade:** any 2.x → 2.12.0: in place, zero rewrite, no REINDEX (HARD
+MANDATE #2(b)). From 1.x, the existing v2.0.0 REINDEX still applies; this
+change adds nothing to it.
 
 **The write format is decided by the loaded binary, not by `ALTER
 EXTENSION`.** The GUC default lives in the `.so`, and every backend writes
@@ -561,12 +564,30 @@ everything again, but rows go unreadable until then.
 - 3.0.0 (default `raw`): downgrade to any 2.12.x is always safe; 2.12.x is
   the downgrade floor of the 3.x line.
 
-**Downgrade census.** "No raw values" must be checked everywhere a
-`turbovec.vector` datum can be stored, not only in user columns:
+**Catalog side of a downgrade.** The GUC is registered at `_PG_init`, so a
+session could set `raw` after the binary swap but before `ALTER EXTENSION
+UPDATE`, when `turbovec.vector_format()` (which the census needs) doesn't
+exist yet. So: **opt in to `raw` only after `ALTER EXTENSION pg_turbovec
+UPDATE`.** Going back, a 2.11 `.so` under the 2.12.0 catalog leaves
+`turbovec.vector_format` bound to a missing C symbol. Recommended: ship
+`sql/pg_turbovec--2.12.0--2.11.0.sql`, which drops `vector_format`, so the
+downgrade is `ALTER EXTENSION pg_turbovec UPDATE TO '2.11.0'` after the
+census passes and before the binary swap. (The alternative, documenting
+that `vector_format()` ERRORs harmlessly under a downgraded binary and that
+`extversion` stays at `2.12.0` until the binary is upgraded again, leaves a
+catalog that disagrees with the loaded code; not recommended.)
 
-1. Every user column of type `vector` (and `vector[]`, element-wise). The
-   column query also covers `pg_attribute.attmissingval` (fast-default
-   `ADD COLUMN … DEFAULT`), because a read returns the missing value.
+**Downgrade census.** "No raw values" must be checked everywhere a
+`turbovec.vector` datum can be stored, not only in user columns. Run the
+census in every database where the extension is installed.
+
+1. Every user column whose type contains `vector` anywhere: `vector`,
+   `vector[]`, domains over either (`pg_type.typbasetype`), and composite
+   types with such an attribute, checked recursively. Array columns are
+   checked element-wise with `EXISTS (SELECT 1 FROM unnest(col) e WHERE
+   turbovec.vector_format(e) = 'raw')`. The column query also covers
+   `pg_attribute.attmissingval` (fast-default `ADD COLUMN … DEFAULT`),
+   because a read returns the missing value.
 2. **Extension-owned data:** `turbovec.partition_summary.centroid`
    (`src/partition.rs:376-380`), written through SPI in the writing
    session's format (`src/partition.rs:285-289`).
@@ -574,37 +595,53 @@ everything again, but rows go unreadable until then.
    `pg_attrdef.adbin`, `pg_rewrite.ev_action` / `ev_qual`,
    `pg_index.indexprs` / `indpred`, `pg_constraint.conbin`,
    `pg_trigger.tgqual`, `pg_policy.polqual` / `polwithcheck`,
-   `pg_proc.prosqlbody` (PG14+ SQL-standard bodies). A CBOR `Const` prints
-   as `constvalue N [ b0 b1 b2 b3 -95 100 …` (measured, §2.3); a raw one
-   prints `… -2 1 …` (`0xFE 0x01`).
+   `pg_proc.prosqlbody` (PG14+ SQL-standard bodies), `pg_proc.proargdefaults`
+   (function argument `DEFAULT '[…]'::vector`), `pg_type.typdefaultbin`
+   (domain default), `pg_statistic_ext.stxexprs` (expression statistics),
+   `pg_partitioned_table.partexprs` (expression partition keys such as
+   `(emb <-> '[…]')`). A CBOR `Const` prints as `constvalue N [ b0 b1 b2 b3
+   -95 100 …` on x86 (measured, §2.3) or `… 161 100 …` on aarch64; a raw one
+   prints `… -2 1 …` (x86) or `… 254 1 …` (aarch64) (`0xFE 0x01`). Array
+   `Const`s (`consttype` = the `vector[]` OID) must be matched too: either
+   match that OID and treat any `(-2|254) 1` byte pair inside it as a hit
+   (false positives accepted), or run the census through a C/Rust helper
+   that walks the node tree.
 
 Sketch (to be finalised and shipped as a function or documented query in
 phase 1):
 
 ```sql
--- 1 + 2: data columns, including turbovec.partition_summary
-SELECT format('SELECT %L, count(*) FROM %s WHERE turbovec.vector_format(%I) = ''raw''',
+-- 1 + 2: data columns, including turbovec.partition_summary. Sketch covers
+--    vector and vector[] directly; the phase-1 version also resolves domains
+--    (typbasetype) and composites (typrelid, recursively).
+SELECT format(CASE WHEN a.atttypid = 'turbovec.vector'::regtype
+  THEN 'SELECT %L, count(*) FROM %s WHERE turbovec.vector_format(%I) = ''raw'''
+  ELSE 'SELECT %L, count(*) FROM %s WHERE EXISTS (SELECT 1 FROM unnest(%I) e WHERE turbovec.vector_format(e) = ''raw'')' END,
               a.attrelid::regclass || '.' || a.attname, a.attrelid::regclass, a.attname)
 FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
-WHERE a.atttypid = 'turbovec.vector'::regtype AND a.attnum > 0
-  AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'm');
--- run each generated statement (\gexec); vector[] columns need unnest().
+WHERE a.atttypid IN ('turbovec.vector'::regtype, 'turbovec.vector[]'::regtype)
+  AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'm');
+-- run each generated statement (\gexec), in every database with the extension.
 
 -- 3: node trees. A raw vector Const's magic + version bytes print as "-2 1"
---    after the header bytes. :R is the regex below with the vector type OID
---    substituted, so other types' Consts never match.
---    R = ':consttype <vector_oid> [^}]*:constvalue \d+ \[ ?(-?\d+ ){4}-2 1 '
+--    (x86, signed char) or "254 1" (aarch64, unsigned char) after the header
+--    bytes. :R is the regex below with the vector type OID substituted, so
+--    other types' Consts never match; repeat with the vector[] OID.
+--    R = ':consttype <oid> [^}]*:constvalue \d+ \[ ?(-?\d+ ){4}(-2|254) 1 '
 SELECT 'pg_attrdef', oid FROM pg_attrdef WHERE adbin::text ~ :'R'
 UNION ALL SELECT 'pg_rewrite', oid FROM pg_rewrite
   WHERE ev_action::text ~ :'R' OR ev_qual::text ~ :'R'
 -- …same pattern for pg_index.indexprs/indpred, pg_constraint.conbin,
---    pg_trigger.tgqual, pg_policy.polqual/polwithcheck, pg_proc.prosqlbody
+--    pg_trigger.tgqual, pg_policy.polqual/polwithcheck, pg_proc.prosqlbody,
+--    pg_proc.proargdefaults, pg_type.typdefaultbin,
+--    pg_statistic_ext.stxexprs, pg_partitioned_table.partexprs
 ;
 ```
 
 The node-tree regex is a heuristic over `nodeToString` output (a 1-byte
-short-header `Const` has 1 header byte, not 4); the phase-1 version must be
-tested against both header forms (§7 test 6).
+short-header `Const` has 1 header byte, not 4: the same regex with `{1}`
+in place of `{4}`, keeping `(-2|254)`); the phase-1 version must be tested
+against both header forms and on both x86 and aarch64 (§7 test 6).
 
 **Recommended release type: a minor (2.12.0) for the reader, a major
 (3.0.0) for the default flip.** 2.12.0 removes no SQL, makes no format
@@ -627,7 +664,7 @@ change in the project that closes a downgrade path by default (§10 item 13).
   `=` operator, so `REPLICA IDENTITY FULL` on a table with a `vector` column
   already errors (`execReplication.c:307-311`); and on PG16+ a `binary =
   true` subscription's initial sync uses `COPY (FORMAT binary)`
-  (`tablesync.c:1228-1235`), which already fails for `vector` (§7 test 14
+  (`tablesync.c:1228-1235`), which already fails for `vector` (§7 test 13
   asserts both stay as they are).
 - **COPY BINARY:** impossible today. **Measured:** `COPY t TO STDOUT
   (FORMAT binary)` → `ERROR: no binary output function available for type
@@ -737,9 +774,15 @@ reproduction that fails before the change. Here the tests split in two:
      element
    - `knn()` and `colbert_search` (SPI)
 
-   Every new read path added to 2.11.x later (as Fix B's was) must be added
-   to this list; the test is what makes "an old binary fails closed" an
-   invariant rather than an audit result.
+   Fix B is not on `main` or in any tag yet (`perf/fix-b-qcache` /
+   `perf/integrate-ab`): the `Slot::get` items are added by whichever of
+   Fix B or 0b merges second. **Recommended:** replace the hand-maintained
+   function list with a catalog-driven sweep: call every `pg_proc` whose
+   `proargtypes` include `vector` or `vector[]` with the injected raw value
+   and assert an ERROR, keeping the AM (`ambuild`, `aminsert`, `amrescan`)
+   and SPI (`knn()`, `colbert_search`) items as explicit cases. New read
+   paths are then covered automatically; the test is what makes "an old
+   binary fails closed" an invariant rather than an audit result.
 1. **Golden CBOR fixtures, committed before any format code.** Phase 0 is a
    separate test-only commit on the current tree. Fixtures
    `tests/fixtures/vector_cbor_v2/…` hold hex payload plus expected `f32`
@@ -808,6 +851,10 @@ reproduction that fails before the change. Here the tests split in two:
    - `MAIN`, `PLAIN`
    - 1-byte header (dim ≤ 30; assert the short header via pageinspect)
    - views/defaults with CBOR `Const`s
+   - the §5.1 downgrade census (both header forms, scalar and array
+     `Const`s, every listed catalog) run on **both x86_64 and aarch64**
+     (Graviton), because `outDatum` prints bytes signed on one and unsigned
+     on the other
 7. **Alignment fuzz:** tables with leading `bool`/`text`/`smallint` columns
    of varying length before a dim 1..30 vector, so the short payload lands
    at every offset mod 4. Read through seq scan, index recheck, `vector[]`,
@@ -868,7 +915,8 @@ reproduction that fails before the change. Here the tests split in two:
     and swapping the standby's `.so` to 2.12 makes them read correctly
     without any rewrite.
 15. **HOT / degradation (pins §4.1):** a 384-d table under `MAIN` with an
-    IVF index, rows written CBOR. Same-value full-row UPDATEs under `cbor`
+    IVF index and `fillfactor = 50` (so HOT can't fail for page-full
+    reasons), rows written CBOR. Same-value full-row UPDATEs under `cbor`
     must be HOT (`n_tup_hot_upd` grows, delta doesn't); under `raw` the
     first rewrite of each row is non-HOT and grows the delta, and a second
     same-value rewrite under `raw` is HOT again. Assert
@@ -885,14 +933,14 @@ Any failure blocks the release. Code reasoning alone is not evidence here
 
 ### 8.1 Phases
 
-| phase | release | contents | SQL change | user action |
-|---|---|---|---|---|
-| 0 | next patch (2.11.x), before any format code | golden CBOR fixtures + encoder-pin tests (§7.1); `serde_cbor = "=0.11.2"` declared directly, `half 1.8.3` kept locked | none | none |
-| 0b | next patch (2.11.x), before any format code | fail-closed invariant test (§7 test 0b): a `0xFE 0x01 …` payload must ERROR, never yield a value, from every read entry point of the 2.11.x binary | none (test-only cast created and dropped inside the test) | none |
-| 1 | **minor 2.12.0** | dual-format reader; hand-written datum impls; GUC `turbovec.vector_write_format` (`Userset`) default **`cbor`**; `turbovec.vector_format(vector)`; downgrade census (§5.1) | +1 function (`sql/pg_turbovec--2.11.x--2.12.0.sql` via `cargo pgrx schema`, `migrations/086_…`). Gate: the order-independent `cargo pgrx schema` diff against 2.11.0 contains only `vector_format` | `ALTER EXTENSION … UPDATE` + **cluster restart**. Opting in to `raw` is a per-database / `ALTER SYSTEM` decision (§4.2), made only after every standby runs 2.12+ |
-| 1b | patch or minor, after an A/B | zero-copy borrowed `VectorArg` path (§3.3) | none (gate: empty schema diff) | none |
-| 2 | **major 3.0.0** | GUC default → **`raw`**, gated on the §4.1 HOT/degradation A/B and the §10.7 compression measurement | none for the type (empty upgrade script + migration file); other 3.0 changes ride along | restart; upgrade standbys first; `ALTER DATABASE … SET turbovec.vector_write_format = cbor` keeps a ≤ 2.11 floor |
-| 3 | ≥ two minors after 3.0.0 | optionally retire the `cbor` *writer* value (AGENTS.md two-release deprecation window); the CBOR *reader* is never removed | none | none |
+| phase | release | contents | SQL change | user action | Mandate |
+|---|---|---|---|---|---|
+| 0 | next patch (2.11.x), before any format code | golden CBOR fixtures + encoder-pin tests (§7.1); `serde_cbor = "=0.11.2"` declared directly, `half 1.8.3` kept locked | none | none | #2(a): zero format change, test-only |
+| 0b | next patch (2.11.x), before any format code | fail-closed invariant test (§7 test 0b): a `0xFE 0x01 …` payload must ERROR, never yield a value, from every read entry point of the 2.11.x binary (the `Slot::get` items are added by whichever of Fix B or 0b merges second; catalog-driven sweep recommended) | none (test-only cast created and dropped inside the test) | none | #2(a): zero format change, test-only |
+| 1 | **minor 2.12.0** | dual-format reader; hand-written datum impls; GUC `turbovec.vector_write_format` (`Userset`) default **`cbor`**; `turbovec.vector_format(vector)`; downgrade census (§5.1) | +1 function (`sql/pg_turbovec--2.11.x--2.12.0.sql` via `cargo pgrx schema`, `migrations/086_…`). Gate: the order-independent `cargo pgrx schema` diff against 2.11.0 contains only `vector_format` | `ALTER EXTENSION … UPDATE` + **cluster restart**. Opting in to `raw` is a per-database / `ALTER SYSTEM` decision (§4.2), made only after every standby runs 2.12+ and after `ALTER EXTENSION … UPDATE` | #2(b): old datums read transparently, no REINDEX, no rewrite. Gated by #1: §7 tests 1–15, including the soak (test 11) |
+| 1b | patch or minor, after an A/B | zero-copy borrowed `VectorArg` path (§3.3) | none (gate: A/B + empty schema diff + §7 tests 3, 5, 7 and 11 (soak with RSS) re-run, because 1b changes palloc ownership on the read path, where the v2.11.0 RSS leak came from) | none | #2(a): zero format change |
+| 2 | **major 3.0.0** | GUC default → **`raw`**, gated on the §4.1 HOT/degradation A/B and the §10.7 compression measurement | none for the type (empty upgrade script + migration file); other 3.0 changes ride along | restart; upgrade standbys first; `ALTER DATABASE … SET turbovec.vector_write_format = cbor` keeps a ≤ 2.11 floor | major, but no format break: every datum stays readable, so #3's offline converter is N/A |
+| 3 | ≥ two minors after 3.0.0 | optionally retire the `cbor` *writer* value (AGENTS.md two-release deprecation window); the CBOR *reader* is never removed | none | none | no break: the reader is never removed |
 
 There is deliberately no "2.13.0 flips the default" phase. A minor whose
 only effect is that a binary swap starts writing a format the previous
@@ -904,8 +952,9 @@ minor the operator opts in; at the major the default changes.
 
 | From | To | Required action | Notes |
 |---|---|---|---|
-| 2.11.x | 2.12.0 | _none_ (no REINDEX, no rewrite); restart the cluster | MINOR. `turbovec.vector` gains a second on-disk datum format (raw `float4`, tagged `0xFE`). This release **reads** it but writes the old CBOR format by default; `ALTER DATABASE … SET turbovec.vector_write_format = raw` (or `ALTER SYSTEM`) opts in. Set it per database, not per session or pool: mixing formats on rewrite defeats HOT. New `turbovec.vector_format(vector)` reports `cbor`/`raw` per value. Index wire format unchanged (v8). The write format is decided by the loaded binary, not `ALTER EXTENSION`: restart after installing it, and upgrade every standby's binary before any session writes `raw` (failing over to a ≤ 2.11 standby is a downgrade). **Downgrade floor: 2.11.x while no `raw` value exists anywhere** (census in the design doc §5.1); 2.11.x reading a raw value raises `failed to decode CBOR … UnassignedCode, offset 1`, never a wrong result. `ALTER EXTENSION pg_turbovec UPDATE TO '2.12.0';` + restart. |
-| 2.12.x | 3.0.0 | per the 3.0.0 row; for this type: none, restart | MAJOR. New and updated values are written raw by default. Existing rows stay CBOR, are read forever, and are never rewritten. **Downgrade floor: 2.12.0.** Upgrade standbys before the primary. `ALTER DATABASE … SET turbovec.vector_write_format = cbor` keeps writing the old format and keeps the ≤ 2.11 floor open. |
+| any 1.x | 2.12.0 | `REINDEX INDEX` (unchanged, v2.0.0 wire v7→v8) | datum change adds no action |
+| 2.0.0–2.11.x | 2.12.0 | _none_ (no REINDEX, no rewrite); restart the cluster | MINOR. `turbovec.vector` gains a second on-disk datum format (raw `float4`, tagged `0xFE`). This release **reads** it but writes the old CBOR format by default; `ALTER DATABASE … SET turbovec.vector_write_format = raw` (or `ALTER SYSTEM`) opts in. Set it per database, not per session or pool: mixing formats on rewrite defeats HOT. New `turbovec.vector_format(vector)` reports `cbor`/`raw` per value. Index wire format unchanged (v8). The write format is decided by the loaded binary, not `ALTER EXTENSION`: restart after installing it, and upgrade every standby's binary before any session writes `raw` (failing over to a ≤ 2.11 standby is a downgrade). **Downgrade floor: 2.11.x while no `raw` value exists anywhere** (census in the design doc §5.1); 2.11.x reading a raw value raises `failed to decode CBOR … UnassignedCode, offset 1`, never a wrong result. `ALTER EXTENSION pg_turbovec UPDATE TO '2.12.0';` + restart. |
+| 2.12.x | 3.0.0 | per the 3.0.0 row; for this type: none, restart | MAJOR. New and updated values are written raw by default. Existing rows stay CBOR, are read forever, and are never rewritten. **Downgrade floor: 2.12.0.** Upgrade standbys before the primary. `ALTER DATABASE … SET turbovec.vector_write_format = cbor` keeps writing the old format and keeps the ≤ 2.11 floor open. From ≤ 2.11.x directly to 3.0.0: supported only with a full cluster restart and every standby upgraded first, because a surviving ≤ 2.11 backend ERRORs on raw rows. |
 
 ### 8.3 Constants and guards to add
 
@@ -1029,8 +1078,9 @@ path and the only one with a measured cost.
     no longer value equality (§4.1). A byte-wise `=` would make the same
     vector unequal to itself across formats and break hash joins and UNIQUE.
 11. **The `0xFE` RFC 8949 "not well-formed" status** (additional-info 30,
-    reserved; §2.3) is verified by review against RFC 8949 §3. The proof
-    still rests on serde_cbor 0.11.2 code plus measurement, not on the RFC.
+    reserved; §2.3) is verified against RFC 8949 §3 (additional
+    information 28–30). The proof still rests on serde_cbor 0.11.2 code
+    plus measurement, not on the RFC.
 12. **Fix B's per-`FmgrInfo` cache is only worth it for CBOR.** Its own
     `ponytail:` note says a slot whose argument changes every call (the
     candidate side, every row) misses and pays a memcmp-to-first-difference

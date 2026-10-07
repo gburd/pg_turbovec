@@ -9,9 +9,11 @@ recheck-analysis commits (`3551a90`).
 `[varlena hdr][0xFE][0x01][u16 dim LE][f32 LE × dim]`. It is chosen by its
 first payload byte, so it can never be confused with the CBOR every released
 binary has written (that always starts with `0xA1`). The CBOR reader stays
-forever and mixed tables are the permanent normal state. Rollout is two minor
-releases: the first can read the new format, the second writes it by default.
-No index changes, no REINDEX, no forced rewrite, and no major release needed.
+forever and mixed tables are the permanent normal state. Rollout: minor
+2.12.0 reads both formats and keeps writing CBOR by default; operators opt in
+to `raw` per database or cluster. **No minor ever flips the write default.**
+The default becomes `raw` only at the next major (3.0.0). No index changes,
+no REINDEX, no forced rewrite.
 
 Evidence labels used below: **measured** = produced in this session or in
 a cited FINDINGS file; **computed** = arithmetic from PostgreSQL constants;
@@ -32,8 +34,8 @@ Appendix.
 | Alignment | `typalign` stays `'i'`; it cannot be changed (`typecmds.c:4282`). `f32` data sits at varlena offset 8. The reader still checks pointer alignment and copies if the pointer is unaligned (1-byte-header datums, dim ≤ 30). §3.1. |
 | pgrx surface | Keep `#[derive(PostgresType)]` + `#[inoutfuncs]`, add `#[bikeshed_postgres_type_manually_impl_from_into_datum]`, and hand-write `FromDatum`/`IntoDatum`/`UnboxDatum`/`ArgAbi`/`BoxRet`. Generated SQL and C symbol names (`vector_in_wrapper`, `vector_out_wrapper`) are unchanged, so no catalog change. §3.2. |
 | Zero-copy | Optional borrowed `VectorRef<'fcx>` argument type for the 8 read-only hot functions, delegating `SqlTranslatable` to `Vector` (the pgrx `PgVarlena<T>` pattern). Ship it after an A/B. §3.3. |
-| Write path | `IntoDatum` is the only write point. GUC `turbovec.vector_write_format = cbor | raw`. Existing rows are never rewritten; `UPDATE t SET v = v` and `VACUUM FULL` do **not** re-encode (measured). §4. |
-| Release type | **Minor ×2.** 2.12.0: reads both, writes CBOR by default (opt-in `raw`), adds `turbovec.vector_format(vector)`. 2.13.0: default flips to `raw`; 2.12.x is the safe downgrade floor. §5, §8. |
+| Write path | `IntoDatum` is the only write point. GUC `turbovec.vector_write_format = cbor | raw` (`Userset`), set once per database or cluster, never per session or pool (§4.2). Existing rows are never rewritten; `UPDATE t SET v = v` and `VACUUM FULL` do **not** re-encode (measured). A same-value rewrite across formats is not HOT (§4.1). §4. |
+| Release type | **Minor, then major.** 2.12.0 (minor): reads both, writes CBOR by default, operators opt in to `raw`, adds `turbovec.vector_format(vector)`. The default flips to `raw` only at **3.0.0** (major); no minor flips it. The write format is decided by the **loaded binary**, not by `ALTER EXTENSION` (§5.1). §5, §8. |
 | Index | Untouched. The AM never persists the varlena; index wire format stays v8. §6. |
 | Scope | `vector` only. `halfvec`, `sparsevec`, `bitvec` and the `*Accum` states are deferred (§8.4). |
 | Expected gain | About 3.7–4 µs per rechecked candidate after Fix B (estimate), for new-format rows only. The 20% byte saving does **not** cut heap pages or TOAST chunks at 1024-d (measured). §9. |
@@ -390,7 +392,7 @@ and no SQL, so it is patch-eligible if the schema diff is empty.
   - a new heap tuple, new TOAST value, and WAL for every row; roughly the
     table's size again
   - the new bytes differ from the old, so `heap_attr_equals`
-    (`heapam.c:4148-4184`) rules out HOT, and **every index gets an
+    (`heapam.c:4148-4184`) rules out HOT (§4.1), and **every index gets an
     `aminsert` per row**
   - an IVF turbovec index appends those rows and degrades to a flat scan
     (AGENTS.md "Degradation must be OBSERVABLE"). So on an IVF-indexed table
@@ -407,6 +409,73 @@ and no SQL, so it is patch-eligible if the schema diff is empty.
   TOAST chunk instead of three (**unverified** that the slice path avoids
   the other chunks for uncompressed external values).
 
+### 4.1 Byte equality is not value equality
+
+PostgreSQL compares some datums byte-wise:
+
+- `heap_attr_equals` for HOT eligibility. It is a plain `datumIsEqual`, a
+  size check plus `memcmp` (`heapam.c:4148-4184`, `datum.c:248-254`, PG
+  16.14), called from `HeapDetermineColumnsInfo` (`heapam.c:3224`) before
+  the new tuple is toasted (`heapam.c:3612-3620`).
+- `record_image_eq` (`*=`) for `REFRESH MATERIALIZED VIEW CONCURRENTLY`
+  (`matview.c:636, 812`).
+- `suppress_redundant_updates_trigger` (`memcmp`, `trigfuncs.c:76`).
+- `Const` equality in the planner (`equal()`, `equalfuncs.c:112`), e.g.
+  partial-index predicate matching. A planning difference only, never a
+  wrong answer.
+
+A CBOR datum and a raw datum of the same vector compare unequal.
+Consequences:
+
+- **(a)** For inline-stored vectors (≤ 397-d under `EXTENDED`, or
+  `MAIN`/`PLAIN` where the page has room; Fix C recommends `MAIN`, and
+  384-d models are common), an UPDATE that rewrites the column with an
+  unchanged value through a type function (an ORM full-row save such as
+  Django `save()` or Hibernate's default, `SET emb = $1`) is HOT-eligible
+  when the stored and new formats match. When they differ it is a non-HOT
+  update: every index gets an insert, and IVF turbovec indexes append to
+  the delta and can cross `turbovec.ivf_max_delta_pct` (default 10) and
+  degrade. Under one consistent write format this happens once per legacy
+  row. If sessions disagree on `turbovec.vector_write_format`, it repeats
+  on every such rewrite, because the value flips encoding each time and is
+  never HOT.
+- **(b)** External-TOAST values (1024-d under default storage) are
+  unaffected: `heap_attr_equals` compares an 18-byte toast pointer against
+  the ~5 KB inline new value, so those rewrites are already non-HOT today.
+- **(c)** Operators must set the write format once per database (§4.2),
+  never per application pool. `REFRESH … CONCURRENTLY` over computed vector
+  columns and `suppress_redundant_updates_trigger` each churn once per row
+  after an operator switches the format.
+
+Not affected: there is no `=`, hash or btree opclass on `vector`
+(`src/distance.rs:220-280`, `src/index/mod.rs:189-260`), so DISTINCT, GROUP
+BY, UNIQUE, ON CONFLICT and Memoize already fail with "could not identify an
+equality operator". Logical-replication `tuples_equal` uses the type's `=`
+and already errors under `REPLICA IDENTITY FULL` (`execReplication.c:307-311`);
+see §5.2.
+
+**Release gate for any default flip (3.0.0, §8.1):** a measured A/B of
+`pg_stat_user_tables.n_tup_hot_upd` and `turbovec.index_degradation()` under
+a 384-d full-row-save workload, CBOR-stored rows rewritten under `raw` vs
+`cbor`.
+
+### 4.2 Pinning the write format
+
+Set the format once per database: `ALTER DATABASE … SET
+turbovec.vector_write_format = …`, `ALTER SYSTEM`, or the provider's
+parameter group. Do not set it per session or per pool (§4.1).
+
+The GUC stays `GucContext::Userset`. `scripts/drift-check.sh` §11b
+(lines 295-304) fails any GUC whose context is not `Userset`, and `Userset`
+is the only context a managed-PG user can set without superuser, so it is
+also what gives operators the `cbor` escape hatch the HARD MANDATE needs.
+`PGC_SUSET` would be worse: it needs a §11b allowlist entry and locks
+managed-PG users out of choosing `cbor`.
+
+The cost: any role that can INSERT can close the ≤ 2.11 downgrade path in
+2.12.0 by setting `raw` in its own session. This is accepted because it is
+visible through `turbovec.vector_format()` and never corrupts data.
+
 ---
 
 ## 5. Compatibility matrix
@@ -416,34 +485,91 @@ and no SQL, so it is patch-eligible if the schema diff is empty.
 | reader \ data | legacy CBOR rows | raw rows |
 |---|---|---|
 | ≤ 2.11.x binary | yes (today) | **ERROR**, `UnassignedCode, offset 1`, always (§2.3 claim 3); never a wrong value |
-| 2.12.x binary (reader release) | yes, bit-identical | yes |
-| 2.13.x+ binary | yes, forever | yes |
+| 2.12.x+ binary | yes, bit-identical, forever | yes |
 
-**Upgrade** (any 1.x/2.x → 2.12.0 / 2.13.0): in place, zero rewrite, no
-REINDEX. This satisfies HARD MANDATE #2(b).
+**Upgrade** (any 1.x/2.x → 2.12.0): in place, zero rewrite, no REINDEX.
+This satisfies HARD MANDATE #2(b).
+
+**The write format is decided by the loaded binary, not by `ALTER
+EXTENSION`.** The GUC default lives in the `.so`, and every backend writes
+whatever its loaded copy says. Consequences:
+
+- Restart the whole cluster after installing the new binary. Without
+  `shared_preload_libraries` (managed PG, many self-managed installs), new
+  backends `dlopen` the new file while long-lived pooled backends keep
+  running the old code. A backend still on ≤ 2.11 code will ERROR on raw
+  rows written by a new backend: fail-closed, but an outage.
+- Failing over to a physical standby whose binary is still ≤ 2.11 is a
+  **downgrade**. Upgrade every standby's binary before any session on the
+  primary writes `raw`. Nothing enforces this; the docs must say it.
+- Because 2.12.0 keeps the `cbor` default, none of this bites until an
+  operator opts in to `raw`. That is the reason no minor flips the default
+  (§8.1): a binary swap alone must never start writing a format the
+  previous binary cannot read.
 
 **Downgrade**, stated honestly: an old binary can't read raw rows. A
 downgrade loses no data, because reinstalling the newer binary reads
-everything again, but rows go unreadable until then. The two-step rollout
-keeps one safe downgrade target at every point:
+everything again, but rows go unreadable until then.
 
-- 2.12.0 with default `cbor`: downgrade to ≤ 2.11 is safe if no session set
-  `raw`. Check with `SELECT count(*) FROM t WHERE turbovec.vector_format(v)
-  = 'raw'` = 0 for every vector column, plus views/defaults created by
-  sessions writing `raw` (catalog `Const`s, §2.3).
-- 2.13.0 with default `raw`: downgrade to 2.12.x is always safe.
-  Downgrading to ≤ 2.11.x is unsafe once any row has been written. Setting
-  `turbovec.vector_write_format = cbor` cluster-wide **before** writing
-  keeps the 2.11 floor open.
-- A 2.12.x → 2.11.x downgrade with raw rows present can be undone in place
-  with the 2.12 binary still installed: the batched re-encode above under
-  `SET turbovec.vector_write_format = cbor`. It costs what §4 says.
+- 2.12.x with the default `cbor`: downgrade to ≤ 2.11 is safe if no session
+  ever wrote `raw`. Check with the census below.
+- 2.12.x after an operator opted in to `raw`: downgrade to ≤ 2.11 is unsafe
+  until every raw value is re-encoded. That can be done in place with the
+  2.12 binary still installed: the batched re-encode in §4 under `SET
+  turbovec.vector_write_format = cbor`. It costs what §4 says.
+- 3.0.0 (default `raw`): downgrade to any 2.12.x is always safe; 2.12.x is
+  the downgrade floor of the 3.x line.
 
-**Recommended release type: two minors, not a major.** No SQL is removed,
-no format becomes unreadable, the upgrade needs no action, and a safe
-downgrade target exists by construction. A major would buy nothing.
-Collapsing both steps into one minor would make the first raw write after
-upgrade a one-way door; that is the case against a single release.
+**Downgrade census.** "No raw values" must be checked everywhere a
+`turbovec.vector` datum can be stored, not only in user columns:
+
+1. Every user column of type `vector` (and `vector[]`, element-wise). The
+   column query also covers `pg_attribute.attmissingval` (fast-default
+   `ADD COLUMN … DEFAULT`), because a read returns the missing value.
+2. **Extension-owned data:** `turbovec.partition_summary.centroid`
+   (`src/partition.rs:376-380`), written through SPI in the writing
+   session's format (`src/partition.rs:285-289`).
+3. **Node-tree catalogs** that can hold a vector `Const`:
+   `pg_attrdef.adbin`, `pg_rewrite.ev_action` / `ev_qual`,
+   `pg_index.indexprs` / `indpred`, `pg_constraint.conbin`,
+   `pg_trigger.tgqual`, `pg_policy.polqual` / `polwithcheck`,
+   `pg_proc.prosqlbody` (PG14+ SQL-standard bodies). A CBOR `Const` prints
+   as `constvalue N [ b0 b1 b2 b3 -95 100 …` (measured, §2.3); a raw one
+   prints `… -2 1 …` (`0xFE 0x01`).
+
+Sketch (to be finalised and shipped as a function or documented query in
+phase 1):
+
+```sql
+-- 1 + 2: data columns, including turbovec.partition_summary
+SELECT format('SELECT %L, count(*) FROM %s WHERE turbovec.vector_format(%I) = ''raw''',
+              a.attrelid::regclass || '.' || a.attname, a.attrelid::regclass, a.attname)
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+WHERE a.atttypid = 'turbovec.vector'::regtype AND a.attnum > 0
+  AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'm');
+-- run each generated statement (\gexec); vector[] columns need unnest().
+
+-- 3: node trees. A raw vector Const's magic + version bytes print as "-2 1"
+--    after the header bytes. :R is the regex below with the vector type OID
+--    substituted, so other types' Consts never match.
+--    R = ':consttype <vector_oid> [^}]*:constvalue \d+ \[ ?(-?\d+ ){4}-2 1 '
+SELECT 'pg_attrdef', oid FROM pg_attrdef WHERE adbin::text ~ :'R'
+UNION ALL SELECT 'pg_rewrite', oid FROM pg_rewrite
+  WHERE ev_action::text ~ :'R' OR ev_qual::text ~ :'R'
+-- …same pattern for pg_index.indexprs/indpred, pg_constraint.conbin,
+--    pg_trigger.tgqual, pg_policy.polqual/polwithcheck, pg_proc.prosqlbody
+;
+```
+
+The node-tree regex is a heuristic over `nodeToString` output (a 1-byte
+short-header `Const` has 1 header byte, not 4); the phase-1 version must be
+tested against both header forms (§7 test 6).
+
+**Recommended release type: a minor (2.12.0) for the reader, a major
+(3.0.0) for the default flip.** 2.12.0 removes no SQL, makes no format
+unreadable, needs no upgrade action, and changes nothing a binary swap
+writes. Flipping the default is deferred to a major because it is the first
+change in the project that closes a downgrade path by default (§10 item 13).
 
 ### 5.2 Paths that never see the datum format
 

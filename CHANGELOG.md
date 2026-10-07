@@ -86,7 +86,8 @@ them to match newly computed values exactly, `REINDEX` / `REFRESH` them.
 
 ### Tests
 
-`cargo pgrx test pg16`: 471 passed / 0 failed / 9 ignored (EC2 c7i, Debian 13).
+`cargo pgrx test pg16`: 472 passed / 0 failed / 9 ignored (EC2 c7i, Debian 13,
+at 537309b).
 
 ### Documentation
 

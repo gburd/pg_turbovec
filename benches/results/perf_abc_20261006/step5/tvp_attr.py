@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Per-candidate backend on-CPU attribution for the CURRENTLY INSTALLED arm
 (same method as benches/results/recheck_20261006/attrib.py): perf task-clock
--c 100000 (each sample = 100 us on-CPU) on the backend thread only, stacks
-bucketed by first matching frame. usage: tvp_attr.py <arm> <table> <k> <nq>"""
+-c 100000 (each sample = 100 us on-CPU) on the backend thread only, each stack goes to the first bucket (in order) with a matching frame anywhere in it. usage: tvp_attr.py <arm> <table> <k> <nq>"""
 import json, os, signal, subprocess, sys, time, collections, numpy as np, psycopg
 ARM, TBL, K, NQ = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 c = psycopg.connect("host=/tmp port=5440 dbname=bench", autocommit=True)

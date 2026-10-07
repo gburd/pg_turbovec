@@ -1,5 +1,5 @@
 #!/bin/bash
-# Step-5 A/B: arms old (perf/recheck-abc = v2.11.0 code) vs new (A+B integrated),
+# Step-5 A/B: arms old (main @ 8939b89, src/Cargo.* byte-identical to v2.11.0) vs new (A+B integrated),
 # alternated; 3 rounds latency+recall (tvp_arm.sh), then one attribution pass
 # per arm per table at search_k=1024 and 100. Postmaster restarted per arm with
 # pinned glibc malloc tunables.

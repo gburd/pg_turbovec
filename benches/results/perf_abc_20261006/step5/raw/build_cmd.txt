@@ -1,0 +1,3 @@
+     Running command "/home/admin/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo" "rustc" "--lib" "--manifest-path" "/work/pg_turbovec/Cargo.toml" "--release" "--features" "pg16" "--no-default-features" "--message-format=json-render-diagnostics" "--" "-C" "link-arg=-Wl,--no-gc-sections"
+     Running command "/home/admin/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo" "rustc" "--lib" "--manifest-path" "/work/wt-integ/Cargo.toml" "--release" "--features" "pg16" "--no-default-features" "--message-format=json-render-diagnostics" "--" "-C" "link-arg=-Wl,--no-gc-sections"
+rustc 1.98.0 (88d9e12ae 2026-08-18)

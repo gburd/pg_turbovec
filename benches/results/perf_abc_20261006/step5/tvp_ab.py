@@ -17,7 +17,7 @@ usage: tvp_ab.py run <arm> <round>      (assumes arm already installed+running)
 """
 import json, os, statistics as st, subprocess, sys, time
 import numpy as np, psycopg
-OUT = "/work/ab/results.jsonl"; os.makedirs("/work/ab", exist_ok=True)
+OUT = os.environ.get("OUT", "/work/ab/results.jsonl"); os.makedirs("/work/ab", exist_ok=True)
 Q = np.load("/work/corpus/q.npy"); GT = np.load("/work/corpus/gt.npy")
 lit = ["[" + ",".join(f"{x:.6f}" for x in q) + "]" for q in Q]
 TABLES = os.environ.get("TABLES", "docs_ext,docs_main").split(",")

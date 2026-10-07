@@ -33,10 +33,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   also reuses its norm. Measured ~2.3 µs saved per candidate at 1024-d. Results
   are bit-identical to computing without the cache. No SQL change: function
   signatures, names and markings are unchanged.
-- Together, the two changes above save ~3.5 µs per rechecked candidate at
-  1024-d: 18.96 → 15.27 ms (1.24×) at `search_k = 1024` with default storage
-  and 13.44 → 9.81 ms (1.37×) with `SET STORAGE MAIN`, recall unchanged (500k ×
-  1024-d real embeddings, EC2 c7i;
+- Together, the two changes above save ~3.1–3.5 µs per rechecked candidate at
+  1024-d: 15.66 → 12.45 ms (1.26×) at `search_k = 1024` with default storage
+  and 11.14 → 7.79 ms (1.43×) with `SET STORAGE MAIN`, recall unchanged (500k ×
+  1024-d real embeddings, EC2 c7i, warm shared_buffers;
   [`benches/results/perf_abc_20261006/step5/FINDINGS.md`](benches/results/perf_abc_20261006/step5/FINDINGS.md)).
 
 ### Documentation

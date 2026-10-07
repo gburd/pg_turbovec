@@ -662,6 +662,42 @@ Mixed-format tables are created in tests with `SET
 turbovec.vector_write_format`. The GUC doubles as the test harness: with it,
 one binary can write both formats.
 
+**Which tests fail before and pass after.** HARD MANDATE #1 asks for a
+reproduction that fails before the change. Here the tests split in two:
+
+- **Regression guards, green on both sides:** 0b, 1, 2, the CBOR halves of
+  3 and 4, the 2.11-only parts of 9, and the `binary = true` / `REPLICA
+  IDENTITY FULL` assertions of 13. They pin what 2.11.x already does (CBOR
+  bytes, decode bits, fail-closed reads, dump text, replication limits) so
+  the change can't move it. 0b, 1 and 2 land first, in phases 0 and 0b, and
+  must be green on the unmodified 2.11.x tree.
+- **Fail before, pass after:** every test that reads or writes a raw datum
+  through the new binary (the raw halves of 3 and 4, 5–8, 10–12, the raw
+  parts of 13, 14, 15). On 2.11.x they fail because the raw value ERRORs or
+  the GUC doesn't exist. They are the new behaviour's reproduction.
+
+0. **(0b) Old-binary fail-closed invariant, shipped in the 2.11.x line before
+   any format code (phase 0b).** A test-only `CREATE CAST (bytea AS
+   turbovec.vector) WITHOUT FUNCTION` (created and dropped inside the test)
+   injects a `0xFE 0x01 <dim LE> <f32 LE …>` payload, and the test asserts an
+   ERROR, never a value, from each entry point:
+   - `vector_out` (`::text`)
+   - every distance function and operator, including Fix B's cache path
+     (`Slot::get`, `src/distance.rs` on `perf/fix-b-qcache`), called both
+     through an operator (cached) and via a `DirectFunctionCall`-style path
+     (no `flinfo`)
+   - casts to `real[]`, `jsonb`, `halfvec`, `sparsevec`
+   - `ambuild`: `CREATE INDEX` and `REINDEX` over a table holding one raw row
+   - `aminsert`, via a non-HOT update of another column (the raw value is
+     re-indexed without passing through a type function)
+   - `amrescan`, via a raw `Const` in a view used as the ORDER BY query
+   - `max_sim` and the ColBERT build over a `vector[]` holding one raw
+     element
+   - `knn()` and `colbert_search` (SPI)
+
+   Every new read path added to 2.11.x later (as Fix B's was) must be added
+   to this list; the test is what makes "an old binary fails closed" an
+   invariant rather than an audit result.
 1. **Golden CBOR fixtures, committed before any format code.** Phase 0 is a
    separate test-only commit on the current tree. Fixtures
    `tests/fixtures/vector_cbor_v2/…` hold hex payload plus expected `f32`
@@ -721,29 +757,67 @@ one binary can write both formats.
    and `datumCopy` (reorder queue). Plus a `#[test]` of the primitive at
    buffer offsets 0–3.
 8. **Index is format-blind:** load the same rows in the same order into two
-   tables, one per format, build flat / IVF / BQ indexes, and sha256 the
-   relfile chains. Must be identical.
+   tables, one per format, and into a third with the formats **interleaved
+   row by row** (alternate `SET turbovec.vector_write_format` per insert).
+   Build flat / IVF / BQ indexes, serially and as a parallel build, and
+   again with `REINDEX CONCURRENTLY`, and sha256 the relfile chains. All
+   must be identical.
 9. **Dump/restore:** dump a mixed table from 2.11.0 (CBOR) and from 2.12+
    (mixed), restore into both, and compare `vector_out` text and decoded
    bits. **COPY BINARY:** assert the current `ERROR` is unchanged (or
    round-trip, if §5.3 ships).
 10. **Downgrade fail-closed, end to end** (EC2 or local, two builds): write
     raw rows with 2.12+, swap in the 2.11.0 `.so`, and assert every read is
-    an `ERROR`, never a value. Swap back and assert all rows read correctly.
+    an `ERROR`, never a value, from every entry point in test 0b. Also
+    assert the operator-visible facts:
+    - the 2.11.0 binary cannot `pg_dump` a table holding raw rows (the dump
+      fails; it never writes a partial or wrong dump)
+    - a `REINDEX CONCURRENTLY` that fails on a raw row leaves an INVALID
+      index, which the docs must tell the operator to drop
+
+    Swap back and assert all rows read correctly.
 11. **Sustained-load soak** (pattern:
     `benches/results/tv111_arm_20261005/raw/soak2.py`), ≥ 90 min:
     - seed 60k rows half CBOR, half raw
     - writers randomly `SET` the write format per session, COPY-INSERT,
       `UPDATE SET tv = tv` (no re-encode), `UPDATE SET tv =
       tv::real[]::turbovec.vector` (re-encode), and DELETE
+    - an ORM-style writer that saves the whole row with an unchanged vector
+      (`UPDATE … SET tv = $1, other = $2` with `$1` the row's own text
+      form), and a writer whose session flips the format on every
+      transaction (the §4.1 worst case)
     - `VACUUM` every ~5 min; `pg_terminate_backend` mid-transaction
     - verify: every live row's decoded bits equal the deterministic
       generator's `vec(id)` (a content check that doesn't care about
       format); `turbovec_check` stays clean; soak2's byte-level
       index-vs-fresh-REINDEX comparison; **backend RSS flat** (AGENTS.md:
       watch RSS, not just correctness; borrowed views change palloc
-      ownership)
+      ownership); `turbovec.index_degradation()` sampled every minute, so
+      the flip-flop writer's delta growth is visible
     - run on arnold (AVX2) and Graviton `c8g` (planes path; AGENTS.md)
+12. **pg_upgrade:** PG N with 2.11 (all CBOR, including a view `Const` and a
+    column `DEFAULT`) → PG N+1 with 2.12, `--link` and `--copy`. Assert every
+    value decodes bit-identically, indexes need no REINDEX, and new writes
+    under `raw` mix in correctly.
+13. **Logical replication:** 2.11 publisher → 2.12 subscriber writing `raw`,
+    and 2.12 (raw) publisher → 2.11 subscriber; values arrive as text and
+    decode identically. Include a `binary = true` subscription: assert that
+    on PG16+ its initial sync still fails the way it does today (`COPY
+    (FORMAT binary)`, `tablesync.c:1228-1235`) and that `REPLICA IDENTITY
+    FULL` still errors (`execReplication.c:307-311`). Both are regression
+    guards on existing behaviour, not new features.
+14. **Physical standby on 2.11** behind a 2.12 primary writing `raw`: WAL
+    replay succeeds, reads of raw rows on the standby ERROR (never a value),
+    and swapping the standby's `.so` to 2.12 makes them read correctly
+    without any rewrite.
+15. **HOT / degradation (pins §4.1):** a 384-d table under `MAIN` with an
+    IVF index, rows written CBOR. Same-value full-row UPDATEs under `cbor`
+    must be HOT (`n_tup_hot_upd` grows, delta doesn't); under `raw` the
+    first rewrite of each row is non-HOT and grows the delta, and a second
+    same-value rewrite under `raw` is HOT again. Assert
+    `turbovec.index_is_degraded()` / `index_degradation()` move exactly as
+    §4.1 predicts. This is also the measured A/B the 3.0.0 default flip is
+    gated on.
 
 Any failure blocks the release. Code reasoning alone is not evidence here
 (HARD MANDATE #1; v1.28.4).

@@ -14,13 +14,14 @@
 //! These compute the EXACT distance the `ORDER BY` recheck ranks by, so
 //! they accumulate in `f64`. Each `f32` input widens to `f64` exactly (and
 //! an `f32 * f32` product is exact in `f64`), so the only error is the
-//! `f64` summation; the largest square of a finite `f32` (~1.2e77) cannot
-//! overflow it. The sum runs over 8 independent `f64` lanes so LLVM can
+//! `f64` summation for `dot`/`norm2`; `l2_sq`/`l1_abs` add at most one
+//! rounding per term (≤ 1.1e-16 relative). The largest square of a
+//! finite `f32` (~1.2e77) cannot overflow `f64`. The sum runs over 8 independent `f64` lanes so LLVM can
 //! vectorize it (packed `cvtps2pd`/`mulpd`/`addpd`, 2 doubles per op, at
 //! the portable x86-64 SSE2 target; `fcvtl`/`fmul`/`fadd .2d` on aarch64
 //! NEON). The old single serial chain could not be reordered, so it ran
 //! scalar. Splitting the chain 8 ways only shortens it: the error bound
-//! drops from `γₙ` to `γ₍ₙ/₈₊₃₎` times `Σ|term|` (Higham, *Accuracy and
+//! drops from `γₙ` to `γ₍ₙ/₈₊₁₃₎` times `Σ|term|` (Higham, *Accuracy and
 //! Stability of Numerical Algorithms*, §4.2).
 //!
 //! Measured against an exact compensated-`f64` reference (dims 1 to
@@ -85,6 +86,11 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
 #[inline]
 pub fn cosine_distance_with_qnorm(a: &[f32], b: &[f32], qnorm2: f64) -> f64 {
     debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(
+        qnorm2.to_bits(),
+        norm2(b).to_bits(),
+        "stale or foreign qnorm2"
+    );
     let na = norm2(a);
     if na == 0.0 || qnorm2 == 0.0 {
         return f64::NAN;
@@ -352,6 +358,10 @@ mod tests {
     /// `normalise_into` must produce the same f32 bits as before: its
     /// output is what gets quantized and persisted, so a change here
     /// would make the same row encode differently across versions.
+    /// The returned f64 norm is checked bit-for-bit too: a changed
+    /// summation order moves the norm by an ulp in almost every vector
+    /// but flips an f32 output only about once per 2^29 elements, so the
+    /// outputs alone cannot catch it here (they would at corpus scale).
     #[test]
     fn normalise_bit_identical_to_old() {
         let mut rng = Rng(9);
@@ -363,7 +373,10 @@ mod tests {
                     .iter()
                     .map(|x| ((f64::from(*x) / n) as f32).to_bits())
                     .collect();
-                let got: Vec<u32> = normalise_to_vec(&v).iter().map(|x| x.to_bits()).collect();
+                let mut out = vec![0.0_f32; v.len()];
+                let norm = normalise_into(&mut out, &v);
+                assert_eq!(norm.to_bits(), n.to_bits(), "{kind} dim {dim}: norm");
+                let got: Vec<u32> = out.iter().map(|x| x.to_bits()).collect();
                 assert_eq!(got, want, "{kind} dim {dim}");
             }
         }
@@ -414,7 +427,9 @@ mod tests {
     /// dot it is the standard condition-scaled error: relative error
     /// against a near-zero dot (near-orthogonal vectors) is unbounded for
     /// any finite-precision sum, the old f64 one included. Rigorous bound
-    /// at 16 000 dims: γ₂₀₀₃ ≈ 2.2e-13; measured max 5.5e-14.
+    /// at 16 000 dims: γ₂₀₁₃ ≈ 2.2e-13. 1e-13 is an empirical regression
+    /// bound for this seed (measured 5.5e-14), deliberately below the
+    /// rigorous bound.
     const KERNEL_REL_BOUND: f64 = 1e-13;
     /// Absolute bound on `cosine_distance` (a value in [0, 2]).
     const COSINE_ABS_BOUND: f64 = 1e-13;
@@ -832,7 +847,7 @@ mod tests {
         let ba = l2_sq(&b, &a);
         assert!(ab >= 0.0, "l2_sq negative: {ab}");
         assert!(
-            (ab - ba).abs() <= 1e-6 * (1.0 + ab.abs()),
+            ab.to_bits() == ba.to_bits(),
             "l2_sq asymmetric: {ab} vs {ba}"
         );
         assert_eq!(l2_sq(&a, &a), 0.0, "l2_sq(a,a) != 0");
@@ -846,7 +861,7 @@ mod tests {
         let ab = dot(&a, &b);
         let ba = dot(&b, &a);
         assert!(
-            (ab - ba).abs() <= 1e-6 * (1.0 + ab.abs()),
+            ab.to_bits() == ba.to_bits(),
             "dot not commutative: {ab} vs {ba}"
         );
     }
@@ -865,7 +880,7 @@ mod tests {
         let rhs = norm2(&a) - 2.0 * dot(&a, &b) + norm2(&b);
         let scale = 1.0 + lhs.abs() + rhs.abs() + norm2(&a) + norm2(&b);
         assert!(
-            (lhs - rhs).abs() <= 1e-5 * scale,
+            (lhs - rhs).abs() <= 1e-12 * scale,
             "polarization identity drift: |a-b|^2={lhs} vs |a|^2-2a.b+|b|^2={rhs}"
         );
     }
@@ -911,8 +926,8 @@ mod tests {
         let ba = l1_abs(&b, &a);
         assert!(ab >= 0.0, "l1_abs negative: {ab}");
         assert!(
-            (ab - ba).abs() <= 1e-6 * (1.0 + ab.abs()),
-            "l1_abs asymmetric"
+            ab.to_bits() == ba.to_bits(),
+            "l1_abs asymmetric: {ab} vs {ba}"
         );
         assert_eq!(l1_abs(&a, &a), 0.0, "l1_abs(a,a) != 0");
     }

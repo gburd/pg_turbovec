@@ -6,6 +6,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Exact distance kernels (`<->`, `<#>`, `<=>`, `<+>` and `vector_norm` on
+  `vector` and `halfvec`, their function forms such as `l2_distance` and
+  `inner_product`, MaxSim (`max_sim`, `max_sim_cosine`, `colbert_search`'s
+  re-rank) and `nearest_partitions` ranking) sum in 8 independent f64 lanes:
+  ~3× faster at 1024-d. Results for vectors of 8 or more dimensions can differ
+  from 2.11.0 in the last one or two digits (≤ ~1e-13 relative, and closer to
+  exact than before). Rows whose exact distances differ by less than that, or
+  that sit that close to a `WHERE dist < t` threshold, may change order or
+  membership. Below 8 dimensions results are unchanged. `sparsevec` operators
+  are unchanged. No wire-format or SQL change; normalised codes are
+  byte-identical.
+
 ### Documentation
 
 - **Corrected the v2.11.0 "~48 µs per candidate" recheck claim.** That number

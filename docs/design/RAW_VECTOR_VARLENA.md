@@ -594,7 +594,8 @@ can `SET turbovec.vector_write_format = raw` after the census passes (such a
 row would fail closed on the downgraded binary, not corrupt, but it is an
 outage). So fence first: `ALTER SYSTEM SET turbovec.vector_write_format =
 cbor`, remove every stored `raw` setting from `ALTER DATABASE` / `ALTER ROLE
-… SET` (check `pg_db_role_setting`), restart, and keep out any writer that
+… SET` (check `pg_db_role_setting`) and from `CREATE/ALTER FUNCTION … SET`
+(check `pg_proc.proconfig`), restart, and keep out any writer that
 could `SET raw`. Only then run census → `ALTER EXTENSION … UPDATE TO
 '2.12.N'` → binary swap. The census cannot be re-run after that `UPDATE TO`,
 because it drops `vector_format`.
@@ -649,6 +650,9 @@ WHERE a.atttypid IN ('turbovec.vector'::regtype, 'turbovec.vector[]'::regtype)
 --    magic can appear at any offset; false positives are accepted).
 --    R     = ':consttype <oid> [^}]*:constvalue \d+ \[ ?(-?\d+ ){4}(-2|254) 1 '
 --    R_arr = ':consttype <vector[]_oid> [^}]*:constvalue \d+ \[[^]]* (-2|254) 1 '
+--    (PostgreSQL `~` is ARE, so \d works; but psql's \set strips single
+--    backslashes, so set :R / :R_arr with doubled backslashes, or write
+--    [0-9]+ for \d+ and [[] for \[.)
 SELECT 'pg_attrdef', oid FROM pg_attrdef WHERE adbin::text ~ :'R'
 UNION ALL SELECT 'pg_rewrite', oid FROM pg_rewrite
   WHERE ev_action::text ~ :'R' OR ev_qual::text ~ :'R'
@@ -889,14 +893,17 @@ reproduction that fails before the change. Here the tests split in two:
    (mixed), restore into both, and compare `vector_out` text and decoded
    bits. **COPY BINARY:** assert the current `ERROR` is unchanged (or
    round-trip, if §5.3 ships).
-10. **Downgrade fail-closed, end to end** (EC2 or local, two builds): write
-    raw rows with 2.13+, swap in the 2.12.N `.so`, and assert every read is
-    an `ERROR`, never a value, from every entry point in test 0b. Exercise
-    the supported path too: fence (§5.1), census, `ALTER EXTENSION
+10. **Downgrade fail-closed, end to end** (EC2 or local, three builds:
+    2.13+, 2.12.0, 2.12.N): write raw rows with 2.13+, then swap in the
+    2.12.0 `.so` and the 2.12.N `.so`
+    in turn, and assert every read is an `ERROR`, never a value, from every
+    entry point in test 0b, under each. Exercise
+    the supported path too: fence (§5.1, asserting no `raw` remains in
+    `pg_db_role_setting` or `pg_proc.proconfig`), census, `ALTER EXTENSION
     pg_turbovec UPDATE TO '2.12.N'` via the downgrade script, binary swap,
     restart, and assert the catalog matches the loaded code. Also assert the
     operator-visible facts:
-    - the 2.12.0 binary cannot `pg_dump` a table holding raw rows (the dump
+    - neither 2.12.x binary can `pg_dump` a table holding raw rows (the dump
       fails; it never writes a partial or wrong dump)
     - a `REINDEX CONCURRENTLY` that fails on a raw row leaves an INVALID
       index, which the docs must tell the operator to drop

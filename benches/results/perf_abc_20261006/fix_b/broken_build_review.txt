@@ -1,0 +1,34 @@
+# Review round (2026-10-07): each new/rewritten test against deliberately
+# broken builds (EC2 c7i, cargo pgrx test pg16 distance_cache_, never committed).
+#
+# Mutation K (cache key ignores the last 16 payload bytes), distance.rs Slot::get:
+#   let cut = |b: &[u8]| b.len().saturating_sub(16);
+#   if self.vec.is_none() || self.raw.len() != bytes.len()
+#       || self.raw[..cut(&self.raw)] != bytes[..cut(bytes)] {
+# Mutation L (cache leaked: Box::into_raw into fn_extra, no reset callback),
+#   replacing pg_func_extra(fcinfo, OperandCache::default).
+#
+# test                                                   real  K       L
+distance_cache_inline_values_match_reference             ok    FAILED  ok
+distance_cache_toasted_values_match_reference            ok    FAILED  ok
+distance_cache_lateral_knn_rescan_matches_reference      ok    FAILED  ok
+distance_cache_plpgsql_simple_expr_across_statements     ok    FAILED  ok
+distance_cache_is_freed_with_the_statement               ok    ok      FAILED
+distance_cache_parallel_matches_serial                   ok    ok      ok
+distance_cache_null_and_markings_unchanged               ok    ok      ok
+(K and L: the other 7 distance_cache_* tests pass.)
+#
+# Mutation K, mismatching (op, shape) cases per table in qc_check_table
+# (6 ops x {constant left, constant right} / {subplan} / {cross join x2}):
+qc_inline: constant 12/12 subplan 6/6 cross 12/12
+qc_short:  constant 12/12 subplan 6/6 cross 12/12
+qc_ext:    constant 12/12 subplan 6/6 cross 12/12
+qc_comp:   constant 12/12 subplan 6/6 cross 12/12
+# Before the OFFSET 0 fence (previous round) only the subplan shape caught K.
+#
+# Failure messages under K:
+#   plpgsql: id 4: 5.646352107629922 vs 100.28161306704439
+#   lateral: max |d - reference| = Some(99.69173431396484)
+#   qc_inline {a} <-> {b} row 30: 7.984005351273255 vs 99.48458015213889
+#   qc_ext    {a} <-> {b} row 10: 31.992474896268657 vs 105.18379592336709
+# Under L: assertion `left == right` failed: freed at cursor close

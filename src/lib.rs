@@ -6314,6 +6314,558 @@ mod tests {
         assert!((ip.unwrap() + nip.unwrap()).abs() < 1e-9);
     }
 
+    // -----------------------------------------------------------------
+    // Fix B: the distance functions decode their operands through a
+    // per-FmgrInfo cache (src/distance.rs). These pin that the cache is
+    // invisible: same values as a from-text Rust reference for constant
+    // operands on either side, for per-row operands on both sides (the
+    // stale-cache test), for inline / short-header / compressed / external
+    // values, plus unchanged errors, NULLs and pg_proc markings. The
+    // decode-count test is the assertion of the optimisation itself.
+    // -----------------------------------------------------------------
+
+    /// `n` deterministic rows of dimension `dim`, plus row n+1 equal to row
+    /// 1 except its LAST coordinate and row n+2 a byte-identical copy of
+    /// row 2. Physical order is 1, n+1, 2, n+2, 3..n, so a scan feeds the
+    /// cache a payload differing only at its tail right after the one it
+    /// shadows (must miss), and an identical payload in a different tuple
+    /// (may hit). `quantize` rounds coordinates to {-1,-0.5,0,0.5,1}
+    /// (f16-exact: 3 B each in CBOR, and compressible).
+    ///
+    /// Callers must evaluate the expression in PHYSICAL order, below an
+    /// `OFFSET 0` fence: PG16+ sorts the input of `array_agg(... ORDER BY
+    /// id)` before evaluating its argument, so row n+1 would never follow
+    /// row 1 and a stale cache would go unnoticed.
+    fn qc_make(table: &str, dim: usize, n: i64, storage: &str, quantize: bool) {
+        Spi::run(&format!("CREATE TABLE {table} (id bigint, tv vector)")).unwrap();
+        if !storage.is_empty() {
+            Spi::run(&format!(
+                "ALTER TABLE {table} ALTER COLUMN tv SET STORAGE {storage}"
+            ))
+            .unwrap();
+        }
+        let val = if quantize {
+            "round(sin(g * 0.731 + (s % 16) * 1.37) * 2) / 2"
+        } else {
+            "round(sin(g * 0.731 + s * 1.37)::numeric, 6)"
+        };
+        let rows_sql = |lo: i64, hi: i64| {
+            format!(
+                "INSERT INTO {table} SELECT g, ('[' || array_to_string(array(\
+                    SELECT {val} FROM generate_series(1, {dim}) s), ',') || ']')::vector \
+                 FROM generate_series({lo}, {hi}) g"
+            )
+        };
+        Spi::run(&rows_sql(1, 1)).unwrap();
+        // Same CBOR width as the coordinate it replaces (f16-exact vs f32),
+        // so only the payload's last bytes differ, and big enough that a
+        // stale decode is far outside the comparison tolerance.
+        let tail = if quantize { "100.25" } else { "100.123457" };
+        Spi::run(&format!(
+            "INSERT INTO {table} SELECT {n} + 1, ('[' || array_to_string(\
+                (tv::real[])[1:{dim} - 1] || ARRAY[{tail}::real], ',') || ']')::vector \
+             FROM {table} WHERE id = 1"
+        ))
+        .unwrap();
+        let same_len: Option<bool> = Spi::get_one(&format!(
+            "SELECT pg_column_size(a.tv::text::vector) = pg_column_size(b.tv::text::vector) \
+                    AND a.tv::text <> b.tv::text \
+             FROM {table} a, {table} b WHERE a.id = 1 AND b.id = {n} + 1"
+        ))
+        .unwrap();
+        assert_eq!(
+            same_len,
+            Some(true),
+            "{table}: tail row must differ only in content"
+        );
+        Spi::run(&rows_sql(2, 2)).unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} SELECT {n} + 2, tv FROM {table} WHERE id = 2"
+        ))
+        .unwrap();
+        Spi::run(&rows_sql(3, n)).unwrap();
+    }
+
+    /// Rows of `table` in id order, decoded from their text form (never
+    /// through the distance functions' cache).
+    fn qc_rows(table: &str) -> Vec<Vec<f32>> {
+        Spi::connect(|client| {
+            let tup = client
+                .select(
+                    &format!("SELECT tv::text FROM {table} ORDER BY id"),
+                    None,
+                    &[],
+                )
+                .unwrap();
+            tup.map(|r| crate::vec::parse_vec(&r.get::<String>(1).unwrap().unwrap()).unwrap())
+                .collect()
+        })
+    }
+
+    /// The six cached functions: SQL template and Rust reference.
+    fn qc_ops() -> Vec<(&'static str, fn(&[f32], &[f32]) -> f64)> {
+        use crate::kernels as k;
+        let ops: [(&'static str, fn(&[f32], &[f32]) -> f64); 6] = [
+            ("{a} <-> {b}", |a, b| k::l2_sq(a, b).sqrt()),
+            ("{a} <#> {b}", |a, b| -k::dot(a, b)),
+            ("{a} <=> {b}", |a, b| k::cosine_distance(a, b)),
+            ("{a} <+> {b}", |a, b| k::l1_abs(a, b)),
+            ("turbovec.l2_squared_distance({a}, {b})", |a, b| {
+                k::l2_sq(a, b)
+            }),
+            ("turbovec.inner_product({a}, {b})", |a, b| k::dot(a, b)),
+        ];
+        ops.to_vec()
+    }
+
+    /// Relative 1e-5: survives a reassociated f32 (vectorised) kernel, still
+    /// orders of magnitude below what a wrong (stale) operand produces.
+    fn qc_close(got: f64, want: f64) -> bool {
+        if want.is_nan() {
+            return got.is_nan(); // cosine against a zero row
+        }
+        (got - want).abs() <= 1e-5 * want.abs().max(1.0)
+    }
+
+    fn qc_agg(sql: &str) -> Vec<f64> {
+        Spi::get_one::<Vec<f64>>(sql).unwrap().unwrap()
+    }
+
+    /// Every op over `table`, with a constant operand on the left and on
+    /// the right, and with per-row operands on both sides (a self cross
+    /// join: one side changes every call, the other in runs). Reports the
+    /// first mismatch of EVERY (op, shape), so one run shows which shapes
+    /// catch a broken cache.
+    fn qc_check_table(table: &str) {
+        let rows = qc_rows(table);
+        let n = rows.len();
+        let mut bad: Vec<String> = Vec::new();
+        let mut check = |shape: String, got: &[f64], want: &mut dyn Iterator<Item = f64>| {
+            assert_eq!(got.len(), want.size_hint().0, "{shape}: row count");
+            if let Some((i, (g, w))) = got
+                .iter()
+                .zip(want)
+                .enumerate()
+                .find(|(_, (g, w))| !qc_close(**g, *w))
+            {
+                bad.push(format!("{shape} row {i}: {g} vs {w}"));
+            }
+        };
+        // An operand matching no row, as a planner-folded constant.
+        let q_sql = format!(
+            "(SELECT ('[' || array_to_string(array(SELECT cos(s * 0.29)::real \
+             FROM generate_series(1, {}) s), ',') || ']')::vector)",
+            rows[0].len()
+        );
+        let q_txt: String = Spi::get_one(&format!("SELECT {q_sql}::text"))
+            .unwrap()
+            .unwrap();
+        let q = crate::vec::parse_vec(&q_txt).unwrap();
+        let q_lit = format!("'{q_txt}'::vector");
+        for (tmpl, reference) in qc_ops() {
+            let e = |a: &str, b: &str| tmpl.replace("{a}", a).replace("{b}", b);
+            for (expr, flip) in [(e("tv", &q_lit), false), (e(&q_lit, "tv"), true)] {
+                let got = qc_agg(&format!(
+                    "SELECT array_agg(d ORDER BY id) \
+                     FROM (SELECT id, {expr} AS d FROM {table} OFFSET 0) s"
+                ));
+                let mut want = rows.iter().map(|r| {
+                    if flip {
+                        reference(&q, r)
+                    } else {
+                        reference(r, &q)
+                    }
+                });
+                check(format!("{table} {expr} (constant)"), &got, &mut want);
+            }
+            // Correlated subplan: one FmgrInfo for the whole statement, its
+            // Param operand changing per outer row (a constant per rescan).
+            // Outer rows in physical order too, so the Param slot sees row
+            // n+1 right after row 1.
+            let got = qc_agg(&format!(
+                "SELECT array_agg(d ORDER BY id) FROM (SELECT x.id, \
+                     (SELECT sum({}) FROM {table} y) AS d FROM {table} x OFFSET 0) s",
+                e("y.tv", "x.tv")
+            ));
+            let mut want = rows
+                .iter()
+                .map(|x| rows.iter().map(|y| reference(y, x)).sum::<f64>());
+            check(format!("{table} {tmpl} (subplan)"), &got, &mut want);
+            for (a, b) in [("x.tv", "y.tv"), ("y.tv", "x.tv")] {
+                let expr = e(a, b);
+                let got = qc_agg(&format!(
+                    "SELECT array_agg(d ORDER BY xi, yi) FROM (SELECT x.id xi, y.id yi, \
+                         {expr} AS d FROM {table} x, {table} y OFFSET 0) s"
+                ));
+                let mut want = (0..n * n).map(|ij| {
+                    let (x, y) = (&rows[ij / n], &rows[ij % n]);
+                    if a == "x.tv" {
+                        reference(x, y)
+                    } else {
+                        reference(y, x)
+                    }
+                });
+                check(format!("{table} {expr} (cross join)"), &got, &mut want);
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// Constant and per-row operands over plain inline values and over
+    /// short-header (1-byte varlena) values.
+    #[pg_test]
+    fn distance_cache_inline_values_match_reference() {
+        use_turbovec();
+        qc_make("qc_inline", 64, 30, "", false);
+        qc_check_table("qc_inline");
+        // 8 f16-exact coords = ~27 B of CBOR: stored with a 1-byte header.
+        qc_make("qc_short", 8, 30, "", true);
+        let sz: Option<i32> = Spi::get_one("SELECT max(pg_column_size(tv)) FROM qc_short").unwrap();
+        assert!(sz.unwrap() < 127, "qc_short must use short varlena headers");
+        qc_check_table("qc_short");
+    }
+
+    /// Same, for out-of-line (EXTERNAL) and inline-compressed values, so
+    /// the cache compares DETOASTED bytes, not TOAST pointers.
+    #[pg_test]
+    fn distance_cache_toasted_values_match_reference() {
+        use_turbovec();
+        qc_make("qc_ext", 1024, 10, "EXTERNAL", false);
+        let toast: String = Spi::get_one(
+            "SELECT reltoastrelid::regclass::text FROM pg_class WHERE oid = 'qc_ext'::regclass",
+        )
+        .unwrap()
+        .unwrap();
+        let chunks: Option<i64> = Spi::get_one(&format!("SELECT count(*) FROM {toast}")).unwrap();
+        assert!(chunks.unwrap() >= 12, "qc_ext values must be out of line");
+        qc_check_table("qc_ext");
+
+        qc_make("qc_comp", 1024, 10, "", true);
+        // Stored size well under the raw size => compressed (works on
+        // pg13, which lacks pg_column_compression()).
+        let uncompressed: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM qc_comp \
+             WHERE pg_column_size(tv) * 2 > pg_column_size(tv::text::vector)",
+        )
+        .unwrap();
+        assert_eq!(uncompressed, Some(0), "qc_comp values must be compressed");
+        qc_check_table("qc_comp");
+    }
+
+    /// The optimisation itself: a constant operand is decoded once per
+    /// expression, not once per row. Before Fix B every call decoded both
+    /// operands (decodes == 2 * calls).
+    #[pg_test]
+    fn distance_cache_decodes_constant_once_per_expression() {
+        use crate::distance::{CALLS, DECODES};
+        use std::sync::atomic::Ordering::Relaxed;
+        use_turbovec();
+        Spi::run("SET max_parallel_workers_per_gather = 0").unwrap();
+        // 1000 distinct rows (no duplicates: an identical neighbour would
+        // legitimately hit the row-side slot and skew the exact count).
+        Spi::run(
+            "CREATE TABLE qc_cnt AS SELECT g AS id, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.731 + s * 1.37) FROM generate_series(1, 64) s), ',') \
+                || ']')::vector AS tv FROM generate_series(1, 1000) g",
+        )
+        .unwrap();
+        let q = "array_fill(0.5::real, ARRAY[64])::vector";
+
+        // Seq scan: 1002 calls, the constant decoded once.
+        let (d0, c0) = (DECODES.load(Relaxed), CALLS.load(Relaxed));
+        Spi::run(&format!("SELECT sum(tv <=> {q}) FROM qc_cnt")).unwrap();
+        let (dd, dc) = (DECODES.load(Relaxed) - d0, CALLS.load(Relaxed) - c0);
+        assert_eq!(dc, 1000, "one call per row");
+        assert_eq!(dd, dc + 1, "constant must be decoded once, not per row");
+
+        // Index scan with ORDER BY recheck: the per-candidate path.
+        Spi::run("CREATE INDEX qc_cnt_idx ON qc_cnt USING turbovec (tv vec_cosine_ops)").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        let sql = format!("SELECT id FROM qc_cnt ORDER BY tv <=> {q} LIMIT 5");
+        let plan: String = Spi::connect(|client| {
+            client
+                .select(&format!("EXPLAIN (COSTS OFF) {sql}"), None, &[])
+                .unwrap()
+                .map(|r| r.get::<String>(1).unwrap().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert!(
+            plan.contains("qc_cnt_idx"),
+            "expected an index scan, got {plan}"
+        );
+        let (d0, c0) = (DECODES.load(Relaxed), CALLS.load(Relaxed));
+        Spi::run(&sql).unwrap();
+        let (dd, dc) = (DECODES.load(Relaxed) - d0, CALLS.load(Relaxed) - c0);
+        assert!(dc >= 20, "expected >= 20 rechecks, got {dc}");
+        // One decode per candidate + one per expression instance that
+        // holds the constant (recheck, projection).
+        assert!(dd <= dc + 4, "{dd} decodes for {dc} calls");
+    }
+
+    /// Dimension-mismatch errors are unchanged, including when the
+    /// mismatching row arrives after the constant is already cached.
+    fn qc_mismatch(table: &str, op: &str) {
+        use_turbovec();
+        Spi::run(&format!("CREATE TABLE {table} (id int, tv vector)")).unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} VALUES (1, '[1,2,3]'), (2, '[4,5,6]'), (3, '[1,2,3,4]')"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "SELECT array_agg({} ORDER BY id) FROM {table}",
+            op.replace("{a}", "tv").replace("{b}", "'[1,1,1]'::vector")
+        ))
+        .unwrap();
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "different vector dimensions 4 and 3 for operator '<->'")]
+    fn distance_cache_mismatch_l2() {
+        qc_mismatch("qc_mm_l2", "{a} <-> {b}");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "different vector dimensions 4 and 3 for operator '<#>'")]
+    fn distance_cache_mismatch_ip() {
+        qc_mismatch("qc_mm_ip", "{a} <#> {b}");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "different vector dimensions 3 and 4 for operator '<=>'")]
+    fn distance_cache_mismatch_cosine_const_left() {
+        qc_mismatch("qc_mm_cosine_const_left", "{b} <=> {a}");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "different vector dimensions 4 and 3 for operator '<+>'")]
+    fn distance_cache_mismatch_l1() {
+        qc_mismatch("qc_mm_l1", "{a} <+> {b}");
+    }
+
+    #[pg_test]
+    #[should_panic(
+        expected = "different vector dimensions 4 and 3 for operator 'l2_squared_distance'"
+    )]
+    fn distance_cache_mismatch_l2_squared() {
+        qc_mismatch("qc_mm_l2_squared", "turbovec.l2_squared_distance({a}, {b})");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "different vector dimensions 4 and 3 for operator 'inner_product'")]
+    fn distance_cache_mismatch_inner_product() {
+        qc_mismatch("qc_mm_inner_product", "turbovec.inner_product({a}, {b})");
+    }
+
+    /// NULL in, NULL out (STRICT), on either side and mid-scan, and the
+    /// pg_proc markings of all six functions are unchanged.
+    #[pg_test]
+    fn distance_cache_null_and_markings_unchanged() {
+        use_turbovec();
+        Spi::run("CREATE TABLE qc_null (id int, tv vector)").unwrap();
+        // NULL rows via an omitted column: PG runs a type's input function
+        // even for a NULL literal, and Vector's rejects it (pre-existing).
+        Spi::run("INSERT INTO qc_null VALUES (1, '[1,2]')").unwrap();
+        Spi::run("INSERT INTO qc_null (id) VALUES (2)").unwrap();
+        Spi::run("INSERT INTO qc_null VALUES (3, '[3,4]')").unwrap();
+        Spi::run("INSERT INTO qc_null (id) VALUES (4)").unwrap();
+        for (tmpl, reference) in qc_ops() {
+            let e = |a: &str, b: &str| tmpl.replace("{a}", a).replace("{b}", b);
+            for expr in [e("tv", "'[1,0]'::vector"), e("'[1,0]'::vector", "tv")] {
+                let nulls: Option<i64> = Spi::get_one(&format!(
+                    "SELECT count(*) FROM qc_null WHERE ({expr}) IS NULL"
+                ))
+                .unwrap();
+                assert_eq!(nulls, Some(2), "{expr}");
+                let v: Option<f64> =
+                    Spi::get_one(&format!("SELECT {expr} FROM qc_null WHERE id = 3")).unwrap();
+                assert!(
+                    qc_close(v.unwrap(), reference(&[3.0, 4.0], &[1.0, 0.0])),
+                    "{expr}"
+                );
+            }
+            let n: Option<bool> = Spi::get_one(&format!(
+                "SELECT ({}) IS NULL FROM qc_null a, qc_null b WHERE a.id = 2 AND b.id = 4",
+                e("a.tv", "b.tv")
+            ))
+            .unwrap();
+            assert_eq!(n, Some(true), "{tmpl} with both NULL");
+        }
+        let marks: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM pg_proc \
+             WHERE pronamespace = 'turbovec'::regnamespace \
+               AND proname IN ('l2_distance', 'negative_inner_product', 'cosine_distance', \
+                               'l1_distance', 'l2_squared_distance', 'inner_product') \
+               AND pg_get_function_arguments(oid) = 'a vector, b vector' \
+               AND proisstrict AND provolatile = 'i' AND proparallel = 's' \
+               AND prorettype = 'float8'::regtype AND pronargs = 2 \
+               AND proargtypes[0] = 'turbovec.vector'::regtype \
+               AND proargtypes[1] = 'turbovec.vector'::regtype \
+               AND prosrc = proname || '_wrapper'",
+        )
+        .unwrap();
+        assert_eq!(marks, Some(6), "pg_proc markings changed");
+    }
+
+    /// kNN join: the index scan's ORDER BY recheck reuses one FmgrInfo
+    /// across rescans while its Param operand (the outer row) changes, and
+    /// outer rows arrive in physical order (row n+1 right after row 1).
+    #[pg_test]
+    fn distance_cache_lateral_knn_rescan_matches_reference() {
+        use_turbovec();
+        qc_make("qc_lat", 64, 30, "", false);
+        Spi::run("CREATE INDEX qc_lat_idx ON qc_lat USING turbovec (tv vec_l2_ops)").unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 64").unwrap();
+        let sql = "SELECT max(abs(n.d - (SELECT sqrt(sum((a - b)::float8 ^ 2)) \
+                       FROM unnest(n.tv::real[], o.tv::real[]) u(a, b)))) \
+                   FROM (SELECT * FROM qc_lat OFFSET 0) o, \
+                   LATERAL (SELECT i.tv, i.tv <-> o.tv AS d FROM qc_lat i \
+                            ORDER BY i.tv <-> o.tv LIMIT 3) n";
+        let plan: String = Spi::connect(|client| {
+            client
+                .select(&format!("EXPLAIN (COSTS OFF) {sql}"), None, &[])
+                .unwrap()
+                .map(|r| r.get::<String>(1).unwrap().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert!(
+            plan.contains("Index Scan using qc_lat_idx") && plan.contains("Order By: ("),
+            "expected a kNN index scan per outer row, got {plan}"
+        );
+        let e: Option<f64> = Spi::get_one(sql).unwrap();
+        assert!(e.unwrap() < 1e-4, "max |d - reference| = {e:?}");
+    }
+
+    /// A PL/pgSQL simple expression keeps its ExprState (so its FmgrInfo
+    /// and cache) for the whole transaction: the only path where one cache
+    /// outlives a statement. Ids 1 and 4 differ only in the last coordinate.
+    #[pg_test]
+    fn distance_cache_plpgsql_simple_expr_across_statements() {
+        use_turbovec();
+        qc_make("qc_pl", 64, 3, "", false); // id 4 = id 1 with a new last coordinate
+        Spi::run(
+            "CREATE FUNCTION qc_pl_d(a vector, b vector) RETURNS float8 LANGUAGE plpgsql \
+             IMMUTABLE AS $$ BEGIN RETURN a <-> b; END $$",
+        )
+        .unwrap();
+        let z = "array_fill(0::real, ARRAY[64])::vector";
+        let rows = qc_rows("qc_pl");
+        let zero = vec![0f32; 64];
+        for (id, i) in [(1, 0), (4, 3), (1, 0)] {
+            let d: f64 = Spi::get_one(&format!(
+                "SELECT qc_pl_d(tv, {z}) FROM qc_pl WHERE id = {id}"
+            ))
+            .unwrap()
+            .unwrap();
+            let want = crate::kernels::l2_sq(&rows[i], &zero).sqrt();
+            assert!(qc_close(d, want), "id {id}: {d} vs {want}");
+        }
+    }
+
+    /// The `fn_extra` cache is Rust state hung on a memory-context reset
+    /// callback; prove it is dropped when the statement's executor state
+    /// goes away (normal end, cursor close, and error unwind).
+    #[pg_test]
+    fn distance_cache_is_freed_with_the_statement() {
+        use crate::distance::LIVE_CACHES;
+        use std::sync::atomic::Ordering::Relaxed;
+        use_turbovec();
+        Spi::run("SET max_parallel_workers_per_gather = 0").unwrap();
+        Spi::run(
+            "CREATE TABLE qc_free AS SELECT g AS id, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.731 + s * 1.37) FROM generate_series(1, 64) s), ',') \
+                || ']')::vector AS tv FROM generate_series(1, 100) g",
+        )
+        .unwrap();
+        let q = "array_fill(0.5::real, ARRAY[64])::vector";
+        let l0 = LIVE_CACHES.load(Relaxed);
+
+        // Mid-statement both expressions hold a cache; closing the cursor
+        // (ExecutorEnd) frees them.
+        Spi::connect(|client| {
+            let mut cur = client.open_cursor(
+                &format!("SELECT tv <=> {q}, tv <-> {q} FROM qc_free") as &str,
+                &[],
+            );
+            cur.fetch(1).unwrap();
+            assert_eq!(
+                LIVE_CACHES.load(Relaxed),
+                l0 + 2,
+                "one cache per expression"
+            );
+            drop(cur);
+            assert_eq!(LIVE_CACHES.load(Relaxed), l0, "freed at cursor close");
+        });
+
+        Spi::run(&format!("SELECT sum(tv <=> {q}) FROM qc_free")).unwrap();
+        assert_eq!(LIVE_CACHES.load(Relaxed), l0, "freed at statement end");
+
+        // An ERROR after the cache is filled (row 2 has a different dim):
+        // the subtransaction abort resets the executor's context.
+        Spi::run("CREATE TABLE qc_free_mm (id int, tv vector)").unwrap();
+        Spi::run("INSERT INTO qc_free_mm VALUES (1, '[1,2,3]'), (2, '[1,2,3,4]')").unwrap();
+        Spi::run(
+            "DO $$ BEGIN PERFORM sum(tv <-> '[1,1,1]'::vector) FROM qc_free_mm; \
+             RAISE 'not reached'; EXCEPTION WHEN others THEN \
+             IF SQLERRM = 'not reached' THEN RAISE; END IF; END $$",
+        )
+        .unwrap();
+        assert_eq!(LIVE_CACHES.load(Relaxed), l0, "freed on error");
+    }
+
+    /// Parallel query: each worker builds its own FmgrInfo (and cache);
+    /// the parallel sum must match the serial one. Runs through
+    /// `select(.., None, ..)`: a tuple limit (as `Spi::get_one` passes)
+    /// makes the executor drop parallel mode.
+    #[pg_test]
+    fn distance_cache_parallel_matches_serial() {
+        use_turbovec();
+        Spi::run(
+            "CREATE TABLE qc_par AS SELECT g AS id, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.731 + s * 1.37) FROM generate_series(1, 64) s), ',') \
+                || ']')::vector AS tv FROM generate_series(1, 5000) g",
+        )
+        .unwrap();
+        let sql = "SELECT sum(tv <=> array_fill(0.5::real, ARRAY[64])::vector) FROM qc_par";
+        let lines = |q: &str| -> Vec<String> {
+            Spi::connect(|client| {
+                client
+                    .select(q, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<String>(1).unwrap().unwrap_or_default())
+                    .collect()
+            })
+        };
+        let sum = || -> f64 {
+            Spi::connect(|c| c.select(sql, None, &[]).unwrap().first().get_one::<f64>())
+                .unwrap()
+                .unwrap()
+        };
+        Spi::run("SET max_parallel_workers_per_gather = 0").unwrap();
+        let serial = sum();
+        for g in [
+            "parallel_setup_cost = 0",
+            "parallel_tuple_cost = 0",
+            "min_parallel_table_scan_size = 0",
+            "max_parallel_workers_per_gather = 2",
+        ] {
+            Spi::run(&format!("SET {g}")).unwrap();
+        }
+        let plan = lines(&format!("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) {sql}")).join("\n");
+        assert!(
+            plan.contains("Workers Launched: ") && !plan.contains("Workers Launched: 0"),
+            "expected parallel workers to run, got {plan}"
+        );
+        let parallel = sum();
+        assert!(
+            (parallel - serial).abs() <= 1e-9 * serial.abs().max(1.0),
+            "parallel {parallel} vs serial {serial}"
+        );
+    }
+
     /// `subvector` boundary cases: full slice, single element.
     #[pg_test]
     fn subvector_boundaries() {

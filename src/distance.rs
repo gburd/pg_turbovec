@@ -102,6 +102,11 @@ pub(crate) static LIVE_CACHES: std::sync::atomic::AtomicI64 = std::sync::atomic:
 struct Slot {
     raw: Vec<u8>,
     vec: Option<Vector>,
+    /// `kernels::norm2` of `vec`, filled lazily on the first cache HIT so a
+    /// per-row (always-missing) slot never pays for it. Reset on refill.
+    norm2: Option<f64>,
+    /// Whether the last `get` reused the cached decode.
+    hit: bool,
 }
 
 impl Slot {
@@ -119,7 +124,8 @@ impl Slot {
             let p = pg_sys::pg_detoast_datum_packed(datum.cast_mut_ptr());
             let bytes =
                 std::slice::from_raw_parts(vardata_any(p).cast::<u8>(), varsize_any_exhdr(p));
-            if self.vec.is_none() || self.raw.as_slice() != bytes {
+            self.hit = self.vec.is_some() && self.raw.as_slice() == bytes;
+            if !self.hit {
                 #[cfg(any(test, feature = "pg_test"))]
                 DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // pgrx's own FromDatum (cbor_decode), so values are
@@ -127,12 +133,22 @@ impl Slot {
                 let v = Vector::from_datum(pg_sys::Datum::from(p), false)
                     .expect("vector argument must not be null");
                 self.vec = None;
+                self.norm2 = None;
                 self.raw.clear();
                 self.raw.extend_from_slice(bytes);
                 self.vec = Some(v);
             }
             self.vec.as_ref().expect("slot filled above")
         }
+    }
+
+    /// The cached squared norm of the slot's vector, computing it once. Only
+    /// meaningful right after a `get` that hit.
+    fn norm2(&mut self) -> f64 {
+        let v = self.vec.as_ref().expect("norm2 on an empty slot");
+        *self
+            .norm2
+            .get_or_insert_with(|| kernels::norm2(v.as_slice()))
     }
 }
 
@@ -176,6 +192,31 @@ fn with_operands<R>(
         let mut cache = pg_func_extra(fcinfo, OperandCache::default);
         let [x, y] = &mut cache.0;
         f(x.get(a.0), y.get(b.0))
+    }
+}
+
+/// [`with_operands`], but hands `f` the filled slots so it can see which side
+/// hit the cache (and reuse that side's cached norm).
+fn with_slots<R>(
+    fcinfo: pg_sys::FunctionCallInfo,
+    a: VectorArg,
+    b: VectorArg,
+    f: impl FnOnce(&mut Slot, &mut Slot) -> R,
+) -> R {
+    #[cfg(any(test, feature = "pg_test"))]
+    CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        if (*fcinfo).flinfo.is_null() {
+            let (mut x, mut y) = (Slot::default(), Slot::default());
+            x.get(a.0);
+            y.get(b.0);
+            return f(&mut x, &mut y);
+        }
+        let mut cache = pg_func_extra(fcinfo, OperandCache::default);
+        let [x, y] = &mut cache.0;
+        x.get(a.0);
+        y.get(b.0);
+        f(x, y)
     }
 }
 
@@ -280,12 +321,29 @@ fn negative_inner_product(a: VectorArg, b: VectorArg, fcinfo: pg_sys::FunctionCa
 /// ```
 #[pg_extern(immutable, parallel_safe)]
 fn cosine_distance(a: VectorArg, b: VectorArg, fcinfo: pg_sys::FunctionCallInfo) -> f64 {
-    with_operands(fcinfo, a, b, |a, b| {
+    with_slots(fcinfo, a, b, |x, y| {
+        // Norm of whichever side hit the cache (the constant query), computed
+        // once per slot fill; `None` when neither side repeats.
+        let qnorm = if y.hit {
+            Some((y.norm2(), false))
+        } else if x.hit {
+            Some((x.norm2(), true))
+        } else {
+            None
+        };
+        let (a, b) = (
+            x.vec.as_ref().expect("filled"),
+            y.vec.as_ref().expect("filled"),
+        );
         a.check_same_dim(b, "<=>");
-        // TODO(fix-a seam): once kernels::cosine_distance_with_qnorm lands,
-        // cache the query's norm2 in the Slot (computed when the slot is
-        // filled) and pass it here for the side that hit the cache.
-        kernels::cosine_distance(a.as_slice(), b.as_slice())
+        match qnorm {
+            Some((q, false)) => kernels::cosine_distance_with_qnorm(a.as_slice(), b.as_slice(), q),
+            // The cached side is `a`: pass it as the query. Bit-identical to the
+            // unswapped call: dot and the clamp are symmetric, and the product
+            // of the two norms commutes.
+            Some((q, true)) => kernels::cosine_distance_with_qnorm(b.as_slice(), a.as_slice(), q),
+            None => kernels::cosine_distance(a.as_slice(), b.as_slice()),
+        }
     })
 }
 

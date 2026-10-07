@@ -6555,6 +6555,44 @@ mod tests {
     /// The optimisation itself: a constant operand is decoded once per
     /// expression, not once per row. Before Fix B every call decoded both
     /// operands (decodes == 2 * calls).
+    /// Integration of Fix A + Fix B: when one cosine operand repeats (the
+    /// constant query, on either side), its cached norm is reused via
+    /// `cosine_distance_with_qnorm`. That must be BIT-identical to the plain
+    /// `kernels::cosine_distance` on the same values, constant left or right,
+    /// so caching never changes a result (and never reorders an ORDER BY).
+    #[pg_test]
+    fn distance_cache_cosine_qnorm_is_bit_identical() {
+        use_turbovec();
+        qc_make("qc_qn", 96, 200, "", false);
+        let rows = qc_rows("qc_qn");
+        let q = &rows[6];
+        for (sql, left) in [
+            (
+                "SELECT array_agg(d ORDER BY id) FROM (SELECT id, tv <=> (SELECT tv FROM qc_qn WHERE id = 7) AS d FROM qc_qn OFFSET 0) s",
+                false,
+            ),
+            (
+                "SELECT array_agg(d ORDER BY id) FROM (SELECT id, (SELECT tv FROM qc_qn WHERE id = 7) <=> tv AS d FROM qc_qn OFFSET 0) s",
+                true,
+            ),
+        ] {
+            let got: Vec<f64> = Spi::get_one::<Vec<f64>>(sql).unwrap().unwrap();
+            assert_eq!(got.len(), rows.len());
+            for (i, (g, r)) in got.iter().zip(&rows).enumerate() {
+                let want = if left {
+                    crate::kernels::cosine_distance(q, r)
+                } else {
+                    crate::kernels::cosine_distance(r, q)
+                };
+                assert!(
+                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
+                    "row {i} (constant on {}): cached-norm {g:?} != plain {want:?}",
+                    if left { "left" } else { "right" }
+                );
+            }
+        }
+    }
+
     #[pg_test]
     fn distance_cache_decodes_constant_once_per_expression() {
         use crate::distance::{CALLS, DECODES};

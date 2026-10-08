@@ -8,6 +8,19 @@ If you're a human and you're updating something here, also propagate
 the change to `docs/UPGRADING.md` (versioning policy) and the
 `.pi/skills/drift-check/SKILL.md` (enforcement rules).
 
+> ### NEVER SEND EMAIL (2026-10-07, absolute)
+>
+> Agents **never** send email: not to pgsql-hackers, any list, any
+> person, and not a test copy. No SMTP, no Proton bridge, no
+> `git send-email`, no mail client. This holds **even after the user
+> approves the patch or cover letter**: approval is of the draft, never
+> of sending. Upstream patches end as files on disk (e.g.
+> `~/ws/pg_turbovec-upstream/<topic>/`: `git format-patch` output +
+> `COVER.md` with recipients and `In-Reply-To`), then "ready for you to
+> send". The user sends. On 2026-10-07 an agent sent the lossy-ORDER-BY
+> comments patch to pgsql-hackers after the user said "yes" to it; a
+> list post can't be recalled.
+
 ---
 
 ## Versioning policy — **READ THIS BEFORE BUMPING ANY VERSION**

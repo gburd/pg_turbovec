@@ -55,7 +55,7 @@ jobs:
           . "$HOME/.cargo/env"
           # cargo-pgrx must match the pgrx version in Cargo.toml.
           PGRX_VER="$(grep -m1 '^pgrx = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
-          cargo install --locked cargo-pgrx --version "${PGRX_VER:-0.19.1}"
+          cargo install --locked cargo-pgrx --version "${PGRX_VER:-0.19.3}"
           cargo pgrx init --pg16 "$(which pg_config)"
 
       - name: Gate the release (compile + drift-check)

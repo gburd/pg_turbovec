@@ -41,7 +41,7 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 [![PostgreSQL 13-19](https://img.shields.io/badge/postgres-13--19-336791)](https://www.postgresql.org/)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-> **Status:** v2.12.0 - built on upstream **turbovec 1.1.1** (wire
+> **Status:** v2.12.1 - built on upstream **turbovec 1.1.2** (wire
 > format v8; staged 2/4-bit search on aarch64 and AVX-512 VBMI+VNNI hosts,
 > 1.14-1.17x faster 4-bit end-to-end on Graviton4 at 1M x 1024-d -- see
 > [CHANGELOG](CHANGELOG.md)). The full `#[pg_test]` suite passes against
@@ -467,7 +467,7 @@ reference development platform; 13/14/15/17/18/19 are tested in CI.
 
 ```bash
 # One-time setup.
-cargo install --locked cargo-pgrx --version 0.19.1
+cargo install --locked cargo-pgrx --version 0.19.3
 cargo pgrx init                # bootstraps a private PostgreSQL cluster
 
 # Build & install into the dev cluster.
@@ -503,7 +503,7 @@ For PG13–17, copy (or symlink) `lib/pg_turbovec.so` into `pg_config
 --pkglibdir` and `share/postgresql/extension/*` into `pg_config
 --sharedir`/extension, or overlay the extension into nixpkgs'
 `postgresql_NN.pkgs`. A dev shell with the full toolchain (rust,
-cargo-pgrx 0.19.1, clang/bindgen, openblas, bison/flex/readline/icu)
+cargo-pgrx 0.19.3, clang/bindgen, openblas, bison/flex/readline/icu)
 is available via `nix develop`.
 
 For a Nix-based build (the dev environment for this project) see
@@ -910,9 +910,26 @@ CREATE INDEX CONCURRENTLY docs_emb_tv_idx
     WITH (bit_width = 4);
 ```
 
-A binary-compatible `vector` varlena layout (zero-copy cast to/from
-pgvector's `vector`) is on the v1.0 roadmap; until then the `real[]`
-bridge is the supported interop path.
+To index an existing pgvector column **without adding a column**, build the
+index on the cast expression and query with the same expression (verified with
+pgvector 0.8.2; each rechecked candidate pays the cast, so time it on your
+data):
+
+```sql
+SET search_path = public, turbovec;
+CREATE INDEX CONCURRENTLY docs_emb_tv_idx ON docs
+    USING turbovec ((embedding::real[]::turbovec.vector) vec_cosine_ops)
+    WITH (bit_width = 4);
+SELECT id FROM docs
+ORDER BY embedding::real[]::turbovec.vector <=> $1::real[]::turbovec.vector
+LIMIT 10;
+```
+
+There is no binary-compatible (zero-copy) cast to or from pgvector's
+`vector`, and none is scheduled: our planned on-disk format
+(`docs/design/RAW_VECTOR_VARLENA.md`) deliberately does not share pgvector's
+byte layout, so an older binary can never silently misread one as the other.
+The `real[]` (or `text`) bridge is the supported interop path.
 
 ## Reference
 

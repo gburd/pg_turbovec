@@ -1,0 +1,1193 @@
+[heartbeat] starting: bash /tmp/pgtv_test_deps.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg16")[0m[39m and `pg_config` from [36m/home/gburd/.pgrx/16.15/pgrx-install/bin/pg_config[39m
+CARGO_TARGET_DIR="/home/gburd/ws/pgtv-wt-deps/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg16 pg_test" PGRX_MANIFEST_PATH="/home/gburd/ws/pgtv-wt-deps/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/home/gburd/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo" "test" "--manifest-path" "/home/gburd/ws/pgtv-wt-deps/Cargo.toml" "--features" "pg16 pg_test" "--no-default-features"
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.5
+   Compiling autocfg v1.5.1
+   Compiling libc v0.2.190
+   Compiling serde_core v1.0.229
+   Compiling libm v0.2.16
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde v1.0.229
+   Compiling zerocopy v0.8.63
+   Compiling once_cell v1.21.4
+   Compiling num-traits v0.2.19
+   Compiling smallvec v1.16.3
+   Compiling memchr v2.8.3
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling zmij v1.0.23
+   Compiling utf8_iter v1.0.4
+   Compiling winnow v1.0.4
+   Compiling typenum v1.20.1
+   Compiling syn v3.0.9
+   Compiling syn v2.0.119
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling thiserror v2.0.21
+   Compiling find-msvc-tools v0.1.14
+   Compiling toml_writer v1.1.3+spec-1.1.0
+   Compiling crossbeam-utils v0.8.23
+   Compiling itoa v1.0.18
+   Compiling shlex v2.0.1
+   Compiling cc v1.8.0
+   Compiling paste v1.0.15
+   Compiling crossbeam-epoch v0.9.21
+   Compiling eyre v0.6.14
+   Compiling crossbeam-deque v0.8.8
+   Compiling synstructure v0.14.0
+   Compiling either v1.19.0
+   Compiling bitflags v2.13.2
+   Compiling regex-syntax v0.8.11
+   Compiling winnow v0.7.15
+   Compiling glob v0.3.4
+   Compiling indenter v0.3.4
+   Compiling rand_core v0.10.1
+   Compiling getrandom v0.4.3
+   Compiling rayon-core v1.13.0
+   Compiling anyhow v1.0.104
+   Compiling clang-sys v1.9.1
+   Compiling serde_spanned v1.1.2
+   Compiling serde_derive v1.0.229
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling bytemuck_derive v1.12.1
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.21
+   Compiling zerofrom v0.1.8
+   Compiling hybrid-array v0.4.15
+   Compiling version_check v0.9.5
+   Compiling yoke v0.8.3
+   Compiling is_ci v1.2.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling bytemuck v1.25.2
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling num-complex v0.4.6
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+. [bash 10:58:43 elapsed]
+   Compiling supports-color v3.0.2
+   Compiling pulp v0.21.5
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling aho-corasick v1.1.5
+   Compiling zerocopy-derive v0.8.63
+   Compiling cmov v0.5.4
+   Compiling percent-encoding v2.3.2
+   Compiling serde_json v1.0.154
+   Compiling minimal-lexical v0.2.1
+   Compiling form_urlencoded v1.2.2
+   Compiling nom v7.1.3
+   Compiling ctutils v0.4.3
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling rayon v1.12.0
+   Compiling icu_provider v2.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling regex-automata v0.4.18
+   Compiling pathsearch v0.2.0
+   Compiling owo-colors v4.4.0
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+   Compiling libloading v0.8.9
+   Compiling const-oid v0.10.2
+   Compiling bindgen v0.72.1
+   Compiling same-file v1.0.6
+   Compiling dyn-stack-macros v0.1.3
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling reborrow v0.5.5
+   Compiling url v2.5.8
+   Compiling dyn-stack v0.13.2
+   Compiling itertools v0.13.0
+   Compiling digest v0.11.3
+   Compiling walkdir v2.5.0
+   Compiling toml v1.1.8+spec-1.1.0
+   Compiling regex v1.13.1
+   Compiling cexpr v0.6.0
+   Compiling cargo_toml v0.22.3
+   Compiling half v2.7.1
+   Compiling raw-cpuid v11.6.0
+   Compiling getrandom v0.2.17
+   Compiling cpufeatures v0.3.1
+   Compiling seq-macro v0.3.6
+   Compiling equivalent v1.0.3
+. [bash 10:59:44 elapsed]
+   Compiling rustc-hash v2.1.3
+   Compiling shlex v1.3.0
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.17.1
+   Compiling parking_lot_core v0.9.12
+   Compiling hashbrown v0.15.5
+   Compiling pgrx-pg-config v0.19.3
+   Compiling rand_core v0.6.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling bytes v1.12.1
+   Compiling fixedbitset v0.5.7
+   Compiling indexmap v2.14.2
+   Compiling scopeguard v1.2.0
+   Compiling tinyvec v1.13.3
+   Compiling unicode-segmentation v1.13.3
+   Compiling lock_api v0.4.14
+   Compiling rand_chacha v0.3.1
+   Compiling petgraph v0.8.3
+   Compiling unicode-normalization v0.1.25
+   Compiling gemm-common v0.18.2
+   Compiling convert_case v0.11.0
+   Compiling chacha20 v0.10.2
+   Compiling safe_arch v0.7.4
+   Compiling cee-scape v0.2.0
+   Compiling matrixmultiply v0.3.11
+   Compiling unicode-properties v0.1.4
+   Compiling futures-core v0.3.34
+   Compiling radium v0.7.0
+   Compiling unicode-bidi v0.3.18
+   Compiling unescape v0.1.0
+   Compiling futures-sink v0.3.34
+   Compiling pin-project-lite v0.2.17
+   Compiling wide v0.7.33
+   Compiling stringprep v0.1.5
+   Compiling rand v0.10.3
+   Compiling parking_lot v0.12.5
+   Compiling rand v0.8.8
+   Compiling sha2 v0.11.1
+   Compiling hmac v0.13.0
+   Compiling pgrx-sql-entity-graph v0.19.3
+   Compiling md-5 v0.11.0
+   Compiling num-integer v0.1.47
+   Compiling approx v0.5.1
+   Compiling pgrx-bindgen v0.19.3
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling byteorder v1.5.0
+   Compiling siphasher v1.0.4
+   Compiling camino v1.2.6
+   Compiling heck v0.5.0
+   Compiling fallible-iterator v0.2.0
+   Compiling tap v1.0.1
+   Compiling clap_lex v1.1.1
+   Compiling anstyle v1.0.14
+   Compiling rawpointer v0.2.1
+   Compiling base64 v0.22.1
+   Compiling postgres-protocol v0.6.12
+   Compiling clap_builder v4.6.7
+   Compiling clap_derive v4.6.7
+   Compiling wyz v0.5.1
+   Compiling tokio v1.53.3
+   Compiling phf_shared v0.13.1
+   Compiling num-rational v0.4.2
+   Compiling simba v0.8.1
+   Compiling rand_distr v0.4.3
+. [bash 11:00:44 elapsed]
+   Compiling pgrx-pg-sys v0.19.3
+   Compiling nalgebra-macros v0.2.2
+   Compiling enum-map-derive v0.17.0
+   Compiling futures-task v0.3.34
+   Compiling funty v2.0.0
+   Compiling half v1.8.3
+   Compiling rustix v1.1.5
+   Compiling bitvec v1.1.1
+   Compiling serde_cbor v0.11.2
+   Compiling nalgebra v0.32.6
+   Compiling tokio-util v0.7.20
+   Compiling futures-util v0.3.34
+   Compiling clap v4.6.7
+   Compiling enum-map v2.7.3
+   Compiling phf v0.13.1
+   Compiling postgres-types v0.2.14
+   Compiling futures-channel v0.3.34
+   Compiling gemm-f32 v0.18.2
+. [bash 11:01:44 elapsed]
+   Compiling uuid v1.28.0
+   Compiling pgrx-macros v0.19.3
+   Compiling async-trait v0.1.92
+   Compiling alloca v0.4.0
+   Compiling cargo-platform v0.3.3
+   Compiling semver v1.0.28
+   Compiling whoami v2.1.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling turbovec v1.1.2 (https://github.com/gburd/turbovec.git?rev=29de559040461b87b8c6931822ae435350fd3abd#29de5590)
+   Compiling plotters-backend v0.3.7
+   Compiling log v0.4.34
+   Compiling seahash v4.1.0
+   Compiling ciborium-io v0.2.2
+   Compiling tokio-postgres v0.7.18
+   Compiling ciborium-ll v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling cargo_metadata v0.23.1
+   Compiling gemm-f16 v0.18.2
+   Compiling gemm-c64 v0.18.2
+   Compiling gemm-c32 v0.18.2
+   Compiling gemm-f64 v0.18.2
+   Compiling statrs v0.17.1
+   Compiling ordered-float v4.6.0
+. [bash 11:02:44 elapsed]
+   Compiling cast v0.3.0
+   Compiling pg_turbovec v2.12.0 (/home/gburd/ws/pgtv-wt-deps)
+   Compiling hegeltest v0.49.5
+   Compiling fastrand v2.5.0
+   Compiling criterion-plot v0.8.2
+   Compiling tempfile v3.27.0
+   Compiling postgres v0.19.14
+   Compiling gemm v0.18.2
+   Compiling clap-cargo v0.18.3
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling tinytemplate v1.2.1
+   Compiling hegeltest-macros v0.49.5
+   Compiling sysinfo v0.39.6
+   Compiling page_size v0.6.0
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling criterion v0.8.2
+. [bash 11:03:44 elapsed]
+. [bash 11:04:45 elapsed]
+. [bash 11:05:45 elapsed]
+   Compiling pgrx v0.19.3
+. [bash 11:06:45 elapsed]
+   Compiling pgrx-tests v0.19.3
+. [bash 11:07:45 elapsed]
+warning: unused import: `super::*`
+   --> src/partition.rs:389:9
+    |
+389 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `turbovec::TurboQuantIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/cache.rs:225:24
+    |
+225 |             self.inner.dim(),
+    |                        ^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `turbovec::IdMapIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/index/insert.rs:275:18
+    |
+275 |         if guard.dim() != 0 && guard.dim() != dim {
+    |                  ^^^
+
+warning: use of deprecated method `turbovec::IdMapIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/index/insert.rs:275:38
+    |
+275 |         if guard.dim() != 0 && guard.dim() != dim {
+    |                                      ^^^
+
+warning: use of deprecated method `turbovec::IdMapIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/index/insert.rs:278:23
+    |
+278 |                 guard.dim(),
+    |                       ^^^
+
+warning: duplicated attribute
+    --> src/index/ivf.rs:1989:5
+     |
+1989 |     #[test]
+     |     ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+. [bash 11:08:46 elapsed]
+warning: field `stride` is never read
+   --> src/cache.rs:688:5
+    |
+679 | pub(crate) struct BqIndex {
+    |                   ------- field in this struct
+...
+688 |     stride: usize,
+    |     ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `stride` is never used
+   --> src/cache.rs:820:19
+    |
+694 | impl BqIndex {
+    | ------------ method in this implementation
+...
+820 |     pub(crate) fn stride(&self) -> usize {
+    |                   ^^^^^^
+
+warning: constant `GRAPH_SCAN_EF_MULTIPLIER` is never used
+   --> src/index/graph.rs:271:11
+    |
+271 | pub const GRAPH_SCAN_EF_MULTIPLIER: usize = 4;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GRAPH_SCAN_EF_FLOOR` is never used
+   --> src/index/graph.rs:279:11
+    |
+279 | pub const GRAPH_SCAN_EF_FLOOR: usize = 64;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: function `default_scan_ef` is never used
+   --> src/index/graph.rs:298:8
+    |
+298 | pub fn default_scan_ef(k: usize, n: usize) -> usize {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `graph_search` is never used
+    --> src/index/graph.rs:1590:8
+     |
+1590 | pub fn graph_search<F>(
+     |        ^^^^^^^^^^^^
+
+warning: function `unpack_signs` is never used
+  --> src/index/onebit.rs:59:8
+   |
+59 | pub fn unpack_signs(bytes: &[u8], dim: usize) -> Vec<f32> {
+   |        ^^^^^^^^^^^^
+
+warning: method `is_legacy_v6` is never used
+    --> src/index/page.rs:1263:12
+     |
+ 415 | impl MetaPageData {
+     | ----------------- method in this implementation
+...
+1263 |     pub fn is_legacy_v6(&self) -> bool {
+     |            ^^^^^^^^^^^^
+
+warning: function `fixture` is never used
+   --> src/partition.rs:392:8
+    |
+392 |     fn fixture() -> Vec<(i32, Vec<f32>)> {
+    |        ^^^^^^^
+
+. [bash 11:09:46 elapsed]
+warning: function `kmeans_deterministic` is never used
+    --> src/index/ivf.rs:2120:8
+     |
+2120 |     fn kmeans_deterministic() {
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+. [bash 11:10:46 elapsed]
+warning: `pg_turbovec` (lib) generated 14 warnings (run `cargo fix --lib -p pg_turbovec` to apply 1 suggestion)
+. [bash 11:11:46 elapsed]
+. [bash 11:12:46 elapsed]
+. [bash 11:13:47 elapsed]
+warning: `pg_turbovec` (lib test) generated 8 warnings (6 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16m 11s
+     Running unittests src/lib.rs (target/debug/deps/pg_turbovec-48a05780066ee266)
+
+running 481 tests
+test cache::graph_scorer_tests::diag_graph_recall_by_dim ... ignored
+test cache::graph_scorer_tests::diag_graph_structure_vs_scorer ... ignored
+test cache::graph_scorer_tests::diag_graph_under_returns ... ignored
+test cache::graph_scorer_tests::timing_scan_simd_vs_scalar ... ignored
+test guc::coarse_graph_tests::decide_matches_mode_and_threshold ... ok
+test cache::merge_tests::merge_matches_global_topk ... ok
+test cache::merge_tests::merge_tie_break_is_slot_ascending ... ok
+test guc::graph_build_partitions_tests::auto_shards_above_threshold_and_respects_pool_and_size_caps ... ok
+test guc::graph_build_partitions_tests::forced_n_honored_when_corpus_is_large ... ok
+test guc::graph_build_partitions_tests::never_returns_zero ... ok
+test guc::graph_build_partitions_tests::forced_n_is_capped_by_corpus_size ... ok
+test guc::graph_build_partitions_tests::auto_is_single_pass_below_threshold ... ok
+test guc::graph_build_partitions_tests::zero_and_one_force_single_pass ... ok
+test guc::graph_ef_tests::auto_uses_the_measured_default ... ok
+test guc::graph_ef_tests::beam_signature_admits_no_dim_or_rerank_input ... ok
+test guc::graph_ef_tests::capped_at_the_corpus ... ok
+test guc::graph_ef_tests::floored_at_the_candidate_count ... ok
+test guc::graph_ef_tests::positive_setting_pins_the_beam ... ok
+test guc::hi_dim_rerank_tests::auto_does_not_touch_low_dim ... ok
+test guc::hi_dim_rerank_tests::auto_floors_high_dim_at_dim_scaled_window ... ok
+test guc::hi_dim_rerank_tests::auto_widens_onebit_regardless_of_dim ... ok
+test guc::hi_dim_rerank_tests::off_never_widens ... ok
+test guc::hi_dim_rerank_tests::on_floors_regardless_of_dim ... ok
+test guc::hi_dim_rerank_tests::user_override_past_floor_wins ... ok
+test guc::scan_parallelism_tests::cap_respects_row_floor_and_ceiling ... ok
+test hybrid::tests::max_sim_dot_sum_of_maxes ... ok
+test hybrid::tests::max_sim_cosine_normalised_equals_dot ... ok
+test hybrid::tests::max_sim_dot_picks_largest ... ok
+test hybrid::tests::max_sim_empty_is_zero ... ok
+test hybrid::tests::rrf_term_is_decreasing ... ok
+test index::build_pool::tests::scan_pool_is_cached_and_grows_monotonically ... ok
+test index::cost::tests::ivf_scored_vectors_scales_with_probes ... ok
+test index::cost::tests::scan_cost_is_in_postgres_units ... ok
+test index::cost::tests::scored_vectors_is_clamped ... ok
+test index::graph::tests::adjacency_decode_rejects_length_mismatch ... ok
+test index::graph::tests::adjacency_encode_decode_round_trip ... ok
+test index::build::reservoir_tests::deferred_batch_rotation_is_byte_identical_to_eager ... ok
+test index::build::reservoir_tests::lazy_rotation_is_byte_identical_to_eager ... ok
+test cache::graph_scorer_tests::graph_scorer_score_matches_kernel_within_quantization ... ok
+test index::graph::tests::empty_corpus_builds_empty_graph ... ok
+test index::graph::tests::every_node_has_at_least_one_neighbor_on_a_real_corpus ... ok
+test index::graph::tests::build_is_deterministic_for_a_fixed_seed ... ok
+test index::graph::tests::different_seeds_can_produce_different_graphs ... ok
+test index::graph::tests::graph_search_empty_graph_returns_empty ... ok
+test index::graph::tests::explicit_beam_is_floored_at_k ... ok
+test index::graph::tests::graph_search_fully_tombstoned_corpus_returns_empty ... ok
+test index::graph::tests::graph_search_deterministic ... ok
+test index::graph::tests::graph_search_k_zero_returns_empty ... ok
+test index::graph::tests::graph_search_falls_back_when_entry_point_is_tombstoned ... ok
+test index::graph::tests::graph_search_matches_linear_scan_set_on_a_real_corpus ... ok
+test index::graph::tests::graph_search_results_are_score_descending ... ok
+test index::graph::tests::graph_search_never_returns_a_tombstoned_id ... ok
+test index::graph::tests::graph_search_returns_k_on_degenerate_corpus ... ok
+test cache::graph_scorer_tests::graph_scorer_is_deterministic ... ok
+test index::graph::tests::insert_node_into_graph_adds_a_valid_navigable_node ... ok
+test index::graph::tests::insert_one_node_grows_the_adjacency_and_stays_findable ... ok
+test index::graph::tests::max_out_degree_is_bounded_by_r ... ok
+test index::graph::tests::graph_search_matches_explicit_default_ef ... ok
+test index::graph::tests::insert_one_node_via_oracle_grows_the_adjacency_and_stays_findable ... ok
+test index::graph::tests::neighbor_ids_are_ascending_and_deduplicated ... ok
+test index::graph::tests::no_self_loops ... ok
+test index::build_pool::tests::build_parts_are_pool_size_invariant ... ok
+test index::graph::tests::partitioned_build_invariants ... ok
+. [bash 11:14:47 elapsed]
+test index::graph::tests::partitioned_build_bails_out_when_abort_is_requested ... ok
+test cache::graph_scorer_tests::graph_scan_simd_matches_scalar_result_set has been running for over 60 seconds
+test cache::graph_scorer_tests::graph_scorer_ranking_matches_kernel_at_high_dim has been running for over 60 seconds
+test index::graph::tests::build_is_bit_identical_across_thread_counts has been running for over 60 seconds
+test index::graph::tests::graph_search_returns_k_under_heavy_tombstoning ... ok
+test index::graph::tests::partitioned_build_is_bit_identical_across_thread_counts has been running for over 60 seconds
+test index::graph::tests::partitioned_build_is_deterministic has been running for over 60 seconds
+test index::graph::tests::partitioned_build_recall_parity_with_single_pass has been running for over 60 seconds
+test index::graph::tests::prop_adjacency_encode_decode_round_trip ... ok
+test cache::graph_scorer_tests::graph_scorer_ranking_matches_kernel_at_high_dim ... ok
+. [bash 11:15:47 elapsed]
+test index::graph::tests::partitioned_p_le_1_equals_single_pass ... ok
+test index::graph::tests::prop_decode_never_panics_on_garbage ... ok
+test index::graph::tests::prop_decode_then_encode_is_identity_when_valid ... ok
+test index::graph::tests::prop_graph_search_never_returns_tombstoned_ids ... ok
+test index::graph::tests::prop_graph_search_returns_k_distinct_valid_results ... ok
+test index::graph::tests::prop_build_is_deterministic ... ok
+test index::graph::tests::prop_neighbor_lists_are_wellformed ... ok
+test index::graph::tests::prop_no_isolated_nodes_above_degree_floor ... ok
+test index::graph::tests::prop_out_degree_bounded_by_r ... ok
+test index::graph::tests::prop_to_lists_from_lists_round_trip ... ok
+test index::graph::tests::robust_prune_respects_degree_bound_with_many_similar_candidates ... ok
+test index::graph::tests::single_node_has_no_edges ... ok
+test index::graph::tests::timing_build_wall_clock ... ignored
+test index::graph::tests::timing_partitioned_vs_single_pass ... ignored
+test index::graph::tests::two_nodes_connect_to_each_other ... ok
+test index::graph::tests::validate_accepts_healthy_and_rejects_each_corruption ... ok
+test index::ivf::tests::cell_directory_round_trip ... ok
+test index::graph::tests::prop_build_thread_count_independent has been running for over 60 seconds
+test index::ivf::tests::centroid_graph_build_deterministic ... ok
+test index::ivf::tests::centroid_graph_degenerate_lists ... ok
+test index::ivf::tests::centroid_graph_lists_smaller_than_degree ... ok
+test index::ivf::tests::centroid_graph_neighbors_are_exact_nearest ... ok
+test index::ivf::tests::coarse_probe_dispatch_fallback_matches_linear_scan ... ok
+test index::ivf::tests::coarse_probe_picks_nearest_cells ... ok
+test index::ivf::tests::graph_probe_clamps_nprobe ... ok
+test index::ivf::tests::graph_probe_deterministic ... ok
+. [bash 11:16:47 elapsed]
+test index::ivf::tests::graph_probe_matches_linear_scan_exactly ... ok
+test index::ivf::tests::ivf_batch_speedup ... ignored
+test index::ivf::tests::ivf_batched_assign_matches_scalar ... ok
+test index::ivf::tests::ivf_batched_rotation_matches_per_row ... ok
+test index::ivf::tests::ivf_build_permutation_soft_expands_duplicates ... ok
+test index::ivf::tests::ivf_coarse_model_bit_identical_across_pool_sizes ... ok
+test index::ivf::tests::ivf_kmeans_converges_fast ... ok
+test index::ivf::tests::ivf_kmeans_early_exit_deterministic ... ok
+test index::ivf::tests::ivf_kmeans_parallel_speedup ... ignored
+test index::ivf::tests::ivf_soft_assign_deterministic ... ok
+test index::ivf::tests::ivf_soft_assign_duplicates_only_boundary ... ok
+test index::ivf::tests::ivf_soft_assign_m1_matches_single ... ok
+test index::ivf::tests::kmeans_converges_two_blobs ... ok
+test index::ivf::tests::kmeans_cross_chunking_is_bit_identical ... ok
+test index::ivf::tests::kmeans_cross_chunking_is_bit_identical ... ok
+test index::graph::tests::prop_build_thread_count_independent ... ok
+test index::ivf::tests::kmeans_handles_empty_cells ... ok
+test index::ivf::tests::kmeans_n_less_than_k ... ok
+test index::ivf::tests::permutation_partitions_all_vectors ... ok
+test index::ivf::tests::probe_mask_marks_cell_ranges ... ok
+test index::ivf::tests::rotate_corpus_bit_identical_across_pool_sizes ... ok
+test index::ivf::tests::rotate_corpus_is_not_row_block_shape_invariant ... ok
+test index::ivf::tests::validate_partition_rejects_gaps ... ok
+test index::onebit::tests::all_positive_is_degenerate_raw_but_centering_fixes_it ... ok
+test index::onebit::tests::centering_zero_mean_is_noop ... ok
+test index::onebit::tests::constant_corpus_stays_degenerate_after_centering ... ok
+test index::onebit::tests::hamming_ignores_zeroed_tail_bits ... ok
+test index::onebit::tests::hamming_matches_bitvec_convention ... ok
+test index::onebit::tests::mean_is_per_dim_average ... ok
+test index::onebit::tests::onebit_stride_is_half_of_twobit ... ok
+test index::onebit::tests::pack_unpack_preserves_sign ... ok
+test index::onebit::tests::packed_degeneracy_matches_centered_degeneracy ... ok
+test index::onebit::tests::packing_is_msb_first ... ok
+test index::onebit::tests::streamed_mean_matches_whole_corpus_mean ... ok
+test index::onebit::tests::tail_bits_are_zero ... ok
+test index::onebit::tests::topk_hamming_finds_self_first_and_handles_edges ... ok
+test index::onebit::tests::topk_hamming_matches_brute_force ... ok
+test index::onebit::tests::topk_hamming_slots_full_range_matches_flat ... ok
+test index::onebit::tests::topk_hamming_slots_is_order_independent ... ok
+test index::onebit::tests::topk_hamming_slots_matches_brute_force_over_the_subset ... ok
+test index::onebit::tests::topk_hamming_slots_skips_out_of_range_slots ... ok
+test index::onebit::tests::zero_centered_spread_is_not_degenerate ... ok
+test index::page::tests::chain_starts_are_stable_across_growth ... ok
+test index::page::tests::colbert_index_emits_v7_with_kind ... ok
+test index::page::tests::decodes_legacy_v1_meta_with_zero_blocked_fields ... ok
+test index::page::tests::decodes_legacy_v2_meta_with_zero_rotation_fields ... ok
+test index::page::tests::decodes_legacy_v3_meta_is_rejected_under_v7 ... ok
+test index::page::tests::degraded_via_blanked_lists_reads_not_degraded ... ok
+test index::page::tests::empty_index_has_no_data_pages ... ok
+test index::page::tests::flat_index_is_never_degraded ... ok
+test index::page::tests::forged_v4_meta_is_legacy_under_v7 ... ok
+test index::page::tests::forged_v5_colbert_meta_is_legacy_under_v7 ... ok
+test index::page::tests::graph_index_emits_v7_with_kind_and_adjacency_chain ... ok
+test index::page::tests::padding_does_not_change_content_addressing ... ok
+test index::page::tests::padding_is_sufficient_and_bounded ... ok
+test index::page::tests::plan_bq_flat_layout_is_unchanged_by_ivf_composition ... ok
+test index::page::tests::plan_bq_with_ivf_chains_never_overlap ... ok
+test index::page::tests::plan_layout_for_million_384d_4bit_with_blocked ... ok
+test index::page::tests::rejects_bad_magic ... ok
+test index::page::tests::rejects_unsupported_version ... ok
+test index::page::tests::round_trip_meta_v4_e2_tombstone_and_degraded ... ok
+test index::page::tests::round_trip_meta_v4_flat ... ok
+test index::page::tests::round_trip_meta_v4_ivf ... ok
+test index::page::tests::rows_on_page_partial_last_page ... ok
+test index::page::tests::set_graph_chain_counts_the_bq_mean_chain ... ok
+test index::page::tests::single_vector_emits_v7_bytes ... ok
+test index::page::tests::small_indexes_are_not_padded ... ok
+test index::page::tests::tombstone_chain_starts_at_the_end_of_the_tombstone_free_layout ... ok
+test index::relfile::reconcile_tests::delta_bound_accepts_small_appends_and_rejects_large ... ok
+test index::relfile::reconcile_tests::delta_bound_rejects_inconsistent_and_empty_layouts ... ok
+test index::relfile::reconcile_tests::delta_bound_zero_disables_the_delta ... ok
+test index::relfile::reconcile_tests::duplicate_touched_id_last_write_wins ... ok
+test index::relfile::reconcile_tests::on_conflict_update_overwrites_in_place_no_dup ... ok
+test index::relfile::reconcile_tests::upsert_new_id_appends_onto_current_disk ... ok
+test index::relfile::reconcile_tests::vacuum_delete_is_not_resurrected ... ok
+test index::scan::duplicate_id_tests::detects_duplicate_ids ... ok
+test kernels::tests::bench_kernels_old_vs_new ... ignored, timing; run with --release -- --ignored --nocapture
+test kernels::tests::cosine_basic ... ok
+test kernels::tests::cosine_clamps_to_valid_range ... ok
+test kernels::tests::cosine_resolves_near_duplicates ... ok
+test kernels::tests::dot_basic ... ok
+test index::graph::tests::partitioned_build_is_bit_identical_across_thread_counts ... ok
+test cache::graph_scorer_tests::graph_scan_simd_matches_scalar_result_set ... ok
+test kernels::tests::kernels_survive_extreme_magnitudes ... ok
+test kernels::tests::kernels_zero_empty_and_singleton ... ok
+test kernels::tests::l1_basic ... ok
+test kernels::tests::l2_basic ... ok
+test kernels::tests::kernels_match_exact_reference ... ok
+test kernels::tests::norm2_basic ... ok
+test kernels::tests::normalise_bit_identical_to_old ... ok
+test kernels::tests::normalise_tiny_norm_stays_finite ... ok
+test kernels::tests::normalise_unit_norm ... ok
+test kernels::tests::normalise_zero_passthrough ... ok
+test kernels::tests::precision_does_not_drift_on_large_sum ... ok
+test kernels::tests::prop_dot_is_commutative ... ok
+test kernels::tests::prop_l1_abs_is_nonneg_symmetric ... ok
+test kernels::tests::prop_l2_sq_is_a_nonneg_symmetric_metric ... ok
+test kernels::tests::prop_l2_sq_matches_polarization_identity ... ok
+test kernels::tests::prop_normalise_is_unit_norm_and_idempotent ... ok
+test kernels::tests::small_dims_bit_identical_to_old_kernels ... ok
+test partition::tests::metric_parse_forms ... ok
+test partition::tests::rank_cosine_ignores_magnitude ... ok
+test partition::tests::rank_edge_cases ... ok
+test partition::tests::rank_l2_picks_nearest_in_order ... ok
+test partition::tests::rank_nan_sorts_last ... ok
+test partition::tests::rank_neg_ip_prefers_larger_dot ... ok
+test partition::tests::rank_respects_k ... ok
+test kernels::tests::lanes_vs_old_change_is_within_published_bound ... ok
+test kernels::tests::inner_product_top10_order_exact_on_tight_cluster ... ok
+test index::graph::tests::recall_increases_monotonically_with_the_beam has been running for over 60 seconds
+test index::ivf::tests::kmeans_deterministic_across_pool_sizes ... ok
+. [bash 11:17:48 elapsed]
+test index::graph::tests::partitioned_build_is_deterministic ... ok
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg16")[0m[39m and `pg_config` from [36m/home/gburd/.pgrx/16.15/pgrx-install/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg16 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/home/gburd/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo" "rustc" "--lib" "--manifest-path" "/home/gburd/ws/pgtv-wt-deps/Cargo.toml" "--features" "pg16 pg_test" "--no-default-features" "--message-format=json-render-diagnostics" "--" "-C" "link-arg=-Wl,--no-gc-sections"[39m
+test index::graph::tests::recall_increases_monotonically_with_the_beam ... ok
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde v1.0.229
+   Compiling either v1.19.0
+   Compiling syn v3.0.9
+   Compiling serde_core v1.0.229
+   Compiling memchr v2.8.3
+   Compiling bitflags v2.13.2
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling smallvec v1.16.3
+   Compiling winnow v1.0.4
+   Compiling serde_spanned v1.1.2
+   Compiling toml_writer v1.1.3+spec-1.1.0
+   Compiling shlex v2.0.1
+   Compiling anyhow v1.0.104
+   Compiling cc v1.8.0
+   Compiling serde_json v1.0.154
+   Compiling rayon v1.12.0
+   Compiling aho-corasick v1.1.5
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling winnow v0.7.15
+   Compiling synstructure v0.14.0
+   Compiling regex-syntax v0.8.11
+   Compiling is_ci v1.2.0
+   Compiling supports-color v3.0.2
+   Compiling form_urlencoded v1.2.2
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling serde_derive v1.0.229
+   Compiling bytemuck_derive v1.12.1
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.21
+test tests::pg_aggregate_avg has been running for over 60 seconds
+   Compiling regex-automata v0.4.18
+   Compiling zerofrom v0.1.8
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling bytemuck v1.25.2
+   Compiling nom v7.1.3
+test tests::pg_aggregate_avg_empty_is_null has been running for over 60 seconds
+test tests::pg_aggregate_avg_mixed_dim_errors has been running for over 60 seconds
+   Compiling yoke v0.8.3
+   Compiling num-complex v0.4.6
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling pulp v0.21.5
+   Compiling dyn-stack v0.13.2
+test tests::pg_aggregate_sum_basic has been running for over 60 seconds
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling raw-cpuid v11.6.0
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+test tests::pg_aggregate_sum_empty_is_null has been running for over 60 seconds
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+. [bash 11:18:49 elapsed]
+test tests::pg_allowlist_guc_composes_with_tombstones has been running for over 60 seconds
+   Compiling toml v1.1.8+spec-1.1.0
+   Compiling cexpr v0.6.0
+   Compiling pathsearch v0.2.0
+   Compiling icu_provider v2.3.1
+   Compiling regex v1.13.1
+   Compiling owo-colors v4.4.0
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling thiserror v2.0.21
+   Compiling itertools v0.13.0
+   Compiling same-file v1.0.6
+   Compiling safe_arch v0.7.4
+   Compiling walkdir v2.5.0
+   Compiling cee-scape v0.2.0
+   Compiling wide v0.7.33
+   Compiling getrandom v0.4.3
+test index::graph::tests::build_is_bit_identical_across_thread_counts ... ok
+   Compiling half v2.7.1
+   Compiling bindgen v0.72.1
+   Compiling idna_adapter v1.2.2
+   Compiling cargo_toml v0.22.3
+   Compiling pgrx-sql-entity-graph v0.19.3
+   Compiling idna v1.1.0
+   Compiling simba v0.8.1
+   Compiling gemm-common v0.18.2
+. [bash 11:19:51 elapsed]
+   Compiling url v2.5.8
+   Compiling typenum v1.20.1
+test tests::pg_allowlist_guc_empty_is_unfiltered has been running for over 60 seconds
+   Compiling gemm-f32 v0.18.2
+   Compiling nalgebra v0.32.6
+   Compiling serde_cbor v0.11.2
+   Compiling parking_lot_core v0.9.12
+   Compiling uuid v1.28.0
+   Compiling pgrx-pg-config v0.19.3
+   Compiling gemm-f16 v0.18.2
+   Compiling gemm-f64 v0.18.2
+   Compiling gemm-c32 v0.18.2
+   Compiling gemm-c64 v0.18.2
+   Compiling pgrx-macros v0.19.3
+. [bash 11:20:51 elapsed]
+   Compiling gemm v0.18.2
+   Compiling parking_lot v0.12.5
+   Compiling pgrx-bindgen v0.19.3
+   Compiling statrs v0.17.1
+. [bash 11:21:53 elapsed]
+   Compiling turbovec v1.1.2 (https://github.com/gburd/turbovec.git?rev=29de559040461b87b8c6931822ae435350fd3abd#29de5590)
+   Compiling pgrx-pg-sys v0.19.3
+. [bash 11:22:53 elapsed]
+. [bash 11:23:53 elapsed]
+. [bash 11:24:54 elapsed]
+. [bash 11:25:54 elapsed]
+test index::graph::tests::partitioned_build_recall_parity_with_single_pass ... ok
+. [bash 11:26:54 elapsed]
+   Compiling pgrx v0.19.3
+test tests::pg_allowlist_guc_matches_knn has been running for over 60 seconds
+   Compiling pg_turbovec v2.12.0 (/home/gburd/ws/pgtv-wt-deps)
+. [bash 11:27:55 elapsed]
+warning: unused import: `super::*`
+   --> src/partition.rs:389:9
+    |
+389 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+. [bash 11:28:55 elapsed]
+. [bash 11:29:56 elapsed]
+. [bash 11:31:18 elapsed]
+. [bash 11:32:23 elapsed]
+. [bash 11:33:28 elapsed]
+. [bash 11:34:34 elapsed]
+. [bash 11:35:40 elapsed]
+warning: use of deprecated method `turbovec::TurboQuantIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/cache.rs:225:24
+    |
+225 |             self.inner.dim(),
+    |                        ^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `turbovec::IdMapIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/index/insert.rs:275:18
+    |
+275 |         if guard.dim() != 0 && guard.dim() != dim {
+    |                  ^^^
+
+warning: use of deprecated method `turbovec::IdMapIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/index/insert.rs:275:38
+    |
+275 |         if guard.dim() != 0 && guard.dim() != dim {
+    |                                      ^^^
+
+warning: use of deprecated method `turbovec::IdMapIndex::dim`: returns 0 for a lazy index, which is unsafe to do arithmetic with; use dim_opt()
+   --> src/index/insert.rs:278:23
+    |
+278 |                 guard.dim(),
+    |                       ^^^
+
+. [bash 11:36:43 elapsed]
+warning: field `stride` is never read
+   --> src/cache.rs:688:5
+    |
+679 | pub(crate) struct BqIndex {
+    |                   ------- field in this struct
+...
+688 |     stride: usize,
+    |     ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `stride` is never used
+   --> src/cache.rs:820:19
+    |
+694 | impl BqIndex {
+    | ------------ method in this implementation
+...
+820 |     pub(crate) fn stride(&self) -> usize {
+    |                   ^^^^^^
+
+warning: constant `GRAPH_SCAN_EF_MULTIPLIER` is never used
+   --> src/index/graph.rs:271:11
+    |
+271 | pub const GRAPH_SCAN_EF_MULTIPLIER: usize = 4;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GRAPH_SCAN_EF_FLOOR` is never used
+   --> src/index/graph.rs:279:11
+    |
+279 | pub const GRAPH_SCAN_EF_FLOOR: usize = 64;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: function `default_scan_ef` is never used
+   --> src/index/graph.rs:298:8
+    |
+298 | pub fn default_scan_ef(k: usize, n: usize) -> usize {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `graph_search` is never used
+    --> src/index/graph.rs:1590:8
+     |
+1590 | pub fn graph_search<F>(
+     |        ^^^^^^^^^^^^
+
+warning: function `unpack_signs` is never used
+  --> src/index/onebit.rs:59:8
+   |
+59 | pub fn unpack_signs(bytes: &[u8], dim: usize) -> Vec<f32> {
+   |        ^^^^^^^^^^^^
+
+warning: method `is_legacy_v6` is never used
+    --> src/index/page.rs:1263:12
+     |
+ 415 | impl MetaPageData {
+     | ----------------- method in this implementation
+...
+1263 |     pub fn is_legacy_v6(&self) -> bool {
+     |            ^^^^^^^^^^^^
+
+warning: function `fixture` is never used
+   --> src/partition.rs:392:8
+    |
+392 |     fn fixture() -> Vec<(i32, Vec<f32>)> {
+    |        ^^^^^^^
+
+. [bash 11:37:43 elapsed]
+. [bash 11:38:44 elapsed]
+warning: `pg_turbovec` (lib) generated 14 warnings (run `cargo fix --lib -p pg_turbovec` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20m 53s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m/home/gburd/.pgrx/16.15/pgrx-install/lib/postgresql/pg_turbovec.so[39m
+[32m[1m  Discovered[0m[39m [36m[1m397[0m[39m SQL entities: [36m[1m2[0m[39m schemas ([36m[1m1[0m[39m unique), [36m[1m378[0m[39m functions, [36m[1m7[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m10[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m0[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.12.0.sql
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.28.3--1.28.4.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.28.4--1.29.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.0--1.29.1.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.1--1.29.2.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.2--1.29.3.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.3--1.29.4.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.4--1.29.5.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.5--1.29.6.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.6--1.29.7.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--1.29.7--2.0.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.0.0--2.1.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.1.0--2.2.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.10.0--2.10.1.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.10.1--2.10.2.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.10.2--2.10.3.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.10.3--2.11.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.11.0--2.12.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.2.0--2.2.1.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.2.1--2.2.2.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.2.2--2.3.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.3.0--2.4.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.4.0--2.5.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.5.0--2.6.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.6.0--2.7.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.0--2.7.1.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.1--2.7.2.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.2--2.7.3.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.3--2.7.4.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.4--2.7.5.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.5--2.7.6.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.7.6--2.8.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.8.0--2.8.1.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.8.1--2.8.2.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.8.2--2.8.3.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.8.3--2.8.4.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.8.4--2.9.0.sql[39m
+[32m[1m     Copying[0m[39m extension schema upgrade file to [36m/home/gburd/.pgrx/16.15/pgrx-install/share/postgresql/extension/pg_turbovec--2.9.0--2.10.0.sql[39m
+[32m[1m    Finished[0m[39m installing pg_turbovec
+test tests::pg_aggregate_avg_empty_is_null ... ok
+test tests::pg_aggregate_avg ... ok
+test tests::pg_aggregate_sum_basic ... ok
+test tests::pg_aggregate_sum_empty_is_null ... ok
+test tests::pg_aggregate_avg_mixed_dim_errors ... ok
+test tests::pg_allowlist_guc_restricts_ordered_scan_flat ... ok
+test tests::pg_alter_extension_path_140_to_171_runs_clean ... ok
+test tests::pg_alter_extension_update_chain_resolves ... ok
+test tests::pg_allowlist_guc_matches_knn ... ok
+test tests::pg_allowlist_guc_rejects_bad_token ... ok
+test tests::pg_allowlist_guc_empty_is_unfiltered ... ok
+test tests::pg_allowlist_guc_probes_all_exact ... ok
+test tests::pg_allowlist_guc_composes_with_tombstones ... ok
+test tests::pg_ambeginscan_errors_on_legacy_v2_meta ... ok
+test tests::pg_ambeginscan_errors_on_legacy_v1_meta ... ok
+test tests::pg_allowlist_guc_restricts_ordered_scan_ivf ... ok
+test tests::pg_array_casts ... ok
+test tests::pg_array_to_vec_with_dim_check ... ok
+test tests::pg_allowlist_guc_out_of_core ... ok
+test tests::pg_bitvec_basic_round_trip ... ok
+test tests::pg_bitvec_binary_quantize ... ok
+test tests::pg_ambeginscan_errors_on_legacy_v6_meta ... ok
+test tests::pg_bitvec_jaccard_distance ... ok
+test tests::pg_bitvec_hamming_distance ... ok
+test tests::pg_bitvec_length_mismatch_errors ... ok
+test tests::pg_bitvec_popcount_function ... ok
+test tests::pg_check_dim_passes_and_fails ... ok
+test tests::pg_check_dim_rejects_zero_expected ... ok
+test tests::pg_ambuild_round_trip_after_phase_w_2_revert ... ok
+test tests::pg_aminsert_rollback_invalidates_cache ... ok
+test tests::pg_ambuild_streams_heap_scan_under_maintenance_work_mem ... ok
+test tests::pg_ann_cost_reflects_filter_selectivity ... ok
+test tests::pg_colbert_persistent_deterministic ... ok
+test tests::pg_colbert_persistent_build_and_search ... ok
+test tests::pg_colbert_index_rejects_orderby_scan - should panic ... ok
+test tests::pg_colbert_persistent_recovers_single_token_match ... ok
+test tests::pg_colbert_search_empty_query ... ok
+test tests::pg_amendscan_releases_cached_index_handle ... ok
+test tests::pg_colbert_persistent_survives_vacuum ... ok
+test tests::pg_cosine_distance_zero_is_nan ... ok
+test tests::pg_colbert_search_deterministic ... ok
+test tests::pg_dims_and_norm ... ok
+test tests::pg_colbert_search_rejects_bad_k - should panic ... ok
+test tests::pg_distance_cache_cosine_qnorm_is_bit_identical ... ok
+test tests::pg_colbert_search_basic ... ok
+test tests::pg_cold_scan_readonly_topk_unchanged ... ok
+test tests::pg_distance_cache_is_freed_with_the_statement ... ok
+test tests::pg_distance_cache_inline_values_match_reference ... ok
+test tests::pg_colbert_search_recovers_single_token_match ... ok
+test tests::pg_delete_then_readonly_scan_is_correct ... ok
+test tests::pg_distance_cache_mismatch_cosine_const_left - should panic ... ok
+test tests::pg_colbert_search_matches_bruteforce_maxsim ... ok
+test tests::pg_distance_cache_mismatch_inner_product - should panic ... ok
+test tests::pg_distance_cache_mismatch_ip - should panic ... ok
+test tests::pg_distance_cache_null_and_markings_unchanged ... ok
+test tests::pg_distance_cache_plpgsql_simple_expr_across_statements ... ok
+test tests::pg_distance_cache_mismatch_l1 - should panic ... ok
+test tests::pg_elementwise_arithmetic ... ok
+test tests::pg_distance_cache_mismatch_l2 - should panic ... ok
+test tests::pg_distance_cache_mismatch_l2_squared - should panic ... ok
+test tests::pg_graph_and_ivf_reloptions_are_mutually_exclusive ... ok
+test tests::pg_distance_cache_lateral_knn_rescan_matches_reference ... ok
+test tests::pg_graph_index_empty_build_does_not_panic ... ok
+test tests::pg_distance_cache_decodes_constant_once_per_expression ... ok
+test tests::pg_distance_cache_parallel_matches_serial ... ok
+test tests::pg_graph_build_polls_for_interrupts ... ok
+test tests::pg_flush_does_not_resplice_previous_txn_ids ... ok
+test tests::pg_distance_cache_toasted_values_match_reference ... ok
+test tests::pg_flat_build_hints_at_the_ann_option ... ok
+test tests::pg_graph_index_insert_dim_mismatch_errors ... ok
+test tests::pg_assign_dups_probes_pareto ... ok
+test tests::pg_graph_index_insert_vacuum_insert_sequence_does_not_corrupt ... ok
+test tests::pg_graph_reloption_emits_deprecation_warning ... ok
+test tests::pg_guc_bit_width_default_round_trip ... ok
+test tests::pg_graph_index_vacuum_tombstoning_entry_point_falls_back ... ok
+test tests::pg_graph_index_vacuum_tombstones_and_excludes_from_scan ... ok
+test tests::pg_halfvec_add_dim_mismatch_errors ... ok
+test tests::pg_halfvec_arithmetic_elementwise ... ok
+test tests::pg_halfvec_basic_round_trip ... ok
+test tests::pg_halfvec_concat_function_name ... ok
+test tests::pg_halfvec_concat_basic ... ok
+test tests::pg_halfvec_aggregate_avg ... ok
+test tests::pg_halfvec_mul_overflow_errors ... ok
+test tests::pg_halfvec_distance_ops ... ok
+test tests::pg_halfvec_overflow_rejected ... ok
+test tests::pg_halfvec_vector_round_trip ... ok
+test tests::pg_hybrid_rrf_recipe ... ok
+test tests::pg_graph_insert_after_vacuum_preserves_tombstones ... ok
+test tests::pg_index_am_2bit_round_trip ... ok
+test tests::pg_graph_insert_keeps_adjacency_and_meta_in_lockstep ... ok
+test tests::pg_index_am_aminsert_path ... ok
+test tests::pg_index_am_cache_invalidates_on_reindex ... ok
+test tests::pg_index_am_cache_hits_on_second_query ... ok
+test tests::pg_index_am_cache_invalidates_on_insert ... ok
+test tests::pg_index_am_create_and_query ... ok
+test tests::pg_index_am_count_star_does_not_error ... ok
+test tests::pg_graph_index_partitioned_build_recall_floor ... ok
+test tests::pg_graph_index_recall_floor ... ok
+test tests::pg_index_am_halfvec_expression_index ... ok
+test tests::pg_graph_index_insert_grows_the_graph_and_stays_findable ... ok
+test tests::pg_index_am_create_index_concurrently ... ok
+test tests::pg_index_am_forced_index_scan ... ok
+test tests::pg_index_am_iterative_scan_defaults_to_off ... ok
+test tests::pg_index_am_iterative_scan_max_scan_tuples_honored ... ok
+test tests::pg_index_am_probes_defaults_to_16 ... ok
+test tests::pg_index_am_l2_opclass ... ok
+test tests::pg_index_am_iterative_scan_no_duplicate_tids ... ok
+test tests::pg_index_am_l1_opclass ... ok
+test tests::pg_index_am_iterative_scan_selective_filter ... ok
+test tests::pg_index_am_iterative_scan_off_preserves_single_batch ... ok
+. [bash 11:39:44 elapsed]
+test tests::pg_index_am_reindex ... ok
+test tests::pg_index_am_rejects_bad_bit_width ... ok
+test tests::pg_index_am_vacuum_removes_dead ... ok
+test tests::pg_index_am_recall_64_rows ... ok
+test tests::pg_index_degradation_does_not_fault_a_flat_index ... ok
+test tests::pg_inner_product_and_cosine ... ok
+test tests::pg_index_am_realistic_dim_384 ... ok
+test tests::pg_index_degradation_quantifies_the_cliff ... ok
+test tests::pg_ivf_build_lists0_is_byte_identical_to_flat ... ok
+test tests::pg_ivf_cell_assignment_covers_all_vectors ... ok
+test tests::pg_ivf_build_with_lists_roundtrips ... ok
+test tests::pg_insert_wal_scales_with_change_not_index_size ... ok
+test tests::pg_ivf_coarse_graph_auto_falls_back_below_threshold ... ok
+test tests::pg_hi_dim_rerank_raises_high_dim_recall ... ok
+test tests::pg_ivf_degradation_is_observable ... ok
+test tests::pg_ivf_cost_increases_with_probes ... ok
+test tests::pg_ivf_coarse_graph_matches_linear_scan ... ok
+test tests::pg_ivf_coarse_graph_build_is_deterministic_across_cache_rebuilds ... ok
+test tests::pg_ivf_flush_degradation_is_reportable ... ok
+test tests::pg_ivf_insert_after_soft_assign_does_not_falsely_abort ... ok
+test tests::pg_ivf_kmeans_deterministic ... ok
+test tests::pg_ivf_insert_past_delta_bound_degrades ... ok
+test tests::pg_ivf_insert_preserves_cells_and_stays_exact ... ok
+test tests::pg_ivf_iterative_widens_probes_under_filter ... ok
+test tests::pg_ivf_ooc_auto_is_size_aware ... ok
+test tests::pg_ivf_low_probes_faster_fewer_cells ... ok
+test tests::pg_ivf_lists_scan_matches_flat ... ok
+test tests::pg_ivf_max_probes_caps_widening ... ok
+test tests::pg_index_am_recall_floor_2bit ... ok
+test tests::pg_ivf_ooc_installs_cell_scoped_handle ... ok
+test tests::pg_ivf_ooc_soft_assign_dedup ... ok
+test tests::pg_ivf_ooc_tombstones_masked ... ok
+test tests::pg_ivf_oversample_composes_with_probes ... ok
+test tests::pg_ivf_ooc_results_match_whole_load ... ok
+test tests::pg_ivf_ooc_probes_all_equals_flat ... ok
+test tests::pg_ivf_parallel_scan_default_guc_correct ... ok
+test tests::pg_highdim_oversample_recovers_recall has been running for over 60 seconds
+test tests::pg_ivf_probes_all_equals_flat ... ok
+test tests::pg_ivf_parallel_scan_probes_all_exact ... ok
+test tests::pg_ivf_parallel_scan_tombstones ... ok
+test tests::pg_ivf_probes_clamped_to_lists ... ok
+test tests::pg_ivf_scan_returns_correct_topk ... ok
+test tests::pg_ivf_parallel_scan_matches_serial ... ok
+test tests::pg_index_am_recall_floor_4bit ... ok
+test tests::pg_ivf_soft_assign_index_rejects_insert_and_is_not_corrupt ... ok
+test tests::pg_ivf_soft_assignment_raises_recall ... ok
+test tests::pg_ivf_soft_assign_insert_error_names_assign_dups - should panic ... ok
+test tests::pg_ivf_soft_assignment_no_duplicate_ids ... ok
+test tests::pg_ivf_streaming_build_determinism_byte_identical ... ok
+test tests::pg_ivf_streaming_build_bounded_memory_completes ... ok
+test tests::pg_ivf_streaming_build_chunk_size_invariant ... ok
+test tests::pg_index_am_recall_floor_3bit has been running for over 60 seconds
+test tests::pg_ivf_tombstoned_rows_not_returned ... ok
+test tests::pg_jsonb_cast_explicit_function ... ok
+test tests::pg_ivf_streaming_build_temp_file_cleanup ... ok
+test tests::pg_jsonb_to_vec_rejects_non_array ... ok
+test tests::pg_jsonb_round_trip ... ok
+test tests::pg_jsonb_to_vec_rejects_non_numeric ... ok
+. [bash 11:40:44 elapsed]
+test tests::pg_ivf_v3_index_is_legacy_under_v7_binary ... ok
+test tests::pg_ivf_survives_vacuum ... ok
+test tests::pg_knn_empty_corpus ... ok
+test tests::pg_knn_cache_invalidates_on_insert ... ok
+test tests::pg_knn_cache_hit_after_first_call ... ok
+test tests::pg_knn_rejects_bad_k ... ok
+test tests::pg_knn_k_greater_than_n ... ok
+test tests::pg_knn_cache_invalidates_on_row_count_change ... ok
+test tests::pg_l2_and_l1 ... ok
+test tests::pg_l2_squared_distance_function ... ok
+test tests::pg_max_probes_guc_round_trip ... ok
+test tests::pg_max_sim_basic ... ok
+test tests::pg_max_sim_cosine_normalised ... ok
+test tests::pg_max_sim_dim_mismatch_errors ... ok
+test tests::pg_max_sim_empty ... ok
+test tests::pg_max_sim_rerank ... ok
+test tests::pg_migration_files_cover_documented_versions ... ok
+test tests::pg_knn_filtered_allowlist ... ok
+test tests::pg_negative_inner_product_function ... ok
+test tests::pg_normalize_unit_norm ... ok
+test tests::pg_onebit_all_positive_corpus_is_centered_or_errors_clearly ... ok
+test tests::pg_knn_returns_nearest_first ... ok
+test tests::pg_onebit_constant_corpus_errors_not_silently_useless ... ok
+test tests::pg_knn_scan_ctid_projection_upstream_limitation ... ok
+test tests::pg_onebit_insert_into_index_built_on_empty_table ... ok
+test tests::pg_ivf_vacuum_degraded_falls_back_to_flat ... ok
+test tests::pg_mutation_after_readonly_scan_is_correct ... ok
+test tests::pg_onebit_ivf_insert_degrades_observably_and_stays_findable ... ok
+test tests::pg_onebit_ivf_vacuum_tombstones_and_survives ... ok
+test tests::pg_onebit_ivf_mean_is_permutation_invariant ... ok
+test tests::pg_onebit_rejects_unsupported_combinations ... ok
+test tests::pg_onebit_reinsert_of_same_tid_overwrites_rather_than_appends ... ok
+test tests::pg_onebit_index_builds_scans_and_halves_storage ... ok
+test tests::pg_oversample_guc_round_trip ... ok
+test tests::pg_onebit_ivf_recall_is_sane_vs_exact ... ok
+test tests::pg_oversample_composes_with_iterative_scan ... ok
+test tests::pg_onebit_ivf_builds_scans_and_beats_twobit_storage ... ok
+test tests::pg_oversample_one_is_pre_feature_behaviour ... ok
+test tests::pg_parallel_build_matches_serial_query ... ok
+test tests::pg_parallel_build_honors_guc ... ok
+test tests::pg_parse_and_render ... ok
+test tests::pg_partition_pruning_selects_the_right_partitions ... ok
+test tests::pg_parallel_build_relfile_size_matches_serial ... ok
+test tests::pg_oversample_widens_candidate_set ... ok
+test tests::pg_pgvector_aliases ... ok
+test tests::pg_persist_row_count_drift_aborts ... ok
+test tests::pg_random_unit_dim_and_norm ... ok
+test tests::pg_persist_large_batch_no_duplicate_id_after_reload ... ok
+test tests::pg_rejects_dim_mismatch ... ok
+test tests::pg_oversample_recall_monotone_non_decreasing ... ok
+test tests::pg_relfile_aminsert_deferred_commit_bulk ... ok
+test tests::pg_phase_q0_storage_is_deduplicated ... ok
+test tests::pg_relfile_cache_invalidation_drop_order ... ok
+test tests::pg_relfile_ambulkdelete_walks_pages_not_rebuild ... ok
+test tests::pg_relfile_concurrent_aminsert_recheck_corrects ... ok
+test tests::pg_relfile_legacy_v2_detection_primitive ... ok
+test tests::pg_relfile_legacy_v1_detection_primitive ... ok
+test tests::pg_relfile_prepared_layout_skips_runtime_pack ... ok
+test tests::pg_relfile_cold_vs_warm_timing ... ok
+test tests::pg_relfile_total_blocks_shrinks_with_n_vectors ... ok
+test tests::pg_relfile_unlogged_has_init_fork ... ok
+test tests::pg_relfile_rewrite_lock_serializes_readers_and_writers ... ok
+test tests::pg_rrf_score_values ... ok
+test tests::pg_search_k_guc_round_trip ... ok
+test tests::pg_index_am_recall_floor_3bit ... ok
+test tests::pg_sparsevec_basic_round_trip ... ok
+test tests::pg_sparsevec_dim_mismatch_errors ... ok
+test tests::pg_sparsevec_distance_ops ... ok
+test tests::pg_relfile_wal_emits_on_build_and_insert ... ok
+test tests::pg_sparsevec_oversized_dim_densify_errors_not_ooms ... ok
+test tests::pg_sparsevec_sum_aggregate ... ok
+test tests::pg_sparsevec_nnz_function ... ok
+test tests::pg_sparsevec_vector_round_trip ... ok
+test tests::pg_subvector_basic ... ok
+test tests::pg_subvector_boundaries ... ok
+test tests::pg_tid_to_bigint_matches_raw_encoding ... ok
+test tests::pg_subvector_out_of_bounds ... ok
+test tests::pg_to_vec_text_form ... ok
+test tests::pg_to_vec_dim_mismatch_errors ... ok
+test tests::pg_relfile_rotation_persisted ... ok
+test tests::pg_relfile_cold_scan_does_not_repeat_load ... ok
+test tests::pg_persist_is_byte_exact_through_planes_layout ... ok
+test tests::pg_torn_flush_on_interrupt_meta_last_stays_clean ... ok
+test tests::pg_ivf_recall_vs_probes_frontier has been running for over 60 seconds
+test tests::pg_turbovec_check_detects_invalid_scale ... ok
+test tests::pg_turbovec_check_reports_healthy_flat_index ... ok
+test tests::pg_turbovec_check_detects_corrupt_graph_adjacency ... ok
+test tests::pg_vec_to_text_function ... ok
+test tests::pg_vector_concat_exceeds_max_dim_errors ... ok
+test tests::pg_vector_concat_basic ... ok
+test tests::pg_vector_concat_function_name ... ok
+test tests::pg_vector_norm_of_zero ... ok
+test tests::pg_vector_dims_overloads ... ok
+test tests::pg_vector_norm_overloads ... ok
+test tests::pg_wire_format_version_is_stable ... ok
+test tests::pg_zeros_helper ... ok
+test tests::pg_version_string ... ok
+test vec::tests::parse_basic ... ok
+test vec::tests::parse_rejects ... ok
+test xact::reconcile_tests::agreeing_counts_return_slot_len ... ok
+test xact::reconcile_tests::authoritative_count_wins_when_they_agree ... ok
+test xact::reconcile_tests::mirror_over_counting_is_rejected ... ok
+test xact::reconcile_tests::mirror_under_counting_is_rejected ... ok
+test tests::pg_zeros_rejects_bad_dim ... ok
+test tests::pg_turbovec_self_score_smoke ... ok
+test tests::pg_v4_single_vector_index_byte_identical ... ok
+test tests::pg_turbovec_check_reports_healthy_graph_index ... ok
+. [bash 11:41:44 elapsed]
+test tests::pg_searchk_recall_frontier has been running for over 60 seconds
+. [bash 11:42:44 elapsed]
+test tests::pg_ivf_recall_vs_probes_frontier ... ok
+test tests::pg_searchk_recall_frontier ... ok
+. [bash 11:43:44 elapsed]
+. [bash 11:44:44 elapsed]
+. [bash 11:45:44 elapsed]
+test tests::pg_highdim_oversample_recovers_recall ... ok
+
+test result: ok. 472 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 1915.52s
+
+   Doc-tests pg_turbovec
+
+running 22 tests
+test src/aggregate.rs - aggregate (line 15) ... ignored
+test src/distance.rs - distance::cosine_distance (line 309) ... ignored
+test src/distance.rs - distance::inner_product (line 266) ... ignored
+test src/distance.rs - distance::l1_distance (line 352) ... ignored
+test src/distance.rs - distance::l2_distance (line 229) ... ignored
+test src/distance.rs - distance::l2_squared_distance (line 249) ... ignored
+test src/distance.rs - distance::negative_inner_product (line 285) ... ignored
+test src/distance.rs - distance::vector_dims (line 369) ... ignored
+test src/distance.rs - distance::vector_norm (line 380) ... ignored
+test src/extras.rs - extras::index_degradation (line 257) ... ignored
+test src/extras.rs - extras::index_is_degraded (line 213) ... ignored
+test src/extras.rs - extras::jsonb_to_vec (line 78) ... ignored
+test src/extras.rs - extras::subvector (line 24) ... ignored
+test src/extras.rs - extras::turbovec_check (line 396) ... ignored
+test src/extras.rs - extras::vec_check_dim (line 135) ... ignored
+test src/extras.rs - extras::vec_to_jsonb (line 58) ... ignored
+test src/extras.rs - extras::vec_to_text (line 179) ... ignored
+test src/extras.rs - extras::vec_zeros (line 161) ... ignored
+test src/hybrid.rs - hybrid::max_sim (line 97) ... ignored
+test src/hybrid.rs - hybrid::rrf_score (line 140) ... ignored
+test src/partition.rs - partition::nearest_partitions (line 331) ... ignored
+test src/partition.rs - partition::refresh_partition_summary (line 255) ... ignored
+
+test result: ok. 0 passed; 0 failed; 22 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT 0
+[heartbeat] DONE rc=0 (clean exit)

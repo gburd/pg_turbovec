@@ -11,10 +11,11 @@
 //! `pg_config`. The bench only touches `pg_turbovec::kernels` and
 //! does not need any Postgres infrastructure.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use pg_turbovec::kernels;
 use rand::prelude::*;
 use rand::rngs::StdRng;
+use std::hint::black_box;
 
 fn random_unit(dim: usize, rng: &mut impl Rng) -> Vec<f32> {
     let raw: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0_f32..1.0_f32)).collect();

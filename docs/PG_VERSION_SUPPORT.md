@@ -17,7 +17,7 @@ the C-ABI shape differences the extension shims, not test-count differences.
 | 16.x | ✅ Supported | 445 passed / 8 ignored | Reference platform during development. |
 | 17.x | ✅ Supported | 445 passed / 8 ignored | Benchmark platform. |
 | 18.x | ✅ Supported | 445 passed / 8 ignored | `relopt_parse_elt` gained `isset_offset`. CI-validated every push (`.github/workflows/test.yml` matrix leg `test (18)`). |
-| 19.0beta1 | ✅ **Experimental** (beta PG) | CI matrix leg | pgrx 0.19.1 floor. PG19 deltas handled: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. PG19 is upstream BETA — re-validate at RC/GA before production use. |
+| 19.0beta4 | ✅ **Experimental** (beta PG) | CI matrix leg | pgrx 0.19.3 (19beta4; 0.19.1 built against 19beta1). PG19 deltas handled: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. PG19 is upstream BETA — re-validate at RC/GA before production use. |
 
 > Test counts and patch versions above are the exact numbers CI
 > installs and reports as of the most recent green run

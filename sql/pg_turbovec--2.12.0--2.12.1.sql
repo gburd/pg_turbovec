@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.12.0 -> 2.12.1
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.12.1';`.
+--
+-- No new or changed SQL objects: this release fixes the Nix build, adopts
+-- turbovec 1.1.2 (a staged-search recall fix) and refreshes dependencies. No
+-- wire-format change (stays v8), no REINDEX. Intentionally empty apart from
+-- this comment.

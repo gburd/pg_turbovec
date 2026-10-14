@@ -875,7 +875,7 @@ mod tests {
     /// coordinates; embeddings are always finite (the type's input
     /// validation rejects non-finite values upstream).
     #[hegel::composite]
-    fn vec_pair(tc: hegel::TestCase) -> (Vec<f32>, Vec<f32>) {
+    fn vec_pair(tc: &hegel::TestCase) -> (Vec<f32>, Vec<f32>) {
         let dim = tc.draw(generators::integers::<usize>().min_value(0).max_value(256));
         let coord = || {
             generators::floats::<f32>()

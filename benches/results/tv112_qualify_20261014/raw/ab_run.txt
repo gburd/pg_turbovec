@@ -1,0 +1,60 @@
+[heartbeat] starting: bash /home/fedora/tvq_ab_run.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
+. [bash 16:32:05 elapsed]
+pg_ctl: server does not shut down
+Traceback (most recent call last):
+  File "/work/ab/bench.py", line 51, in <module>
+    la0 = os.getloadavg()[0]; res = run(setup); la1 = os.getloadavg()[0]
+                                    ~~~^^^^^^^
+  File "/work/ab/bench.py", line 38, in run
+    if r.returncode: raise RuntimeError(r.stderr[-800:])
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: psql: error: connection to server on socket "/tmp/.s.PGSQL.5432" failed: FATAL:  the database system is shutting down
+
+BENCH FAIL old r1
+. [bash 16:33:05 elapsed]
+pg_ctl: server does not shut down
+Traceback (most recent call last):
+  File "/work/ab/bench.py", line 51, in <module>
+    la0 = os.getloadavg()[0]; res = run(setup); la1 = os.getloadavg()[0]
+                                    ~~~^^^^^^^
+  File "/work/ab/bench.py", line 38, in run
+    if r.returncode: raise RuntimeError(r.stderr[-800:])
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: psql: error: connection to server on socket "/tmp/.s.PGSQL.5432" failed: FATAL:  the database system is shutting down
+
+BENCH FAIL new r1
+swapped -> old  md5=bb30cfbd
+{"round": 2, "arm": "old", "envset": "default", "label": "flat_bw4_k32", "n": 200, "p50_ms": 1.732, "p95_ms": 1.937, "mean_ms": 1.726, "recall10": 1.0, "seq_fallback": false, "loadavg": 0.98, "ts": "16:33:42"}
+{"round": 2, "arm": "old", "envset": "default", "label": "flat_bw4_k100", "n": 200, "p50_ms": 2.665, "p95_ms": 3.087, "mean_ms": 2.722, "recall10": 1.0, "seq_fallback": false, "loadavg": 0.98, "ts": "16:33:44"}
+{"round": 2, "arm": "old", "envset": "default", "label": "flat_bw4_k256", "n": 200, "p50_ms": 4.41, "p95_ms": 5.05, "mean_ms": 4.5, "recall10": 1.0, "seq_fallback": false, "loadavg": 0.98, "ts": "16:33:46"}
+{"round": 2, "arm": "old", "envset": "default", "label": "flat_bw4_k1024", "n": 200, "p50_ms": 13.733, "p95_ms": 15.378, "mean_ms": 14.189, "recall10": 1.0, "seq_fallback": false, "loadavg": 0.98, "ts": "16:33:52"}
+swapped -> new  md5=eadece95
+{"round": 2, "arm": "new", "envset": "default", "label": "flat_bw4_k32", "n": 200, "p50_ms": 1.741, "p95_ms": 1.906, "mean_ms": 1.724, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.06, "ts": "16:33:55"}
+{"round": 2, "arm": "new", "envset": "default", "label": "flat_bw4_k100", "n": 200, "p50_ms": 2.687, "p95_ms": 3.141, "mean_ms": 2.751, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.06, "ts": "16:33:57"}
+{"round": 2, "arm": "new", "envset": "default", "label": "flat_bw4_k256", "n": 200, "p50_ms": 4.585, "p95_ms": 5.158, "mean_ms": 4.662, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.06, "ts": "16:33:59"}
+. [bash 16:34:05 elapsed]
+{"round": 2, "arm": "new", "envset": "default", "label": "flat_bw4_k1024", "n": 200, "p50_ms": 14.256, "p95_ms": 15.96, "mean_ms": 14.769, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.06, "ts": "16:34:05"}
+swapped -> old  md5=bb30cfbd
+{"round": 3, "arm": "old", "envset": "default", "label": "flat_bw4_k32", "n": 200, "p50_ms": 1.731, "p95_ms": 1.878, "mean_ms": 1.708, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.05, "ts": "16:34:08"}
+{"round": 3, "arm": "old", "envset": "default", "label": "flat_bw4_k100", "n": 200, "p50_ms": 2.635, "p95_ms": 3.023, "mean_ms": 2.696, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.05, "ts": "16:34:09"}
+{"round": 3, "arm": "old", "envset": "default", "label": "flat_bw4_k256", "n": 200, "p50_ms": 4.489, "p95_ms": 5.103, "mean_ms": 4.588, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.05, "ts": "16:34:12"}
+{"round": 3, "arm": "old", "envset": "default", "label": "flat_bw4_k1024", "n": 200, "p50_ms": 13.838, "p95_ms": 16.337, "mean_ms": 14.384, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.05, "ts": "16:34:18"}
+swapped -> new  md5=eadece95
+{"round": 3, "arm": "new", "envset": "default", "label": "flat_bw4_k32", "n": 200, "p50_ms": 1.726, "p95_ms": 1.881, "mean_ms": 1.711, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.12, "ts": "16:34:20"}
+{"round": 3, "arm": "new", "envset": "default", "label": "flat_bw4_k100", "n": 200, "p50_ms": 2.687, "p95_ms": 3.131, "mean_ms": 2.73, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.12, "ts": "16:34:22"}
+{"round": 3, "arm": "new", "envset": "default", "label": "flat_bw4_k256", "n": 200, "p50_ms": 4.481, "p95_ms": 5.061, "mean_ms": 4.537, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.12, "ts": "16:34:24"}
+{"round": 3, "arm": "new", "envset": "default", "label": "flat_bw4_k1024", "n": 200, "p50_ms": 13.758, "p95_ms": 16.207, "mean_ms": 14.317, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.12, "ts": "16:34:30"}
+swapped -> old  md5=bb30cfbd
+{"round": 4, "arm": "old", "envset": "default", "label": "flat_bw4_k32", "n": 200, "p50_ms": 1.776, "p95_ms": 2.003, "mean_ms": 1.778, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.1, "ts": "16:34:33"}
+{"round": 4, "arm": "old", "envset": "default", "label": "flat_bw4_k100", "n": 200, "p50_ms": 2.704, "p95_ms": 3.169, "mean_ms": 2.741, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.25, "ts": "16:34:35"}
+{"round": 4, "arm": "old", "envset": "default", "label": "flat_bw4_k256", "n": 200, "p50_ms": 4.488, "p95_ms": 5.176, "mean_ms": 4.572, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.25, "ts": "16:34:37"}
+{"round": 4, "arm": "old", "envset": "default", "label": "flat_bw4_k1024", "n": 200, "p50_ms": 13.872, "p95_ms": 16.091, "mean_ms": 14.413, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.25, "ts": "16:34:43"}
+swapped -> new  md5=eadece95
+{"round": 4, "arm": "new", "envset": "default", "label": "flat_bw4_k32", "n": 200, "p50_ms": 1.745, "p95_ms": 1.905, "mean_ms": 1.723, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.38, "ts": "16:34:46"}
+{"round": 4, "arm": "new", "envset": "default", "label": "flat_bw4_k100", "n": 200, "p50_ms": 2.663, "p95_ms": 3.161, "mean_ms": 2.722, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.38, "ts": "16:34:47"}
+{"round": 4, "arm": "new", "envset": "default", "label": "flat_bw4_k256", "n": 200, "p50_ms": 4.503, "p95_ms": 5.103, "mean_ms": 4.566, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.99, "ts": "16:34:50"}
+{"round": 4, "arm": "new", "envset": "default", "label": "flat_bw4_k1024", "n": 200, "p50_ms": 13.893, "p95_ms": 16.598, "mean_ms": 14.387, "recall10": 1.0, "seq_fallback": false, "loadavg": 1.99, "ts": "16:34:56"}
+AB_DONE
+[heartbeat] DONE rc=0 (clean exit)

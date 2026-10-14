@@ -131,11 +131,14 @@ fn main() {
         for q in &queries {
             let take = k.min(m);
             let t0 = Instant::now();
-            let (_s, hits) = idx.search_with_allowlist(q, take, Some(&allow));
+            let (_s, hits) = idx
+                .search_with_allowlist(q, take, Some(&allow))
+                .expect("search_with_allowlist");
             allow_lat.push(t0.elapsed().as_secs_f64() * 1e6);
             returned = hits.len();
         }
-        let blocks_skipped = blocks_skipped_by_mask();
+        // `None` when turbovec was built without `mask-skip-counter`.
+        let blocks_skipped = blocks_skipped_by_mask().unwrap_or(0);
 
         // --- naive post-filter baseline: fetch k*oversample
         //     unfiltered, drop ids not in the set, keep top-k ---

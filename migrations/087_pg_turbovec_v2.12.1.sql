@@ -1,0 +1,11 @@
+-- pg_turbovec v2.12.1
+--
+-- PATCH: builds again under Nix / nixpkgs' rustc (LLVM 21) -- flake vendoring
+-- hash key fixed (turbovec-1.1.2) and turbovec fork carry #5 emits vpdpbusd via
+-- inline asm on LLVM < 22; turbovec 1.1.1 -> 1.1.2 (staged-search recall fix on
+-- corpora with a strong shared direction, upstream #562); pgrx 0.19.1 -> 0.19.3.
+--
+-- No SQL-surface change, no GUC change, no wire-format change
+-- (MetaPageData::version stays 8), index bytes unchanged, so NO REINDEX.
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '2.12.1'` plus reconnecting is
+-- sufficient.

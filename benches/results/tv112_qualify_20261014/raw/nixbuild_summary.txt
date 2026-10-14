@@ -1,0 +1,16 @@
+cargo-pgrx> Finished cargoSetupPostUnpackHook
+cargo-pgrx> Finished cargoSetupPostPatchHook
+cargo-pgrx>     Finished `release` profile [optimized] target(s) in 26m 51s
+cargo-pgrx> Finished cargoInstallPostBuildHook
+cargo-pgrx> Finished cargoBuildHook
+cargo-pgrx> Finished cargoInstallHook
+pg_turbovec> Finished cargoSetupPostUnpackHook
+pg_turbovec> Finished cargoSetupPostUnpackHook
+pg_turbovec> Finished cargoSetupPostPatchHook
+pg_turbovec> Finished cargoSetupPostPatchHook
+pg_turbovec>    Compiling turbovec v1.1.2 (https://github.com/gburd/turbovec.git?rev=29de559040461b87b8c6931822ae435350fd3abd#29de5590)
+pg_turbovec>    Compiling turbovec v1.1.2 (https://github.com/gburd/turbovec.git?rev=29de559040461b87b8c6931822ae435350fd3abd#29de5590)
+pg_turbovec>     Finished `release` profile [optimized] target(s) in 20m 35s
+pg_turbovec>     Finished installing pg_turbovec
+pg_turbovec>     Finished `release` profile [optimized] target(s) in 20m 42s
+pg_turbovec>     Finished installing pg_turbovec

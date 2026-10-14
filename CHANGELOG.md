@@ -4,6 +4,97 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.12.1] — RELEASE_DATE
+
+PATCH: **builds again under Nix / nixpkgs' Rust toolchain**, turbovec 1.1.2
+(a recall bug fix in its staged search), and a dependency refresh. No
+SQL-surface change, no GUC change, **no wire-format change**
+(`MetaPageData::version` stays **8**), index bytes unchanged. `ALTER EXTENSION
+pg_turbovec UPDATE` plus a reconnect is sufficient; **no REINDEX**.
+
+Patch rather than minor: `docs/UPGRADING.md` allows "bug fixes that don't
+change the page layout" in a patch. turbovec 1.1.2 fixes a recall loss in the
+staged search that 2.11.0 adopted (upstream #562), and changes no persisted
+byte. 2.11.0 was a minor because it adopted a new search algorithm whose
+candidate set differed; this release corrects that algorithm.
+
+### Fixed
+
+- **`nix build` failed before compiling anything.** `flake.nix` pinned the
+  vendored turbovec git crate's hash under the key `turbovec-0.9.0`, but Nix
+  keys these by `<crate>-<version>` from `Cargo.lock`, which has said 1.1.x
+  since 2.11.0 ("A hash was specified for turbovec-0.9.0, but there is no
+  corresponding git dependency"). The key and hash now match `turbovec-1.1.2`,
+  and a comment says why they must move together.
+- **turbovec did not compile with nixpkgs' rustc** (1.97.0 and 1.98.1, both
+  linking LLVM 21): `intrinsic signature mismatch for
+  llvm.x86.avx512.vpdpbusd.512`. stdarch binds that intrinsic with LLVM 22's
+  operand types. New fork carry #5 (turbovec `29de559`) detects LLVM < 22 in a
+  build script and emits the same `vpdpbusd` instruction through inline asm;
+  on LLVM ≥ 22 the intrinsic is used exactly as before. The asm path is pinned
+  bit-for-bit against the scalar definition (50k random lanes plus u8-max ×
+  i8-min and i32 wrap-around cases) on an AVX-512 VNNI host. Verified: the
+  flake builds `pg_turbovec_16` and `pg_turbovec_18` on nixpkgs `8edc0c7`
+  (rustc 1.98.1, LLVM 21.1.8), and the resulting `.so` contains the VNNI
+  kernels (305 `vpdpbusd`).
+- The `allowlist_crossover` bench did not compile since turbovec 1.0 changed
+  `search_with_allowlist` to return a `Result`; fixed.
+
+### Changed
+
+- **turbovec 1.1.1 → 1.1.2** (upstream `c3b043b`, merged into our fork with
+  carries #1–#4 unchanged). Upstream: the staged search lost recall on
+  corpora whose vectors share a strong common direction (MedCPT 768-d: 4-bit
+  recall@10 0.931 vs the whole-index scan's 0.944); 1.1.2 recovers it to
+  within 0.1% of the scan at k = 1/10/100, at some cost in stage widths
+  (upstream reports 4-bit within 3% and 2-bit 2–12% slower on a laptop).
+  It only affects hosts where the staged ("planes") search engages: aarch64
+  with dotprod and x86 with AVX-512 VBMI+VNNI, indexes of ≥ 32,768 rows.
+  pg_turbovec's exact recheck re-ranks every candidate, so final scores are
+  unchanged; the **candidate set** can differ slightly from 2.12.0 on those
+  hosts on bunched corpora. On a 1M × 1024-d Cohere index on Graviton4, the
+  returned top-10 was identical for all 200 test queries (see Tests).
+- **pgrx 0.19.1 → 0.19.3** (PostgreSQL 19beta4 support, upstream error-path
+  fixes), and `cargo-pgrx` 0.19.3 in CI, the release workflows and the flake.
+  The PG19 matrix leg now builds against 19beta4.
+- `cargo update` within existing semver ranges (serde_json, libc, cc,
+  thiserror, tokio and others); dev-dependencies `criterion` 0.5 → 0.8 and
+  `hegeltest` 0.25 → 0.49 (two property-test generators take `&TestCase`).
+- Docs: the README and `docs/MIGRATING_FROM_PGVECTOR.md` no longer promise a
+  binary-compatible pgvector `vector` "on the v1.0 roadmap" — none is
+  scheduled, and the planned raw format deliberately does not share pgvector's
+  byte layout. They now show, verified against pgvector 0.8.2, how to index an
+  existing pgvector column in place with an expression index over the cast
+  (no second column).
+
+### Not changed
+
+Deliberately left alone: `gemm` 0.18 → 0.19 and `rand` 0.8 → 0.10 /
+`rand_chacha` 0.3 → 0.10 (both feed persisted IVF centroids and graph builds
+through seeded RNG streams; a bump would need a byte-identity check of IVF
+builds first), `half` 1.8.3 (pinned for CBOR decode, see the raw-varlena
+design), and `serde_cbor` (unmaintained but frozen as our datum format).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.12.1';` and reconnect (or restart).
+No REINDEX.
+
+### Tests
+
+`cargo pgrx test pg16`: **472 passed / 0 failed / 9 ignored** on EC2 c7i
+(Sapphire Rapids, AVX-512 VNNI) and c8g (Graviton4), both Fedora 44, and
+locally. turbovec's own suite: 525 / 0 on c7i under both the intrinsic and the
+forced-asm `vpdpbusd` path, 522 / 0 on Graviton4, 524 / 0 built with nixpkgs'
+rustc 1.97.0 (LLVM 21).
+
+Graviton4 A/B, v2.12.0 vs 2.12.1 (1M × 1024-d Cohere, flat 4-bit, warm,
+200 queries, 3 alternated rounds): p50 within ±0.8% at search_k = 32 to
+1024, with overlapping round ranges, so no latency change is resolved; recall@10
+1.000 in both arms, and the **ordered top-10 identical for all 200 queries**.
+Upstream's MedCPT recall gain is upstream's number; no bunched corpus was run
+here. Evidence: `benches/results/tv112_qualify_20261014/`.
+
 ## [2.12.0] — 2026-10-07
 
 MINOR: **faster exact-distance recheck** (vectorized kernels; the constant

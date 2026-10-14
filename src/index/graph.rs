@@ -3091,7 +3091,7 @@ mod tests {
     /// so Hegel shrinks the *shape* and the *seed*, and replay is
     /// exact.
     #[hegel::composite]
-    fn corpus_shape(tc: hegel::TestCase) -> (Vec<f32>, usize, usize, u64) {
+    fn corpus_shape(tc: &hegel::TestCase) -> (Vec<f32>, usize, usize, u64) {
         // n spans 0..400: includes the empty/one/two-node degenerate
         // cases AND corpora comfortably past R+1 where navigability
         // must hold. dim spans 1..64: cheap but varied.

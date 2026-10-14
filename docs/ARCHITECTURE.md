@@ -22,7 +22,7 @@ only storage strategy.
 > [DEPRECATED v2.5.0], 1-bit BQ) plus IVF (`WITH (lists = N)`).
 **Target Postgres:** 13–18, plus 19beta1 (experimental); every leg tested in
 CI (see [`docs/PG_VERSION_SUPPORT.md`](PG_VERSION_SUPPORT.md)).
-**Toolchain:** Rust 1.96+, `pgrx = "0.19.1"`.
+**Toolchain:** Rust 1.96+, `pgrx = "0.19.3"`.
 **Upstream:** [`turbovec`](https://github.com/RyanCodrai/turbovec) 1.0.0,
 pinned via a git fork (`gburd/turbovec`) carrying two additive integration
 commits (`pub pack::repack`; the `IdMapIndex` parts API) — see the pin in

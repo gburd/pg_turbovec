@@ -81,7 +81,7 @@ jobs:
               libopenblas-dev gfortran
 
       - name: install cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version 0.19.1
+        run: cargo install --locked cargo-pgrx --version 0.19.3
 
       - uses: actions/cache@v4
         with:

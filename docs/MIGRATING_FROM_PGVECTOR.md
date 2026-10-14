@@ -7,12 +7,15 @@ extensions side-by-side and migrating columns and queries.
 (`'[1, 2, 3]'`) but different *binary* varlena layouts. That means:
 
 - Casting via `text` or `real[]` is always safe.
-- Direct binary cast (`vector::vector`) is **not** supported in
-  v0.x. Roadmap item: a binary-compatible varlena layout in a
-  future release.
+- Direct binary cast (`vector::vector`) is **not** supported, and
+  none is scheduled: the planned on-disk format
+  (`docs/design/RAW_VECTOR_VARLENA.md`) deliberately does not share
+  pgvector's byte layout, so an older binary can never silently
+  misread one as the other.
 
-For now use the `real[]` bridge — Postgres optimises the cast
-chain reasonably well and the conversion is O(dim).
+Use the `real[]` bridge — the conversion is O(dim). To index an existing
+pgvector column without adding a second column, see § 11 (expression
+index over the cast).
 
 ## 1. Coexistence
 
@@ -204,11 +207,32 @@ the SQL layer (see [`HYBRID_SEARCH.md`](HYBRID_SEARCH.md)):
 pgvector has none of these built in (you'd hand-roll RRF and MaxSim in
 SQL/app code), so this is a net gain on migration, not a gap.
 
-## 11. Indexing halfvec / sparsevec via expression indexes
+## 11. Indexing via expression indexes (pgvector columns, halfvec, sparsevec)
 
-`pg_turbovec`'s index AM natively indexes `vector`. To get the same
-ANN speed-up on `halfvec` or `sparsevec` columns without converting
-the column itself, use an *expression index* over the cast:
+`pg_turbovec`'s index AM natively indexes `turbovec.vector`. To index an
+existing **pgvector** `vector` column in place — no second column, no table
+rewrite, pgvector's own indexes untouched — index the cast expression and
+query with the same expression:
+
+```sql
+SET search_path = public, turbovec;   -- so <=> resolves for turbovec.vector
+CREATE INDEX CONCURRENTLY docs_emb_tv_idx ON docs
+    USING turbovec ((embedding::real[]::turbovec.vector) vec_cosine_ops)
+    WITH (bit_width = 4);
+
+SELECT id FROM docs
+ORDER BY embedding::real[]::turbovec.vector <=> $1::real[]::turbovec.vector
+LIMIT 10;
+```
+
+Verified with pgvector 0.8.2 on PG 16: the plan is an `Index Scan` on the
+expression index, recall@10 matched a native `turbovec.vector` column on the
+same data, and `INSERT`s keep the index in sync. Each candidate the executor
+rechecks evaluates the cast (O(dim)), and each write pays it once; time it on
+your data. Without `turbovec` on `search_path`, write `OPERATOR(turbovec.<=>)`.
+
+The same works for our own `halfvec` or `sparsevec` columns without converting
+the column itself:
 
 ```sql
 -- halfvec column, cosine-distance ANN:

@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "2.12.0"
+version = "2.12.1"
 edition = "2024"
 rust-version = "1.96.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -43,18 +43,20 @@ pg_test = []
 # to just `pg<N>`.
 
 [dependencies]
-pgrx = "=0.19.1"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "455549fa6a2ffb128527d282b6dc87fad258f7f3", features = ["mask-skip-counter"] }
-# ^ turbovec 1.1.1 (upstream 60efd4d: staged 2/4-bit planes search) + FOUR
-#   additive fork carries (the first three cherry-picked unchanged) on branch
-#   gburd/turbovec@pgtv-2.11.0-port: `pub fn repack` (3ed5708), the
-#   re-exposed IdMapIndex parts API (be133b8), the parallel cold-open
-#   repack (9638651), and NEW carry #4, the parallel planes cold-open
-#   repack (455549f) — both byte-identical to serial, pinned by turbovec's
-#   `parallel_{,planes_}repack_is_byte_identical_to_serial`. Upstream
-#   issues #545/#546/#547. We persist only packed codes, never turbovec's v8 file
-#   container, so 1.1's v8 *file* format does not touch our wire format.
-#   Pinned by git rev so the port builds anywhere.
+pgrx = "=0.19.3"
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "29de559040461b87b8c6931822ae435350fd3abd", features = ["mask-skip-counter"] }
+# ^ turbovec 1.1.2 (upstream c3b043b: staged search keeps the scan's recall on
+#   bunched corpora) + FIVE additive fork carries on branch
+#   gburd/turbovec@pgtv-2.12.1-port: `pub fn repack` (3ed5708), the
+#   re-exposed IdMapIndex parts API (be133b8), the parallel cold-open repack
+#   (9638651), the parallel planes cold-open repack (455549f) -- both
+#   byte-identical to serial, pinned by turbovec's
+#   `parallel_{,planes_}repack_is_byte_identical_to_serial` -- and NEW carry
+#   #5 (29de559): `vpdpbusd` via inline asm on LLVM < 22 so the crate builds
+#   with nixpkgs' rustc (LLVM 21), pinned by `dpbusd_matches_the_scalar_definition`.
+#   Upstream issues #545/#546/#547. We persist only packed codes, never
+#   turbovec's v8 file container, so its file format does not touch our wire
+#   format. Pinned by git rev so the port builds anywhere.
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -82,9 +84,9 @@ rayon = "1.10"
 gemm = "0.18"
 
 [dev-dependencies]
-pgrx-tests = "=0.19.1"
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "plotters"] }
-hegeltest = "0.25"
+pgrx-tests = "=0.19.3"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "plotters"] }
+hegeltest = "0.49"
 
 [[bench]]
 name = "distance"

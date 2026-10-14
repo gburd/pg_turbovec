@@ -1,0 +1,26 @@
+# cargo pgrx schema pg16: main (f772c0c, pgrx 0.19.1, cargo-pgrx 0.19.1) vs 2.12.1 (pgrx 0.19.3, cargo-pgrx 0.19.3)
+# normalised: comments, blank lines and pgrx's /* <begin connected objects> */ markers stripped; lines sorted (pgrx's emission order is not stable)
+main.sql cd253d57e434f61f raw_lines=1755 normalised_lines=986
+new.sql  27b01fa886625a6d raw_lines=1755 normalised_lines=986
+normalised diff lines: 0
+raw diff (before sorting):
+71,79d70
+< CREATE  FUNCTION "halfvec_add"(
+< 	"a" Halfvec, /* Halfvec */
+< 	"b" Halfvec /* Halfvec */
+< ) RETURNS Halfvec /* Halfvec */
+< IMMUTABLE STRICT PARALLEL SAFE
+< LANGUAGE c /* Rust */
+< AS 'MODULE_PATHNAME', 'halfvec_add_wrapper';
+< /* </end connected objects> */
+< /* <begin connected objects> */
+88,100c79,81
+< CREATE  FUNCTION "halfvec_l2_squared_distance"(
+< 	"a" Halfvec, /* Halfvec */
+< 	"b" Halfvec /* Halfvec */
+< ) RETURNS double precision /* f64 */
+< IMMUTABLE STRICT PARALLEL SAFE
+< LANGUAGE c /* Rust */
+< AS 'MODULE_PATHNAME', 'halfvec_l2_squared_distance_wrapper';
+< /* </end connected objects> */
+< /* <begin connected objects> */

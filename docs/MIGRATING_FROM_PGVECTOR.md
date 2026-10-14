@@ -229,7 +229,8 @@ Verified with pgvector 0.8.2 on PG 16: the plan is an `Index Scan` on the
 expression index, recall@10 matched a native `turbovec.vector` column on the
 same data, and `INSERT`s keep the index in sync. Each candidate the executor
 rechecks evaluates the cast (O(dim)), and each write pays it once; time it on
-your data. Without `turbovec` on `search_path`, write `OPERATOR(turbovec.<=>)`.
+your data. Without `turbovec` on `search_path`, write `OPERATOR(turbovec.<=>)`
+in the query and `turbovec.vec_cosine_ops` in `CREATE INDEX`.
 
 The same works for our own `halfvec` or `sparsevec` columns without converting
 the column itself:

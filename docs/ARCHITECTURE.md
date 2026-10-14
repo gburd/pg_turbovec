@@ -20,13 +20,15 @@ only storage strategy.
 > `src/guc.rs` (20 GUCs) and the README Configuration table; index kinds —
 > the `KIND_*` constants in `src/index/page.rs` (flat/single, ColBERT, graph
 > [DEPRECATED v2.5.0], 1-bit BQ) plus IVF (`WITH (lists = N)`).
-**Target Postgres:** 13–18, plus 19beta1 (experimental); every leg tested in
+**Target Postgres:** 13–18, plus 19beta4 (experimental); every leg tested in
 CI (see [`docs/PG_VERSION_SUPPORT.md`](PG_VERSION_SUPPORT.md)).
 **Toolchain:** Rust 1.96+, `pgrx = "0.19.3"`.
-**Upstream:** [`turbovec`](https://github.com/RyanCodrai/turbovec) 1.0.0,
-pinned via a git fork (`gburd/turbovec`) carrying two additive integration
-commits (`pub pack::repack`; the `IdMapIndex` parts API) — see the pin in
-`Cargo.toml` and `.agent/notes/TURBOVEC_UPSTREAM_RECONCILE_2026-08-25.md`.
+**Upstream:** [`turbovec`](https://github.com/RyanCodrai/turbovec) 1.1.2,
+pinned via a git fork (`gburd/turbovec`, branch `pgtv-2.12.1-port`) carrying
+five additive commits: `pub pack::repack`, the `IdMapIndex` parts API, the
+parallel cold-open `repack` and `planes_repack`, and the LLVM < 22 inline-asm
+`vpdpbusd`. See the pin and its comment in `Cargo.toml`, and
+`upstream-pr/turbovec-fork-carries/STATUS.md`.
 **License:** Apache-2.0 (matches `turbovec`).
 
 ---

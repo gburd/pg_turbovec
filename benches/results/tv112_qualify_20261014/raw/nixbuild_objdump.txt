@@ -1,0 +1,14 @@
+# objdump of the flake-built pg_turbovec .so (nix build .#pg_turbovec_16 .#pg_turbovec_18, flake.lock nixpkgs 8edc0c7)
+# compiler used by the flake (nixpkgs rustc):
+release: 1.98.1
+LLVM version: 21.1.8
+/nix/store/b1lgry9zq21j2czd7w42j16fqjjm659l-pg_turbovec-2.12.0
+  sha256 54ba1ca57ece4d3c0a96e7d66883ab7bef548ae182af17935c9518ebb50b3a1d
+  vpdpbusd instructions: 305
+  vpermb instructions:   152
+  links libpq server ABI for: n/a
+/nix/store/fb7wz62xws7lnsfz1pkdb2qx45qajk3n-pg_turbovec-2.12.0
+  sha256 439eac8c3a9394b04f7568a7f7a720574e7c9420e694ba5a83effb523db77951
+  vpdpbusd instructions: 305
+  vpermb instructions:   152
+  links libpq server ABI for: n/a

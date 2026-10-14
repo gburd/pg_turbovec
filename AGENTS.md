@@ -300,11 +300,23 @@ rustup `stable` toolchain's bundled `gcc-ld/ld.lld` wrapper
 references a GC'd rustup store path on this box; bfd is the system
 fallback.
 
-**turbovec >= 1.1 does NOT build with the nix-profile `rustc` 1.97.0**
-(system LLVM 21): `intrinsic signature mismatch for
-llvm.x86.avx512.vpdpbusd.512`. Use a rustup toolchain (LLVM 22):
-`TC=~/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu; export
-PATH=$TC/bin:$PATH RUSTC=$TC/bin/rustc`. CI's rustup `stable` is fine.
+**LLVM 21 (nix-profile / nixpkgs `rustc` 1.97–1.98.1) builds turbovec since
+v2.12.1** via fork carry #5: `turbovec/build.rs` detects LLVM < 22 and the
+`dpbusd!` macro emits `vpdpbusd` through inline asm instead of
+`_mm512_dpbusd_epi32` (whose stdarch binding needs LLVM 22). Before it, the
+error was `intrinsic signature mismatch for llvm.x86.avx512.vpdpbusd.512`. The
+fork's `examples/` still call the intrinsic directly, so on LLVM 21 run
+turbovec's tests with `--lib --tests`, not `--all-targets`.
+`TURBOVEC_DPBUSD_ASM=1` forces the asm path on LLVM 22 (no CI leg does;
+qualify it by hand on an AVX-512 VNNI host). A rustup toolchain (LLVM 22) is
+still the default here: `TC=~/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu;
+export PATH=$TC/bin:$PATH RUSTC=$TC/bin/rustc`. If upstream turbovec adds a
+new `_mm512_dpbusd_epi32` call site, route it through `dpbusd!`, or the Nix
+build breaks again.
+
+**aarch64 `cargo pgrx test` needs `RUSTFLAGS="-C target-feature=+fp16"`**
+(debug profile only): `gemm-common` 0.18.2's fp16 inline asm does not
+assemble at opt-level 0 (sarah-quinones/gemm#31). Release builds are fine.
 
 Pre-test cleanup:
 ```bash

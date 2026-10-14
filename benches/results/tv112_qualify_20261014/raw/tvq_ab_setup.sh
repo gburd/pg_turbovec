@@ -10,9 +10,11 @@ SRC=$(ls -d ~/.pgrx/16.*/ | grep -v -E 'install|unpack' | head -1)
 PGC=$W/pg16r/bin/pg_config; cd $W
 [ -d $W/pgtv-old ] || git clone -q --branch v2.12.0 https://github.com/gburd/pg_turbovec.git $W/pgtv-old
 D=$(ls -d /work/pgtv-*/pgtv-wt-deps | tail -1)
+# v2.12.0 pins pgrx 0.19.1, so the old arm needs the matching cargo-pgrx.
+[ -x $W/pgrx191/bin/cargo-pgrx ] || cargo install -q --locked cargo-pgrx --version 0.19.1 --root $W/pgrx191
 for arm in old new; do
-  src=$W/pgtv-old; [ $arm = new ] && src=$D
-  (cd $src && cargo pgrx install --release --pg-config $PGC > $W/build_$arm.log 2>&1)
+  src=$W/pgtv-old; CP=$W/pgrx191/bin; [ $arm = new ] && { src=$D; CP=$HOME/.cargo/bin; }
+  (cd $src && PATH=$CP:$PATH cargo pgrx install --release --pg-config $PGC > $W/build_$arm.log 2>&1)
   cp $($PGC --pkglibdir)/pg_turbovec.so $W/so/$arm.so; md5sum $W/so/$arm.so
 done
 export PATH=$W/pg16r/bin:$PATH
@@ -33,7 +35,11 @@ psql -d bench -qc "CREATE EXTENSION IF NOT EXISTS pg_turbovec; CREATE EXTENSION 
 python3 -m venv $W/venv && $W/venv/bin/pip install -q numpy pyarrow huggingface_hub
 sed -e "s#/mnt/nvme#$W#g" ~/load_corpus.py > $W/load_corpus.py
 $W/venv/bin/python $W/load_corpus.py 1000000 200 bench
-psql -d bench -qc "ALTER TABLE public.docs SET (autovacuum_enabled = off); VACUUM ANALYZE public.docs"
+# (as run: this step and the CREATE INDEX below ran from a separate script with
+#  ALTER TABLE and VACUUM as separate psql -c calls -- VACUUM cannot run in a
+#  multi-statement -c transaction)
+psql -d bench -qc "ALTER TABLE public.docs SET (autovacuum_enabled = off)"
+psql -d bench -qc "VACUUM ANALYZE public.docs"
 psql -d bench -c "CREATE INDEX docs_flat4 ON public.docs USING turbovec (tv turbovec.vec_cosine_ops) WITH (bit_width = 4)"
 psql -d bench -c "SELECT pg_size_pretty(pg_relation_size('docs_flat4')), pg_size_pretty(pg_total_relation_size('docs'))"
 echo SETUP_OK

@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.12.1] — RELEASE_DATE
+## [2.12.1] — 2026-10-14
 
 PATCH: **builds again under Nix / nixpkgs' Rust toolchain**, turbovec 1.1.2
 (a recall bug fix in its staged search), and a dependency refresh. No
@@ -35,8 +35,10 @@ candidate set differed; this release corrects that algorithm.
   bit-for-bit against the scalar definition (50k random lanes plus u8-max ×
   i8-min and i32 wrap-around cases) on an AVX-512 VNNI host. Verified: the
   flake builds `pg_turbovec_16` and `pg_turbovec_18` on nixpkgs `8edc0c7`
-  (rustc 1.98.1, LLVM 21.1.8), and the resulting `.so` contains the VNNI
-  kernels (305 `vpdpbusd`).
+  (rustc 1.98.1, LLVM 21.1.8), and each resulting `.so` contains the VNNI
+  kernels (305 `vpdpbusd`;
+  `benches/results/tv112_qualify_20261014/raw/nixbuild_objdump.txt`). The asm
+  path's latency was not measured.
 - The `allowlist_crossover` bench did not compile since turbovec 1.0 changed
   `search_with_allowlist` to return a `Result`; fixed.
 
@@ -82,6 +84,10 @@ No REINDEX.
 
 ### Tests
 
+`cargo pgrx schema` output is unchanged from 2.12.0 across the pgrx bump
+(normalised diff empty), so the upgrade script is correctly empty. CI: pg13–19
+native and pg16 classic all green.
+
 `cargo pgrx test pg16`: **472 passed / 0 failed / 9 ignored** on EC2 c7i
 (Sapphire Rapids, AVX-512 VNNI) and c8g (Graviton4), both Fedora 44, and
 locally. turbovec's own suite: 525 / 0 on c7i under both the intrinsic and the
@@ -89,9 +95,10 @@ forced-asm `vpdpbusd` path, 522 / 0 on Graviton4, 524 / 0 built with nixpkgs'
 rustc 1.97.0 (LLVM 21).
 
 Graviton4 A/B, v2.12.0 vs 2.12.1 (1M × 1024-d Cohere, flat 4-bit, warm,
-200 queries, 3 alternated rounds): p50 within ±0.8% at search_k = 32 to
-1024, with overlapping round ranges, so no latency change is resolved; recall@10
-1.000 in both arms, and the **ordered top-10 identical for all 200 queries**.
+200 queries, 3 alternated rounds): 2.12.1's p50 is 0.3–0.8% slower at
+search_k = 32 to 1024. The round ranges overlap, so that is not a resolved
+regression. Recall@10 is 1.000 in both arms, and the **ordered top-10 is
+identical for all 200 queries**.
 Upstream's MedCPT recall gain is upstream's number; no bunched corpus was run
 here. Evidence: `benches/results/tv112_qualify_20261014/`.
 

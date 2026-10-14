@@ -19,8 +19,15 @@ noted; `raw/host_*.txt`):
 
 | Build | Before | After |
 |---|---|---|
-| `nix build .#pg_turbovec_16` / `_18` (nixpkgs rustc 1.98.1, LLVM 21.1.8) | fails at vendoring (`A hash was specified for turbovec-0.9.0, but there is no corresponding git dependency`); with the key fixed, fails compiling turbovec (`intrinsic signature mismatch for llvm.x86.avx512.vpdpbusd.512`) | builds; the `.so` contains 305 `vpdpbusd` and 152 `vpermb` (`raw/nixbuild_summary.txt`) |
+| `nix build .#pg_turbovec_16` / `_18` (nixpkgs rustc 1.98.1, LLVM 21.1.8) | fails at vendoring (`A hash was specified for turbovec-0.9.0, but there is no corresponding git dependency`); with the key fixed, fails compiling turbovec (`intrinsic signature mismatch for llvm.x86.avx512.vpdpbusd.512`) | builds; each `.so` contains 305 `vpdpbusd` and 152 `vpermb` (`raw/nixbuild_objdump.txt`: compiler version, sha256 and instruction counts; `raw/nixbuild_summary.txt`: the build log's compile lines) |
 | turbovec with nix rustc 1.97.0 / LLVM 21.1.8 | same intrinsic error | builds; `cargo test --release --lib --tests` 524 passed / 0 failed (`raw/turbovec_test_x86_local_llvm21.txt`, an AVX2 host, so the asm path compiles here but the VNNI kernels don't run) |
+
+**SQL surface.** `cargo pgrx schema pg16` on main (pgrx 0.19.1) and on this
+release (pgrx 0.19.3) generates the same schema: 986 lines each after
+stripping comments and sorting (pgrx's emission order is not stable), with 0
+differing (`raw/schema_diff.txt`, `raw/schema_diff.sh`). So the comment-only
+`pg_turbovec--2.12.0--2.12.1.sql` leaves fresh and upgraded installs with the
+same catalog.
 
 ## 2. Tests
 
@@ -63,8 +70,11 @@ recheck:
 | 256 | 4.49 (4.41–4.49) | 4.50 (4.48–4.58) | 1.003 | 1.000 / 1.000 |
 | 1024 | 13.84 (13.73–13.87) | 13.89 (13.76–14.26) | 1.004 | 1.000 / 1.000 |
 
-The two arms' round ranges overlap in every row: **no latency change is
-resolved at this precision** (≤ 0.8% either way). Returned ids: for all 200
+2.12.1's median is 0.3–0.8% slower in every row, consistently in one
+direction. The round ranges overlap in every row, so the difference is not
+resolved at this precision: **no latency change is resolved, but if there is
+one it is a small slowdown, not a speedup**. Upstream reports 4-bit within 3%
+for the same change. Returned ids: for all 200
 queries, at both `search_k = 32` and `1024`, the ordered top-10 is
 **identical** between the arms (`raw/ids_{old,new}.json`).
 
@@ -78,6 +88,18 @@ not ours.
 ## Not measured
 
 - x86 AVX-512 VNNI latency for the planes change. The c7i host ran tests only.
+- Latency of carry #5's inline-asm `vpdpbusd` path. It is the same
+  instruction, but the asm block is opaque to LLVM's scheduler, so
+  Nix-built (LLVM 21) VNNI hosts may differ slightly from rustup-built ones.
+  Only Nix builds take that path.
+- Index bytes across the arms were not hashed (2.11.0's qualification did a
+  sha256 A/B). "Unchanged" rests on the code: 1.1.2 adds a search-time value
+  computed from the in-memory planes cache and changes nothing we persist.
+- The pgvector 0.8.2 expression-index check (README / MIGRATING § 11) was a
+  local PG 16.15 session, transcript not archived: `EXPLAIN` showed `Index
+  Scan` on the expression index; recall@10 1.000 over 100 queries on
+  20k × 256-d random vectors, identical to a native column;
+  `turbovec_check` was clean after an `INSERT`.
 - 2-bit indexes, where upstream reports 2–12% slower at k = 10 from wider
   stage widths.
 - IVF, ColBERT, 1-bit.

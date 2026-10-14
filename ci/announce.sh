@@ -40,14 +40,16 @@ pg_turbovec ${VERSION} is now available.
 
 pg_turbovec is a PostgreSQL extension for exact and approximate nearest-
 neighbour vector search, backed by Google Research's TurboQuant quantizer (the
-turbovec Rust crate). It stores vectors in 2- or 4-bit quantised form for
-roughly 16x smaller on-disk footprint than pgvector at 4-bit, with a dedicated
-index access method (L2, inner-product, cosine, and L1 distance operators), an
-opt-in out-of-core IVF layer (WITH (lists = N)) that builds and queries indexes
-larger than RAM, an opt-in Vamana navigable-graph index kind
-(WITH (graph = true)), and filtered/hybrid ANN via an in-kernel allowlist. It
-uses the same type and operator surface as pgvector and can coexist with it.
-Supports PostgreSQL 13 through 18.
+turbovec Rust crate). Its index stores vectors in 1-, 2- or 4-bit quantised
+form; measured against pgvector HNSW on 10M x 1536-d real embeddings, the
+4-bit index is 4.4x smaller and builds 2.6x faster (see the README for the
+recall/latency trade-off). It has a dedicated index access method (L2,
+inner-product, cosine and L1 distance operators), an opt-in out-of-core IVF
+layer (WITH (lists = N)) that builds and queries indexes larger than RAM, and
+filtered/hybrid ANN via an in-kernel allowlist. It uses the same type and
+operator surface as pgvector and can coexist with it, including indexing an
+existing pgvector column through an expression index. Supports PostgreSQL 13
+through 18, with 19 (beta) experimental.
 
 Changes in ${VERSION}:
 

@@ -369,17 +369,21 @@ than ~60s with `benches/scripts/lib/with-heartbeat.sh`. Poll with
 Bench work on EC2 runs in short-lived burner accounts that **expire without
 warning**, and an expiring account strands whatever it was running.
 
-**Current burner: `hotdog` → account `170848442262`, region `us-east-2`**
-(configured in `~/.aws/config`; replaced `lava` 2026-10-05). Graviton (`c8g`/`c8gd`)
-is available there and is the host for turbovec planes-path qualification.
+**Current burner: `kiwi` → account `830118047484`, region `us-east-2`**
+(credentials in `~/.aws/credentials`; confirmed by the user 2026-10-14). Graviton
+(`c8g`/`c8gd`/`r8gd`) and metal (`i7i.metal-24xl`, `r8gd.metal-24xl`) are
+available there. `kiwi` is SHARED and busy (two dozen other running instances
+on 2026-10-14), so select and tear down strictly by your own `run=` tag.
 
-Expired/dead, do not use: `lava` (769093516156, replaced 2026-10-05), `bene` (292759875395, expired **2026-09-11 12:03
-UTC**), and before it `chiuso`, `lala`, `fred`, `egret`, `numa`.
+Expired/dead, do not use: `hotdog` (170848442262, credentials gone by
+2026-10-14), `lava` (769093516156, replaced 2026-10-05), `bene` (292759875395,
+expired **2026-09-11 12:03 UTC**), and before it `chiuso`, `lala`, `fred`,
+`egret`, `numa`.
 
 Rules, each of which has been paid for at least once:
 
 - **Verify the profile before you launch:** `aws sts get-caller-identity
-  --profile hotdog`. A launch on a nearly-expired account is money you cannot
+  --profile kiwi`. A launch on a nearly-expired account is money you cannot
   reclaim, because you lose the ability to terminate.
 - **`InvalidClientTokenId` on a profile that worked minutes ago means the
   account expired, not that you broke something.** Do not spend turns retrying
@@ -390,8 +394,8 @@ Rules, each of which has been paid for at least once:
   it churns between Starlink and Comcast ranges), or use SSM with no inbound
   port at all.
 - **Tag every instance `run=<something>`** and touch only your own tag. Other
-  people's untagged instances share these accounts — `hotdog` has
-  several untagged c7i instances that are not ours.
+  people's untagged instances share these accounts — `kiwi` has
+  many instances that are not ours (some tagged Owner=gburd by other agents).
 - **Pull artefacts down as you go, not at the end.** The 2026-09-11 run survived
   a mid-run account expiry with zero data loss purely because the agent had
   already copied everything locally.

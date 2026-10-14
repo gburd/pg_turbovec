@@ -1,14 +1,18 @@
-# objdump of the flake-built pg_turbovec .so (nix build .#pg_turbovec_16 .#pg_turbovec_18, flake.lock nixpkgs 8edc0c7)
-# compiler used by the flake (nixpkgs rustc):
-release: 1.98.1
-LLVM version: 21.1.8
-/nix/store/b1lgry9zq21j2czd7w42j16fqjjm659l-pg_turbovec-2.12.0
-  sha256 54ba1ca57ece4d3c0a96e7d66883ab7bef548ae182af17935c9518ebb50b3a1d
+# objdump of the flake-built pg_turbovec .so from the RELEASE tree
+# tree: b348419 release: v2.12.1 -- review fixes: evidence, date, stale toolchain docs (code identical to 664124a; later commits touch docs/CHANGELOG/bench files only)
+# command: nix build .#pg_turbovec_16 .#pg_turbovec_18 --print-out-paths   (flake.lock nixpkgs 8edc0c7)
+# flake toolchain (nixpkgs rustc):
+#   release: 1.98.1
+#   LLVM version: 21.1.8
+/nix/store/grsnpdsmrldf1qix4bacvn7kri2mh1j1-pg_turbovec-2.12.1
+  control default_version: default_version = '2.12.1'
+  pg_config used: postgresql-16.15
+  sha256 016bb2ab2ffefec6c9d38374f48453dc82d9ea61d1ded41547d55eb3af1c9e1c
   vpdpbusd instructions: 305
   vpermb instructions:   152
-  links libpq server ABI for: n/a
-/nix/store/fb7wz62xws7lnsfz1pkdb2qx45qajk3n-pg_turbovec-2.12.0
-  sha256 439eac8c3a9394b04f7568a7f7a720574e7c9420e694ba5a83effb523db77951
+/nix/store/igz2dwr6s39ajml903xm543w6wxhqwj9-pg_turbovec-2.12.1
+  control default_version: default_version = '2.12.1'
+  pg_config used: postgresql-18.6
+  sha256 ce1ce523aebbb4cb335fae837efeab399365671662e42f5aa8e3c6e9c3e05b0f
   vpdpbusd instructions: 305
   vpermb instructions:   152
-  links libpq server ABI for: n/a

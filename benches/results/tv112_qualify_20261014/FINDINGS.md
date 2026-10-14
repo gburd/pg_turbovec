@@ -25,7 +25,10 @@ noted; `raw/host_*.txt`):
 **SQL surface.** `cargo pgrx schema pg16` on main (pgrx 0.19.1) and on this
 release (pgrx 0.19.3) generates the same schema: 986 lines each after
 stripping comments and sorting (pgrx's emission order is not stable), with 0
-differing (`raw/schema_diff.txt`, `raw/schema_diff.sh`). So the comment-only
+differing, and a statement-level comparison (whole statements as a multiset,
+so a clause cannot move between functions unseen) finds 173 vs 173 with none
+unique to either side (`raw/schema_diff.txt`, `raw/schema_diff.sh`,
+`raw/schema_stmt_check.py`). So the comment-only
 `pg_turbovec--2.12.0--2.12.1.sql` leaves fresh and upgraded installs with the
 same catalog.
 

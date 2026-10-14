@@ -3,6 +3,7 @@
 main.sql cd253d57e434f61f raw_lines=1755 normalised_lines=986
 new.sql  27b01fa886625a6d raw_lines=1755 normalised_lines=986
 normalised diff lines: 0
+statement-level (schema_stmt_check.py): statements: 173 vs 173; only in first: 0; only in second: 0
 raw diff (before sorting):
 71,79d70
 < CREATE  FUNCTION "halfvec_add"(

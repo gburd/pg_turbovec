@@ -25,3 +25,17 @@ Carries #1-#3 cherry-picked unchanged onto upstream v1.1.1 (branch
 planes cache build is serial and bypassed carry #3 on staged-search hosts
 (279 ms / 1.09 s at 1M x 1024-d on Graviton4 -> 18-32 ms). Not yet filed;
 natural follow-on to #545.
+
+## 2026-10-14: merged upstream 1.1.2 + carry #5 (now on fork `main`)
+
+Fork `main` = `pgtv-2.12.1-port` = `29de559`: upstream `c3b043b` (1.1.2:
+staged-search recall fix on bunched corpora, #562/#563) merged with carries
+#1-#4 unchanged, plus NEW carry #5 (`29de559`): `turbovec/build.rs` detects
+LLVM < 22 and a `dpbusd!` macro emits `vpdpbusd` via inline asm instead of
+`_mm512_dpbusd_epi32`, so the crate builds with nixpkgs' rustc (LLVM 21;
+stdarch binds the intrinsic with LLVM 22's operand types). Pinned by
+`dpbusd_matches_the_scalar_definition`. pg_turbovec 2.12.1 pins it.
+
+Carry #5 is a good upstream candidate on its own: any Nix user of turbovec
+hits the same error. It is not yet filed. File it as an issue first, per
+`00-strategy.md`; nothing is posted without the user.

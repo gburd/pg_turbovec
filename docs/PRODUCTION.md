@@ -744,6 +744,38 @@ The pgrx test cluster default is 128 MiB; production should run with
   anything; it'll just make cold-fill p50 noisier as buffer-manager
   evictions force refills.
 
+### glibc malloc: heap trimming under large `search_k`
+
+A measured latency hazard: under default glibc malloc, a warm backend running
+large-candidate queries can settle into a state where glibc trims the top of
+its heap after every query and faults it back in on the next. On 1024-d
+vectors at `search_k = 1024` that is **~2,000 minor page faults and +2–3 ms per
+query** (14.6 ms vs 11.4 ms in one measured cell). Whether a backend enters the
+state depends on its allocation history, so it shows up per backend and
+bimodally: some connections are affected and others aren't. In the measured
+runs it appeared only at `search_k = 1024`, never at 32 or 256: at 384-d with
+both storage modes (~515 faults/query) and at 1024-d and 1536-d with inline
+(`MAIN`) storage (~2,000)
+([`benches/results/storage_20261006/FINDINGS.md` § 2.1](../benches/results/storage_20261006/FINDINGS.md)).
+
+Starting the postmaster with
+
+```bash
+GLIBC_TUNABLES=glibc.malloc.mmap_threshold=67108864:glibc.malloc.trim_threshold=268435456 \
+    pg_ctl -D "$PGDATA" start
+```
+
+removed it in every cell measured (0 faults per query, deterministic
+latency). Setting only `trim_threshold` made it worse, so set both. Under
+systemd, put it in the unit as `Environment=GLIBC_TUNABLES=...`. The trade-off
+(not measured here): with `trim_threshold = 256 MB` a backend may keep up to
+that much freed heap instead of returning it to the OS, and allocations under
+64 MB come from the heap rather than fresh `mmap`s, so allow for it in the
+per-connection memory budget. The setting only applies to glibc-based
+systems. To tell whether you are affected, compare `minflt` (field 10) in
+`/proc/<backend pid>/stat` before and after a query: thousands of faults per
+warm query is this state.
+
 ### `maintenance_work_mem`
 
 `CREATE INDEX` and `REINDEX` use this for the heap-scan staging buffer

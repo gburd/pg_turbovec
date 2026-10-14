@@ -705,7 +705,7 @@ fn search_tokens(
     }
     // The index was built with synthetic slot-ids 0..n_tokens, so the
     // ids the kernel returns ARE slot indices into `slot_doc`.
-    let (scores, slot_ids) = idx.search(q_flat, take);
+    let (scores, slot_ids) = crate::cache::bounded(|| idx.search(q_flat, take));
     let mut out: Vec<(i64, f32)> = Vec::with_capacity(scores.len());
     for (slot, score) in slot_ids.iter().zip(scores.iter()) {
         let s = *slot as usize;

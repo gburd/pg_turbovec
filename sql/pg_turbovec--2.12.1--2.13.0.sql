@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.12.1 -> 2.13.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.13.0';`.
+--
+-- No new or changed SQL objects. This release changes scan threading, fixes
+-- the out-of-core IVF latency tail and removes the GUC
+-- turbovec.search_concurrency (a GUC is not an SQL object). No wire-format
+-- change (stays v8), no REINDEX. Intentionally empty apart from this comment.

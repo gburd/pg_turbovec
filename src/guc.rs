@@ -9,7 +9,6 @@
 //! | `turbovec.bit_width_default`     | int  | 4       | 2..=4          |
 //! | `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      |
 //! | `turbovec.warn_on_rebuild`       | bool | true    | -              |
-//! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
 //! | `turbovec.normalize_on_insert`   | bool | true    | -              |
 //! | `turbovec.search_k`              | int  | 32      | 1..=100000     |
 //! | `turbovec.probes`                | int  | 16      | 1..=65536      |
@@ -36,7 +35,6 @@ use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 pub static BIT_WIDTH_DEFAULT: GucSetting<i32> = GucSetting::<i32>::new(4);
 pub static CACHE_SIZE_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
-pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(32);
 pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(16);
@@ -591,11 +589,12 @@ pub fn graph_scan_ef_decide(setting: i32, k: usize, n: usize) -> usize {
 /// wrecking a high-concurrency workload; raise it explicitly for a
 /// latency-bound single-query deployment, set `1` to disable.
 ///
-/// **No effect** on the flat (non-IVF) path, the whole-load IVF path
-/// (small indexes that already load whole are already fast — the win
-/// is on the large / out-of-core compact path where the cell ranges
-/// are explicit), or on `ambuild` (that is `turbovec.build_parallelism`).
-/// Never touches the wire format — this is a pure scan-time compute knob.
+/// **Since 2.13.0 it bounds every scan kind**, not just this out-of-core
+/// fine-scan: flat, whole-load IVF, ColBERT's ANN stage and 1-bit searches
+/// run on the same per-backend pool ([`scan_threads`],
+/// `cache::ScanHandle::search`). It still has no effect on `ambuild` (that
+/// is `turbovec.build_parallelism`). Never touches the wire format; this
+/// is a pure scan-time compute knob.
 pub static SCAN_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Modest ceiling on `turbovec.scan_parallelism = 0` (auto) fan-out.
@@ -621,16 +620,30 @@ const MIN_ROWS_PER_SCAN_CHUNK: usize = 2048;
 /// a tiny compact set isn't split into thread-startup-dominated
 /// slivers).
 pub fn resolve_scan_parallelism(n_compact: usize) -> usize {
+    cap_scan_chunks(scan_threads(), n_compact)
+}
+
+/// Threads one query's scan may use, from `turbovec.scan_parallelism`:
+/// the configured value, or for `0` (auto) `min(cores,
+/// AUTO_SCAN_PARALLELISM_CAP)`. Applies to every scan kind since 2.13.0
+/// (flat, whole-load IVF, out-of-core IVF, ColBERT's ANN stage, 1-bit).
+/// Before that only the out-of-core IVF fine-scan was bounded, and flat
+/// and whole-load IVF ran each query on rayon's global pool, one thread
+/// per core: measured on a 96-vCPU host, ~100 CPU-ms per 7 ms query, ~58%
+/// of it work-stealing bookkeeping. The out-of-core path additionally caps
+/// this by its rows-per-chunk floor ([`resolve_scan_parallelism`]); the
+/// whole-index paths leave the split to turbovec, which runs serially
+/// below 1,024 blocks.
+pub fn scan_threads() -> usize {
     let configured = SCAN_PARALLELISM.get();
-    let want = if configured > 0 {
+    if configured > 0 {
         configured as usize
     } else {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
         cores.min(AUTO_SCAN_PARALLELISM_CAP)
-    };
-    cap_scan_chunks(want, n_compact)
+    }
 }
 
 /// Cap the desired chunk count `want` by how many chunks the compact
@@ -703,19 +716,6 @@ pub fn register_gucs() {
             b"Phase 2 turbovec indexes are rebuilt from the heap on first use after a server restart. Setting this on surfaces those events so operators can decide whether to issue an explicit REINDEX.\0",
         ),
         &WARN_ON_REBUILD,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-
-    GucRegistry::define_int_guc(
-        c_str(b"turbovec.search_concurrency\0"),
-        c_str(b"Number of OS threads used inside a turbovec ANN scan.\0"),
-        c_str(
-            b"The TurboQuant SIMD kernel parallelises within a single query batch using rayon. This GUC caps that fan-out. 1 disables intra-query parallelism.\0",
-        ),
-        &SEARCH_CONCURRENCY,
-        1,
-        128,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -888,9 +888,9 @@ pub fn register_gucs() {
 
     GucRegistry::define_int_guc(
         c_str(b"turbovec.scan_parallelism\0"),
-        c_str(b"OS threads used to fine-scan probed IVF cells per query (0 = auto, capped modest; 1 = serial).\0"),
+        c_str(b"OS threads one index scan may use (0 = auto = min(cores, 4); 1 = serial).\0"),
         c_str(
-            b"The out-of-core IVF scan gathers the probed cells into one compact contiguous code buffer on the backend thread, then fine-scans it for the top-k. At high dim and high probes that fine-scan dominates query latency and runs single-threaded on one core. This GUC splits the compact rows into N disjoint chunks, runs the SIMD LUT top-k per chunk in a bounded rayon pool (pure compute over owned bytes; no buffer-manager access inside threads), and merges the per-chunk top-k heaps into the global top-k. 1 = serial (no fan-out); a positive value pins the chunk/thread count; 0 (the default) = auto = min(cores, 4), a deliberately MODEST cap: intra-query parallelism cuts single-query latency but many concurrent queries each grabbing every core thrashes and hurts aggregate QPS, so the default favours the isolated-latency case without wrecking high concurrency (raise it for a latency-bound low-concurrency deployment). The returned top-k SET is identical to a serial scan (the executor re-ranks by exact distance regardless of tie order). No effect on the flat (non-IVF) path, the whole-load IVF path (small indexes already load whole and are fast), or ambuild (that is turbovec.build_parallelism). Never changes on-disk bytes.\0",
+            b"The out-of-core IVF scan gathers the probed cells into one compact contiguous code buffer on the backend thread, then fine-scans it for the top-k. At high dim and high probes that fine-scan dominates query latency and runs single-threaded on one core. This GUC splits the compact rows into N disjoint chunks, runs the SIMD LUT top-k per chunk in a bounded rayon pool (pure compute over owned bytes; no buffer-manager access inside threads), and merges the per-chunk top-k heaps into the global top-k. 1 = serial (no fan-out); a positive value pins the chunk/thread count; 0 (the default) = auto = min(cores, 4), a deliberately MODEST cap: intra-query parallelism cuts single-query latency but many concurrent queries each grabbing every core thrashes and hurts aggregate QPS, so the default favours the isolated-latency case without wrecking high concurrency (raise it for a latency-bound low-concurrency deployment). The returned top-k SET is identical to a serial scan (the executor re-ranks by exact distance regardless of tie order). Since 2.13.0 the same bound applies to every scan kind (flat, whole-load IVF, ColBERT, 1-bit), which before ran each query on one thread per core; it does not affect ambuild (that is turbovec.build_parallelism). Never changes on-disk bytes.\0",
         ),
         &SCAN_PARALLELISM,
         0,

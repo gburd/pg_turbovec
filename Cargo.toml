@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "2.12.1"
+version = "2.13.0"
 edition = "2024"
 rust-version = "1.96.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -44,16 +44,20 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.3"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "29de559040461b87b8c6931822ae435350fd3abd", features = ["mask-skip-counter"] }
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "83a1f9767e1ec1adfb3ad6224b9980db5876d517", features = ["mask-skip-counter"] }
 # ^ turbovec 1.1.2 (upstream c3b043b: staged search keeps the scan's recall on
-#   bunched corpora) + FIVE additive fork carries on branch
-#   gburd/turbovec@pgtv-2.12.1-port: `pub fn repack` (3ed5708), the
+#   bunched corpora) + SIX additive fork carries on branch
+#   gburd/turbovec@main (= pgtv-2.12.1-port + carry #6): `pub fn repack` (3ed5708), the
 #   re-exposed IdMapIndex parts API (be133b8), the parallel cold-open repack
 #   (9638651), the parallel planes cold-open repack (455549f) -- both
 #   byte-identical to serial, pinned by turbovec's
 #   `parallel_{,planes_}repack_is_byte_identical_to_serial` -- and NEW carry
 #   #5 (29de559): `vpdpbusd` via inline asm on LLVM < 22 so the crate builds
-#   with nixpkgs' rustc (LLVM 21), pinned by `dpbusd_matches_the_scalar_definition`.
+#   with nixpkgs' rustc (LLVM 21), pinned by `dpbusd_matches_the_scalar_definition`;
+#   and #6 (6c1300c..83a1f97): a contended warm codebook memo is waited for
+#   (bounded 10 ms) instead of re-solved, pinned by
+#   `warm_lookup_waits_for_a_briefly_held_lock` and
+#   `warm_codebook_is_never_resolved_under_contention`.
 #   Upstream issues #545/#546/#547. We persist only packed codes, never
 #   turbovec's v8 file container, so its file format does not touch our wire
 #   format. Pinned by git rev so the port builds anywhere.

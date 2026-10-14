@@ -1,0 +1,10 @@
+# turbovec codebook memo contention probe (local, Intel Core Ultra 7 258V, 8 cores, rustup 1.98.0)
+# An #[ignore]d test in turbovec/src/codebook.rs (removed after use): N threads released by a Barrier call
+# codebook(4, 1024) on a WARM memo, 200 rounds each; "slow" = a call over 5 ms (a Lloyd-Max re-solve).
+# Code: gburd/turbovec @ 29de559 (before fork carry #6).
+threads=2: rounds=200 slow_calls(>5ms)=0 worst=2.882µs
+threads=4: rounds=200 slow_calls(>5ms)=129 worst=76.491553ms     (129 / 800 calls = 16.1%)
+threads=8: rounds=200 slow_calls(>5ms)=407 worst=123.689664ms    (407 / 1600 calls = 25.4%)
+# After carry #6 (83a1f97): warm_lookup_waits_for_a_briefly_held_lock and
+# warm_codebook_is_never_resolved_under_contention both pass (0 re-solves); the mutated old code fails the first
+# 3/3 runs and the second with 11 re-solves.

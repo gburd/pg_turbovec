@@ -93,20 +93,21 @@ pub(crate) fn make_pool() -> Option<rayon::ThreadPool> {
 /// QPS right at conn == vCPU count. A backend runs one query at a time,
 /// so a thread_local pool is exactly one pool per concurrent worker;
 /// the churn is gone and only the (bounded) resident worker threads
-/// remain. If a later query needs a LARGER pool than the cached one,
-/// the cache is rebuilt at the larger size (monotonic; in practice `t`
-/// is stable within a backend so this happens at most once).
+/// remain. If a later query asks for a DIFFERENT size (the session changed
+/// `turbovec.scan_parallelism`), the cache is rebuilt at that size. Since
+/// 2.13.0 whole-index scans run turbovec's search inside this pool, and
+/// turbovec splits work by `rayon::current_num_threads()`, so a pool larger
+/// than asked for would silently ignore a lowered setting.
 pub(crate) fn scan_pool_with<R>(n: usize, f: impl FnOnce(Option<&rayon::ThreadPool>) -> R) -> R {
     if n <= 1 {
         return f(None);
     }
     SCAN_POOL.with(|cell| {
         let mut slot = cell.borrow_mut();
-        // (Re)build only if absent or too small. A pool of size m >= n
-        // can run an n-way `par_iter` fine (rayon just leaves the
-        // extra workers idle), so we never shrink.
+        // (Re)build if absent or a different size. Exact size matters:
+        // turbovec's search uses every thread of the pool it runs in.
         let need_rebuild = match slot.as_ref() {
-            Some(p) => p.current_num_threads() < n,
+            Some(p) => p.current_num_threads() != n,
             None => true,
         };
         if need_rebuild {
@@ -217,11 +218,14 @@ mod tests {
 
     /// G3 fix: `scan_pool_with` caches ONE pool per backend and reuses
     /// it, instead of spawning fresh OS threads per query. Verifies the
-    /// cache is reused for the same size, grows (never shrinks) when a
-    /// larger size is asked, runs the degenerate n<=1 inline (no pool),
-    /// and that work executed on the cached pool is correct.
+    /// cache is reused for the same size, is rebuilt at EXACTLY the asked
+    /// size when it changes in either direction (2.13.0: whole-index scans
+    /// use every thread of this pool, so a pool left larger by an earlier
+    /// `SET turbovec.scan_parallelism` would ignore a lowered setting),
+    /// runs the degenerate n<=1 inline (no pool), and that work executed on
+    /// the cached pool is correct.
     #[test]
-    fn scan_pool_is_cached_and_grows_monotonically() {
+    fn scan_pool_is_cached_and_matches_the_requested_size() {
         use super::scan_pool_with;
         // n<=1 -> inline, no pool handed to the closure.
         let inline = scan_pool_with(1, |pool| {
@@ -247,15 +251,16 @@ mod tests {
         let ptr2b = scan_pool_with(2, |pool| pool.unwrap().current_num_threads());
         assert_eq!(ptr2, ptr2b, "same size should reuse the cached pool");
 
-        // Larger size -> rebuild bigger.
-        let big = scan_pool_with(4, |pool| pool.unwrap().current_num_threads());
-        assert!(big >= 4, "must grow to at least the larger request");
+        // Larger size -> rebuilt at exactly that size.
+        let big = scan_pool_with(8, |pool| pool.unwrap().current_num_threads());
+        assert_eq!(big, 8, "a larger request must rebuild at exactly that size");
 
-        // Smaller-than-cached size -> keep the bigger cached pool (never shrink).
-        let after_small = scan_pool_with(3, |pool| pool.unwrap().current_num_threads());
-        assert!(
-            after_small >= big,
-            "a smaller request must not shrink the cached pool"
+        // Smaller size -> rebuilt smaller (before 2.13.0 the 8-thread pool
+        // was kept, so lowering scan_parallelism had no effect).
+        let after_small = scan_pool_with(2, |pool| pool.unwrap().current_num_threads());
+        assert_eq!(
+            after_small, 2,
+            "a smaller request must shrink the cached pool"
         );
     }
 }

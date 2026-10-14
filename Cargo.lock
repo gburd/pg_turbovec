@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "pg_turbovec"
-version = "2.12.1"
+version = "2.13.0"
 dependencies = [
  "criterion",
  "gemm",
@@ -2364,7 +2364,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 [[package]]
 name = "turbovec"
 version = "1.1.2"
-source = "git+https://github.com/gburd/turbovec.git?rev=29de559040461b87b8c6931822ae435350fd3abd#29de559040461b87b8c6931822ae435350fd3abd"
+source = "git+https://github.com/gburd/turbovec.git?rev=83a1f9767e1ec1adfb3ad6224b9980db5876d517#83a1f9767e1ec1adfb3ad6224b9980db5876d517"
 dependencies = [
  "ordered-float",
  "rand 0.8.8",

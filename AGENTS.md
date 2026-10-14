@@ -133,22 +133,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.12.1, 2026-10-14)
+### Current (as of v2.13.0, 2026-10-14)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.12.1 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.12.0 | 2.12.1 | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.13.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.12.1 | 2.13.0 | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.12.1)
+### Where the project actually is (v2.13.0)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and

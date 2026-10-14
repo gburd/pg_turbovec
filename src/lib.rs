@@ -8990,7 +8990,7 @@ mod tests {
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
-            "2.12.0", "2.12.1",
+            "2.12.0", "2.12.1", "2.13.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10909,6 +10909,155 @@ mod tests {
             r1, r2,
             "rebuilding the CentroidGraph from the same persisted centroids \
              must reproduce the identical scan result (same order, not just same set)"
+        );
+    }
+
+    /// OS threads in this backend right now (`/proc/self/task`).
+    fn backend_thread_count() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    /// 2.13.0: a FLAT scan (and every other whole-index scan) runs on the
+    /// bounded per-backend scan pool sized by `turbovec.scan_parallelism`,
+    /// not on rayon's global pool (one thread per core). Before the fix a
+    /// flat search of >= 1,024 blocks spawned `available_parallelism()`
+    /// rayon threads in the backend (97 on a 96-vCPU host). The corpus is
+    /// 40,000 rows = 1,250 blocks, past turbovec's single-query parallel gate.
+    ///
+    /// Two checks:
+    /// 1. Thread growth across the FIRST scan in this backend, at
+    ///    `scan_parallelism = 1`: at most the 1-thread pool's worker. The
+    ///    unbounded code started rayon's global pool here (one thread per
+    ///    core), which is the bug. This must be the backend's first scan
+    ///    (rayon's global pool, once started, never stops); pgrx opens a new
+    ///    client connection, so a new backend, for every `#[pg_test]`.
+    /// 2. After settings 8, 1, 2, auto, 1 in that order, the pool the scan
+    ///    ran on has exactly the requested size. A pool that only ever grew
+    ///    (pre-2.13.0 `scan_pool_with`) fails at the first `1` after `8`.
+    #[pg_test]
+    fn flat_scan_threads_are_bounded_by_scan_parallelism() {
+        use_turbovec();
+        ivf2_make_corpus("fsb", 40_000);
+        Spi::run(
+            "CREATE INDEX fsb_idx ON fsb USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let sql =
+            "SELECT id FROM fsb ORDER BY emb <=> (SELECT emb FROM fsb WHERE id = 777) LIMIT 10";
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let pull = || -> Vec<i64> {
+            Spi::connect(|c| {
+                c.select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // (1) first scan in this backend, serial setting
+        Spi::run("SET turbovec.scan_parallelism = 1").unwrap();
+        crate::cache::invalidate_all();
+        let before = backend_thread_count();
+        let ids = pull();
+        let grew = backend_thread_count().saturating_sub(before);
+        assert_eq!(ids.len(), 10, "{ids:?}");
+        assert_distinct_ids(&ids);
+        assert!(
+            grew <= 1,
+            "scan_parallelism=1: the first flat scan added {grew} threads to the backend \
+             ({cores} cores) -- it ran on rayon's global pool, not the bounded scan pool"
+        );
+
+        // (2) the pool size follows the setting in both directions
+        for (setting, cap) in [
+            ("8", 8usize),
+            ("1", 1),
+            ("2", 2),
+            ("0", cores.min(4)),
+            ("1", 1),
+        ] {
+            Spi::run(&format!("SET turbovec.scan_parallelism = {setting}")).unwrap();
+            crate::cache::invalidate_all();
+            let ids = pull();
+            assert_eq!(ids.len(), 10, "scan_parallelism={setting}: {ids:?}");
+            assert_distinct_ids(&ids);
+            if cap > 1 {
+                let pool_threads = crate::index::build_pool::scan_pool_with(cap, |p| {
+                    p.expect("a pool for n > 1").current_num_threads()
+                });
+                assert_eq!(pool_threads, cap, "scan_parallelism={setting}: pool size");
+            }
+            assert_eq!(
+                crate::guc::scan_threads(),
+                cap,
+                "scan_parallelism={setting}"
+            );
+        }
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+    }
+
+    /// The cached scan pool must follow the requested size DOWN as well as
+    /// up. Before 2.13.0 it only grew, so after `scan_parallelism = 8` a
+    /// later `= 2` still ran turbovec's search on 8 threads. The pool is
+    /// reported by size after a real scan on it, so this checks the pool the
+    /// scan used, not just the GUC.
+    #[pg_test]
+    fn lowering_scan_parallelism_shrinks_the_pool_a_scan_uses() {
+        use_turbovec();
+        ivf2_make_corpus("fsd", 40_000);
+        Spi::run(
+            "CREATE INDEX fsd_idx ON fsd USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        let sql = "SELECT count(*) FROM (SELECT id FROM fsd ORDER BY emb <=> (SELECT emb FROM fsd WHERE id = 9) LIMIT 10) s";
+        for n in [8usize, 2] {
+            Spi::run(&format!("SET turbovec.scan_parallelism = {n}")).unwrap();
+            crate::cache::invalidate_all();
+            assert_eq!(Spi::get_one::<i64>(sql).unwrap(), Some(10));
+            // A request for the same size must REUSE the pool the scan just
+            // used; its size is what the scan ran on.
+            let used = crate::index::build_pool::scan_pool_with(n, |p| {
+                p.expect("pool").current_num_threads()
+            });
+            assert_eq!(
+                used, n,
+                "after SET scan_parallelism = {n} the scan pool has {used} threads"
+            );
+        }
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+    }
+
+    /// 2.13.0 removed `turbovec.search_concurrency`: it was registered in
+    /// Phase 1 and never read, while its description claimed it capped the
+    /// fan-out (it did not; `turbovec.scan_parallelism` now does). Checks it
+    /// is gone from `pg_settings` and that `scan_parallelism`'s description
+    /// was updated to say what it now bounds.
+    #[pg_test]
+    fn search_concurrency_guc_is_removed() {
+        let registered = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_settings WHERE name = 'turbovec.search_concurrency'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            registered, 0,
+            "turbovec.search_concurrency is still registered"
+        );
+        let still_documented = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_settings WHERE name = 'turbovec.scan_parallelism' \
+             AND short_desc LIKE '%one index scan%'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            still_documented, 1,
+            "scan_parallelism's description was not updated"
         );
     }
 

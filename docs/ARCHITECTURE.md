@@ -17,7 +17,7 @@ only storage strategy.
 > v1.3.0-era design). For anything that must be exact today, prefer the code
 > and these current references: wire format + meta page — `src/index/page.rs`
 > (`VERSION = 8`); build pipeline — `src/index/build.rs`; the GUC surface —
-> `src/guc.rs` (20 GUCs) and the README Configuration table; index kinds —
+> `src/guc.rs` (19 GUCs) and the README Configuration table; index kinds —
 > the `KIND_*` constants in `src/index/page.rs` (flat/single, ColBERT, graph
 > [DEPRECATED v2.5.0], 1-bit BQ) plus IVF (`WITH (lists = N)`).
 **Target Postgres:** 13–18, plus 19beta4 (experimental); every leg tested in
@@ -631,14 +631,13 @@ ambulkdelete `ShareUpdateExclusiveLock` — unchanged.
 | `turbovec.bit_width_default`     | int  | 4       | 2..=4          | applied when `WITH (bit_width)` is omitted |
 | `turbovec.cache_size_mb`         | int  | 256     | 0..=65536      | 0 disables caching (forces rebuild every scan); also the size threshold `turbovec.out_of_core=auto` compares codes-bytes against |
 | `turbovec.warn_on_rebuild`       | bool | true    | -              | emit `NOTICE` when a per-backend `IdMapIndex` is reconstructed from the relfile pages |
-| `turbovec.search_concurrency`    | int  | 1       | 1..=128        | caps rayon fan-out inside a single batched search |
 | `turbovec.normalize_on_insert`   | bool | true    | -              | unit-normalise vectors before passing to `add_with_ids` |
 | `turbovec.search_k`              | int  | 32      | 1..=100000     | candidate count per scan batch; the reorder-recheck floor lever (Tier-1 #1a) |
 | `turbovec.probes`                | int  | 16      | 1..=65536      | IVF: number of coarse cells scanned per query |
 | `turbovec.iterative_scan`        | enum | off     | off, relaxed_order | off is the default since v1.20.1 (the old `relaxed_order` default drove a 450× latency regression — see CHANGELOG) |
 | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10000000   | cap on total candidates examined under iterative refill |
 | `turbovec.build_parallelism`     | int  | 0       | 0..=128        | 0 = auto; bounds the rayon pool used by IVF build (k-means + assign-sweep) |
-| `turbovec.scan_parallelism`      | int  | 0       | 0..=128        | 0 = auto = `min(cores,4)`; parallelizes the out-of-core per-query fine-scan across probed cells |
+| `turbovec.scan_parallelism`      | int  | 0       | 0..=128        | 0 = auto = `min(cores,4)`; threads ONE index scan may use, on every scan kind (flat, whole-load and out-of-core IVF, ColBERT, 1-bit) since 2.13.0 |
 | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    | widens the initial candidate set to `ceil(search_k * oversample)` |
 | `turbovec.max_probes`            | int  | 64      | 1..=65536      | cap on IVF probe-set widening under iterative refill |
 | `turbovec.out_of_core`           | enum | auto    | off, auto, on  | auto goes cell-scoped only when an IVF index's codes exceed half of `turbovec.cache_size_mb` |

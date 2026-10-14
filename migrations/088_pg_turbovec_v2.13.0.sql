@@ -1,0 +1,12 @@
+-- pg_turbovec v2.13.0
+--
+-- MINOR: every index scan runs on a bounded per-query thread pool
+-- (turbovec.scan_parallelism, default min(cores, 4); before, flat and
+-- whole-load IVF used one thread per core per query); the out-of-core IVF
+-- ~100 ms latency tail is fixed (turbovec fork carry #6: a contended warm
+-- codebook memo is waited for instead of re-solved); and the no-op GUC
+-- turbovec.search_concurrency is removed (a postgresql.conf that still sets
+-- it starts normally; the name becomes an ignored placeholder).
+--
+-- No SQL-object change (GUCs are not SQL objects), no wire-format change
+-- (MetaPageData::version stays 8), index bytes unchanged, so NO REINDEX.

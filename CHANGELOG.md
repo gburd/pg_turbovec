@@ -4,6 +4,93 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.13.0] — RELEASE_DATE
+
+MINOR: **every index scan now runs on a bounded per-query thread pool**, the
+out-of-core IVF ~100 ms latency tail is fixed, and the no-op
+`turbovec.search_concurrency` GUC is removed. No wire-format change
+(`MetaPageData::version` stays **8**), index bytes unchanged, **no REINDEX**.
+Minor rather than patch because it removes a GUC and changes how many threads
+a query uses by default.
+
+### Changed
+
+- **`turbovec.scan_parallelism` now bounds every scan kind**: flat,
+  whole-load IVF, out-of-core IVF, ColBERT's ANN stage, 1-bit, the
+  `turbovec.knn()` function, and the repack done when a backend first opens
+  an index. Before 2.13.0 it bounded only the out-of-core IVF fine-scan.
+  Everything else ran on rayon's global pool, one thread per core, from
+  turbovec's single-query parallel gate (about 32k rows) up. The default
+  (`0` = `min(cores, 4)`) is unchanged; what it applies to is new.
+  Lowering it within a session now takes effect immediately: the cached
+  per-backend pool used to only ever grow. The deprecated graph kind is left
+  as it was.
+
+  Measured on 2.12.1, on an i7i.metal-24xl (Emerald Rapids), flat 4-bit over
+  1M × 1024-d, `search_k = 32`, `hi_dim_rerank = off`, one client,
+  postmaster pinned to 88 vCPUs. The thread count was forced with
+  `RAYON_NUM_THREADS`, which stands in for what 2.13.0 does by default:
+
+  | threads per query | p50 | backend CPU per query |
+  |---|---|---|
+  | 88 (2.12.1 default) | 1.12 ms | 36.6 ms |
+  | 4 | 2.03 ms | 5.7 ms |
+  | 1 | 5.33 ms | 5.1 ms |
+
+  BENCH_2130_PLACEHOLDER
+
+  **Single-query latency on an idle many-core server goes up; CPU per query
+  goes down about 6–7×**, and concurrent queries no longer compete for every
+  core. About 58% of a 2.12.1 query's CPU was rayon's work-stealing
+  bookkeeping rather than search. To keep the old latency on an idle server,
+  set `turbovec.scan_parallelism` to the core count. For the most queries
+  per second per core, set it to `1`. Guarded by
+  `flat_scan_threads_are_bounded_by_scan_parallelism`, which counts the
+  backend's OS threads around the first 40,000-row flat scan (2.12.1 started
+  8 rayon threads at `scan_parallelism = 1` on an 8-core machine), and by
+  `lowering_scan_parallelism_shrinks_the_pool_a_scan_uses`.
+  `docs/PRODUCTION.md` § "`turbovec.scan_parallelism`: threads per query".
+
+### Removed
+
+- **`turbovec.search_concurrency`.** Registered in the first release and
+  never read anywhere. Its description claimed it capped the per-query
+  fan-out; it did not. `turbovec.scan_parallelism` does that now. Verified
+  that a `postgresql.conf` still setting it starts cleanly with no warning,
+  and `SET` still succeeds: PostgreSQL treats it as a placeholder.
+  `search_concurrency_guc_is_removed` pins it. 19 GUCs remain.
+
+### Fixed
+
+- **Out-of-core IVF queries had a ~100 ms tail.** A p95 of ~103 ms over a
+  16 ms p50 at `probes = 16` on 1M × 1024-d (i7i.metal-24xl, 300 queries
+  per setting): 80 of 300 queries (27%) hit it at the default 4 threads,
+  166 (55%) at 8, none at 1–2. Evidence:
+  `benches/results/vs_pgvectorsearch_20261014/x86/p0/remote/tailprobe/`. It was not the data. Each
+  parallel chunk of the fine-scan builds a throwaway turbovec index, which
+  fetches the Lloyd-Max codebook from turbovec's process-wide memo with a
+  single `try_lock`, and a lost race re-solved the codebook from scratch
+  (25–100 ms) even though it was cached. Fork carry #6 (turbovec `6c1300c`)
+  retries the lock for up to 10 ms before treating it as a miss: a live
+  holder keeps it for microseconds, and an owner-less lock (a lock inherited
+  across `fork`, the reason it was `try_lock`) still cannot hang the caller.
+  Reproduced in turbovec on a warm memo: 4 contending threads re-solved on
+  16% of calls (worst 76 ms), 8 threads on 25% (worst 124 ms)
+  (`benches/results/scan_pool_20261014/raw/codebook_contention_probe.txt`).
+  Pinned by `warm_lookup_waits_for_a_briefly_held_lock`, which fails on the
+  old code every time, and `warm_codebook_is_never_resolved_under_contention`.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.13.0';` and reconnect (or restart).
+No REINDEX. Optionally remove `turbovec.search_concurrency` from
+`postgresql.conf`; it is ignored. Review `turbovec.scan_parallelism` if you
+care about single-query latency on an idle, many-core server.
+
+### Tests
+
+TESTS_PLACEHOLDER
+
 ## [2.12.1] — 2026-10-14
 
 PATCH: **builds again under Nix / nixpkgs' Rust toolchain**, turbovec 1.1.2

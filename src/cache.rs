@@ -120,7 +120,11 @@ impl ReadOnlyIndex {
         // Eagerly build the codebook / rotation / blocked caches so the
         // first search on this per-backend index doesn't pay the cold
         // compute (the same amortization the old prepared path bought).
-        inner.prepare();
+        // On the bounded scan pool: the repack splits across every thread
+        // of the pool it runs in (one per core on rayon's global pool).
+        // Byte-identical at any thread count (turbovec's
+        // `parallel_{,planes_}repack_is_byte_identical_to_serial`).
+        bounded(|| inner.prepare());
         Self { inner, slot_to_id }
     }
 
@@ -1067,15 +1071,19 @@ impl OocIvfIndex {
         let (cscores, cslots): (Vec<f32>, Vec<i64>) = if t <= 1 {
             // Serial: one sub-index over all compact rows (the
             // pre-parallel path). `cslots` are compact-slot indices.
-            let res = self.search_compact_chunk(
-                &compact_codes,
-                &compact_scales,
-                0,
-                n_compact,
-                query,
-                k,
-                allow_compact.as_deref(),
-            );
+            // On a 1-thread pool so the chunk's own turbovec search cannot
+            // fan out onto rayon's global pool.
+            let res = single_thread_pool().install(|| {
+                self.search_compact_chunk(
+                    &compact_codes,
+                    &compact_scales,
+                    0,
+                    n_compact,
+                    query,
+                    k,
+                    allow_compact.as_deref(),
+                )
+            });
             (res.scores, res.indices)
         } else {
             self.search_compact_parallel(
@@ -1276,6 +1284,47 @@ pub(crate) enum ScanHandle {
     Bq(Arc<BqIndex>),
 }
 
+/// Run a search on this backend's bounded scan pool, sized by
+/// `turbovec.scan_parallelism` ([`guc::scan_threads`]). turbovec's search
+/// parallelises on whatever pool it runs in (`rayon::current_num_threads()`),
+/// so without this it used rayon's GLOBAL pool -- one thread per core for
+/// every query. The pool is the same per-backend one the out-of-core
+/// fine-scan uses (`build_pool::scan_pool_with`), built once and rebuilt
+/// only when the setting changes. With 1 thread, `f` runs on a reused
+/// 1-thread pool's worker, so turbovec sees one thread and scans inline.
+///
+/// `f` runs on a pool WORKER thread, not the backend thread, so it must not
+/// touch PostgreSQL. The GUC is read here, before the hand-off, because
+/// pgrx refuses a GUC read from any other thread. `error!()` inside `f` is
+/// tolerable (pgrx turns it into a panic that rayon re-raises on the backend
+/// thread), but callers keep it outside where they can. Graph searches
+/// read a GUC and are deliberately NOT routed through here.
+pub(crate) fn bounded<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    let t = guc::scan_threads();
+    crate::index::build_pool::scan_pool_with(t, |pool| match pool {
+        Some(p) => p.install(f),
+        // t <= 1: a single-thread pool so turbovec's
+        // `rayon::current_num_threads()` reads 1 and it scans inline, rather
+        // than running `f` here, where nested rayon calls would escape to
+        // the global pool.
+        None => single_thread_pool().install(f),
+    })
+}
+
+/// One reused 1-thread rayon pool per backend for `scan_parallelism = 1`.
+fn single_thread_pool() -> &'static rayon::ThreadPool {
+    thread_local! {
+        static ONE: &'static rayon::ThreadPool = Box::leak(Box::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .thread_name(|_| "turbovec-scan-1".into())
+                .build()
+                .expect("1-thread rayon pool"),
+        ));
+    }
+    ONE.with(|p| *p)
+}
+
 impl ScanHandle {
     pub fn len(&self) -> usize {
         match self {
@@ -1294,6 +1343,15 @@ impl ScanHandle {
     }
 
     pub fn search(&self, queries: &[f32], k: usize) -> (Vec<f32>, Vec<u64>) {
+        match self {
+            // Reads turbovec.graph_ef, which pgrx only allows on the backend
+            // thread, and the graph kind is deprecated: leave it where it was.
+            ScanHandle::Graph(a) => a.search(queries, k),
+            _ => bounded(|| self.search_unbounded(queries, k)),
+        }
+    }
+
+    fn search_unbounded(&self, queries: &[f32], k: usize) -> (Vec<f32>, Vec<u64>) {
         match self {
             ScanHandle::ReadOnly(a) => a.search(queries, k),
             ScanHandle::Mutable(a) => a.read().search(queries, k),
@@ -1349,6 +1407,15 @@ impl ScanHandle {
     /// mirror), whose slot order has diverged from the build-time cell
     /// layout — the caller must fall back to the flat [`Self::search`].
     pub fn search_masked(
+        &self,
+        queries: &[f32],
+        k: usize,
+        mask: &[bool],
+    ) -> Option<(Vec<f32>, Vec<u64>)> {
+        bounded(|| self.search_masked_unbounded(queries, k, mask))
+    }
+
+    fn search_masked_unbounded(
         &self,
         queries: &[f32],
         k: usize,

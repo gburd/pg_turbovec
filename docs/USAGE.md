@@ -162,11 +162,10 @@ Operators on `vector`:
 | `turbovec.bit_width_default`     | int  | 4       | default `bit_width` for indexes built without an explicit reloption |
 | `turbovec.cache_size_mb`         | int  | 256     | per-backend cache cap for materialised indexes |
 | `turbovec.warn_on_rebuild`       | bool | true    | NOTICE on rematerialisation |
-| `turbovec.search_concurrency`    | int  | 1       | rayon fan-out cap inside a single batched search |
 | `turbovec.normalize_on_insert`   | bool | true    | unit-normalise on ingestion / query |
 
 These are the GUCs most relevant to the SQL `knn()`/type surface; all are
-`USERSET` (settable per-session). `pg_turbovec` registers **20** GUCs in
+`USERSET` (settable per-session). `pg_turbovec` registers **19** GUCs in
 total — the index-scan tuning knobs (`probes`, `search_k`, `oversample`,
 `iterative_scan`, `out_of_core`, `hi_dim_rerank`, `build_parallelism`, …) are
 listed in the README Configuration table and in `src/guc.rs`. Note they are

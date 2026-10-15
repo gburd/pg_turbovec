@@ -1,0 +1,13 @@
+14:09:09.702848|building index: initializing|0|0|0|1000000
+14:09:10.792847|building index: clustering (k-means)|1000000|1000000|987712|1000000
+14:09:11.881793|building index: clustering (k-means)|1000000|1000000|987712|1000000
+14:09:12.978402|building index: clustering (subtrees)|1000000|1000000|987712|1000000
+14:09:14.078674|building index: clustering (subtrees)|1000000|1000000|987712|1000000
+14:09:15.173297|building index: clustering (subtrees)|1000000|1000000|987712|1000000
+14:09:16.266505|building index: clustering (subtrees)|1000000|1000000|987712|1000000
+14:09:17.374473|building index: clustering (subtrees)|1000000|1000000|987712|1000000
+14:09:18.470739|building index: clustering (subtrees)|1000000|1000000|987712|1000000
+14:09:19.563289|building index: scanning table (parallel)|1000000|1000000|0|1000000
+14:09:20.655547|building index: scanning table (parallel)|1000000|1000000|349184|1000000
+14:09:21.744587|building index: scanning table (parallel)|1000000|1000000|813056|1000000
+14:09:22.788292|building index: WAL logging|1000000|1000000|1000000|1000000

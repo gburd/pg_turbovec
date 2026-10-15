@@ -1,0 +1,66 @@
++ echo '== pg_config'
+== pg_config
++ pg_config --version
+PostgreSQL 18.6
++ pg_config --configure
+ '--prefix=/opt/pg18' '--with-liburing' '--with-lz4' '--with-zstd' '--with-openssl' '--with-icu' 'CFLAGS=-O2 -g -fno-omit-frame-pointer'
++ pg_config --cflags
+-Wall -Wmissing-prototypes -Wpointer-arith -Wdeclaration-after-statement -Werror=vla -Wendif-labels -Wmissing-format-attribute -Wimplicit-fallthrough=3 -Wcast-function-type -Wshadow=compatible-local -Wformat-security -Wmissing-variable-declarations -fno-strict-aliasing -fwrapv -fexcess-precision=standard -Wno-format-truncation -Wno-stringop-truncation -O2 -g -fno-omit-frame-pointer
++ echo '== pgvector'
+== pgvector
++ cd /home/fedora/src/pgvector
++ git describe --tags
+v0.8.7
++ git rev-parse HEAD
+f37c13f68b57d2c3472b2214fbcff699d6d34876
++ echo '== pg_vectorsearch'
+== pg_vectorsearch
++ cd /home/fedora/src/pg_vectorsearch
++ git rev-parse HEAD
+7a9716b811267e66bc3b51b807ec4138ee7d9012
++ git log -1 '--format=%ci %s'
+2026-10-13 18:12:23 +0200 Update README.md
++ cat VERSION
+0.2.0-dev
++ echo '== pg_turbovec'
+== pg_turbovec
++ cd /home/fedora/src/pg_turbovec
++ git describe --tags
+v2.13.0
++ git rev-parse HEAD
+25452ebdddf456e96231498d32456d950b5881a1
++ echo '== rustc'
+== rustc
++ rustc -vV
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+binary: rustc
+commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+commit-date: 2026-08-18
+host: x86_64-unknown-linux-gnu
+release: 1.98.0
+LLVM version: 22.1.8
++ cargo pgrx --version
+cargo-pgrx 0.19.3
++ echo '== .so md5'
+== .so md5
++ grep -E 'vector|turbovec'
+++ pg_config --pkglibdir
++ md5sum /opt/pg18/lib/postgresql/amcheck.so /opt/pg18/lib/postgresql/auth_delay.so /opt/pg18/lib/postgresql/auto_explain.so /opt/pg18/lib/postgresql/autoinc.so /opt/pg18/lib/postgresql/basebackup_to_shell.so /opt/pg18/lib/postgresql/basic_archive.so /opt/pg18/lib/postgresql/bloom.so /opt/pg18/lib/postgresql/btree_gin.so /opt/pg18/lib/postgresql/btree_gist.so /opt/pg18/lib/postgresql/citext.so /opt/pg18/lib/postgresql/cube.so /opt/pg18/lib/postgresql/cyrillic_and_mic.so /opt/pg18/lib/postgresql/dblink.so /opt/pg18/lib/postgresql/dict_int.so /opt/pg18/lib/postgresql/dict_snowball.so /opt/pg18/lib/postgresql/dict_xsyn.so /opt/pg18/lib/postgresql/earthdistance.so /opt/pg18/lib/postgresql/euc2004_sjis2004.so /opt/pg18/lib/postgresql/euc_cn_and_mic.so /opt/pg18/lib/postgresql/euc_jp_and_sjis.so /opt/pg18/lib/postgresql/euc_kr_and_mic.so /opt/pg18/lib/postgresql/euc_tw_and_big5.so /opt/pg18/lib/postgresql/file_fdw.so /opt/pg18/lib/postgresql/fuzzystrmatch.so /opt/pg18/lib/postgresql/hstore.so /opt/pg18/lib/postgresql/insert_username.so /opt/pg18/lib/postgresql/_int.so /opt/pg18/lib/postgresql/isn.so /opt/pg18/lib/postgresql/latin2_and_win1250.so /opt/pg18/lib/postgresql/latin_and_mic.so /opt/pg18/lib/postgresql/libpqwalreceiver.so /opt/pg18/lib/postgresql/lo.so /opt/pg18/lib/postgresql/ltree.so /opt/pg18/lib/postgresql/moddatetime.so /opt/pg18/lib/postgresql/pageinspect.so /opt/pg18/lib/postgresql/passwordcheck.so /opt/pg18/lib/postgresql/pg_buffercache.so /opt/pg18/lib/postgresql/pgcrypto.so /opt/pg18/lib/postgresql/pg_freespacemap.so /opt/pg18/lib/postgresql/pg_logicalinspect.so /opt/pg18/lib/postgresql/pgoutput.so /opt/pg18/lib/postgresql/pg_overexplain.so /opt/pg18/lib/postgresql/pg_prewarm.so /opt/pg18/lib/postgresql/pgrowlocks.so /opt/pg18/lib/postgresql/pg_stat_statements.so /opt/pg18/lib/postgresql/pgstattuple.so /opt/pg18/lib/postgresql/pg_surgery.so /opt/pg18/lib/postgresql/pg_trgm.so /opt/pg18/lib/postgresql/pg_turbovec.so /opt/pg18/lib/postgresql/pg_vectorsearch-0.2.0-dev.so /opt/pg18/lib/postgresql/pg_visibility.so /opt/pg18/lib/postgresql/pgvs_test_helpers.so /opt/pg18/lib/postgresql/pg_walinspect.so /opt/pg18/lib/postgresql/plpgsql.so /opt/pg18/lib/postgresql/postgres_fdw.so /opt/pg18/lib/postgresql/refint.so /opt/pg18/lib/postgresql/seg.so /opt/pg18/lib/postgresql/sslinfo.so /opt/pg18/lib/postgresql/tablefunc.so /opt/pg18/lib/postgresql/tcn.so /opt/pg18/lib/postgresql/test_decoding.so /opt/pg18/lib/postgresql/tsm_system_rows.so /opt/pg18/lib/postgresql/tsm_system_time.so /opt/pg18/lib/postgresql/unaccent.so /opt/pg18/lib/postgresql/utf8_and_big5.so /opt/pg18/lib/postgresql/utf8_and_cyrillic.so /opt/pg18/lib/postgresql/utf8_and_euc2004.so /opt/pg18/lib/postgresql/utf8_and_euc_cn.so /opt/pg18/lib/postgresql/utf8_and_euc_jp.so /opt/pg18/lib/postgresql/utf8_and_euc_kr.so /opt/pg18/lib/postgresql/utf8_and_euc_tw.so /opt/pg18/lib/postgresql/utf8_and_gb18030.so /opt/pg18/lib/postgresql/utf8_and_gbk.so /opt/pg18/lib/postgresql/utf8_and_iso8859_1.so /opt/pg18/lib/postgresql/utf8_and_iso8859.so /opt/pg18/lib/postgresql/utf8_and_johab.so /opt/pg18/lib/postgresql/utf8_and_sjis2004.so /opt/pg18/lib/postgresql/utf8_and_sjis.so /opt/pg18/lib/postgresql/utf8_and_uhc.so /opt/pg18/lib/postgresql/utf8_and_win.so /opt/pg18/lib/postgresql/vector.so
+493249c9362349e891d8ebf536777d03  /opt/pg18/lib/postgresql/pg_turbovec.so
+62eb442fb4a9432fdf799343965635db  /opt/pg18/lib/postgresql/pg_vectorsearch-0.2.0-dev.so
+0e347694b106ae3ad7de18465d60850f  /opt/pg18/lib/postgresql/vector.so
++ echo '== meson config'
+== meson config
++ grep -iE 'simd|native|blas' /home/fedora/pgvs_meson.log
++ head -30
+Build type: native build
+Run-time dependency openblas found: NO  (tried pkg-config and cmake)
+Library openblas found: YES
+Has header "cblas.h" : YES 
+Checking for function "bli_thread_set_num_threads" with dependency -lopenblas: NO 
+Checking for function "bli_thread_set_num_threads" with dependency -lopenblas: NO (cached)
+Message: BLAS: OpenBLAS (optimized matrix operations enabled)
+    blas     : enabled
+    c_args   : -I/usr/include/openblas
+    native   : false
+    simd     : full

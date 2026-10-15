@@ -1,0 +1,10 @@
+label=b2_tvivf_co10m db=db_tv rc=0
+pre: SET turbovec.build_parallelism=32
+sql: CREATE INDEX ixtvivf2_co10m ON dtv_ivf_co10m USING turbovec (emb vec_cosine_ops) WITH (lists=3162)
+wall_s=294.115236460
+wal_bytes=11281036112 (includes the post-build CHECKPOINT record)
+index_bytes=5599854592 total_index_bytes=5599854592
+datadir_delta_bytes=2940073999 (includes WAL)
+peak_summed_RssAnon_kb=12359468 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX

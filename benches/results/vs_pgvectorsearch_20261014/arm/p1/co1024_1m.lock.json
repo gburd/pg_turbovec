@@ -1,0 +1,96 @@
+{
+ "dataset": "CO1024",
+ "N": 1000000,
+ "H": 5200,
+ "shards": [
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0000.parquet",
+   "bytes": 216612385,
+   "md5": "a9aad5f3a96cf3fe013a53d0d8c0136f"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0001.parquet",
+   "bytes": 216746705,
+   "md5": "452a56d222112af1a9263391542f7bb0"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0002.parquet",
+   "bytes": 216645218,
+   "md5": "b4c93b558879a972b39475155b9e9acb"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0003.parquet",
+   "bytes": 216311581,
+   "md5": "b6b96c90c7c79518b2c0f93f06b44ed6"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0004.parquet",
+   "bytes": 214758303,
+   "md5": "d841eaa2158ce56a93c02aa7d0744272"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0005.parquet",
+   "bytes": 216790181,
+   "md5": "bd883cf13db157e5e9c077d9243766b1"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0006.parquet",
+   "bytes": 217259568,
+   "md5": "0f5a1150740b1c1dd4d8550353586ada"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0007.parquet",
+   "bytes": 217022068,
+   "md5": "11d327cc71595eba925527edeffbe920"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0008.parquet",
+   "bytes": 217443476,
+   "md5": "99633b9295378dce6c3a145d370fd779"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0009.parquet",
+   "bytes": 216040478,
+   "md5": "e9daa3b4fb26294e32e3c8c14d02d520"
+  },
+  {
+   "repo": "CohereLabs/wikipedia-2023-11-embed-multilingual-v3",
+   "file": "en/0010.parquet",
+   "bytes": 216623894,
+   "md5": "f907a9d023c13ade5ef4ca67d677a171"
+  }
+ ],
+ "npy_md5": {
+  "corpus.npy": "0a78c6a73cf56e3627adb597ad4cb660",
+  "queries.npy": "98cb3882a0ad31ecb6ada2d35fcbcfbb",
+  "gt_ids.npy": "e24dfa2bfd9ee5910594a4481b3c9b83",
+  "gt_dist.npy": "a38b8738a97187cf7a7ed3ad69e86469",
+  "corpus_src.npy": "76f0818d66df15f534a10ae2d491d0e1",
+  "queries_src.npy": "db85df603439131f643df4e9d9a272b0"
+ },
+ "stats": {
+  "null": 0,
+  "badlen": 0,
+  "zero": 0,
+  "corpus_dup_dropped": 841,
+  "query_dup_dropped": 0,
+  "query_eq_corpus": 0,
+  "rows_read": 1006041,
+  "max_abs_norm_dev_corpus": 2.3421542638679682e-07,
+  "max_abs_norm_dev_queries": 1.976483647858629e-07,
+  "query_eq_corpus_qids": [],
+  "tie_ambiguous_k10": 3,
+  "tie_ambiguous_k100": 23,
+  "queries_with_dist0_top1": 0
+ }
+}

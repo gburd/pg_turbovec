@@ -1,0 +1,41 @@
+{
+ "tag": "co1m",
+ "n0": 1000000,
+ "probes": 32,
+ "steps": [
+  {
+   "step": "+5%",
+   "rows_inserted": 50000,
+   "insert_s": 2.30023455619812,
+   "rows_per_s": 21736.913683551094,
+   "wal_bytes": 340035128,
+   "degraded": false,
+   "recall": 0.95985,
+   "p50_ms": 18.211388,
+   "p95_ms": 24.4608614
+  },
+  {
+   "step": "+11.1%",
+   "rows_inserted": 61000,
+   "insert_s": 2.155949592590332,
+   "rows_per_s": 28293.796946666862,
+   "wal_bytes": 398692040,
+   "degraded": true,
+   "recall": 0.9202500000000001,
+   "p50_ms": 7.967847,
+   "p95_ms": 14.488508
+  }
+ ],
+ "baseline": {
+  "degraded": false,
+  "recall": 0.9611500000000001,
+  "p50_ms": 23.3428725,
+  "p95_ms": 27.15425925
+ },
+ "turbovec_check": [
+  false,
+  null,
+  1111000,
+  null
+ ]
+}

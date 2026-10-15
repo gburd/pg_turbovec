@@ -1,0 +1,1 @@
+{"round": "r0", "arm": "pv", "sys": "pv", "knob_name": "prism.nprobe", "knob": 80, "n": 5000, "recall": 0.96496, "wall_p50_ms": 4.549118999999999, "wall_p95_ms": 6.056552750000001, "wall_mean_ms": 4.6733096444, "cpu_ms_per_q_tasksum": 4.316, "cpu_ms_per_q_tg": 4.316, "threads": 2, "pss_anon_kb": 6302, "order_violations": 0, "loadavg": ["1.58", "1.42"]}

@@ -1,0 +1,15 @@
+{
+ "tag": "co10m",
+ "kind": "ivf",
+ "sys": "pv",
+ "knob": "prism.nprobe=56",
+ "table": "dpv_prism_co10m",
+ "cold_ttfr_ms": 160.722312,
+ "cold_first100_p50": 9.70571,
+ "cold_first100_p95": 18.66532105,
+ "cold_first100_max": 22.093323,
+ "newconn_q0_ms": 104.109758,
+ "newconn_q1_ms": 2.59175,
+ "newconn_rest_p50": 2.951221,
+ "newconn_rest_p95": 12.427920499999999
+}

@@ -1,0 +1,38 @@
++ echo '== PG'
+== PG
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d postgres -Atc 'SELECT version()'
+PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2), 64-bit
++ echo '== shared_buffers huge_pages'
+== shared_buffers huge_pages
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d postgres -Atc 'SELECT name,setting FROM pg_settings WHERE name IN ('\''shared_buffers'\'','\''huge_pages'\'','\''wal_level'\'','\''io_method'\'','\''effective_io_concurrency'\'','\''jit'\'','\''autovacuum'\'','\''max_parallel_maintenance_workers'\'')'
+autovacuum|off
+effective_io_concurrency|64
+huge_pages|on
+io_method|io_uring
+jit|off
+max_parallel_maintenance_workers|32
+shared_buffers|16777216
+wal_level|replica
++ echo '== extensions db_tv'
+== extensions db_tv
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT extname,extversion FROM pg_extension ORDER BY 1'
+pg_buffercache|1.6
+pg_prewarm|1.2
+pg_stat_statements|1.12
+pg_turbovec|2.13.0
+plpgsql|1.0
++ echo '== extensions db_pv'
+== extensions db_pv
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT extname,extversion FROM pg_extension ORDER BY 1'
+pg_buffercache|1.6
+pg_prewarm|1.2
+pg_stat_statements|1.12
+pg_vectorsearch|0.2.0-dev
+plpgsql|1.0
+vector|0.8.7
++ echo '== GLIBC env'
+== GLIBC env
++ env
++ grep -i GLIBC
++ echo '(none)'
+(none)

@@ -1,0 +1,113 @@
+{
+ "host": "r8gd.metal-24xl",
+ "tag": "co10m",
+ "rows": [
+  {
+   "sys": "pg_turbovec",
+   "target": 0.9,
+   "knob": 12,
+   "recall": 0.8892400000000001,
+   "p50": 31.104841,
+   "p95": 37.093051875,
+   "cpu_ms_q": 82.682,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 0.8461319574017419,
+   "calib_recall": 0.9007000000000001
+  },
+  {
+   "sys": "pg_turbovec",
+   "target": 0.95,
+   "knob": 32,
+   "recall": 0.95096,
+   "p50": 61.2683045,
+   "p95": 70.59997017500001,
+   "cpu_ms_q": 177.09,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 0.32322911759374595,
+   "calib_recall": 0.95535
+  },
+  {
+   "sys": "pg_turbovec",
+   "target": 0.98,
+   "knob": 96,
+   "recall": 0.9822,
+   "p50": 59.30268525,
+   "p95": 68.55293255000001,
+   "cpu_ms_q": 125.39699999999999,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 1.0247031773321105,
+   "calib_recall": 0.983
+  },
+  {
+   "sys": "pg_turbovec",
+   "target": 0.99,
+   "knob": null,
+   "note": "not reached (max=0.9830)"
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.9,
+   "knob": 20,
+   "recall": 0.8921800000000001,
+   "p50": 1.6677635,
+   "p95": 2.11940665,
+   "cpu_ms_q": 1.3530000000000002,
+   "threads": 2,
+   "rounds": 2,
+   "p50_spread_pct": 0.1735857632092242,
+   "calib_recall": 0.9021500000000001
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.95,
+   "knob": 56,
+   "recall": 0.9531199999999999,
+   "p50": 3.49987825,
+   "p95": 4.59830185,
+   "cpu_ms_q": 3.234,
+   "threads": 2,
+   "rounds": 2,
+   "p50_spread_pct": 0.3521979657435327,
+   "calib_recall": 0.9594000000000001
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.98,
+   "knob": 160,
+   "recall": 0.98172,
+   "p50": 8.6278195,
+   "p95": 11.437192025000002,
+   "cpu_ms_q": 8.45,
+   "threads": 2,
+   "rounds": 2,
+   "p50_spread_pct": 1.8069455440044735,
+   "calib_recall": 0.9836500000000001
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.99,
+   "knob": 320,
+   "recall": 0.9905599999999999,
+   "p50": 15.86154775,
+   "p95": 20.871607824999998,
+   "cpu_ms_q": 15.834,
+   "threads": 2,
+   "rounds": 2,
+   "p50_spread_pct": 0.0730855537095931,
+   "calib_recall": 0.9911500000000001
+  }
+ ],
+ "boot_ratio_tv_over_pv": {
+  "0.95": {
+   "ratio_median": 17.512738208483665,
+   "ci": [
+    17.42478547029188,
+    17.60731852663173
+   ],
+   "n_shared": 5000
+  }
+ }
+}

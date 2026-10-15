@@ -1,0 +1,23 @@
+14:08:34.6119|building index: initializing|0|0|0|1000000
+14:08:35.703497|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:36.794896|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:37.885915|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:38.977172|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:40.067909|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:41.15882|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:42.249982|building index: clustering (k-means)|1000000|1000000|981568|1000000
+14:08:43.343909|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:44.437688|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:45.531585|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:46.624828|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:47.716507|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:48.806667|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:49.897102|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:50.987914|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:52.082236|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:53.176275|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:54.269948|building index: clustering (subtrees)|1000000|1000000|981568|1000000
+14:08:55.360735|building index: scanning table (parallel)|1000000|1000000|0|1000000
+14:08:56.454522|building index: scanning table (parallel)|1000000|1000000|222208|1000000
+14:08:57.547445|building index: scanning table (parallel)|1000000|1000000|539648|1000000
+14:08:58.64063|building index: scanning table (parallel)|1000000|1000000|857088|1000000

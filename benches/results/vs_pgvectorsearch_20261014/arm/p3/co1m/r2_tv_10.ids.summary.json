@@ -1,0 +1,1 @@
+{"round": "r2", "arm": "tv", "sys": "tv", "knob_name": "turbovec.search_k", "knob": 10, "n": 5000, "recall": 0.9421400000000002, "wall_p50_ms": 2.473818, "wall_p95_ms": 2.5862068, "wall_mean_ms": 2.4593276524, "cpu_ms_per_q_tasksum": 7.406, "cpu_ms_per_q_tg": 7.41, "threads": 5, "pss_anon_kb": 1023641, "order_violations": 0, "loadavg": ["1.41", "2.03"]}

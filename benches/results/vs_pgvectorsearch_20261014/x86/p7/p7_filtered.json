@@ -1,0 +1,60 @@
+{
+ "data": "/data/co1024_1m",
+ "N": 1000000,
+ "cells": [
+  {
+   "sys": "tv",
+   "selectivity_pct": 50,
+   "n": 1000,
+   "recall": 1.0,
+   "short_result_rate": 0.0,
+   "p50_ms": 218.183993,
+   "p95_ms": 272.80475279999996
+  },
+  {
+   "sys": "tv",
+   "selectivity_pct": 10,
+   "n": 1000,
+   "recall": 1.0,
+   "short_result_rate": 0.0,
+   "p50_ms": 220.0735995,
+   "p95_ms": 276.1006693
+  },
+  {
+   "sys": "tv",
+   "selectivity_pct": 1,
+   "n": 1000,
+   "recall": 1.0,
+   "short_result_rate": 0.0,
+   "p50_ms": 219.3432995,
+   "p95_ms": 275.1833148
+  },
+  {
+   "sys": "pv",
+   "selectivity_pct": 50,
+   "n": 1000,
+   "recall": 0.9402,
+   "short_result_rate": 0.007,
+   "p50_ms": 1.7071930000000002,
+   "p95_ms": 2.25774745
+  },
+  {
+   "sys": "pv",
+   "selectivity_pct": 10,
+   "n": 1000,
+   "recall": 0.9063,
+   "short_result_rate": 0.024,
+   "p50_ms": 3.3914775,
+   "p95_ms": 4.13785375
+  },
+  {
+   "sys": "pv",
+   "selectivity_pct": 1,
+   "n": 1000,
+   "recall": 0.7949,
+   "short_result_rate": 0.021,
+   "p50_ms": 34.857634000000004,
+   "p95_ms": 57.40264205
+  }
+ ]
+}

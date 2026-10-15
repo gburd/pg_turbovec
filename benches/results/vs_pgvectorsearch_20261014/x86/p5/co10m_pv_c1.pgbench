@@ -1,0 +1,17 @@
+pgbench (18.6)
+transaction type: /tmp/q_co10m_pv.sql
+scaling factor: 1
+query mode: prepared
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 120 s
+number of transactions actually processed: 60681
+number of failed transactions: 0 (0.000%)
+latency average = 1.978 ms
+initial connection time = 1.364 ms
+tps = 505.679425 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.000           0 \set qid random(0, 5199)
+         0.053           0 SELECT q::text AS qv FROM queries_co10m WHERE qid = :qid 
+         1.924           0 SELECT id FROM dpv_prism_co10m ORDER BY emb <=> :qv::vector LIMIT 10;

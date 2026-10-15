@@ -1,0 +1,10 @@
+label=b1_prism_co1m db=db_pv rc=0
+pre: SET max_parallel_maintenance_workers=31
+sql: CREATE INDEX ixprism_co1m ON dpv_prism_co1m USING prism (emb vec32_cosine_ops)
+wall_s=13.193998242
+wal_bytes=317451048 (includes the post-build CHECKPOINT record)
+index_bytes=315940864 total_index_bytes=315940864
+datadir_delta_bytes=-4398455487 (includes WAL)
+peak_summed_RssAnon_kb=725596 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX

@@ -1,0 +1,15 @@
+{
+ "tag": "co1m",
+ "kind": "flat",
+ "sys": "pv",
+ "knob": "prism.nprobe=28",
+ "table": "dpv_prism_co1m",
+ "cold_ttfr_ms": 142.830674,
+ "cold_first100_p50": 2.451524,
+ "cold_first100_p95": 8.061970499999996,
+ "cold_first100_max": 10.501155,
+ "newconn_q0_ms": 100.733108,
+ "newconn_q1_ms": 1.490225,
+ "newconn_rest_p50": 1.555248,
+ "newconn_rest_p95": 2.5670655
+}

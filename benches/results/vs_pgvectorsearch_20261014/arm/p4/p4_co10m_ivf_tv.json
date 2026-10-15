@@ -1,0 +1,15 @@
+{
+ "tag": "co10m",
+ "kind": "ivf",
+ "sys": "tv",
+ "knob": "turbovec.probes=32",
+ "table": "dtv_ivf_co10m",
+ "cold_ttfr_ms": 379.406509,
+ "cold_first100_p50": 161.017939,
+ "cold_first100_p95": 277.9576829,
+ "cold_first100_max": 322.491047,
+ "newconn_q0_ms": 199.64136,
+ "newconn_q1_ms": 65.428014,
+ "newconn_rest_p50": 71.436148,
+ "newconn_rest_p95": 140.0333898
+}

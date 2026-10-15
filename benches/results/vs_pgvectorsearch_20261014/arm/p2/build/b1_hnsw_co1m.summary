@@ -1,0 +1,10 @@
+label=b1_hnsw_co1m db=db_pv rc=0
+pre: SET max_parallel_maintenance_workers=31
+sql: CREATE INDEX ixhnsw_co1m ON dpv_hnsw_co1m USING hnsw (emb vector_cosine_ops) WITH (m=16, ef_construction=64)
+wall_s=65.409176398
+wal_bytes=4449761352 (includes the post-build CHECKPOINT record)
+index_bytes=8192008192 total_index_bytes=8192008192
+datadir_delta_bytes=-649584111 (includes WAL)
+peak_summed_RssAnon_kb=187196 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX

@@ -1,0 +1,1 @@
+{"round": "r0", "arm": "tv", "sys": "tv", "knob_name": "turbovec.probes", "knob": 48, "n": 5000, "recall": 0.9661200000000001, "wall_p50_ms": 64.7297845, "wall_p95_ms": 86.7579034, "wall_mean_ms": 66.9632756962, "cpu_ms_per_q_tasksum": 123.098, "cpu_ms_per_q_tg": 123.096, "threads": 5, "pss_anon_kb": 384510, "order_violations": 0, "loadavg": ["2.93", "2.29"]}

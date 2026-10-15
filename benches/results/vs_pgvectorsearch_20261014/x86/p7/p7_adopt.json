@@ -1,0 +1,27 @@
+{
+ "data": "/data/co1024_1m",
+ "routes": {
+  "column_copy": {
+   "update_s": 109.02320289611816,
+   "wal_bytes": 9872390832,
+   "heap_bytes_after": 22302212096,
+   "build_s": 13.061959505081177,
+   "query": {
+    "p50_ms": 2.0355090000000002,
+    "p95_ms": 2.0867857,
+    "recall": 0.9984,
+    "uses_index": true
+   }
+  },
+  "expr_index": {
+   "build_s": 45.2115683555603,
+   "query": {
+    "p50_ms": 2.8329104999999997,
+    "p95_ms": 2.88161545,
+    "recall": 0.9984,
+    "uses_index": true
+   }
+  }
+ },
+ "note": "populate adopt_src from docs_co1m via real[] bridge took 38.5s (setup, not a route cost)"
+}

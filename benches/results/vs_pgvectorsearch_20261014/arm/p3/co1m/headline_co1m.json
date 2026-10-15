@@ -1,0 +1,120 @@
+{
+ "host": "r8gd.metal-24xl",
+ "tag": "co1m",
+ "rows": [
+  {
+   "sys": "pg_turbovec",
+   "target": 0.9,
+   "knob": 10,
+   "recall": 0.9421400000000002,
+   "p50": 2.4808702499999997,
+   "p95": 2.593678,
+   "cpu_ms_q": 7.4350000000000005,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 0.5685303372878829,
+   "calib_recall": 0.9421400000000002
+  },
+  {
+   "sys": "pg_turbovec",
+   "target": 0.95,
+   "knob": 16,
+   "recall": 0.99928,
+   "p50": 2.5470342500000003,
+   "p95": 2.6843624000000004,
+   "cpu_ms_q": 7.588,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 0.43036327446323375,
+   "calib_recall": 0.99928
+  },
+  {
+   "sys": "pg_turbovec",
+   "target": 0.98,
+   "knob": 16,
+   "recall": 0.99928,
+   "p50": 2.5470342500000003,
+   "p95": 2.6843624000000004,
+   "cpu_ms_q": 7.588,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 0.43036327446323375,
+   "calib_recall": 0.99928
+  },
+  {
+   "sys": "pg_turbovec",
+   "target": 0.99,
+   "knob": 16,
+   "recall": 0.99928,
+   "p50": 2.5470342500000003,
+   "p95": 2.6843624000000004,
+   "cpu_ms_q": 7.588,
+   "threads": 5,
+   "rounds": 2,
+   "p50_spread_pct": 0.43036327446323375,
+   "calib_recall": 0.99928
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.9,
+   "knob": 14,
+   "recall": 0.9118799999999999,
+   "p50": 1.216091,
+   "p95": 1.5957435750000002,
+   "cpu_ms_q": 0.897,
+   "threads": 1,
+   "rounds": 2,
+   "p50_spread_pct": 0.1280331817273568,
+   "calib_recall": 0.9118799999999999
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.95,
+   "knob": 28,
+   "recall": 0.9563599999999999,
+   "p50": 1.84159175,
+   "p95": 2.5628539750000012,
+   "cpu_ms_q": 1.545,
+   "threads": 1,
+   "rounds": 2,
+   "p50_spread_pct": 0.09901760257126477,
+   "calib_recall": 0.9563599999999999
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.98,
+   "knob": 56,
+   "recall": 0.9804,
+   "p50": 3.05715625,
+   "p95": 4.356314825,
+   "cpu_ms_q": 2.798,
+   "threads": 1,
+   "rounds": 2,
+   "p50_spread_pct": 0.06815157059768695,
+   "calib_recall": 0.9804
+  },
+  {
+   "sys": "pg_vectorsearch",
+   "target": 0.99,
+   "knob": 112,
+   "recall": 0.9920400000000001,
+   "p50": 5.5499600000000004,
+   "p95": 7.563803200000002,
+   "cpu_ms_q": 5.316,
+   "threads": 1,
+   "rounds": 2,
+   "p50_spread_pct": 0.5182920237263118,
+   "calib_recall": 0.9920400000000001
+  }
+ ],
+ "boot_ratio_tv_over_pv": {
+  "0.95": {
+   "ratio_median": 1.3838243734196012,
+   "ci": [
+    1.3766926944242182,
+    1.3905323351504812
+   ],
+   "n_shared": 5000
+  }
+ }
+}

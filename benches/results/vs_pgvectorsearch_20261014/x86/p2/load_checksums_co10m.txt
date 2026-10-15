@@ -1,0 +1,28 @@
++ echo '== co10m checksums (count,sum(id),sum c1,sum cDIM)'
+== co10m checksums (count,sum(id),sum c1,sum cDIM)
+++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT count(*),sum(id),sum((emb::real[])[1]::float8),sum((emb::real[])[1024]::float8) FROM docs_co10m'
++ echo 'pv: 10000000|49999995000000|23967.899471925324|73654.90157970987'
+pv: 10000000|49999995000000|23967.899471925324|73654.90157970987
+++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*),sum(id),sum((emb::real[])[1]::float8),sum((emb::real[])[1024]::float8) FROM docs_co10m'
++ echo 'tv: 10000000|49999995000000|23967.89947192534|73654.90157970997'
+tv: 10000000|49999995000000|23967.89947192534|73654.90157970997
+++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT count(*),sum((q::real[])[1]::float8) FROM queries_co10m'
++ echo 'pv q: 5200|22.663636636783394'
+pv q: 5200|22.663636636783394
+++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*),sum((q::real[])[1]::float8) FROM queries_co10m'
++ echo 'tv q: 5200|22.663636636783394'
+tv q: 5200|22.663636636783394
++ for db in db_pv db_tv
++ echo '== db_pv docs_co10m sizes/persist/storage'
+== db_pv docs_co10m sizes/persist/storage
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT relname,relpersistence,pg_relation_size(oid),pg_total_relation_size(oid),relpages,(SELECT attstorage FROM pg_attribute WHERE attrelid=c.oid AND attnum=2) FROM pg_class c WHERE relname='\''docs_co10m'\'''
+docs_co10m|p|81920000000|82336800768|10000000|p
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT avg(pg_column_size(emb)) FROM (SELECT emb FROM docs_co10m LIMIT 10000) s'
+4104.0000000000000000
++ for db in db_pv db_tv
++ echo '== db_tv docs_co10m sizes/persist/storage'
+== db_tv docs_co10m sizes/persist/storage
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT relname,relpersistence,pg_relation_size(oid),pg_total_relation_size(oid),relpages,(SELECT attstorage FROM pg_attribute WHERE attrelid=c.oid AND attnum=2) FROM pg_class c WHERE relname='\''docs_co10m'\'''
+docs_co10m|p|81916305408|82333089792|9999549|p
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT avg(pg_column_size(emb)) FROM (SELECT emb FROM docs_co10m LIMIT 10000) s'
+5124.8060000000000000

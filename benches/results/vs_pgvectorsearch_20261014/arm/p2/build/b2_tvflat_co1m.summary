@@ -1,0 +1,12 @@
+label=b2_tvflat_co1m db=db_tv rc=0
+pre: SET turbovec.build_parallelism=32
+sql: CREATE INDEX ixtvflat2_co1m ON dtv_flat_co1m USING turbovec (emb vec_cosine_ops)
+wall_s=8.138218621
+wal_bytes=1126858992 (includes the post-build CHECKPOINT record)
+index_bytes=559947776 total_index_bytes=559947776
+datadir_delta_bytes=-564125199 (includes WAL)
+peak_summed_RssAnon_kb=2609988 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX

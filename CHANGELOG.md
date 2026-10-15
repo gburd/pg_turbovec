@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.13.0] — RELEASE_DATE
+## [2.13.0] — 2026-10-15
 
 MINOR: **every index scan now runs on a bounded per-query thread pool**, the
 out-of-core IVF ~100 ms latency tail is fixed, and the no-op

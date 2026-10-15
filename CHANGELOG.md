@@ -70,15 +70,17 @@ a query uses by default.
   parallel chunk of the fine-scan builds a throwaway turbovec index, which
   fetches the Lloyd-Max codebook from turbovec's process-wide memo with a
   single `try_lock`, and a lost race re-solved the codebook from scratch
-  (25–100 ms) even though it was cached. Fork carry #6 (turbovec `6c1300c`)
+  (25–100 ms) even though it was cached. Fork carry #6 (turbovec
+  `6c1300c`..`7873157`)
   retries the lock for up to 10 ms before treating it as a miss: a live
   holder keeps it for microseconds, and an owner-less lock (a lock inherited
   across `fork`, the reason it was `try_lock`) still cannot hang the caller.
   Reproduced in turbovec on a warm memo: 4 contending threads re-solved on
   16% of calls (worst 76 ms), 8 threads on 25% (worst 124 ms)
   (`benches/results/scan_pool_20261014/raw/codebook_contention_probe.txt`).
-  Pinned by `warm_lookup_waits_for_a_briefly_held_lock`, which fails on the
-  old code every time, and `warm_codebook_is_never_resolved_under_contention`.
+  Pinned by `warm_lookup_waits_for_a_briefly_held_lock`, which failed 5 of 5
+  runs against the old code, and
+  `warm_codebook_is_never_resolved_under_contention`.
 
 ### Migration
 

@@ -635,6 +635,15 @@ pub fn resolve_scan_parallelism(n_compact: usize) -> usize {
 /// whole-index paths leave the split to turbovec, which runs serially
 /// below 1,024 blocks.
 pub fn scan_threads() -> usize {
+    // Plain `#[test]`s run in the cargo test harness, not a backend, on many
+    // threads at once; pgrx allows a GUC read from only one thread per
+    // process, so they would panic here. They get the auto value. (The
+    // extension `.so` that `#[pg_test]`s run in is not built with
+    // `cfg(test)`; `flat_scan_threads_are_bounded_by_scan_parallelism`
+    // asserts this reads the real GUC there.)
+    #[cfg(test)]
+    let configured = 0;
+    #[cfg(not(test))]
     let configured = SCAN_PARALLELISM.get();
     if configured > 0 {
         configured as usize

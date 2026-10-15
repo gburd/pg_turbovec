@@ -336,6 +336,8 @@ impl ReadOnlyIndex {
     /// candidate batch is already deduplicated via the `visited`
     /// bitmap in `graph::graph_search`).
     pub fn score_slots(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
+        // Graph kind (deprecated): deliberately not on the bounded scan pool;
+        // see `ScanHandle::search`.
         let n = self.len();
         let mut mask = vec![false; n];
         for &id in ids {

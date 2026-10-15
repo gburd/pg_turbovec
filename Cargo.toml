@@ -44,7 +44,7 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.3"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "83a1f9767e1ec1adfb3ad6224b9980db5876d517", features = ["mask-skip-counter"] }
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "78731577c79b18f264b4604381fe7451acb5c20d", features = ["mask-skip-counter"] }
 # ^ turbovec 1.1.2 (upstream c3b043b: staged search keeps the scan's recall on
 #   bunched corpora) + SIX additive fork carries on branch
 #   gburd/turbovec@main (= pgtv-2.12.1-port + carry #6): `pub fn repack` (3ed5708), the
@@ -54,7 +54,7 @@ turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "83a1f9767e1ec
 #   `parallel_{,planes_}repack_is_byte_identical_to_serial` -- and NEW carry
 #   #5 (29de559): `vpdpbusd` via inline asm on LLVM < 22 so the crate builds
 #   with nixpkgs' rustc (LLVM 21), pinned by `dpbusd_matches_the_scalar_definition`;
-#   and #6 (6c1300c..83a1f97): a contended warm codebook memo is waited for
+#   and #6 (6c1300c..7873157): a contended warm codebook memo is waited for
 #   (bounded 10 ms) instead of re-solved, pinned by
 #   `warm_lookup_waits_for_a_briefly_held_lock` and
 #   `warm_codebook_is_never_resolved_under_contention`.

@@ -725,7 +725,7 @@ RESET turbovec.allowlist;
 
 Every index scan (flat, IVF, ColBERT, 1-bit) runs on a small per-backend
 thread pool of `turbovec.scan_parallelism` threads. The default `0` means
-`min(cores, 4)`; `1` runs the scan on the backend's own thread; a positive
+`min(cores, 4)`; `1` runs the scan serially, on one thread; a positive
 value pins it. Only scans big enough to split use more than one thread
 (about 32k rows or more for flat, or several thousand probed rows for IVF);
 smaller ones run serially regardless.

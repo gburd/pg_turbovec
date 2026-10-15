@@ -1,0 +1,30 @@
+dim|1024|column
+metric|cosine|opclass
+nlist|3969|auto
+fan_out|63|auto
+nlevels|2|derived
+target_pages|3|default
+target_entries|256|derived
+centroid_pages|128|maintained
+first_posting|129|derived
+posting_pages|38455|derived
+centroid_format|fastscan|auto
+fastscan|off|auto
+soar_lambda|1|default
+boundary_epsilon|0.35|default
+kmeans_nredo|1|default
+distance_mode|asymmetric|default
+nprobe|32|auto
+                                             Table "public.docs"
+ Column |     Type     | Collation | Nullable | Default | Storage | Compression | Stats target | Description 
+--------+--------------+-----------+----------+---------+---------+-------------+--------------+-------------
+ id     | bigint       |           | not null |         | plain   |             |              | 
+ emb    | vector(1024) |           |          |         | plain   |             |              | 
+Indexes:
+    "docs_pkey" PRIMARY KEY, btree (id)
+    "docs_hnsw" hnsw (emb vector_cosine_ops) WITH (m='16', ef_construction='64')
+    "docs_prism" prism (emb vec32_cosine_ops)
+Not-null constraints:
+    "docs_id_not_null" NOT NULL "id"
+Access method: heap
+

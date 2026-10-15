@@ -1,0 +1,2 @@
+SET
+ERROR:  operator class "vec_cosine_ops" does not exist for access method "turbovec"

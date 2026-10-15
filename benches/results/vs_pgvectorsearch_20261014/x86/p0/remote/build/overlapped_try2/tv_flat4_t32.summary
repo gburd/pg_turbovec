@@ -1,0 +1,12 @@
+label=tv_flat4_t32 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)
+wall_s=8.587192722
+wal_bytes=1126904576 (includes the post-build CHECKPOINT record)
+index_bytes=559947776 total_index_bytes=559947776
+datadir_delta_bytes=559948708 (includes WAL)
+peak_summed_rss_kb=2346520
+SET
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX

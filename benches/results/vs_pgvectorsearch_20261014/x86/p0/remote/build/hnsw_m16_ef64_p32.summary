@@ -1,0 +1,10 @@
+label=hnsw_m16_ef64_p32 db=db_pv rc=0
+pre: SET max_parallel_maintenance_workers = 31
+sql: CREATE INDEX docs_hnsw ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+wall_s=48.667151001
+wal_bytes=4449782904 (includes the post-build CHECKPOINT record)
+index_bytes=8192008192 total_index_bytes=8192008192
+datadir_delta_bytes=5574762914 (includes WAL)
+peak_summed_RssAnon_kb=105940 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX

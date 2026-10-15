@@ -1,0 +1,180 @@
+== swap -> old 2026-10-15T00:26:04Z installed_so_md5=66fcaeee66dd1483c590303bf94e4fd6 postmaster=38939
+affinity: pid 38939's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.12.1
+search_concurrency_guc_present=1
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+after_build docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+after_build docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r0_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r0_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r0_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r0_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r0_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r0_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+== swap -> new 2026-10-15T00:30:29Z installed_so_md5=9a157a6ce35fda2cfffcaf903807156b postmaster=39946
+affinity: pid 39946's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.13.0
+search_concurrency_guc_present=0
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r0_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r0_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r0_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r0_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r0_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r0_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r0_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r0_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r0_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+== swap -> old 2026-10-15T00:34:13Z installed_so_md5=66fcaeee66dd1483c590303bf94e4fd6 postmaster=43574
+affinity: pid 43574's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.12.1
+search_concurrency_guc_present=1
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r0_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r0_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r1_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r1_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r1_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r1_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r1_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r1_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r1_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+r1_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003413.log:0
+== swap -> new 2026-10-15T00:38:37Z installed_so_md5=9a157a6ce35fda2cfffcaf903807156b postmaster=44560
+affinity: pid 44560's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.13.0
+search_concurrency_guc_present=0
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r1_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r1_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r1_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r1_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003413.log:0
+r1_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003837.log:0
+== swap -> old 2026-10-15T00:42:22Z installed_so_md5=66fcaeee66dd1483c590303bf94e4fd6 postmaster=48090
+affinity: pid 48090's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.12.1
+search_concurrency_guc_present=1
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r1_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r1_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r2_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r2_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003413.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003837.log:0
+r2_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004222.log:0
+== swap -> new 2026-10-15T00:46:30Z installed_so_md5=9a157a6ce35fda2cfffcaf903807156b postmaster=49058
+affinity: pid 49058's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.13.0
+search_concurrency_guc_present=0
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r2_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r2_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r2_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r2_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003413.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003837.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004222.log:0
+r2_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004630.log:0
+== swap -> old 2026-10-15T00:50:14Z installed_so_md5=66fcaeee66dd1483c590303bf94e4fd6 postmaster=52622
+affinity: pid 52622's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.12.1
+search_concurrency_guc_present=1
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r2_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r2_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r3_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r3_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003413.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003837.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004222.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004630.log:0
+r3_old pglog_err_count /data/pgdata/log/postgresql-2026-10-15_005014.log:0
+== swap -> new 2026-10-15T00:54:20Z installed_so_md5=9a157a6ce35fda2cfffcaf903807156b postmaster=53614
+affinity: pid 53614's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.13.0
+search_concurrency_guc_present=0
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+r3_old docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r3_old docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r3_new docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+r3_new docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002118.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002531.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002538.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_002604.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003029.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003413.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_003837.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004222.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_004630.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_005014.log:0
+r3_new pglog_err_count /data/pgdata/log/postgresql-2026-10-15_005420.log:0

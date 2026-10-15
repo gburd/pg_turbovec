@@ -1,0 +1,13 @@
+TERMINATINGINSTANCES	i-06a1442cbdad13f33
+CURRENTSTATE	32	shutting-down
+PREVIOUSSTATE	16	running
+{
+    "Return": true,
+    "GroupId": "sg-008270f5ab6b30982"
+}
+{
+    "Return": true,
+    "KeyPairId": "key-003057d7f1f43eaaa"
+}
+--- verify (instances must all be terminated; volumes/SG/key empty):
+i-06a1442cbdad13f33	terminated

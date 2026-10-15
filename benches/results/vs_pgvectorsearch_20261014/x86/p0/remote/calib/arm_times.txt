@@ -1,0 +1,6 @@
+ARM prism restart_prewarm_s=5 grid_s=4 points=18
+ARM tvflat restart_prewarm_s=3 grid_s=55 points=14
+ARM tvflatdef restart_prewarm_s=5 grid_s=10 points=1
+ARM tvivf restart_prewarm_s=5 grid_s=686 points=16
+ARM hnsw restart_prewarm_s=7 grid_s=16 points=4
+ARM prism restart_prewarm_s=4 grid_s=91 points=18

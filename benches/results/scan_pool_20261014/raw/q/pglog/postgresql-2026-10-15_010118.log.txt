@@ -1,0 +1,12 @@
+2026-10-15 01:01:18.829 UTC [68407] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2), 64-bit
+2026-10-15 01:01:18.829 UTC [68407] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+2026-10-15 01:01:18.830 UTC [68411] LOG:  database system was shut down at 2026-10-15 01:01:18 UTC
+2026-10-15 01:01:18.832 UTC [68407] LOG:  database system is ready to accept connections
+2026-10-15 01:01:21.786 UTC [68413] LOG:  autoprewarm successfully prewarmed 2154573 of 2154573 previously-loaded blocks
+2026-10-15 01:06:22.328 UTC [68407] LOG:  received fast shutdown request
+2026-10-15 01:06:22.331 UTC [68407] LOG:  aborting any active transactions
+2026-10-15 01:06:22.341 UTC [68407] LOG:  background worker "logical replication launcher" (PID 68414) exited with exit code 1
+2026-10-15 01:06:23.930 UTC [68409] LOG:  shutting down
+2026-10-15 01:06:23.930 UTC [68409] LOG:  checkpoint starting: shutdown immediate
+2026-10-15 01:06:24.141 UTC [68409] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.211 s, sync=0.001 s, total=0.212 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=3/118142A0, redo lsn=3/118142A0
+2026-10-15 01:06:24.148 UTC [68407] LOG:  database system is shut down

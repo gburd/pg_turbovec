@@ -1,0 +1,2 @@
+LOAD docs 9.876273305 s
+LOAD docs_ivf 9.943858975 s

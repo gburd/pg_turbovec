@@ -1,0 +1,54 @@
+[heartbeat] starting: bash /home/fedora/builds_p0b.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ B=/home/fedora/build_index.sh
++ psql -h /tmp -X -d db_tv -c 'DROP INDEX IF EXISTS docs_tv_flat' -c 'DROP INDEX IF EXISTS docs_tv_ivf'
+DROP INDEX
+DROP INDEX
++ psql -h /tmp -X -d db_pv -c 'DROP INDEX IF EXISTS docs_hnsw'
+DROP INDEX
++ psql -h /tmp -X -d db_pv -c CHECKPOINT
+CHECKPOINT
++ psql -h /tmp -X -d db_tv -c CHECKPOINT
+CHECKPOINT
++ bash /home/fedora/build_index.sh db_tv tv_flat4_t32 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)'
+label=tv_flat4_t32 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)
+wall_s=8.564695443
+wal_bytes=1126839816 (includes the post-build CHECKPOINT record)
+index_bytes=559947776 total_index_bytes=559947776
+datadir_delta_bytes=-564125283 (includes WAL)
+peak_summed_RssAnon_kb=2304360 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX
++ bash /home/fedora/build_index.sh db_tv tv_ivf1000_t32 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_tv_ivf ON docs USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)'
+label=tv_ivf1000_t32 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_ivf ON docs USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)
+wall_s=28.415547320
+wal_bytes=1135168392 (includes the post-build CHECKPOINT record)
+index_bytes=564076544 total_index_bytes=564076544
+datadir_delta_bytes=-574122494 (includes WAL)
+peak_summed_RssAnon_kb=1954232 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX
++ bash /home/fedora/build_index.sh db_pv hnsw_m16_ef64_p32 'SET max_parallel_maintenance_workers = 31' 'CREATE INDEX docs_hnsw ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)'
+. [bash 19:34:28 elapsed]
+label=hnsw_m16_ef64_p32 db=db_pv rc=0
+pre: SET max_parallel_maintenance_workers = 31
+sql: CREATE INDEX docs_hnsw ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+wall_s=48.667151001
+wal_bytes=4449782904 (includes the post-build CHECKPOINT record)
+index_bytes=8192008192 total_index_bytes=8192008192
+datadir_delta_bytes=5574762914 (includes WAL)
+peak_summed_RssAnon_kb=105940 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX
++ echo BUILDS_DONE
+BUILDS_DONE
+[heartbeat] DONE rc=0 (clean exit)

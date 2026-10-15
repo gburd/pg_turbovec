@@ -1,0 +1,27 @@
+# Summary of strace.txt (128 MB, not committed): strace -f -T -e futex,clock_nanosleep,nanosleep,sched_yield,epoll_wait,poll,select,pread64
+# on one backend running 60 OOC IVF queries, probes=16, scan_parallelism=4, pg_turbovec 2.12.1.
+# syscalls that took >= 50 ms, by kind:
+    196 <... futex
+      1 epoll_wait(468, [{events=EPOLLIN,
+# first 20 such lines:
+47339 <... futex resumed>)              = 0 <0.062089>
+47427 <... futex resumed>)              = 0 <0.092933>
+47428 <... futex resumed>)              = 0 <0.092849>
+47429 <... futex resumed>)              = 0 <0.085039>
+47339 <... futex resumed>)              = 0 <0.054272>
+47339 <... futex resumed>)              = 0 <0.051140>
+47339 <... futex resumed>)              = 0 <0.051286>
+47339 <... futex resumed>)              = 0 <0.052781>
+47339 <... futex resumed>)              = 0 <0.051073>
+47339 <... futex resumed>)              = 0 <0.052424>
+47428 <... futex resumed>)              = 0 <0.079647>
+47429 <... futex resumed>)              = 0 <0.088708>
+47339 <... futex resumed>)              = 0 <0.053679>
+47339 <... futex resumed>)              = 0 <0.050747>
+47419 <... futex resumed>)              = 0 <0.050225>
+47420 <... futex resumed>)              = 0 <0.050495>
+47421 <... futex resumed>)              = 0 <0.050638>
+47422 <... futex resumed>)              = 0 <0.050806>
+47423 <... futex resumed>)              = 0 <0.051162>
+47424 <... futex resumed>)              = 0 <0.051331>
+# total lines in strace.txt: 2601771

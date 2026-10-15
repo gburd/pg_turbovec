@@ -1,0 +1,325 @@
+[heartbeat] starting: bash /home/fedora/q7_datasets.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ R=/home/fedora/results/p0/q7
++ mkdir -p /home/fedora/results/p0/q7 /data/vdb
++ cd /data/vdb
++ B=https://assets.zilliz.com/benchmark
++ for u in http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 http://ann-benchmarks.com/glove-100-angular.hdf5 https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3
+++ curl -sL -o /dev/null --max-time 30 -w '%{http_code}' http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5
++ echo 'http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 404'
++ for u in http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 http://ann-benchmarks.com/glove-100-angular.hdf5 https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3
+++ curl -sL -o /dev/null --max-time 30 -w '%{http_code}' https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5
++ echo 'https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 404'
++ for u in http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 http://ann-benchmarks.com/glove-100-angular.hdf5 https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3
+++ curl -sL -o /dev/null --max-time 30 -w '%{http_code}' http://ann-benchmarks.com/glove-100-angular.hdf5
++ echo 'http://ann-benchmarks.com/glove-100-angular.hdf5 200'
++ for u in http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 http://ann-benchmarks.com/glove-100-angular.hdf5 https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3
+++ curl -sL -o /dev/null --max-time 30 -w '%{http_code}' https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings
++ echo 'https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings 401'
++ for u in http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 http://ann-benchmarks.com/glove-100-angular.hdf5 https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3
+++ curl -sL -o /dev/null --max-time 30 -w '%{http_code}' https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3
++ echo 'https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3 200'
++ for d in cohere_medium_1m cohere_large_10m openai_large_5m
++ mkdir -p cohere_medium_1m
++ for f in test.parquet neighbors.parquet
++ curl -s -C - -o cohere_medium_1m/test.parquet https://assets.zilliz.com/benchmark/cohere_medium_1m/test.parquet
++ for f in test.parquet neighbors.parquet
++ curl -s -C - -o cohere_medium_1m/neighbors.parquet https://assets.zilliz.com/benchmark/cohere_medium_1m/neighbors.parquet
+++ seq 0 9
++ for i in $(seq 0 9)
++ f=train-00-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-00-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-00-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-01-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-01-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-01-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-02-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-02-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-02-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-03-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-03-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-03-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-04-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-04-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-04-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-05-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-05-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-05-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-06-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-06-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-06-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-07-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-07-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-07-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-08-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-08-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-08-of-10.parquet  '
++ for i in $(seq 0 9)
++ f=train-09-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train-09-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train-09-of-10.parquet  '
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_medium_1m/train.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_medium_1m/train.parquet 3131995162 "9f40b7c484423428d5c4dbade66b0e31-374"'
++ for d in cohere_medium_1m cohere_large_10m openai_large_5m
++ mkdir -p cohere_large_10m
++ for f in test.parquet neighbors.parquet
++ curl -s -C - -o cohere_large_10m/test.parquet https://assets.zilliz.com/benchmark/cohere_large_10m/test.parquet
++ for f in test.parquet neighbors.parquet
++ curl -s -C - -o cohere_large_10m/neighbors.parquet https://assets.zilliz.com/benchmark/cohere_large_10m/neighbors.parquet
+++ seq 0 9
++ for i in $(seq 0 9)
++ f=train-00-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-00-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-00-of-10.parquet 3132712656 "fa67c7cffb98c268625d480ab1de8fa3-374"'
++ for i in $(seq 0 9)
++ f=train-01-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-01-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-01-of-10.parquet 3132688995 "1e09a7e47e277e35a30b2e0e6e3a4beb-374"'
++ for i in $(seq 0 9)
++ f=train-02-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-02-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-02-of-10.parquet 3132687596 "e1eb2854d008db53e2204b682bddb55d-374"'
++ for i in $(seq 0 9)
++ f=train-03-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-03-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-03-of-10.parquet 3132679477 "7922f6efabf9a7b6e07a9b1533dc0bf1-374"'
++ for i in $(seq 0 9)
++ f=train-04-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-04-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-04-of-10.parquet 3132702312 "ccee8e54b646123b986cb2766fa25a5a-374"'
++ for i in $(seq 0 9)
++ f=train-05-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-05-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-05-of-10.parquet 3132683521 "d3bd2a8a358fb6f1925284b66528780b-374"'
++ for i in $(seq 0 9)
++ f=train-06-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-06-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-06-of-10.parquet 3132691091 "6ddaa047e7f563bd55f07fb2dfe95450-374"'
++ for i in $(seq 0 9)
++ f=train-07-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-07-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-07-of-10.parquet 3132692641 "425ef3e83380ed6076e2b0e0e4b60e97-374"'
++ for i in $(seq 0 9)
++ f=train-08-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-08-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-08-of-10.parquet 3132694246 "87411bafc73861764209bc3328dda21b-374"'
++ for i in $(seq 0 9)
++ f=train-09-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train-09-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train-09-of-10.parquet 3132706678 "ab9e966c1193d0bd5c5cdecb9bc7c424-374"'
+++ curl -sI https://assets.zilliz.com/benchmark/cohere_large_10m/train.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'cohere_large_10m/train.parquet  '
++ for d in cohere_medium_1m cohere_large_10m openai_large_5m
++ mkdir -p openai_large_5m
++ for f in test.parquet neighbors.parquet
++ curl -s -C - -o openai_large_5m/test.parquet https://assets.zilliz.com/benchmark/openai_large_5m/test.parquet
++ for f in test.parquet neighbors.parquet
++ curl -s -C - -o openai_large_5m/neighbors.parquet https://assets.zilliz.com/benchmark/openai_large_5m/neighbors.parquet
+++ seq 0 9
++ for i in $(seq 0 9)
++ f=train-00-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-00-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-00-of-10.parquet 4494434813 "cdc4307b9d09993d08c7023a7c035c6b-536"'
++ for i in $(seq 0 9)
++ f=train-01-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-01-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-01-of-10.parquet 4494470993 "8a5ac7812447cd4666a8953cfc5efd44-536"'
++ for i in $(seq 0 9)
++ f=train-02-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-02-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-02-of-10.parquet 4494421533 "87ba66c060269dac5cbbc8aaa7b9be11-536"'
++ for i in $(seq 0 9)
++ f=train-03-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-03-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-03-of-10.parquet 4494494836 "ed0ccf7f88febdd3158eaf26cda6bcfd-536"'
++ for i in $(seq 0 9)
++ f=train-04-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-04-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-04-of-10.parquet 4494461722 "719258b96169875c1bba6bfaff460d14-536"'
++ for i in $(seq 0 9)
++ f=train-05-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-05-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-05-of-10.parquet 4494402480 "0452ce7604d7937f2578543d2dad039a-536"'
++ for i in $(seq 0 9)
++ f=train-06-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-06-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-06-of-10.parquet 4494430804 "53fc16a1ff9c9f018b6b10cab31fa9f0-536"'
++ for i in $(seq 0 9)
++ f=train-07-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-07-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-07-of-10.parquet 4494392488 "ec5ebfc01164de9f44940f091bc7c599-536"'
++ for i in $(seq 0 9)
++ f=train-08-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-08-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-08-of-10.parquet 4494458560 "66271ad22495d6bf6a8ec97a9e5cc82e-536"'
++ for i in $(seq 0 9)
++ f=train-09-of-10.parquet
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train-09-of-10.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train-09-of-10.parquet 4494350061 "687e782ad57b698e366ae46086e1b2b3-536"'
+++ curl -sI https://assets.zilliz.com/benchmark/openai_large_5m/train.parquet
+++ tr -d '\r'
+++ awk 'tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=$2} END{print l, e}'
++ echo 'openai_large_5m/train.parquet  '
++ curl -s -o cohere_medium_1m/train.parquet https://assets.zilliz.com/benchmark/cohere_medium_1m/train.parquet
+. [bash 19:38:40 elapsed]
+. [bash 19:39:40 elapsed]
+. [bash 19:40:40 elapsed]
+. [bash 19:41:40 elapsed]
+. [bash 19:42:40 elapsed]
+. [bash 19:43:40 elapsed]
+. [bash 19:44:40 elapsed]
+. [bash 19:45:40 elapsed]
+. [bash 19:46:40 elapsed]
+. [bash 19:47:40 elapsed]
++ md5sum cohere_large_10m/neighbors.parquet cohere_large_10m/test.parquet cohere_medium_1m/neighbors.parquet cohere_medium_1m/test.parquet cohere_medium_1m/train.parquet openai_large_5m/neighbors.parquet openai_large_5m/test.parquet
++ python3 -
+. [bash 19:48:40 elapsed]
++ cat /home/fedora/results/p0/q7/url_status.txt /home/fedora/results/p0/q7/vdb_counts.txt /home/fedora/results/p0/q7/vdb_md5.txt /home/fedora/results/p0/q7/vdb_train_heads.txt
+http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 404
+https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 404
+http://ann-benchmarks.com/glove-100-angular.hdf5 200
+https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings 401
+https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3 200
+/data/vdb/cohere_large_10m/neighbors.parquet rows 1000 schema id: int64
+neighbors_id: large_list<item: int64>
+  child 0, item: int64
+/data/vdb/cohere_large_10m/test.parquet rows 1000 schema id: int64
+emb: large_list<item: float>
+  child 0, item: float
+/data/vdb/cohere_medium_1m/neighbors.parquet rows 1000 schema id: int64
+neighbors_id: large_list<item: int64>
+  child 0, item: int64
+/data/vdb/cohere_medium_1m/test.parquet rows 1000 schema id: int64
+emb: large_list<item: float>
+  child 0, item: float
+/data/vdb/cohere_medium_1m/train.parquet rows 1000000 schema id: int64
+emb: large_list<item: float>
+  child 0, item: float
+/data/vdb/openai_large_5m/neighbors.parquet rows 1000 schema id: int64
+neighbors_id: list<item: int64>
+  child 0, item: int64
+-- schema metadata --
+pandas: '{"index_columns": [{"kind": "range", "name": null, "start": 0, "' + 491
+/data/vdb/openai_large_5m/test.parquet rows 1000 schema id: int64
+emb: large_list<item: double>
+  child 0, item: double
+cohere_medium_1m: test (1000, 768) train (1000000, 768)
+norms test min/max 12.342849 16.224667 train min/max 12.258187 17.474176
+corpus exact-dup rows (after normalise): 81  test queries exactly equal to a corpus row: 1
+test queries with max cos >= 1-1e-6: 1  >= 0.9999: 1
+ed8a95682c184a5ad3de2538e64e189c  cohere_large_10m/neighbors.parquet
+293629678416c4e1b8076e45d17ba569  cohere_large_10m/test.parquet
+d1aca052763a292b10e80bbda964f55d  cohere_medium_1m/neighbors.parquet
+c63a0efd0e611d9f35345af1fc6f7966  cohere_medium_1m/test.parquet
+51f7420cc71b6de7f7218d2dc1eb983f  cohere_medium_1m/train.parquet
+072e4fa27dcb4c116485367d06c6f1a4  openai_large_5m/neighbors.parquet
+392273730a5f6a8893acca3f4d6d8a9b  openai_large_5m/test.parquet
+cohere_medium_1m/train-00-of-10.parquet  
+cohere_medium_1m/train-01-of-10.parquet  
+cohere_medium_1m/train-02-of-10.parquet  
+cohere_medium_1m/train-03-of-10.parquet  
+cohere_medium_1m/train-04-of-10.parquet  
+cohere_medium_1m/train-05-of-10.parquet  
+cohere_medium_1m/train-06-of-10.parquet  
+cohere_medium_1m/train-07-of-10.parquet  
+cohere_medium_1m/train-08-of-10.parquet  
+cohere_medium_1m/train-09-of-10.parquet  
+cohere_medium_1m/train.parquet 3131995162 "9f40b7c484423428d5c4dbade66b0e31-374"
+cohere_large_10m/train-00-of-10.parquet 3132712656 "fa67c7cffb98c268625d480ab1de8fa3-374"
+cohere_large_10m/train-01-of-10.parquet 3132688995 "1e09a7e47e277e35a30b2e0e6e3a4beb-374"
+cohere_large_10m/train-02-of-10.parquet 3132687596 "e1eb2854d008db53e2204b682bddb55d-374"
+cohere_large_10m/train-03-of-10.parquet 3132679477 "7922f6efabf9a7b6e07a9b1533dc0bf1-374"
+cohere_large_10m/train-04-of-10.parquet 3132702312 "ccee8e54b646123b986cb2766fa25a5a-374"
+cohere_large_10m/train-05-of-10.parquet 3132683521 "d3bd2a8a358fb6f1925284b66528780b-374"
+cohere_large_10m/train-06-of-10.parquet 3132691091 "6ddaa047e7f563bd55f07fb2dfe95450-374"
+cohere_large_10m/train-07-of-10.parquet 3132692641 "425ef3e83380ed6076e2b0e0e4b60e97-374"
+cohere_large_10m/train-08-of-10.parquet 3132694246 "87411bafc73861764209bc3328dda21b-374"
+cohere_large_10m/train-09-of-10.parquet 3132706678 "ab9e966c1193d0bd5c5cdecb9bc7c424-374"
+cohere_large_10m/train.parquet  
+openai_large_5m/train-00-of-10.parquet 4494434813 "cdc4307b9d09993d08c7023a7c035c6b-536"
+openai_large_5m/train-01-of-10.parquet 4494470993 "8a5ac7812447cd4666a8953cfc5efd44-536"
+openai_large_5m/train-02-of-10.parquet 4494421533 "87ba66c060269dac5cbbc8aaa7b9be11-536"
+openai_large_5m/train-03-of-10.parquet 4494494836 "ed0ccf7f88febdd3158eaf26cda6bcfd-536"
+openai_large_5m/train-04-of-10.parquet 4494461722 "719258b96169875c1bba6bfaff460d14-536"
+openai_large_5m/train-05-of-10.parquet 4494402480 "0452ce7604d7937f2578543d2dad039a-536"
+openai_large_5m/train-06-of-10.parquet 4494430804 "53fc16a1ff9c9f018b6b10cab31fa9f0-536"
+openai_large_5m/train-07-of-10.parquet 4494392488 "ec5ebfc01164de9f44940f091bc7c599-536"
+openai_large_5m/train-08-of-10.parquet 4494458560 "66271ad22495d6bf6a8ec97a9e5cc82e-536"
+openai_large_5m/train-09-of-10.parquet 4494350061 "687e782ad57b698e366ae46086e1b2b3-536"
+openai_large_5m/train.parquet  
++ echo Q7_DONE
+Q7_DONE
+[heartbeat] DONE rc=0 (clean exit)

@@ -1,0 +1,188 @@
+[heartbeat] starting: bash /home/fedora/build_q.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ PGV=18.6
++ R=/home/fedora/results/q
++ mkdir -p /home/fedora/results/q /home/fedora/src /home/fedora/so
++ '[' '!' -x /opt/pg18/bin/postgres ']'
++ cd /home/fedora/src
++ '[' -d postgresql-18.6 ']'
++ wget -q https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.bz2
++ tar xjf postgresql-18.6.tar.bz2
++ cd postgresql-18.6
++ ./configure --prefix=/opt/pg18 --with-liburing --with-lz4 --with-zstd --with-openssl --with-icu 'CFLAGS=-O2 -g -fno-omit-frame-pointer'
++ make -j96 -s world-bin
++ sudo make -s install-world-bin
++ sudo chown -R fedora:fedora /opt/pg18
++ export PATH=/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ rustup-init -y --default-toolchain 1.98.0 --profile minimal
++ source /home/fedora/.cargo/env
+++ case ":${PATH}:" in
+++ export PATH=/home/fedora/.cargo/bin:/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
+++ PATH=/home/fedora/.cargo/bin:/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ rustup toolchain install 1.98.0 --profile minimal
++ rustup default 1.98.0
+info: using existing install for 1.98.0-x86_64-unknown-linux-gnu
+info: default toolchain set to 1.98.0-x86_64-unknown-linux-gnu
+
+  1.98.0-x86_64-unknown-linux-gnu unchanged - rustc 1.98.0 (88d9e12ae 2026-08-18)
+
++ cargo install --locked cargo-pgrx --version 0.19.3
+. [bash 00:15:13 elapsed]
++ cargo pgrx init --pg18 /opt/pg18/bin/pg_config --pg16 download
+. [bash 00:16:13 elapsed]
++ cd /home/fedora/src
++ '[' -d tv-old ']'
++ git clone -q --branch v2.12.1 https://github.com/gburd/pg_turbovec.git tv-old
+warning: refs/tags/v2.12.1 dea8b1602cfa5f25bc41bcfcf87db4077ab16291 is not a commit!
+Note: switching to '95d0fdd2817a0d3b72d5d163a1b12ecafa6a595c'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
++ '[' -d tv-new ']'
++ git clone -q --branch fix/scan-concurrency-2.12.2 https://github.com/gburd/pg_turbovec.git tv-new
++ for arm in new old
++ cd /home/fedora/src/tv-new
++ cargo pgrx install --release --pg-config /opt/pg18/bin/pg_config --no-default-features --features pg18
+. [bash 00:17:13 elapsed]
+++ pg_config --pkglibdir
++ cp /opt/pg18/lib/postgresql/pg_turbovec.so /home/fedora/so/new.so
++ for arm in new old
++ cd /home/fedora/src/tv-old
++ cargo pgrx install --release --pg-config /opt/pg18/bin/pg_config --no-default-features --features pg18
+. [bash 00:18:13 elapsed]
+++ pg_config --pkglibdir
++ cp /opt/pg18/lib/postgresql/pg_turbovec.so /home/fedora/so/old.so
++ cat /home/fedora/results/q/versions.txt
++ echo '== pg_config'
+== pg_config
++ pg_config --version
+PostgreSQL 18.6
++ pg_config --configure
+ '--prefix=/opt/pg18' '--with-liburing' '--with-lz4' '--with-zstd' '--with-openssl' '--with-icu' 'CFLAGS=-O2 -g -fno-omit-frame-pointer'
++ for arm in old new
++ echo '== tv-old'
+== tv-old
++ cd /home/fedora/src/tv-old
++ git describe --tags --always
+v2.12.1
++ git rev-parse HEAD
+95d0fdd2817a0d3b72d5d163a1b12ecafa6a595c
++ git log -1 '--format=%ci %s'
+2026-10-14 13:30:57 -0400 release: v2.12.1 -- Nix evidence from the release tree, statement-level schema check
++ grep -n '^turbovec = ' Cargo.toml
+47:turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "29de559040461b87b8c6931822ae435350fd3abd", features = ["mask-skip-counter"] }
++ grep '^version' Cargo.toml
++ head -1
+version = "2.12.1"
++ for arm in old new
++ echo '== tv-new'
+== tv-new
++ cd /home/fedora/src/tv-new
++ git describe --tags --always
+v2.12.1-5-g8cf1642
++ git rev-parse HEAD
+8cf1642c09cbb6a8ca02119578ff3b9f5a200d63
++ git log -1 '--format=%ci %s'
+2026-10-14 20:01:23 -0400 scan: review fixes -- cfg(test) GUC read, turbovec carry #6 test handshake (7873157), docs
++ grep -n '^turbovec = ' Cargo.toml
+47:turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "78731577c79b18f264b4604381fe7451acb5c20d", features = ["mask-skip-counter"] }
++ grep '^version' Cargo.toml
++ head -1
+version = "2.13.0"
++ echo '== rustc'
+== rustc
++ rustc -vV
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+binary: rustc
+commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+commit-date: 2026-08-18
+host: x86_64-unknown-linux-gnu
+release: 1.98.0
+LLVM version: 22.1.8
++ cargo pgrx --version
+cargo-pgrx 0.19.3
++ echo '== .so'
+== .so
++ md5sum /home/fedora/so/new.so /home/fedora/so/old.so
+9a157a6ce35fda2cfffcaf903807156b  /home/fedora/so/new.so
+66fcaeee66dd1483c590303bf94e4fd6  /home/fedora/so/old.so
++ sha256sum /home/fedora/so/new.so /home/fedora/so/old.so
+3e7568e7ce3960a856a58111c8e819d32d6fcce1842a91817ee18e642a3233d1  /home/fedora/so/new.so
+01ed26ca0c8f241e59a9d2a428a654b79994cc3ce2a8b84f78a4073b8593e758  /home/fedora/so/old.so
++ ls -l /home/fedora/so/
+total 16864
+-rwxr-xr-x. 1 fedora fedora 8652344 Oct 15 00:17 new.so
+-rwxr-xr-x. 1 fedora fedora 8616848 Oct 15 00:18 old.so
++ echo '== installed control'
+== installed control
+++ pg_config --sharedir
++ cat /opt/pg18/share/postgresql/extension/pg_turbovec.control
+comment = 'Vector index for PostgreSQL backed by the TurboQuant quantizer (turbovec)'
+default_version = '2.12.1'
+module_pathname = '$libdir/pg_turbovec'
+relocatable = false
+superuser = false
+schema = 'turbovec'
++ grep turbovec
+++ pg_config --sharedir
++ ls /opt/pg18/share/postgresql/extension/
+pg_turbovec--1.28.3--1.28.4.sql
+pg_turbovec--1.28.4--1.29.0.sql
+pg_turbovec--1.29.0--1.29.1.sql
+pg_turbovec--1.29.1--1.29.2.sql
+pg_turbovec--1.29.2--1.29.3.sql
+pg_turbovec--1.29.3--1.29.4.sql
+pg_turbovec--1.29.4--1.29.5.sql
+pg_turbovec--1.29.5--1.29.6.sql
+pg_turbovec--1.29.6--1.29.7.sql
+pg_turbovec--1.29.7--2.0.0.sql
+pg_turbovec--2.0.0--2.1.0.sql
+pg_turbovec--2.10.0--2.10.1.sql
+pg_turbovec--2.10.1--2.10.2.sql
+pg_turbovec--2.1.0--2.2.0.sql
+pg_turbovec--2.10.2--2.10.3.sql
+pg_turbovec--2.10.3--2.11.0.sql
+pg_turbovec--2.11.0--2.12.0.sql
+pg_turbovec--2.12.0--2.12.1.sql
+pg_turbovec--2.12.1--2.13.0.sql
+pg_turbovec--2.12.1.sql
+pg_turbovec--2.13.0.sql
+pg_turbovec--2.2.0--2.2.1.sql
+pg_turbovec--2.2.1--2.2.2.sql
+pg_turbovec--2.2.2--2.3.0.sql
+pg_turbovec--2.3.0--2.4.0.sql
+pg_turbovec--2.4.0--2.5.0.sql
+pg_turbovec--2.5.0--2.6.0.sql
+pg_turbovec--2.6.0--2.7.0.sql
+pg_turbovec--2.7.0--2.7.1.sql
+pg_turbovec--2.7.1--2.7.2.sql
+pg_turbovec--2.7.2--2.7.3.sql
+pg_turbovec--2.7.3--2.7.4.sql
+pg_turbovec--2.7.4--2.7.5.sql
+pg_turbovec--2.7.5--2.7.6.sql
+pg_turbovec--2.7.6--2.8.0.sql
+pg_turbovec--2.8.0--2.8.1.sql
+pg_turbovec--2.8.1--2.8.2.sql
+pg_turbovec--2.8.2--2.8.3.sql
+pg_turbovec--2.8.3--2.8.4.sql
+pg_turbovec--2.8.4--2.9.0.sql
+pg_turbovec--2.9.0--2.10.0.sql
+pg_turbovec.control
++ echo BUILD_Q_DONE
+BUILD_Q_DONE
+[heartbeat] DONE rc=0 (clean exit)

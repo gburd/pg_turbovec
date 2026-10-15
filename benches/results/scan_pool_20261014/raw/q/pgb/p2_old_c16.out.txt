@@ -1,0 +1,30 @@
+pgbench (18.6)
+progress: 5.0 s, 753.4 tps, lat 21.176 ms stddev 44.064, 0 failed
+progress: 10.0 s, 864.6 tps, lat 18.514 ms stddev 4.619, 0 failed
+progress: 15.0 s, 879.6 tps, lat 18.186 ms stddev 3.916, 0 failed
+progress: 20.0 s, 861.1 tps, lat 18.580 ms stddev 4.642, 0 failed
+progress: 25.0 s, 875.7 tps, lat 18.275 ms stddev 4.061, 0 failed
+progress: 30.0 s, 863.0 tps, lat 18.527 ms stddev 4.600, 0 failed
+progress: 35.0 s, 875.2 tps, lat 18.294 ms stddev 4.076, 0 failed
+progress: 40.0 s, 860.4 tps, lat 18.580 ms stddev 4.685, 0 failed
+progress: 45.0 s, 865.6 tps, lat 18.490 ms stddev 4.574, 0 failed
+progress: 50.0 s, 873.1 tps, lat 18.324 ms stddev 4.336, 0 failed
+progress: 55.0 s, 864.5 tps, lat 18.515 ms stddev 4.579, 0 failed
+progress: 60.0 s, 864.3 tps, lat 18.509 ms stddev 4.653, 0 failed
+progress: 65.0 s, 862.5 tps, lat 18.552 ms stddev 4.572, 0 failed
+progress: 70.0 s, 872.2 tps, lat 18.344 ms stddev 4.077, 0 failed
+progress: 75.0 s, 860.8 tps, lat 18.581 ms stddev 4.659, 0 failed
+transaction type: /home/fedora/results/q/pgb/pgb_tv.sql
+scaling factor: 1
+query mode: prepared
+number of clients: 16
+number of threads: 16
+maximum number of tries: 1
+duration: 75 s
+number of transactions actually processed: 64494
+number of failed transactions: 0 (0.000%)
+latency average = 18.606 ms
+latency stddev = 11.506 ms
+initial connection time = 3.680 ms
+tps = 859.831953 (without initial connection time)
+rc=0

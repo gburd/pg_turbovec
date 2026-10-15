@@ -1,0 +1,4 @@
+v2.12.1:src/guc.rs:39:pub static SEARCH_CONCURRENCY: GucSetting<i32> = GucSetting::<i32>::new(1);
+v2.12.1:src/guc.rs:716:        &SEARCH_CONCURRENCY,
+v2.12.1:src/guc.rs:12://! | `turbovec.search_concurrency`    | int  | 1       | 1..=128        |
+v2.12.1:src/guc.rs:711:        c_str(b"turbovec.search_concurrency\0"),

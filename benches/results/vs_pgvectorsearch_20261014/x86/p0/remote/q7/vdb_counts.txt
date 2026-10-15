@@ -1,0 +1,27 @@
+/data/vdb/cohere_large_10m/neighbors.parquet rows 1000 schema id: int64
+neighbors_id: large_list<item: int64>
+  child 0, item: int64
+/data/vdb/cohere_large_10m/test.parquet rows 1000 schema id: int64
+emb: large_list<item: float>
+  child 0, item: float
+/data/vdb/cohere_medium_1m/neighbors.parquet rows 1000 schema id: int64
+neighbors_id: large_list<item: int64>
+  child 0, item: int64
+/data/vdb/cohere_medium_1m/test.parquet rows 1000 schema id: int64
+emb: large_list<item: float>
+  child 0, item: float
+/data/vdb/cohere_medium_1m/train.parquet rows 1000000 schema id: int64
+emb: large_list<item: float>
+  child 0, item: float
+/data/vdb/openai_large_5m/neighbors.parquet rows 1000 schema id: int64
+neighbors_id: list<item: int64>
+  child 0, item: int64
+-- schema metadata --
+pandas: '{"index_columns": [{"kind": "range", "name": null, "start": 0, "' + 491
+/data/vdb/openai_large_5m/test.parquet rows 1000 schema id: int64
+emb: large_list<item: double>
+  child 0, item: double
+cohere_medium_1m: test (1000, 768) train (1000000, 768)
+norms test min/max 12.342849 16.224667 train min/max 12.258187 17.474176
+corpus exact-dup rows (after normalise): 81  test queries exactly equal to a corpus row: 1
+test queries with max cos >= 1-1e-6: 1  >= 0.9999: 1

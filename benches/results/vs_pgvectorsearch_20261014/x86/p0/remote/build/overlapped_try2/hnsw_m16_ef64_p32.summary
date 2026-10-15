@@ -1,0 +1,10 @@
+label=hnsw_m16_ef64_p32 db=db_pv rc=1
+pre: SET max_parallel_maintenance_workers = 31
+sql: CREATE INDEX docs_hnsw ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+wall_s=.003930526
+wal_bytes=17352 (includes the post-build CHECKPOINT record)
+index_bytes=8192008192 total_index_bytes=8192008192
+datadir_delta_bytes=633 (includes WAL)
+peak_summed_rss_kb=
+SET
+ERROR:  relation "docs_hnsw" already exists

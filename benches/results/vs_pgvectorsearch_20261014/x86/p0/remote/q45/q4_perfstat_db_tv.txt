@@ -1,0 +1,11 @@
+# started on Wed Oct 14 19:59:11 2026
+
+
+ Performance counter stats for process id '44390':
+
+         51,218.07 msec task-clock                                                            
+           186,304      context-switches                                                      
+            12,890      cpu-migrations                                                        
+
+       4.934386711 seconds time elapsed
+

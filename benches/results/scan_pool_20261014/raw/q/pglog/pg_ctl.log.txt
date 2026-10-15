@@ -1,0 +1,30 @@
+2026-10-15 00:21:18.633 UTC [36810] LOG:  redirecting log output to logging collector process
+2026-10-15 00:21:18.633 UTC [36810] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:25:31.289 UTC [38436] LOG:  redirecting log output to logging collector process
+2026-10-15 00:25:31.289 UTC [38436] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:25:38.236 UTC [38604] LOG:  redirecting log output to logging collector process
+2026-10-15 00:25:38.236 UTC [38604] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:26:04.573 UTC [38939] LOG:  redirecting log output to logging collector process
+2026-10-15 00:26:04.573 UTC [38939] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:30:29.933 UTC [39946] LOG:  redirecting log output to logging collector process
+2026-10-15 00:30:29.933 UTC [39946] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:34:13.141 UTC [43574] LOG:  redirecting log output to logging collector process
+2026-10-15 00:34:13.141 UTC [43574] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:38:37.890 UTC [44560] LOG:  redirecting log output to logging collector process
+2026-10-15 00:38:37.890 UTC [44560] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:42:22.789 UTC [48090] LOG:  redirecting log output to logging collector process
+2026-10-15 00:42:22.789 UTC [48090] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:46:30.702 UTC [49058] LOG:  redirecting log output to logging collector process
+2026-10-15 00:46:30.702 UTC [49058] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:50:14.369 UTC [52622] LOG:  redirecting log output to logging collector process
+2026-10-15 00:50:14.369 UTC [52622] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:54:20.692 UTC [53614] LOG:  redirecting log output to logging collector process
+2026-10-15 00:54:20.692 UTC [53614] HINT:  Future log output will appear in directory "log".
+2026-10-15 00:58:43.252 UTC [57248] LOG:  redirecting log output to logging collector process
+2026-10-15 00:58:43.252 UTC [57248] HINT:  Future log output will appear in directory "log".
+2026-10-15 01:01:18.829 UTC [68407] LOG:  redirecting log output to logging collector process
+2026-10-15 01:01:18.829 UTC [68407] HINT:  Future log output will appear in directory "log".
+2026-10-15 01:06:24.636 UTC [69714] LOG:  redirecting log output to logging collector process
+2026-10-15 01:06:24.636 UTC [69714] HINT:  Future log output will appear in directory "log".
+2026-10-15 01:09:00.264 UTC [80776] LOG:  redirecting log output to logging collector process
+2026-10-15 01:09:00.264 UTC [80776] HINT:  Future log output will appear in directory "log".

@@ -1,0 +1,10 @@
+
+ Performance counter stats for process id '47567':
+
+         19,710.43 msec task-clock                                                            
+            46,999      context-switches                                                      
+             1,127      cpu-migrations                                                        
+             6,909      page-faults                                                           
+
+       8.001158519 seconds time elapsed
+

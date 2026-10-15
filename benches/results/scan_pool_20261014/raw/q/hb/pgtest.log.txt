@@ -1,0 +1,10 @@
+[heartbeat] starting: bash /home/fedora/pgtest.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
+. [bash 01:15:24 elapsed]
+. [bash 01:16:24 elapsed]
+. [bash 01:17:24 elapsed]
+test result: ok. 475 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 150.14s
+test result: ok. 0 passed; 0 failed; 22 ignored; 0 measured; 0 filtered out; finished in 0.00s
+EXIT 0
+[heartbeat] DONE rc=0 (clean exit)

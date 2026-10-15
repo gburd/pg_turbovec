@@ -1,0 +1,39 @@
+[heartbeat] starting: bash /home/fedora/builds_q.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ B=/home/fedora/build_index.sh
++ psql -h /tmp -X -d db_tv -Atc 'SELECT turbovec.turbovec_version()'
++ tee /home/fedora/results/q/build_arm.txt
+2.12.1
++ bash /home/fedora/build_index.sh db_tv tv_flat4 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)'
+label=tv_flat4 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)
+wall_s=8.878340215
+wal_bytes=1126765728 (includes the post-build CHECKPOINT record)
+index_bytes=559947776 total_index_bytes=559947776
+datadir_delta_bytes=1684021898 (includes WAL)
+peak_summed_RssAnon_kb=2259408 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX
++ bash /home/fedora/build_index.sh db_tv tv_ivf1000 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_ivf_tv ON docs_ivf USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)'
+label=tv_ivf1000 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_ivf_tv ON docs_ivf USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)
+wall_s=28.706414431
+wal_bytes=1135170576 (includes the post-build CHECKPOINT record)
+index_bytes=564076544 total_index_bytes=564076544
+datadir_delta_bytes=564077051 (includes WAL)
+peak_summed_RssAnon_kb=1988296 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX
++ bash /home/fedora/idx_sha.sh after_build
+after_build docs_tv_flat 559947776 4ed3adbdb8f596f0e899fee5881bc69cbcc33a21b316e9df255c7911d353ad63  /data/pgdata/base/16384/16610
+after_build docs_ivf_tv 564076544 57ef8893bd9978ba9a713dd2c8382397e0d196f0609745fe44bc87207edd66cd  /data/pgdata/base/16384/16611
++ echo BUILDS_DONE
+BUILDS_DONE
+[heartbeat] DONE rc=0 (clean exit)

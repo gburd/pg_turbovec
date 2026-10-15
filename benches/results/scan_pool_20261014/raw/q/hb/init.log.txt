@@ -1,0 +1,31 @@
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ D=/data/pgdata
++ R=/home/fedora/results/q
++ '[' -d /data/pgdata ']'
++ initdb -D /data/pgdata
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
++ grep -q VS_BENCH_PLAN /data/pgdata/postgresql.conf
++ cat /home/fedora/postgresql.bench.conf
+++ postgres -D /data/pgdata -C shared_memory_size_in_huge_pages
++ HP=66984
++ sudo sysctl -w vm.nr_hugepages=67496
+vm.nr_hugepages = 67496
++ echo 'shared_memory_size_in_huge_pages=66984 nr_hugepages=67496'
++ grep -i huge /proc/meminfo
++ pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
++ createdb -h /tmp db_tv
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -c 'CREATE EXTENSION pg_turbovec' -c 'CREATE EXTENSION pg_prewarm' -c 'ALTER DATABASE db_tv SET search_path = public, turbovec'
+CREATE EXTENSION
+CREATE EXTENSION
+ALTER DATABASE
++ psql -h /tmp -X -d db_tv -Atc 'SELECT extname, extversion FROM pg_extension'
++ tee -a /home/fedora/results/q/hugepages.txt
+plpgsql|1.0
+pg_turbovec|2.12.1
+pg_prewarm|1.2
++ echo INIT_PG_DONE
+INIT_PG_DONE

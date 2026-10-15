@@ -1,0 +1,50 @@
+[heartbeat] starting: bash /home/fedora/builds_p0.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ B=/home/fedora/build_index.sh
++ psql -h /tmp -X -d db_tv -c 'ALTER DATABASE db_tv SET search_path = public, turbovec'
+ALTER DATABASE
++ psql -h /tmp -X -d db_pv -Atc 'SELECT * FROM prism_index_settings('\''docs_prism'\'')'
++ psql -h /tmp -X -d db_pv -c '\d+ docs'
++ bash /home/fedora/build_index.sh db_tv tv_flat4_t32 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)'
+[heartbeat] DONE rc=0 (clean exit)
+label=tv_flat4_t32 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)
+wall_s=8.587192722
+wal_bytes=1126904576 (includes the post-build CHECKPOINT record)
+index_bytes=559947776 total_index_bytes=559947776
+datadir_delta_bytes=559948708 (includes WAL)
+peak_summed_rss_kb=2346520
+SET
+NOTICE:  turbovec: built a FLAT (exact) index over 1000000 rows
+DETAIL:  Flat is an exact O(n) scan (recall@10 = 1.000). For approximate cell-pruned search, rebuild WITH (lists = N), N ~ sqrt(row count). Flat is often FASTER and more accurate at this scale -- see the Choosing lists section of the README before switching.
+CREATE INDEX
++ bash /home/fedora/build_index.sh db_tv tv_ivf1000_t32 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_tv_ivf ON docs USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)'
+label=tv_ivf1000_t32 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_ivf ON docs USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)
+wall_s=28.419960039
+wal_bytes=1135165544 (includes the post-build CHECKPOINT record)
+index_bytes=564076544 total_index_bytes=564076544
+datadir_delta_bytes=564077047 (includes WAL)
+peak_summed_rss_kb=2038396
+SET
+CREATE INDEX
++ bash /home/fedora/build_index.sh db_pv hnsw_m16_ef64_p32 'SET max_parallel_maintenance_workers = 31' 'CREATE INDEX docs_hnsw ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)'
+tail: cannot open '/home/fedora/results/p0/build/hnsw_m16_ef64_p32.rss' for reading: No such file or directory
+label=hnsw_m16_ef64_p32 db=db_pv rc=1
+pre: SET max_parallel_maintenance_workers = 31
+sql: CREATE INDEX docs_hnsw ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+wall_s=.003930526
+wal_bytes=17352 (includes the post-build CHECKPOINT record)
+index_bytes=8192008192 total_index_bytes=8192008192
+datadir_delta_bytes=633 (includes WAL)
+peak_summed_rss_kb=
+SET
+ERROR:  relation "docs_hnsw" already exists
++ echo BUILDS_DONE
+BUILDS_DONE
+[heartbeat] DONE rc=0 (clean exit)

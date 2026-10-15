@@ -1,0 +1,13 @@
+before any query {'Rss': 12636, 'Pss': 4950, 'Pss_Anon': 1397, 'Pss_Shmem': 181, 'Anonymous': 2636}
+q0 426.53 ms {'Rss': 1164688, 'Pss': 1156162, 'Pss_Anon': 1147473, 'Pss_Shmem': 181, 'Anonymous': 1148644}
+q1 8.93 ms {'Rss': 1164700, 'Pss': 1156174, 'Pss_Anon': 1147485, 'Pss_Shmem': 181, 'Anonymous': 1148656}
+q2 8.38 ms {'Rss': 1164708, 'Pss': 1156182, 'Pss_Anon': 1147493, 'Pss_Shmem': 181, 'Anonymous': 1148664}
+q3 8.09 ms {'Rss': 1164708, 'Pss': 1156182, 'Pss_Anon': 1147493, 'Pss_Shmem': 181, 'Anonymous': 1148664}
+q4 7.83 ms {'Rss': 1164708, 'Pss': 1156182, 'Pss_Anon': 1147493, 'Pss_Shmem': 181, 'Anonymous': 1148664}
+q5 8.04 ms {'Rss': 1164764, 'Pss': 1156238, 'Pss_Anon': 1147549, 'Pss_Shmem': 181, 'Anonymous': 1148720}
+q6 7.70 ms {'Rss': 1164764, 'Pss': 1156238, 'Pss_Anon': 1147549, 'Pss_Shmem': 181, 'Anonymous': 1148720}
+q7 8.17 ms {'Rss': 1164764, 'Pss': 1156238, 'Pss_Anon': 1147549, 'Pss_Shmem': 181, 'Anonymous': 1148720}
+q8 7.91 ms {'Rss': 1164764, 'Pss': 1156238, 'Pss_Anon': 1147549, 'Pss_Shmem': 181, 'Anonymous': 1148720}
+q9 8.04 ms {'Rss': 1164772, 'Pss': 1156246, 'Pss_Anon': 1147557, 'Pss_Shmem': 181, 'Anonymous': 1148728}
+q10 7.56 ms {'Rss': 1164780, 'Pss': 1156254, 'Pss_Anon': 1147565, 'Pss_Shmem': 181, 'Anonymous': 1148736}
+q11 7.94 ms {'Rss': 1164792, 'Pss': 1156266, 'Pss_Anon': 1147577, 'Pss_Shmem': 181, 'Anonymous': 1148748}

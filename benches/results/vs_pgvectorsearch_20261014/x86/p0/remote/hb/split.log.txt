@@ -1,0 +1,52 @@
+[heartbeat] starting: bash /home/fedora/split_tables.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ B=/home/fedora/build_index.sh
++ P='psql -h /tmp -X -v ON_ERROR_STOP=1'
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -c 'DROP INDEX docs_tv_ivf' -c 'CREATE TABLE docs_ivf (LIKE docs INCLUDING ALL)' -c 'INSERT INTO docs_ivf SELECT * FROM docs' -c 'VACUUM (FREEZE, ANALYZE) docs_ivf'
+DROP INDEX
+CREATE TABLE
+INSERT 0 1000000
+VACUUM
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -c 'DROP INDEX docs_hnsw' -c 'CREATE TABLE docs_h (LIKE docs INCLUDING ALL)' -c 'INSERT INTO docs_h SELECT * FROM docs' -c 'VACUUM (FREEZE, ANALYZE) docs_h'
+DROP INDEX
+CREATE TABLE
+INSERT 0 1000000
+VACUUM
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT relname, relpersistence, (SELECT attstorage FROM pg_attribute WHERE attrelid=c.oid AND attnum=2), pg_relation_size(oid) FROM pg_class c WHERE relname IN ('\''docs'\'','\''docs_ivf'\'')'
+docs_ivf|p|p|8183635968
+docs|p|p|8192131072
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT relname, relpersistence, (SELECT attstorage FROM pg_attribute WHERE attrelid=c.oid AND attnum=2), pg_relation_size(oid) FROM pg_class c WHERE relname IN ('\''docs'\'','\''docs_h'\'')'
+docs|p|p|8192450560
+docs_h|p|p|8192000000
++ bash /home/fedora/build_index.sh db_tv tv_ivf1000_t32_b 'SET turbovec.build_parallelism = 32' 'CREATE INDEX docs_ivf_tv ON docs_ivf USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)'
+. [bash 19:37:29 elapsed]
+label=tv_ivf1000_t32_b db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_ivf_tv ON docs_ivf USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)
+wall_s=28.534161782
+wal_bytes=1135094088 (includes the post-build CHECKPOINT record)
+index_bytes=564076544 total_index_bytes=564076544
+datadir_delta_bytes=1704927745 (includes WAL)
+peak_summed_RssAnon_kb=2007100 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX
++ bash /home/fedora/build_index.sh db_pv hnsw_m16_ef64_p32_b 'SET max_parallel_maintenance_workers = 31' 'CREATE INDEX docs_h_hnsw ON docs_h USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)'
+. [bash 19:38:29 elapsed]
+label=hnsw_m16_ef64_p32_b db=db_pv rc=0
+pre: SET max_parallel_maintenance_workers = 31
+sql: CREATE INDEX docs_h_hnsw ON docs_h USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+wall_s=49.188990767
+wal_bytes=4449811224 (includes the post-build CHECKPOINT record)
+index_bytes=8192008192 total_index_bytes=8192008192
+datadir_delta_bytes=8273741027 (includes WAL)
+peak_summed_RssAnon_kb=149220 (private anon of all postmaster children, 1 Hz; excludes shared_buffers)
+SET
+CREATE INDEX
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -c 'ALTER TABLE docs_h SET (parallel_workers = 31)'
+ALTER TABLE
++ echo SPLIT_DONE
+SPLIT_DONE
+[heartbeat] DONE rc=0 (clean exit)

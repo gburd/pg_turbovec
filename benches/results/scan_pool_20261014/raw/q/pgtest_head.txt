@@ -1,0 +1,4 @@
+8cf1642c09cbb6a8ca02119578ff3b9f5a200d63
+2026-10-14 20:01:23 -0400 scan: review fixes -- cfg(test) GUC read, turbovec carry #6 test handshake (7873157), docs
+47:turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "78731577c79b18f264b4604381fe7451acb5c20d", features = ["mask-skip-counter"] }
+96

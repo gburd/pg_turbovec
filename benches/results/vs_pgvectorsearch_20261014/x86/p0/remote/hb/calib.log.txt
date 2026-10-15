@@ -1,0 +1,437 @@
+[heartbeat] starting: bash /home/fedora/calib_p0.sh all
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ R=/home/fedora/results/p0/calib
++ mkdir -p /home/fedora/results/p0/calib
++ P='psql -h /tmp -X -v ON_ERROR_STOP=1'
++ N=1000
++ case ${1:-all} in
++ arm prism db_pv docs docs_prism pv prism.nprobe '' 4 6 8 10 14 20 28 40 56 80 112 160 224 320 448 640 1024 0
++ local name=prism db=db_pv tbl=docs idx=docs_prism sys=pv knob=prism.nprobe extra=
++ shift 7
+++ date +%s
++ local t0=1792007044
++ restart_prewarm db_pv docs queries docs_prism
++ local db=db_pv
++ shift
++ pg_ctl -D /data/pgdata -m fast -w stop
+waiting for server to shut down..... done
+server stopped
++ sync
++ echo 3
++ sudo tee /proc/sys/vm/drop_caches
++ pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
++ env
++ grep -ci GLIBC_TUNABLES
+0
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT '\''docs'\'', pg_prewarm('\''docs'\'')'
+docs|1000055
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT '\''queries'\'', pg_prewarm('\''queries'\'')'
+queries|5200
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT '\''docs_prism'\'', pg_prewarm('\''docs_prism'\'')'
+docs_prism|38584
+++ date +%s
++ local t1=1792007049
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_4 --table docs --set prism.nprobe=4 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_6 --table docs --set prism.nprobe=6 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_8 --table docs --set prism.nprobe=8 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_10 --table docs --set prism.nprobe=10 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_14 --table docs --set prism.nprobe=14 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_20 --table docs --set prism.nprobe=20 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_28 --table docs --set prism.nprobe=28 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_40 --table docs --set prism.nprobe=40 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_56 --table docs --set prism.nprobe=56 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_80 --table docs --set prism.nprobe=80 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_112 --table docs --set prism.nprobe=112 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_160 --table docs --set prism.nprobe=160 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_224 --table docs --set prism.nprobe=224 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_320 --table docs --set prism.nprobe=320 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_448 --table docs --set prism.nprobe=448 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_640 --table docs --set prism.nprobe=640 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_1024 --table docs --set prism.nprobe=1024 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label prism_0 --table docs --set prism.nprobe=0 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_prism
+Traceback (most recent call last):
+  File "/home/fedora/bench.py", line 29, in <module>
+    assert settings.get("prism.query_limit") == "0", settings.get("prism.query_limit")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None
+++ date +%s
++ local t2=1792007053
++ echo 'ARM prism restart_prewarm_s=5 grid_s=4 points=18'
++ tee -a /home/fedora/results/p0/calib/arm_times.txt
+ARM prism restart_prewarm_s=5 grid_s=4 points=18
++ arm tvflat db_tv docs docs_tv_flat tv turbovec.search_k ';turbovec.hi_dim_rerank=off' 10 16 24 32 48 64 96 128 192 256 384 512 768 1024
++ local name=tvflat db=db_tv tbl=docs idx=docs_tv_flat sys=tv knob=turbovec.search_k 'extra=;turbovec.hi_dim_rerank=off'
++ shift 7
+++ date +%s
++ local t0=1792007053
++ restart_prewarm db_tv docs queries docs_tv_flat
++ local db=db_tv
++ shift
++ pg_ctl -D /data/pgdata -m fast -w stop
+waiting for server to shut down.... done
+server stopped
++ sync
++ echo 3
++ sudo tee /proc/sys/vm/drop_caches
++ pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
++ env
++ grep -ci GLIBC_TUNABLES
+0
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''docs'\'', pg_prewarm('\''docs'\'')'
+docs|1000016
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''queries'\'', pg_prewarm('\''queries'\'')'
+queries|5200
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''docs_tv_flat'\'', pg_prewarm('\''docs_tv_flat'\'')'
+docs_tv_flat|68353
+++ date +%s
++ local t1=1792007056
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_10 --table docs --set 'turbovec.search_k=10;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_10", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=10;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 40839, "batch_wall_s": 1.1789450645446777, "cpu_ms_per_q_threadgroup": 59.13, "cpu_ms_per_q_tasksum": 59.05, "threads_before": 97, "threads_after": 97, "loadavg": ["1.11", "1.82"], "smaps_rollup_kb": {"Rss": 1158276, "Pss": 1148976, "Pss_Anon": 1140329, "Pss_File": 8474, "Pss_Shmem": 172, "Anonymous": 1141512}, "recall": 0.9399000000000001, "wall_p50_ms": 1.1523379999999999, "wall_p95_ms": 1.3747565499999994, "wall_mean_ms": 1.176577544, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.151, 1.259, 1.115, 1.124, 1.126, 1.258, 1.162, 1.297, 1.206, 1.152], "lat_p50_first_half": 1.1603745, "lat_p50_second_half": 1.1410775}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_16 --table docs --set 'turbovec.search_k=16;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_16", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=16;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 40937, "batch_wall_s": 1.2080039978027344, "cpu_ms_per_q_threadgroup": 58.76, "cpu_ms_per_q_tasksum": 58.71, "threads_before": 97, "threads_after": 97, "loadavg": ["1.82", "1.82"], "smaps_rollup_kb": {"Rss": 1158556, "Pss": 1149326, "Pss_Anon": 1140673, "Pss_File": 8480, "Pss_Shmem": 172, "Anonymous": 1141856}, "recall": 0.998, "wall_p50_ms": 1.176568, "wall_p95_ms": 1.40873355, "wall_mean_ms": 1.206063487, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.268, 1.187, 1.099, 1.188, 1.202, 1.194, 1.142, 1.135, 1.18, 1.15], "lat_p50_first_half": 1.193972, "lat_p50_second_half": 1.1620965}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_24 --table docs --set 'turbovec.search_k=24;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_24", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=24;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41035, "batch_wall_s": 1.2867226600646973, "cpu_ms_per_q_threadgroup": 62.21, "cpu_ms_per_q_tasksum": 62.17, "threads_before": 97, "threads_after": 97, "loadavg": ["1.82", "2.48"], "smaps_rollup_kb": {"Rss": 1159248, "Pss": 1149333, "Pss_Anon": 1141365, "Pss_File": 7795, "Pss_Shmem": 172, "Anonymous": 1142548}, "recall": 0.9999, "wall_p50_ms": 1.2451720000000002, "wall_p95_ms": 1.4555369, "wall_mean_ms": 1.284972558, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.246, 1.246, 1.178, 1.202, 1.235, 1.205, 1.169, 1.327, 1.184, 1.184], "lat_p50_first_half": 1.250788, "lat_p50_second_half": 1.2386914999999998}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_32 --table docs --set 'turbovec.search_k=32;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_32", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=32;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41152, "batch_wall_s": 1.2443585395812988, "cpu_ms_per_q_threadgroup": 41.94, "cpu_ms_per_q_tasksum": 42.03, "threads_before": 97, "threads_after": 97, "loadavg": ["2.48", "2.48"], "smaps_rollup_kb": {"Rss": 1159992, "Pss": 1151381, "Pss_Anon": 1142124, "Pss_File": 9083, "Pss_Shmem": 173, "Anonymous": 1143292}, "recall": 1.0, "wall_p50_ms": 1.2053555, "wall_p95_ms": 1.3198636999999998, "wall_mean_ms": 1.2427540039999998, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.223, 1.215, 1.21, 1.2, 1.218, 1.182, 1.182, 1.226, 1.288, 1.275], "lat_p50_first_half": 1.2239944999999999, "lat_p50_second_half": 1.185575}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_48 --table docs --set 'turbovec.search_k=48;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_48", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=48;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41250, "batch_wall_s": 1.386200189590454, "cpu_ms_per_q_threadgroup": 42.25, "cpu_ms_per_q_tasksum": 42.12, "threads_before": 97, "threads_after": 97, "loadavg": ["2.48", "2.48"], "smaps_rollup_kb": {"Rss": 1161352, "Pss": 1152741, "Pss_Anon": 1143484, "Pss_File": 9083, "Pss_Shmem": 173, "Anonymous": 1144652}, "recall": 1.0, "wall_p50_ms": 1.2487430000000002, "wall_p95_ms": 1.3621197999999999, "wall_mean_ms": 1.3847469510000001, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.266, 1.27, 1.231, 1.266, 1.3, 1.283, 1.266, 1.29, 1.275, 1.254], "lat_p50_first_half": 1.259595, "lat_p50_second_half": 1.240064}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_64 --table docs --set 'turbovec.search_k=64;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_64", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=64;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41348, "batch_wall_s": 1.6515989303588867, "cpu_ms_per_q_threadgroup": 67.91, "cpu_ms_per_q_tasksum": 67.75, "threads_before": 97, "threads_after": 97, "loadavg": ["2.36", "2.36"], "smaps_rollup_kb": {"Rss": 1161404, "Pss": 1152746, "Pss_Anon": 1143536, "Pss_File": 9036, "Pss_Shmem": 173, "Anonymous": 1144704}, "recall": 1.0, "wall_p50_ms": 1.5588864999999998, "wall_p95_ms": 1.74797515, "wall_mean_ms": 1.649949955, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.522, 1.57, 1.493, 1.517, 1.749, 1.561, 1.512, 1.56, 1.619, 1.594], "lat_p50_first_half": 1.5745615, "lat_p50_second_half": 1.5411795}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_96 --table docs --set 'turbovec.search_k=96;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_96", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=96;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41446, "batch_wall_s": 2.026179313659668, "cpu_ms_per_q_threadgroup": 78.55, "cpu_ms_per_q_tasksum": 78.47, "threads_before": 97, "threads_after": 97, "loadavg": ["2.36", "2.36"], "smaps_rollup_kb": {"Rss": 1165380, "Pss": 1156720, "Pss_Anon": 1147512, "Pss_File": 9034, "Pss_Shmem": 173, "Anonymous": 1148680}, "recall": 1.0, "wall_p50_ms": 1.795452, "wall_p95_ms": 1.9974309499999998, "wall_mean_ms": 2.024381704, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.748, 1.875, 1.712, 1.867, 1.988, 1.807, 1.727, 1.913, 1.938, 1.744], "lat_p50_first_half": 1.828908, "lat_p50_second_half": 1.765836}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_128 --table docs --set 'turbovec.search_k=128;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_128", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=128;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41544, "batch_wall_s": 2.18521785736084, "cpu_ms_per_q_threadgroup": 81.9, "cpu_ms_per_q_tasksum": 81.86, "threads_before": 97, "threads_after": 97, "loadavg": ["2.25", "2.25"], "smaps_rollup_kb": {"Rss": 1165288, "Pss": 1156627, "Pss_Anon": 1147420, "Pss_File": 9033, "Pss_Shmem": 173, "Anonymous": 1148588}, "recall": 1.0, "wall_p50_ms": 2.0278885, "wall_p95_ms": 2.1964136, "wall_mean_ms": 2.1834756360000003, "order_violations": 0, "short_results": 0, "lat_first10_ms": [2.004, 1.949, 2.05, 2.094, 2.15, 2.069, 2.001, 1.972, 2.209, 2.073], "lat_p50_first_half": 2.049551, "lat_p50_second_half": 2.0023805}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_192 --table docs --set 'turbovec.search_k=192;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_192", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=192;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41644, "batch_wall_s": 2.880396842956543, "cpu_ms_per_q_threadgroup": 88.78, "cpu_ms_per_q_tasksum": 88.79, "threads_before": 97, "threads_after": 97, "loadavg": ["2.25", "2.15"], "smaps_rollup_kb": {"Rss": 1172908, "Pss": 1164247, "Pss_Anon": 1155040, "Pss_File": 9034, "Pss_Shmem": 173, "Anonymous": 1156208}, "recall": 1.0, "wall_p50_ms": 2.4394485, "wall_p95_ms": 2.6161528, "wall_mean_ms": 2.878652529, "order_violations": 0, "short_results": 0, "lat_first10_ms": [2.425, 2.424, 2.209, 2.348, 2.582, 2.475, 2.428, 2.479, 2.608, 2.388], "lat_p50_first_half": 2.4478885, "lat_p50_second_half": 2.4300129999999998}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_256 --table docs --set 'turbovec.search_k=256;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_256", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=256;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41744, "batch_wall_s": 3.2310423851013184, "cpu_ms_per_q_threadgroup": 88.5, "cpu_ms_per_q_tasksum": 88.44, "threads_before": 97, "threads_after": 97, "loadavg": ["2.15", "2.06"], "smaps_rollup_kb": {"Rss": 1173036, "Pss": 1164375, "Pss_Anon": 1155168, "Pss_File": 9033, "Pss_Shmem": 173, "Anonymous": 1156336}, "recall": 1.0, "wall_p50_ms": 2.8057105, "wall_p95_ms": 2.9862672000000003, "wall_mean_ms": 3.229286475, "order_violations": 0, "short_results": 0, "lat_first10_ms": [2.764, 2.812, 2.755, 2.805, 2.976, 2.816, 2.83, 2.868, 2.86, 2.807], "lat_p50_first_half": 2.814906, "lat_p50_second_half": 2.7959355}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_384 --table docs --set 'turbovec.search_k=384;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_384", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=384;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41845, "batch_wall_s": 4.036783456802368, "cpu_ms_per_q_threadgroup": 93.62, "cpu_ms_per_q_tasksum": 93.72, "threads_before": 97, "threads_after": 97, "loadavg": ["2.06", "1.97"], "smaps_rollup_kb": {"Rss": 1173112, "Pss": 1164455, "Pss_Anon": 1155247, "Pss_File": 9034, "Pss_Shmem": 173, "Anonymous": 1156412}, "recall": 1.0, "wall_p50_ms": 3.557865, "wall_p95_ms": 3.7629889000000003, "wall_mean_ms": 4.0350418480000005, "order_violations": 0, "short_results": 0, "lat_first10_ms": [3.581, 3.6, 3.554, 3.589, 3.656, 3.611, 3.502, 3.531, 3.615, 3.447], "lat_p50_first_half": 3.5623500000000003, "lat_p50_second_half": 3.5469875}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_512 --table docs --set 'turbovec.search_k=512;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_512", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=512;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 41944, "batch_wall_s": 4.701794862747192, "cpu_ms_per_q_threadgroup": 95.81, "cpu_ms_per_q_tasksum": 95.74, "threads_before": 97, "threads_after": 97, "loadavg": ["1.97", "1.89"], "smaps_rollup_kb": {"Rss": 1173180, "Pss": 1164522, "Pss_Anon": 1155315, "Pss_File": 9034, "Pss_Shmem": 173, "Anonymous": 1156480}, "recall": 1.0, "wall_p50_ms": 4.280616500000001, "wall_p95_ms": 4.51671345, "wall_mean_ms": 4.6999092430000005, "order_violations": 0, "short_results": 0, "lat_first10_ms": [4.39, 4.273, 4.35, 4.288, 4.441, 4.356, 4.278, 4.147, 4.448, 4.231], "lat_p50_first_half": 4.2898935, "lat_p50_second_half": 4.264645}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_768 --table docs --set 'turbovec.search_k=768;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflat_768", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=768;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42043, "batch_wall_s": 6.042599201202393, "cpu_ms_per_q_threadgroup": 104.89, "cpu_ms_per_q_tasksum": 104.89, "threads_before": 97, "threads_after": 97, "loadavg": ["1.89", "1.82"], "smaps_rollup_kb": {"Rss": 1173376, "Pss": 1164718, "Pss_Anon": 1155511, "Pss_File": 9034, "Pss_Shmem": 173, "Anonymous": 1156676}, "recall": 1.0, "wall_p50_ms": 5.736397500000001, "wall_p95_ms": 5.9820636, "wall_mean_ms": 6.0408032, "order_violations": 0, "short_results": 0, "lat_first10_ms": [5.757, 5.649, 5.613, 5.5, 5.913, 5.79, 5.643, 5.639, 5.756, 5.504], "lat_p50_first_half": 5.7376565, "lat_p50_second_half": 5.736397500000001}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflat_1024 --table docs --set 'turbovec.search_k=1024;turbovec.hi_dim_rerank=off' --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+. [bash 19:45:04 elapsed]
+{"label": "tvflat_1024", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=1024;turbovec.hi_dim_rerank=off", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42141, "batch_wall_s": 7.436710834503174, "cpu_ms_per_q_threadgroup": 102.84, "cpu_ms_per_q_tasksum": 102.7, "threads_before": 97, "threads_after": 97, "loadavg": ["1.82", "16.22"], "smaps_rollup_kb": {"Rss": 1173568, "Pss": 1164911, "Pss_Anon": 1155703, "Pss_File": 9034, "Pss_Shmem": 173, "Anonymous": 1156868}, "recall": 1.0, "wall_p50_ms": 7.151536, "wall_p95_ms": 7.47753215, "wall_mean_ms": 7.434844828999999, "order_violations": 0, "short_results": 0, "lat_first10_ms": [7.133, 7.001, 7.018, 6.982, 7.313, 7.253, 6.985, 6.967, 7.116, 6.935], "lat_p50_first_half": 7.1688155, "lat_p50_second_half": 7.130098}
+++ date +%s
++ local t2=1792007111
++ echo 'ARM tvflat restart_prewarm_s=3 grid_s=55 points=14'
++ tee -a /home/fedora/results/p0/calib/arm_times.txt
+ARM tvflat restart_prewarm_s=3 grid_s=55 points=14
++ arm tvflatdef db_tv docs docs_tv_flat tv turbovec.search_k '' 32
++ local name=tvflatdef db=db_tv tbl=docs idx=docs_tv_flat sys=tv knob=turbovec.search_k extra=
++ shift 7
+++ date +%s
++ local t0=1792007111
++ restart_prewarm db_tv docs queries docs_tv_flat
++ local db=db_tv
++ shift
++ pg_ctl -D /data/pgdata -m fast -w stop
+waiting for server to shut down..... done
+server stopped
++ sync
++ echo 3
++ sudo tee /proc/sys/vm/drop_caches
++ pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
++ env
++ grep -ci GLIBC_TUNABLES
+0
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''docs'\'', pg_prewarm('\''docs'\'')'
+docs|1000016
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''queries'\'', pg_prewarm('\''queries'\'')'
+queries|5200
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''docs_tv_flat'\'', pg_prewarm('\''docs_tv_flat'\'')'
+docs_tv_flat|68353
+++ date +%s
++ local t1=1792007116
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvflatdef_32 --table docs --set turbovec.search_k=32 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_tv_flat
+{"label": "tvflatdef_32", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.search_k=32", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42334, "batch_wall_s": 8.088611602783203, "cpu_ms_per_q_threadgroup": 127.71, "cpu_ms_per_q_tasksum": 127.8, "threads_before": 97, "threads_after": 97, "loadavg": ["15.08", "20.78"], "smaps_rollup_kb": {"Rss": 1173688, "Pss": 1165034, "Pss_Anon": 1155744, "Pss_File": 9108, "Pss_Shmem": 181, "Anonymous": 1156912}, "recall": 1.0, "wall_p50_ms": 7.6865749999999995, "wall_p95_ms": 8.496690699999997, "wall_mean_ms": 8.085969501, "order_violations": 0, "short_results": 0, "lat_first10_ms": [7.768, 7.636, 7.952, 7.65, 7.795, 7.805, 7.625, 7.684, 7.674, 7.715], "lat_p50_first_half": 7.7597815, "lat_p50_second_half": 7.637101}
+++ date +%s
++ local t2=1792007126
++ echo 'ARM tvflatdef restart_prewarm_s=5 grid_s=10 points=1'
++ tee -a /home/fedora/results/p0/calib/arm_times.txt
+ARM tvflatdef restart_prewarm_s=5 grid_s=10 points=1
++ arm tvivf db_tv docs_ivf docs_ivf_tv tv turbovec.probes '' 1 2 3 4 6 8 12 16 24 32 48 64 96 128 192 256
++ local name=tvivf db=db_tv tbl=docs_ivf idx=docs_ivf_tv sys=tv knob=turbovec.probes extra=
++ shift 7
+++ date +%s
++ local t0=1792007126
++ restart_prewarm db_tv docs_ivf queries docs_ivf_tv
++ local db=db_tv
++ shift
++ pg_ctl -D /data/pgdata -m fast -w stop
+waiting for server to shut down..... done
+server stopped
++ sync
++ echo 3
++ sudo tee /proc/sys/vm/drop_caches
++ pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
++ env
++ grep -ci GLIBC_TUNABLES
+0
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''docs_ivf'\'', pg_prewarm('\''docs_ivf'\'')'
+docs_ivf|998979
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''queries'\'', pg_prewarm('\''queries'\'')'
+queries|5200
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT '\''docs_ivf_tv'\'', pg_prewarm('\''docs_ivf_tv'\'')'
+docs_ivf_tv|68857
+++ date +%s
++ local t1=1792007131
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_1 --table docs_ivf --set turbovec.probes=1 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_1", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=1", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42608, "batch_wall_s": 8.839089155197144, "cpu_ms_per_q_threadgroup": 8.56, "cpu_ms_per_q_tasksum": 8.55, "threads_before": 97, "threads_after": 97, "loadavg": ["19.28", "17.39"], "smaps_rollup_kb": {"Rss": 51920, "Pss": 43309, "Pss_Anon": 34132, "Pss_File": 8996, "Pss_Shmem": 181, "Anonymous": 35300}, "recall": 0.4894, "wall_p50_ms": 9.014738000000001, "wall_p95_ms": 11.007085199999999, "wall_mean_ms": 8.838571788000001, "order_violations": 0, "short_results": 0, "lat_first10_ms": [8.134, 9.863, 10.456, 9.791, 9.373, 8.853, 10.782, 11.023, 10.421, 10.468], "lat_p50_first_half": 9.1175195, "lat_p50_second_half": 8.9716155}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_2 --table docs_ivf --set turbovec.probes=2 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_2", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=2", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42753, "batch_wall_s": 11.097309112548828, "cpu_ms_per_q_threadgroup": 10.84, "cpu_ms_per_q_tasksum": 10.83, "threads_before": 97, "threads_after": 99, "loadavg": ["17.39", "13.76"], "smaps_rollup_kb": {"Rss": 60972, "Pss": 52373, "Pss_Anon": 43248, "Pss_File": 8944, "Pss_Shmem": 181, "Anonymous": 44416}, "recall": 0.6556000000000001, "wall_p50_ms": 10.950723499999999, "wall_p95_ms": 13.05622705, "wall_mean_ms": 11.096783989, "order_violations": 0, "short_results": 0, "lat_first10_ms": [11.032, 10.726, 10.88, 11.231, 12.128, 11.375, 12.668, 11.86, 11.513, 11.54], "lat_p50_first_half": 10.850454, "lat_p50_second_half": 11.0203825}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_3 --table docs_ivf --set turbovec.probes=3 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:46:04 elapsed]
+{"label": "tvivf_3", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=3", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42855, "batch_wall_s": 12.431506872177124, "cpu_ms_per_q_threadgroup": 13.0, "cpu_ms_per_q_tasksum": 12.5, "threads_before": 99, "threads_after": 100, "loadavg": ["13.76", "11.87"], "smaps_rollup_kb": {"Rss": 81280, "Pss": 72568, "Pss_Anon": 63435, "Pss_File": 8952, "Pss_Shmem": 181, "Anonymous": 64596}, "recall": 0.7377, "wall_p50_ms": 12.304026, "wall_p95_ms": 13.949398899999998, "wall_mean_ms": 12.430988109, "order_violations": 0, "short_results": 0, "lat_first10_ms": [13.501, 13.311, 12.31, 13.096, 14.065, 14.322, 14.255, 13.7, 13.552, 13.768], "lat_p50_first_half": 12.202965, "lat_p50_second_half": 12.5116175}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_4 --table docs_ivf --set turbovec.probes=4 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_4", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=4", "n": 1000, "warm": 50, "k": 10, "backend_pid": 42988, "batch_wall_s": 12.602665185928345, "cpu_ms_per_q_threadgroup": 15.46, "cpu_ms_per_q_tasksum": 15.45, "threads_before": 100, "threads_after": 100, "loadavg": ["11.00", "9.46"], "smaps_rollup_kb": {"Rss": 78444, "Pss": 69733, "Pss_Anon": 60599, "Pss_File": 8952, "Pss_Shmem": 181, "Anonymous": 61760}, "recall": 0.7875, "wall_p50_ms": 11.933612, "wall_p95_ms": 13.98931255, "wall_mean_ms": 12.602126891, "order_violations": 0, "short_results": 0, "lat_first10_ms": [12.034, 11.733, 11.317, 11.758, 11.871, 11.753, 11.884, 11.586, 11.286, 11.317], "lat_p50_first_half": 12.153452999999999, "lat_p50_second_half": 11.8014285}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_6 --table docs_ivf --set turbovec.probes=6 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_6", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=6", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43094, "batch_wall_s": 13.098499536514282, "cpu_ms_per_q_threadgroup": 20.52, "cpu_ms_per_q_tasksum": 20.47, "threads_before": 5, "threads_after": 101, "loadavg": ["9.46", "7.59"], "smaps_rollup_kb": {"Rss": 85812, "Pss": 77101, "Pss_Anon": 67967, "Pss_File": 8953, "Pss_Shmem": 181, "Anonymous": 69128}, "recall": 0.8421000000000001, "wall_p50_ms": 11.8601745, "wall_p95_ms": 12.9128442, "wall_mean_ms": 13.097961968, "order_violations": 0, "short_results": 0, "lat_first10_ms": [12.357, 11.97, 11.342, 11.442, 11.9, 12.177, 12.112, 11.813, 12.005, 11.525], "lat_p50_first_half": 11.913383, "lat_p50_second_half": 11.7730095}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_8 --table docs_ivf --set turbovec.probes=8 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:47:04 elapsed]
+{"label": "tvivf_8", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=8", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43204, "batch_wall_s": 27.46468424797058, "cpu_ms_per_q_threadgroup": 38.79, "cpu_ms_per_q_tasksum": 38.79, "threads_before": 5, "threads_after": 5, "loadavg": ["7.59", "5.05"], "smaps_rollup_kb": {"Rss": 96200, "Pss": 87480, "Pss_Anon": 78351, "Pss_File": 8947, "Pss_Shmem": 181, "Anonymous": 79516}, "recall": 0.8699, "wall_p50_ms": 12.203187499999999, "wall_p95_ms": 99.04537475000001, "wall_mean_ms": 27.464124776000002, "order_violations": 0, "short_results": 0, "lat_first10_ms": [98.771, 12.144, 11.402, 11.762, 98.554, 12.113, 98.646, 11.97, 12.032, 11.842], "lat_p50_first_half": 12.293823499999998, "lat_p50_second_half": 12.139036}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_12 --table docs_ivf --set turbovec.probes=12 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_12", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=12", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43255, "batch_wall_s": 30.272282361984253, "cpu_ms_per_q_threadgroup": 48.08, "cpu_ms_per_q_tasksum": 48.09, "threads_before": 5, "threads_after": 5, "loadavg": ["5.05", "3.61"], "smaps_rollup_kb": {"Rss": 89384, "Pss": 80796, "Pss_Anon": 71663, "Pss_File": 8951, "Pss_Shmem": 181, "Anonymous": 72828}, "recall": 0.9055, "wall_p50_ms": 14.109441499999999, "wall_p95_ms": 101.1075354, "wall_mean_ms": 30.271749453, "order_violations": 0, "short_results": 0, "lat_first10_ms": [14.498, 15.183, 13.645, 14.282, 14.151, 14.446, 14.444, 13.98, 14.08, 13.697], "lat_p50_first_half": 13.977563, "lat_p50_second_half": 14.232634000000001}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_16 --table docs_ivf --set turbovec.probes=16 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:48:04 elapsed]
+{"label": "tvivf_16", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=16", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43322, "batch_wall_s": 27.559452533721924, "cpu_ms_per_q_threadgroup": 49.95, "cpu_ms_per_q_tasksum": 49.96, "threads_before": 5, "threads_after": 5, "loadavg": ["3.64", "3.59"], "smaps_rollup_kb": {"Rss": 103128, "Pss": 94522, "Pss_Anon": 85407, "Pss_File": 8934, "Pss_Shmem": 181, "Anonymous": 86572}, "recall": 0.9261, "wall_p50_ms": 16.023626, "wall_p95_ms": 102.6388985, "wall_mean_ms": 27.558915638, "order_violations": 0, "short_results": 0, "lat_first10_ms": [16.133, 16.536, 15.833, 15.645, 16.477, 16.384, 16.298, 16.297, 15.564, 16.1], "lat_p50_first_half": 16.068651, "lat_p50_second_half": 15.9687585}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_24 --table docs_ivf --set turbovec.probes=24 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_24", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=24", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43407, "batch_wall_s": 29.078827619552612, "cpu_ms_per_q_threadgroup": 61.35, "cpu_ms_per_q_tasksum": 61.35, "threads_before": 5, "threads_after": 5, "loadavg": ["3.59", "3.41"], "smaps_rollup_kb": {"Rss": 122620, "Pss": 114010, "Pss_Anon": 104899, "Pss_File": 8929, "Pss_Shmem": 181, "Anonymous": 106064}, "recall": 0.9484000000000001, "wall_p50_ms": 20.1094495, "wall_p95_ms": 105.8647557, "wall_mean_ms": 29.078270889, "order_violations": 0, "short_results": 0, "lat_first10_ms": [20.605, 20.183, 19.554, 19.706, 106.798, 22.136, 107.127, 20.262, 19.419, 20.679], "lat_p50_first_half": 19.7920635, "lat_p50_second_half": 20.349286}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_32 --table docs_ivf --set turbovec.probes=32 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:49:04 elapsed]
+{"label": "tvivf_32", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=32", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43431, "batch_wall_s": 36.49233794212341, "cpu_ms_per_q_threadgroup": 78.94, "cpu_ms_per_q_tasksum": 78.96, "threads_before": 5, "threads_after": 5, "loadavg": ["3.30", "2.85"], "smaps_rollup_kb": {"Rss": 130612, "Pss": 122018, "Pss_Anon": 112891, "Pss_File": 8945, "Pss_Shmem": 181, "Anonymous": 114056}, "recall": 0.9607, "wall_p50_ms": 24.023578999999998, "wall_p95_ms": 107.89911385, "wall_mean_ms": 36.491627048999995, "order_violations": 0, "short_results": 0, "lat_first10_ms": [24.216, 24.767, 23.496, 23.946, 25.149, 25.249, 25.197, 23.847, 102.39, 24.029], "lat_p50_first_half": 24.07602, "lat_p50_second_half": 23.987347999999997}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_48 --table docs_ivf --set turbovec.probes=48 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:50:04 elapsed]
+{"label": "tvivf_48", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=48", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43618, "batch_wall_s": 45.84320330619812, "cpu_ms_per_q_threadgroup": 108.17, "cpu_ms_per_q_tasksum": 108.16, "threads_before": 5, "threads_after": 5, "loadavg": ["2.94", "2.68"], "smaps_rollup_kb": {"Rss": 183500, "Pss": 174912, "Pss_Anon": 165779, "Pss_File": 8951, "Pss_Shmem": 181, "Anonymous": 166944}, "recall": 0.9761000000000002, "wall_p50_ms": 31.0693495, "wall_p95_ms": 106.56770954999999, "wall_mean_ms": 45.842641758999996, "order_violations": 0, "short_results": 0, "lat_first10_ms": [30.774, 31.114, 30.731, 31.09, 105.328, 32.487, 105.866, 31.358, 31.329, 31.978], "lat_p50_first_half": 31.1130965, "lat_p50_second_half": 31.034940999999996}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_64 --table docs_ivf --set turbovec.probes=64 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+{"label": "tvivf_64", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=64", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43672, "batch_wall_s": 51.34476137161255, "cpu_ms_per_q_threadgroup": 130.43, "cpu_ms_per_q_tasksum": 130.44, "threads_before": 5, "threads_after": 5, "loadavg": ["2.68", "2.68"], "smaps_rollup_kb": {"Rss": 217492, "Pss": 208903, "Pss_Anon": 199771, "Pss_File": 8951, "Pss_Shmem": 181, "Anonymous": 200936}, "recall": 0.9838, "wall_p50_ms": 47.585939999999994, "wall_p95_ms": 116.9967211, "wall_mean_ms": 51.344193314, "order_violations": 0, "short_results": 0, "lat_first10_ms": [48.435, 49.753, 47.11, 47.468, 51.401, 51.318, 49.04, 51.051, 117.556, 49.415], "lat_p50_first_half": 47.638023000000004, "lat_p50_second_half": 47.5692765}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_96 --table docs_ivf --set turbovec.probes=96 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:51:04 elapsed]
+. [bash 19:52:04 elapsed]
+{"label": "tvivf_96", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=96", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43698, "batch_wall_s": 74.28122997283936, "cpu_ms_per_q_threadgroup": 193.68, "cpu_ms_per_q_tasksum": 193.69, "threads_before": 5, "threads_after": 5, "loadavg": ["2.68", "2.77"], "smaps_rollup_kb": {"Rss": 57128, "Pss": 48535, "Pss_Anon": 39407, "Pss_File": 8946, "Pss_Shmem": 181, "Anonymous": 40572}, "recall": 0.9905, "wall_p50_ms": 67.5772595, "wall_p95_ms": 127.87832805000001, "wall_mean_ms": 74.280662988, "order_violations": 0, "short_results": 0, "lat_first10_ms": [70.113, 73.072, 64.995, 64.738, 72.435, 79.912, 76.983, 78.348, 75.952, 75.613], "lat_p50_first_half": 68.593733, "lat_p50_second_half": 66.7813735}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_128 --table docs_ivf --set turbovec.probes=128 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:53:04 elapsed]
+{"label": "tvivf_128", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=128", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43738, "batch_wall_s": 73.88141393661499, "cpu_ms_per_q_threadgroup": 170.96, "cpu_ms_per_q_tasksum": 170.96, "threads_before": 5, "threads_after": 5, "loadavg": ["2.87", "2.39"], "smaps_rollup_kb": {"Rss": 51508, "Pss": 42912, "Pss_Anon": 33787, "Pss_File": 8943, "Pss_Shmem": 181, "Anonymous": 34952}, "recall": 0.9943, "wall_p50_ms": 76.3504345, "wall_p95_ms": 136.60728955, "wall_mean_ms": 73.880850379, "order_violations": 0, "short_results": 0, "lat_first10_ms": [52.686, 51.473, 131.391, 50.406, 57.018, 66.396, 56.981, 56.634, 61.198, 55.133], "lat_p50_first_half": 66.96944099999999, "lat_p50_second_half": 78.13520150000001}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_192 --table docs_ivf --set turbovec.probes=192 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:54:04 elapsed]
+{"label": "tvivf_192", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=192", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43803, "batch_wall_s": 79.70786476135254, "cpu_ms_per_q_threadgroup": 138.45, "cpu_ms_per_q_tasksum": 138.44, "threads_before": 5, "threads_after": 5, "loadavg": ["2.28", "1.62"], "smaps_rollup_kb": {"Rss": 288468, "Pss": 279884, "Pss_Anon": 270747, "Pss_File": 8956, "Pss_Shmem": 181, "Anonymous": 271912}, "recall": 0.9972, "wall_p50_ms": 75.86746, "wall_p95_ms": 147.68577200000001, "wall_mean_ms": 79.70729856700001, "order_violations": 0, "short_results": 0, "lat_first10_ms": [77.972, 76.762, 76.357, 76.162, 83.482, 99.09, 85.614, 159.776, 94.599, 81.452], "lat_p50_first_half": 76.49576300000001, "lat_p50_second_half": 75.2737755}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_tv --sys tv --label tvivf_256 --table docs_ivf --set turbovec.probes=256 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_ivf_tv
+. [bash 19:55:04 elapsed]
+. [bash 19:56:04 elapsed]
+{"label": "tvivf_256", "mode": "ids", "sys": "tv", "db": "db_tv", "set": "turbovec.probes=256", "n": 1000, "warm": 50, "k": 10, "backend_pid": 43851, "batch_wall_s": 111.14451909065247, "cpu_ms_per_q_threadgroup": 199.72, "cpu_ms_per_q_tasksum": 199.73, "threads_before": 5, "threads_after": 5, "loadavg": ["1.81", "1.99"], "smaps_rollup_kb": {"Rss": 312116, "Pss": 303523, "Pss_Anon": 294395, "Pss_File": 8946, "Pss_Shmem": 181, "Anonymous": 295560}, "recall": 0.9987, "wall_p50_ms": 114.930791, "wall_p95_ms": 121.67029020000001, "wall_mean_ms": 111.143918447, "order_violations": 0, "short_results": 0, "lat_first10_ms": [118.928, 117.437, 118.521, 118.772, 121.788, 122.293, 119.997, 123.19, 121.812, 123.659], "lat_p50_first_half": 116.0947075, "lat_p50_second_half": 108.9622445}
+++ date +%s
++ local t2=1792007817
++ echo 'ARM tvivf restart_prewarm_s=5 grid_s=686 points=16'
++ tee -a /home/fedora/results/p0/calib/arm_times.txt
+ARM tvivf restart_prewarm_s=5 grid_s=686 points=16
++ arm hnsw db_pv docs_h docs_h_hnsw pv hnsw.ef_search '' 40 100 200 400
++ local name=hnsw db=db_pv tbl=docs_h idx=docs_h_hnsw sys=pv knob=hnsw.ef_search extra=
++ shift 7
+++ date +%s
++ local t0=1792007817
++ restart_prewarm db_pv docs_h queries docs_h_hnsw
++ local db=db_pv
++ shift
++ pg_ctl -D /data/pgdata -m fast -w stop
+waiting for server to shut down..... done
+server stopped
++ sync
++ echo 3
++ sudo tee /proc/sys/vm/drop_caches
++ pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
++ env
++ grep -ci GLIBC_TUNABLES
+0
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT '\''docs_h'\'', pg_prewarm('\''docs_h'\'')'
+docs_h|1000000
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT '\''queries'\'', pg_prewarm('\''queries'\'')'
+queries|5200
++ for r in "$@"
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT '\''docs_h_hnsw'\'', pg_prewarm('\''docs_h_hnsw'\'')'
+docs_h_hnsw|1000001
+++ date +%s
++ local t1=1792007824
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label hnsw_40 --table docs_h --set hnsw.ef_search=40 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_h_hnsw
+. [bash 19:57:04 elapsed]
+{"label": "hnsw_40", "mode": "ids", "sys": "pv", "db": "db_pv", "set": "hnsw.ef_search=40", "n": 1000, "warm": 50, "k": 10, "backend_pid": 44088, "batch_wall_s": 1.4003918170928955, "cpu_ms_per_q_threadgroup": 1.15, "cpu_ms_per_q_tasksum": 1.15, "threads_before": 1, "threads_after": 1, "loadavg": ["1.99", "1.99"], "smaps_rollup_kb": {"Rss": 18672, "Pss": 9304, "Pss_Anon": 2299, "Pss_File": 6824, "Pss_Shmem": 180, "Anonymous": 3496}, "recall": 0.8799000000000001, "wall_p50_ms": 1.4064294999999998, "wall_p95_ms": 1.9079049499999996, "wall_mean_ms": 1.3998630389999998, "order_violations": 0, "short_results": 0, "lat_first10_ms": [1.627, 1.677, 1.475, 1.344, 1.576, 1.609, 1.719, 1.356, 1.328, 1.189], "lat_p50_first_half": 1.447877, "lat_p50_second_half": 1.3483260000000001}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label hnsw_100 --table docs_h --set hnsw.ef_search=100 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_h_hnsw
+{"label": "hnsw_100", "mode": "ids", "sys": "pv", "db": "db_pv", "set": "hnsw.ef_search=100", "n": 1000, "warm": 50, "k": 10, "backend_pid": 44090, "batch_wall_s": 2.213095188140869, "cpu_ms_per_q_threadgroup": 1.94, "cpu_ms_per_q_tasksum": 1.94, "threads_before": 1, "threads_after": 1, "loadavg": ["1.99", "1.99"], "smaps_rollup_kb": {"Rss": 18636, "Pss": 9870, "Pss_Anon": 2346, "Pss_File": 7343, "Pss_Shmem": 181, "Anonymous": 3524}, "recall": 0.9519000000000001, "wall_p50_ms": 2.205509, "wall_p95_ms": 3.14555165, "wall_mean_ms": 2.212566673, "order_violations": 0, "short_results": 0, "lat_first10_ms": [2.868, 2.78, 2.618, 2.192, 2.626, 2.672, 2.82, 1.989, 2.004, 1.842], "lat_p50_first_half": 2.2669525000000004, "lat_p50_second_half": 2.1241345}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label hnsw_200 --table docs_h --set hnsw.ef_search=200 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_h_hnsw
+{"label": "hnsw_200", "mode": "ids", "sys": "pv", "db": "db_pv", "set": "hnsw.ef_search=200", "n": 1000, "warm": 50, "k": 10, "backend_pid": 44095, "batch_wall_s": 3.2699906826019287, "cpu_ms_per_q_threadgroup": 3.0, "cpu_ms_per_q_tasksum": 3.0, "threads_before": 1, "threads_after": 1, "loadavg": ["1.99", "1.99"], "smaps_rollup_kb": {"Rss": 18704, "Pss": 9942, "Pss_Anon": 2414, "Pss_File": 7347, "Pss_Shmem": 181, "Anonymous": 3592}, "recall": 0.9770000000000001, "wall_p50_ms": 3.207865, "wall_p95_ms": 4.88403365, "wall_mean_ms": 3.2694474330000003, "order_violations": 0, "short_results": 0, "lat_first10_ms": [4.318, 4.289, 3.806, 3.5, 3.714, 3.59, 3.761, 2.402, 2.644, 2.565], "lat_p50_first_half": 3.2831745000000003, "lat_p50_second_half": 3.0945125}
++ for v in "$@"
++ python3 /home/fedora/bench.py --db db_pv --sys pv --label hnsw_400 --table docs_h --set hnsw.ef_search=400 --mode ids --warm 50 --n 1000 --out /home/fedora/results/p0/calib --expect-index docs_h_hnsw
+{"label": "hnsw_400", "mode": "ids", "sys": "pv", "db": "db_pv", "set": "hnsw.ef_search=400", "n": 1000, "warm": 50, "k": 10, "backend_pid": 44098, "batch_wall_s": 5.473465919494629, "cpu_ms_per_q_threadgroup": 5.19, "cpu_ms_per_q_tasksum": 5.19, "threads_before": 1, "threads_after": 1, "loadavg": ["1.99", "1.91"], "smaps_rollup_kb": {"Rss": 18788, "Pss": 9977, "Pss_Anon": 2498, "Pss_File": 7298, "Pss_Shmem": 181, "Anonymous": 3676}, "recall": 0.9891, "wall_p50_ms": 5.2914975, "wall_p95_ms": 8.461424749999999, "wall_mean_ms": 5.472934412000001, "order_violations": 0, "short_results": 0, "lat_first10_ms": [7.351, 7.081, 6.279, 5.94, 5.296, 5.144, 5.708, 3.628, 3.902, 3.895], "lat_p50_first_half": 5.4011475, "lat_p50_second_half": 5.1020895}
+++ date +%s
++ local t2=1792007840
++ echo 'ARM hnsw restart_prewarm_s=7 grid_s=16 points=4'
++ tee -a /home/fedora/results/p0/calib/arm_times.txt
+ARM hnsw restart_prewarm_s=7 grid_s=16 points=4
++ echo CALIB_DONE
+CALIB_DONE
+[heartbeat] DONE rc=0 (clean exit)

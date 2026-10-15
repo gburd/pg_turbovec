@@ -1,0 +1,10 @@
+label=prism_default_p32 db=db_pv rc=0
+pre: SET max_parallel_maintenance_workers = 31
+sql: CREATE INDEX docs_prism ON docs USING prism (emb vec32_cosine_ops)
+wall_s=43.173785457
+wal_bytes=317563608 (includes the post-build CHECKPOINT record)
+index_bytes=316080128 total_index_bytes=316080128
+datadir_delta_bytes=687117388 (includes WAL)
+peak_summed_rss_kb=21440524
+SET
+CREATE INDEX

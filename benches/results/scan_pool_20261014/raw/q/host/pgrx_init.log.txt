@@ -1,0 +1,12 @@
+[1m[37m   Discovered[39m[0m Postgres v13.23, v14.24, v15.19, v16.15, v17.11, v18.6, v19beta4
+[32m[1m     Creating[0m[39m PGRX_HOME at `/home/fedora/.pgrx`
+[32m[1m  Downloading[0m[39m Postgres v16.15 from https://ftp.postgresql.org/pub/source/v16.15/postgresql-16.15.tar.bz2
+[32m[1m    Untarring[0m[39m Postgres v16.15 to /home/fedora/.pgrx/16.15_unpack
+[32m[1m     Renaming[0m[39m /home/fedora/.pgrx/16.15_unpack/postgresql-16.15 -> /home/fedora/.pgrx/16.15
+[32m[1m  Configuring[0m[39m Postgres v16.15
+[32m[1m    Compiling[0m[39m Postgres v16.15
+[32m[1m   Installing[0m[39m Postgres v16.15 to /home/fedora/.pgrx/16.15/pgrx-install
+[32m[1m   Validating[0m[39m /home/fedora/.pgrx/16.15/pgrx-install/bin/pg_config
+ [32m[1mInitializing[0m[39m data directory at /home/fedora/.pgrx/data-16
+[32m[1m   Validating[0m[39m /opt/pg18/bin/pg_config
+ [32m[1mInitializing[0m[39m data directory at /home/fedora/.pgrx/data-18

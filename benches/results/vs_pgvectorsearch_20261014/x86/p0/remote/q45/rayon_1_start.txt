@@ -1,0 +1,36 @@
++ pg_ctl -D /data/pgdata -m fast -w stop
+waiting for server to shut down..... done
+server stopped
++ sync
++ echo 3
++ sudo tee /proc/sys/vm/drop_caches
++ env RAYON_NUM_THREADS=1 taskset -c 0-43,48-91 pg_ctl -D /data/pgdata -l /home/fedora/pg.log -w start
+waiting for server to start.... done
+server started
+++ head -1 /data/pgdata/postmaster.pid
++ PM=45180
+++ taskset -pc 45180
++ echo 'postmaster 45180 affinity: pid 45180'\''s current affinity list: 0-43,48-91'
+postmaster 45180 affinity: pid 45180's current affinity list: 0-43,48-91
++ tr '\0' '\n'
++ grep -E 'RAYON|GLIBC'
+RAYON_NUM_THREADS=1
++ for db_r in db_tv:docs db_tv:docs_tv_flat db_tv:queries db_pv:docs db_pv:docs_prism db_pv:queries
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT pg_prewarm('\''docs'\'')'
+1000016
++ for db_r in db_tv:docs db_tv:docs_tv_flat db_tv:queries db_pv:docs db_pv:docs_prism db_pv:queries
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT pg_prewarm('\''docs_tv_flat'\'')'
+68353
++ for db_r in db_tv:docs db_tv:docs_tv_flat db_tv:queries db_pv:docs db_pv:docs_prism db_pv:queries
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'SELECT pg_prewarm('\''queries'\'')'
+5200
++ for db_r in db_tv:docs db_tv:docs_tv_flat db_tv:queries db_pv:docs db_pv:docs_prism db_pv:queries
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT pg_prewarm('\''docs'\'')'
+1000055
++ for db_r in db_tv:docs db_tv:docs_tv_flat db_tv:queries db_pv:docs db_pv:docs_prism db_pv:queries
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT pg_prewarm('\''docs_prism'\'')'
+38584
++ for db_r in db_tv:docs db_tv:docs_tv_flat db_tv:queries db_pv:docs db_pv:docs_prism db_pv:queries
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'SELECT pg_prewarm('\''queries'\'')'
+5200
+998979|68857

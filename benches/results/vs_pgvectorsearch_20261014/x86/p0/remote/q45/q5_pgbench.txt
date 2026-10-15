@@ -1,0 +1,106 @@
++ for sys in tv pv
++ '[' tv = tv ']'
++ DB=db_tv
++ T=turbovec.vector
++ printf '\\set qid random(0, 5199)\nSELECT q::text AS qv FROM queries WHERE qid = :qid \\gset\nSELECT id FROM docs ORDER BY emb <=> :'\''qv'\''::%s LIMIT 10;\n' turbovec.vector
++ printf '\\set qid random(0, 5199)\nSELECT q::text AS qv FROM queries WHERE qid = :qid \\gset\nSELECT id FROM docs ORDER BY emb <=> :qv::%s LIMIT 10;\n' turbovec.vector
++ printf '\\set qid random(0, 5199)\nSELECT q::text AS qv FROM queries WHERE qid = :qid \\gset\nINSERT INTO pgb_out SELECT :qid, array_agg(id) FROM (SELECT id FROM docs ORDER BY emb <=> :qv::%s LIMIT 10) s;\n' turbovec.vector
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -c 'DROP TABLE IF EXISTS pgb_out' -c 'CREATE TABLE pgb_out(qid int, ids bigint[])'
+NOTICE:  table "pgb_out" does not exist, skipping
+DROP TABLE
+CREATE TABLE
++ echo '== plan form (tv)'
+== plan form (tv)
++ taskset -c 44,92,45,93,46,94,47,95 pgbench -h /tmp -n -M prepared -t 5 -c 1 -f /home/fedora/results/p0/q45/pgb_plan_form_tv.sql db_tv
++ tail -5
+number of threads: 1
+maximum number of tries: 1
+number of transactions per client: 5
+number of transactions actually processed: 0/5
+pgbench: error: Run was aborted; the above results are incomplete.
++ echo '== :qv form capture (tv)'
+== :qv form capture (tv)
++ taskset -c 44,92,45,93,46,94,47,95 pgbench -h /tmp -n -M prepared -t 100 -c 1 -f /home/fedora/results/p0/q45/pgb_capture_tv.sql db_tv
++ grep -E 'latency|tps|failed|error'
+number of failed transactions: 0 (0.000%)
+latency average = 11.718 ms
+tps = 85.339159 (without initial connection time)
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'EXPLAIN (COSTS OFF) INSERT INTO pgb_out SELECT 1, array_agg(id) FROM (SELECT id FROM docs ORDER BY emb <=> (SELECT q FROM queries WHERE qid=1) LIMIT 10) s'
++ head -8
+Insert on pgb_out
+  ->  Aggregate
+        ->  Limit
+              InitPlan 1
+                ->  Index Scan using queries_pkey on queries
+                      Index Cond: (qid = 1)
+              ->  Index Scan using docs_tv_flat on docs
+                    Order By: (emb <=> (InitPlan 1).col1)
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_tv -Atc 'COPY (SELECT qid, array_to_string(ids, '\'','\'') FROM pgb_out) TO STDOUT'
++ echo '== :qv form 30 s 4 clients pinned (tv)'
+== :qv form 30 s 4 clients pinned (tv)
++ taskset -c 44,92,45,93,46,94,47,95 pgbench -h /tmp -n -M prepared -T 30 -c 4 -j 4 -P 10 -l --log-prefix=/home/fedora/results/p0/q45/pgb_log_tv -f /home/fedora/results/p0/q45/pgb_tv.sql db_tv
++ grep -E 'progress|latency|tps|failed|error'
+progress: 10.0 s, 370.8 tps, lat 10.777 ms stddev 15.415, 0 failed
+progress: 20.0 s, 386.1 tps, lat 10.358 ms stddev 3.169, 0 failed
+progress: 30.0 s, 387.8 tps, lat 10.313 ms stddev 3.084, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 10.480 ms
+latency stddev = 9.144 ms
+tps = 381.482364 (without initial connection time)
+++ pgrep -x pgbench
+++ head -1
++ PGB=
++ '[' -n '' ']'
++ for sys in tv pv
++ '[' pv = tv ']'
++ DB=db_pv
++ T=vector
++ printf '\\set qid random(0, 5199)\nSELECT q::text AS qv FROM queries WHERE qid = :qid \\gset\nSELECT id FROM docs ORDER BY emb <=> :'\''qv'\''::%s LIMIT 10;\n' vector
++ printf '\\set qid random(0, 5199)\nSELECT q::text AS qv FROM queries WHERE qid = :qid \\gset\nSELECT id FROM docs ORDER BY emb <=> :qv::%s LIMIT 10;\n' vector
++ printf '\\set qid random(0, 5199)\nSELECT q::text AS qv FROM queries WHERE qid = :qid \\gset\nINSERT INTO pgb_out SELECT :qid, array_agg(id) FROM (SELECT id FROM docs ORDER BY emb <=> :qv::%s LIMIT 10) s;\n' vector
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -c 'DROP TABLE IF EXISTS pgb_out' -c 'CREATE TABLE pgb_out(qid int, ids bigint[])'
+NOTICE:  table "pgb_out" does not exist, skipping
+DROP TABLE
+CREATE TABLE
++ echo '== plan form (pv)'
+== plan form (pv)
++ taskset -c 44,92,45,93,46,94,47,95 pgbench -h /tmp -n -M prepared -t 5 -c 1 -f /home/fedora/results/p0/q45/pgb_plan_form_pv.sql db_pv
++ tail -5
+number of threads: 1
+maximum number of tries: 1
+number of transactions per client: 5
+number of transactions actually processed: 0/5
+pgbench: error: Run was aborted; the above results are incomplete.
++ echo '== :qv form capture (pv)'
+== :qv form capture (pv)
++ taskset -c 44,92,45,93,46,94,47,95 pgbench -h /tmp -n -M prepared -t 100 -c 1 -f /home/fedora/results/p0/q45/pgb_capture_pv.sql db_pv
++ grep -E 'latency|tps|failed|error'
+number of failed transactions: 0 (0.000%)
+latency average = 2.323 ms
+tps = 430.564944 (without initial connection time)
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'EXPLAIN (COSTS OFF) INSERT INTO pgb_out SELECT 1, array_agg(id) FROM (SELECT id FROM docs ORDER BY emb <=> (SELECT q FROM queries WHERE qid=1) LIMIT 10) s'
++ head -8
+Insert on pgb_out
+  ->  Aggregate
+        ->  Limit
+              InitPlan 1
+                ->  Index Scan using queries_pkey on queries
+                      Index Cond: (qid = 1)
+              ->  Index Scan using docs_prism on docs
+                    Order By: (emb <=> (InitPlan 1).col1)
++ psql -h /tmp -X -v ON_ERROR_STOP=1 -d db_pv -Atc 'COPY (SELECT qid, array_to_string(ids, '\'','\'') FROM pgb_out) TO STDOUT'
++ echo '== :qv form 30 s 4 clients pinned (pv)'
+== :qv form 30 s 4 clients pinned (pv)
++ taskset -c 44,92,45,93,46,94,47,95 pgbench -h /tmp -n -M prepared -T 30 -c 4 -j 4 -P 10 -l --log-prefix=/home/fedora/results/p0/q45/pgb_log_pv -f /home/fedora/results/p0/q45/pgb_pv.sql db_pv
++ grep -E 'progress|latency|tps|failed|error'
+progress: 10.0 s, 3670.3 tps, lat 1.089 ms stddev 1.103, 0 failed
+progress: 20.0 s, 3754.8 tps, lat 1.065 ms stddev 0.161, 0 failed
+progress: 30.0 s, 3751.2 tps, lat 1.066 ms stddev 0.163, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 1.073 ms
+latency stddev = 0.646 ms
+tps = 3725.655710 (without initial connection time)
+++ pgrep -x pgbench
+++ head -1
++ PGB=
++ '[' -n '' ']'

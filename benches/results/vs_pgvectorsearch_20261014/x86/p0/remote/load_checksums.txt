@@ -1,0 +1,36 @@
++ echo '== pv'
+== pv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT count(*), sum(id), sum((emb::real[])[1]::float8), sum((emb::real[])[1024]::float8) FROM docs'
+1000000|499999500000|2920.7662003634596|6826.938138479035
++ echo '== tv'
+== tv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*), sum(id), sum((emb::real[])[1]::float8), sum((emb::real[])[1024]::float8) FROM docs'
+1000000|499999500000|2920.7662003634573|6826.938138479039
++ echo '== pv queries'
+== pv queries
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT count(*), sum((q::real[])[1]::float8) FROM queries'
+5200|9.138857103799182
++ echo '== tv queries'
+== tv queries
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*), sum((q::real[])[1]::float8) FROM queries'
+5200|9.138857103799182
++ for db in db_pv db_tv
++ echo '== db_pv sizes/persistence'
+== db_pv sizes/persistence
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT c.relname, c.relpersistence, pg_relation_size(c.oid), pg_total_relation_size(c.oid), c.relpages, c.reltuples, (SELECT attstorage FROM pg_attribute WHERE attrelid=c.oid AND attnum=2) FROM pg_class c WHERE relname IN ('\''docs'\'','\''queries'\'')'
+docs|p|8192450560|8234049536|1000055|999988|p
+queries|p|42598400|42786816|5200|5200|p
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT pg_relation_size(reltoastrelid) FROM pg_class WHERE relname='\''docs'\'''
+0
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -Atc 'SELECT avg(pg_column_size(emb)) FROM (SELECT emb FROM docs LIMIT 10000) s'
+4104.0000000000000000
++ for db in db_pv db_tv
++ echo '== db_tv sizes/persistence'
+== db_tv sizes/persistence
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT c.relname, c.relpersistence, pg_relation_size(c.oid), pg_total_relation_size(c.oid), c.relpages, c.reltuples, (SELECT attstorage FROM pg_attribute WHERE attrelid=c.oid AND attnum=2) FROM pg_class c WHERE relname IN ('\''docs'\'','\''queries'\'')'
+docs|p|8192131072|8233730048|1000016|1.000016e+06|p
+queries|p|42598400|42786816|5200|5200|p
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT pg_relation_size(reltoastrelid) FROM pg_class WHERE relname='\''docs'\'''
+0
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT avg(pg_column_size(emb)) FROM (SELECT emb FROM docs LIMIT 10000) s'
+5127.4692000000000000

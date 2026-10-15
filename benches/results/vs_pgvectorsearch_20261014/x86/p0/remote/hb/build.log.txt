@@ -1,0 +1,68 @@
+[heartbeat] starting: bash /home/fedora/build_all.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ PGV=18.6
++ PGVEC=v0.8.7
++ TV=v2.12.1
++ R=/home/fedora/results/p0
++ mkdir -p /home/fedora/results/p0 /home/fedora/src
++ '[' '!' -x /opt/pg18/bin/postgres ']'
++ export PATH=/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ cd /home/fedora/src
++ '[' -d pgvector ']'
++ cd pgvector
++ '[' -f vector.so ']'
++ make install PG_CONFIG=/opt/pg18/bin/pg_config
++ cd /home/fedora/src
++ '[' -d pg_vectorsearch ']'
++ cd pg_vectorsearch
++ '[' -d build ']'
++ mv build build.old.14730
++ meson setup build --buildtype=release -Dsimd=full -Dnative=false -Dblas=enabled -Dtools=disabled -Dc_args=-I/usr/include/openblas -Dpg_config=/opt/pg18/bin/pg_config
++ meson compile -C build
++ meson install -C build
++ command -v rustup
++ true
++ rustup-init -y --default-toolchain 1.98.0 --profile minimal
++ source /home/fedora/.cargo/env
+++ case ":${PATH}:" in
+++ export PATH=/home/fedora/.cargo/bin:/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
+++ PATH=/home/fedora/.cargo/bin:/opt/pg18/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ rustup toolchain install 1.98.0 --profile minimal
++ rustup default 1.98.0
+info: using existing install for 1.98.0-x86_64-unknown-linux-gnu
+info: default toolchain set to 1.98.0-x86_64-unknown-linux-gnu
+
+  1.98.0-x86_64-unknown-linux-gnu unchanged - rustc 1.98.0 (88d9e12ae 2026-08-18)
+
++ cargo install --locked cargo-pgrx --version 0.19.3
++ cargo pgrx init --pg18 /opt/pg18/bin/pg_config
++ cd /home/fedora/src
++ '[' -d pg_turbovec ']'
++ git clone -q --branch v2.12.1 https://github.com/gburd/pg_turbovec.git
+warning: refs/tags/v2.12.1 dea8b1602cfa5f25bc41bcfcf87db4077ab16291 is not a commit!
+Note: switching to '95d0fdd2817a0d3b72d5d163a1b12ecafa6a595c'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
++ cd pg_turbovec
++ cargo pgrx install --release --pg-config /opt/pg18/bin/pg_config --no-default-features --features pg18
+. [bash 19:16:07 elapsed]
+. [bash 19:17:07 elapsed]
++ echo BUILD_ALL_DONE
+BUILD_ALL_DONE
+[heartbeat] DONE rc=0 (clean exit)

@@ -26,18 +26,22 @@ a query uses by default.
   per-backend pool used to only ever grow. The deprecated graph kind is left
   as it was.
 
-  Measured on 2.12.1, on an i7i.metal-24xl (Emerald Rapids), flat 4-bit over
-  1M × 1024-d, `search_k = 32`, `hi_dim_rerank = off`, one client,
-  postmaster pinned to 88 vCPUs. The thread count was forced with
-  `RAYON_NUM_THREADS`, which stands in for what 2.13.0 does by default:
+  Measured directly on 2.12.1 (OLD) vs 2.13.0 (NEW) on an i7i.metal-24xl
+  (Emerald Rapids, AVX-512 VBMI+VNNI), flat 4-bit over 1M × 1024-d, one
+  client, 3 rounds × 1,000 queries, recall@10 unchanged, nothing pinned
+  (`benches/results/scan_pool_20261014/`):
 
-  | threads per query | p50 | backend CPU per query |
-  |---|---|---|
-  | 88 (2.12.1 default) | 1.12 ms | 36.6 ms |
-  | 4 | 2.03 ms | 5.7 ms |
-  | 1 | 5.33 ms | 5.1 ms |
+  | | p50 | CPU-ms/query | backend threads |
+  |---|---|---|---|
+  | 2.12.1, `search_k = 32` | 1.20 ms | 45.9 | 97 |
+  | 2.13.0 default (4 threads) | 2.06 ms | 5.7 | 5 |
+  | 2.13.0 `scan_parallelism = 1` | 5.26 ms | 5.0 | 2 |
+  | 2.13.0 `scan_parallelism` = cores | 1.07 ms | 32.9 | 89 |
 
-  BENCH_2130_PLACEHOLDER
+  With all GUCs at defaults, flat p50 goes 7.23 → 7.99 ms and CPU 112.8 →
+  13.0 ms/query. pgbench (flat, defaults): at 16 clients 2.12.1 does ~867 TPS
+  at 92% host CPU, 2.13.0 ~1,116 TPS at 36%; at 96 clients ~1,091 → ~1,431
+  (and ~1,557 at `scan_parallelism = 1`).
 
   **Single-query latency on an idle many-core server goes up; CPU per query
   goes down about 6–7×**, and concurrent queries no longer compete for every
@@ -66,7 +70,8 @@ a query uses by default.
   16 ms p50 at `probes = 16` on 1M × 1024-d (i7i.metal-24xl, 300 queries
   per setting): 80 of 300 queries (27%) hit it at the default 4 threads,
   166 (55%) at 8, none at 1–2. Evidence:
-  `benches/results/vs_pgvectorsearch_20261014/x86/p0/remote/tailprobe/`. It was not the data. Each
+  `benches/results/vs_pgvectorsearch_20261014/x86/p0/remote/tailprobe/`. It was
+  not the data. Each
   parallel chunk of the fine-scan builds a throwaway turbovec index, which
   fetches the Lloyd-Max codebook from turbovec's process-wide memo with a
   single `try_lock`, and a lost race re-solved the codebook from scratch
@@ -91,7 +96,10 @@ care about single-query latency on an idle, many-core server.
 
 ### Tests
 
-TESTS_PLACEHOLDER
+`cargo pgrx test pg16`: **475 passed / 0 failed / 9 ignored** locally and on
+the i7i.metal-24xl qualification host; green on CI across pg13–19 native and
+pg16 classic. turbovec's own suite: 527 passed / 0 failed (fork carry #6's two
+new codebook-contention tests).
 
 ## [2.12.1] — 2026-10-14
 

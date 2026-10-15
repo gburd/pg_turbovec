@@ -1,0 +1,10 @@
+/home/fedora/.local/lib/python3.14/site-packages/numpy/_core/fromnumeric.py:3862: RuntimeWarning: Mean of empty slice
+  return _methods._mean(a, axis=axis, dtype=dtype,
+/home/fedora/.local/lib/python3.14/site-packages/numpy/_core/_methods.py:142: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+slow qids (whole>60ms): 400 of 400
+default                slow-set median   67.5 ms (max  138.0) | other median    nan ms
+hi_dim_rerank=off      slow-set median   13.8 ms (max   14.3) | other median    nan ms
+scan_parallelism=1     slow-set median   62.7 ms (max  135.0) | other median    nan ms
+search_k=10,hdr=off    slow-set median   12.8 ms (max   13.3) | other median    nan ms
+probes=64              slow-set median   63.4 ms (max   67.8) | other median    nan ms

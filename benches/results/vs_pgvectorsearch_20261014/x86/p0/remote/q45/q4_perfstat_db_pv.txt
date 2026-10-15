@@ -1,0 +1,11 @@
+# started on Wed Oct 14 19:59:17 2026
+
+
+ Performance counter stats for process id '44502':
+
+            559.22 msec task-clock                                                            
+               504      context-switches                                                      
+                 0      cpu-migrations                                                        
+
+       1.867795892 seconds time elapsed
+

@@ -1,0 +1,25 @@
+558-}
+559-
+560:VECTOR_TARGET_CLONES static float
+561-VectorL2SquaredDistance(int dim, float *ax, float *bx)
+562-{
+563-	float		distance = 0.0;
+564-
+565-	/* Auto-vectorized */
+566-	for (int i = 0; i < dim; i++)
+567-	{
+568-		float		diff = ax[i] - bx[i];
+--
+605-}
+606-
+20:#define USE_DISPATCH
+22:#define USE_DISPATCH
+24:#define USE_DISPATCH
+29:#if defined(USE_DISPATCH) && defined(__gnu_linux__) && defined(__has_attribute)
+32:#define USE_TARGET_CLONES
+37:#if defined(USE_DISPATCH) && (defined(HAVE__GET_CPUID) || defined(__apple_build_version__))
+41:#if defined(USE_DISPATCH)
+   1a94e:	vfmadd231ps %ymm8,%ymm8,%ymm12
+   1a953:	vfmadd231ps %ymm7,%ymm7,%ymm19
+   1a963:	vfmadd231ps %ymm6,%ymm6,%ymm10
+   1a968:	vfmadd231ps %ymm5,%ymm5,%ymm18

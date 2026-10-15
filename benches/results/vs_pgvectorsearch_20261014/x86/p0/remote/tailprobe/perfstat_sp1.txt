@@ -1,0 +1,10 @@
+
+ Performance counter stats for process id '47676':
+
+         19,793.67 msec task-clock                                                            
+            47,248      context-switches                                                      
+             1,231      cpu-migrations                                                        
+             6,909      page-faults                                                           
+
+       8.001095875 seconds time elapsed
+

@@ -1,0 +1,10 @@
+label=tv_ivf1000_t32 db=db_tv rc=0
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_ivf ON docs USING turbovec (emb vec_cosine_ops) WITH (lists = 1000)
+wall_s=28.419960039
+wal_bytes=1135165544 (includes the post-build CHECKPOINT record)
+index_bytes=564076544 total_index_bytes=564076544
+datadir_delta_bytes=564077047 (includes WAL)
+peak_summed_rss_kb=2038396
+SET
+CREATE INDEX

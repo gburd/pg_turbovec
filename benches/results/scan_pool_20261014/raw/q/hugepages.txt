@@ -1,0 +1,13 @@
+shared_memory_size_in_huge_pages=66984 nr_hugepages=67496
+AnonHugePages:         0 kB
+ShmemHugePages:        0 kB
+FileHugePages:  19640320 kB
+HugePages_Total:   67496
+HugePages_Free:    67496
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+Hugepagesize:       2048 kB
+Hugetlb:        138231808 kB
+plpgsql|1.0
+pg_turbovec|2.12.1
+pg_prewarm|1.2

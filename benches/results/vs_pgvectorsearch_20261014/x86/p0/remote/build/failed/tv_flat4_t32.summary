@@ -1,0 +1,10 @@
+label=tv_flat4_t32 db=db_tv rc=1
+pre: SET turbovec.build_parallelism = 32
+sql: CREATE INDEX docs_tv_flat ON docs USING turbovec (emb vec_cosine_ops)
+wall_s=.004274773
+wal_bytes=13520 (includes the post-build CHECKPOINT record)
+index_bytes= total_index_bytes=
+datadir_delta_bytes=688 (includes WAL)
+peak_summed_rss_kb=
+SET
+ERROR:  operator class "vec_cosine_ops" does not exist for access method "turbovec"

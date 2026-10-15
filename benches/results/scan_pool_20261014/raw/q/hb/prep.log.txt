@@ -1,0 +1,22 @@
+[heartbeat] starting: python3 /home/fedora/prep_co1024.py 1000000 5200 /data/co1024_1m
+[heartbeat] interval: 60s
+[heartbeat] label:    python3
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  shard 0: corpus 99943/1000000 queries 0/5200 5s
+  shard 1: corpus 199883/1000000 queries 0/5200 8s
+  shard 2: corpus 299814/1000000 queries 0/5200 11s
+  shard 3: corpus 399664/1000000 queries 0/5200 15s
+  shard 4: corpus 499455/1000000 queries 0/5200 18s
+  shard 5: corpus 599337/1000000 queries 0/5200 22s
+  shard 6: corpus 699271/1000000 queries 0/5200 25s
+  shard 7: corpus 799246/1000000 queries 0/5200 27s
+  shard 8: corpus 899214/1000000 queries 0/5200 30s
+  shard 9: corpus 999159/1000000 queries 0/5200 33s
+  shard 10: corpus 1000000/1000000 queries 5200/5200 46s
+vectors saved 51s
+. [python3 00:15:29 elapsed]
+GT done 89s
+copy files done 108s
+{"null": 0, "badlen": 0, "zero": 0, "corpus_dup_dropped": 841, "query_dup_dropped": 0, "query_eq_corpus": 0, "rows_read": 1006041, "max_abs_norm_dev_corpus": 1.4543587822934967e-07, "max_abs_norm_dev_queries": 1.2242529900952093e-07, "query_eq_corpus_qids": [], "tie_ambiguous_k10": 3, "tie_ambiguous_k100": 24, "queries_with_dist0_top1": 0}
+done 114s
+[heartbeat] DONE rc=0 (clean exit)

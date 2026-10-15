@@ -1,0 +1,153 @@
+CREATE EXTENSION vector;
+CREATE EXTENSION
+CREATE EXTENSION pg_vectorsearch;
+WARNING:  pg_vectorsearch 0.2.0-dev is a prerelease: upgrading to later versions might not be possible (reinstall instead) and its indexes may need rebuilding
+CREATE EXTENSION
+CREATE EXTENSION pg_buffercache;
+CREATE EXTENSION
+CREATE EXTENSION pg_prewarm;
+CREATE EXTENSION
+CREATE EXTENSION pg_stat_statements;
+CREATE EXTENSION
+SELECT extname, extversion FROM pg_extension ORDER BY 1;
+      extname       | extversion 
+--------------------+------------
+ pg_buffercache     | 1.6
+ pg_prewarm         | 1.2
+ pg_stat_statements | 1.12
+ pg_vectorsearch    | 0.2.0-dev
+ plpgsql            | 1.0
+ vector             | 0.8.7
+(6 rows)
+
+CREATE UNLOGGED TABLE u(id bigint, emb vector(3));
+CREATE TABLE
+INSERT INTO u SELECT g, ARRAY[random(),random(),random()]::real[]::vector FROM generate_series(1,1000) g;
+INSERT 0 1000
+CREATE INDEX ON u USING prism (emb vec32_cosine_ops);
+ERROR:  prism indexes do not support unlogged tables
+HINT:  Use a logged table, or run ALTER TABLE ... SET LOGGED before creating the index.
+CREATE INDEX ON u USING prism (emb vector_cosine_ops);
+ERROR:  operator class "vector_cosine_ops" does not exist for access method "prism"
+SHOW prism.query_limit;
+ prism.query_limit 
+-------------------
+ 0
+(1 row)
+
+SHOW prism.leaf_refine_threshold;
+ prism.leaf_refine_threshold 
+-----------------------------
+ 0
+(1 row)
+
+SHOW prism.recent_buffers;
+ prism.recent_buffers 
+----------------------
+ on
+(1 row)
+
+SHOW prism.nprobe;
+ prism.nprobe 
+--------------
+ 0
+(1 row)
+
+SHOW prism.rerank;
+ prism.rerank 
+--------------
+ on
+(1 row)
+
+SHOW prism.rerank_pool;
+ prism.rerank_pool 
+-------------------
+ 0
+(1 row)
+
+SHOW prism.fastscan_bits;
+ prism.fastscan_bits 
+---------------------
+ 16
+(1 row)
+
+SHOW prism.centroid_beam_scale;
+ prism.centroid_beam_scale 
+---------------------------
+ 0.5
+(1 row)
+
+SHOW prism.probe_expand;
+ prism.probe_expand 
+--------------------
+ 2
+(1 row)
+
+SELECT name, setting, boot_val, short_desc FROM pg_settings WHERE name LIKE 'prism.%' ORDER BY 1;
+            name             | setting | boot_val |                                             short_desc                                             
+-----------------------------+---------+----------+----------------------------------------------------------------------------------------------------
+ prism.centroid_beam_scale   | 0.5     | 0.5      | Intermediate centroid beam width as a fraction of nprobe.
+ prism.centroid_error_scale  | 0       | 0        | Centroid-search beam width, as a multiple of the RaBitQ distance-error margin.
+ prism.distance_mode         | default | default  | RaBitQ distance computation mode.
+ prism.fastscan_bits         | 16      | 16       | Fastscan LUT quantization bits.
+ prism.leaf_refine_threshold | 0       | 0        | Sample-per-leaf count below which a subsampled build refines the leaf centroids on the full table.
+ prism.log_build_stats       | off     | off      | Log per-phase index-build resource statistics.
+ prism.nprobe                | 0       | 0        | Number of clusters to probe per query.
+ prism.probe_expand          | 2       | 2        | Probe-candidate expansion factor for exact centroid re-rank.
+ prism.query_limit           | 0       | 0        | Caps the top-k an index scan is sized for (0 = no cap).
+ prism.recent_buffers        | on      | on       | Re-pin index pages via a backend-local buffer-id cache.
+ prism.rerank                | on      | on       | Enable reranking with exact distances.
+ prism.rerank_pool           | 0       | 0        | Max candidates to exact-rerank per query (0 = automatic, -1 = unlimited).
+(12 rows)
+
+DROP TABLE u;
+DROP TABLE
+CREATE EXTENSION pg_turbovec;
+CREATE EXTENSION
+CREATE EXTENSION pg_buffercache;
+CREATE EXTENSION
+CREATE EXTENSION pg_prewarm;
+CREATE EXTENSION
+CREATE EXTENSION pg_stat_statements;
+CREATE EXTENSION
+SELECT extname, extversion FROM pg_extension ORDER BY 1;
+      extname       | extversion 
+--------------------+------------
+ pg_buffercache     | 1.6
+ pg_prewarm         | 1.2
+ pg_stat_statements | 1.12
+ pg_turbovec        | 2.12.1
+ plpgsql            | 1.0
+(5 rows)
+
+SELECT turbovec.turbovec_version();
+ turbovec_version 
+------------------
+ 2.12.1
+(1 row)
+
+SELECT name, setting, boot_val FROM pg_settings WHERE name LIKE 'turbovec.%' ORDER BY 1;
+              name               | setting | boot_val 
+---------------------------------+---------+----------
+ turbovec.allowlist              |         | 
+ turbovec.bit_width_default      | 4       | 4
+ turbovec.build_parallelism      | 0       | 0
+ turbovec.cache_size_mb          | 256     | 256
+ turbovec.coarse_graph           | auto    | auto
+ turbovec.graph_build_partitions | -1      | -1
+ turbovec.graph_ef               | 0       | 0
+ turbovec.hi_dim_rerank          | auto    | auto
+ turbovec.iterative_scan         | off     | off
+ turbovec.ivf_max_delta_pct      | 10      | 10
+ turbovec.max_probes             | 64      | 64
+ turbovec.max_scan_tuples        | 20000   | 20000
+ turbovec.normalize_on_insert    | on      | on
+ turbovec.out_of_core            | auto    | auto
+ turbovec.oversample             | 1       | 1
+ turbovec.probes                 | 16      | 16
+ turbovec.scan_parallelism       | 0       | 0
+ turbovec.search_concurrency     | 1       | 1
+ turbovec.search_k               | 32      | 32
+ turbovec.warn_on_rebuild        | on      | on
+(20 rows)
+

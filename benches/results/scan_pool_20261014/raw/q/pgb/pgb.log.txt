@@ -1,0 +1,227 @@
+== 00:58:46 p1_old_c16 clients=16 jobs=16 PGOPTIONS=''
+progress: 5.0 s, 766.3 tps, lat 20.828 ms stddev 42.857, 0 failed
+progress: 10.0 s, 874.1 tps, lat 18.300 ms stddev 4.255, 0 failed
+progress: 15.0 s, 867.4 tps, lat 18.442 ms stddev 4.516, 0 failed
+progress: 20.0 s, 873.4 tps, lat 18.309 ms stddev 4.115, 0 failed
+progress: 25.0 s, 868.4 tps, lat 18.432 ms stddev 4.596, 0 failed
+progress: 30.0 s, 869.6 tps, lat 18.398 ms stddev 4.360, 0 failed
+progress: 35.0 s, 864.8 tps, lat 18.499 ms stddev 4.658, 0 failed
+progress: 40.0 s, 872.0 tps, lat 18.359 ms stddev 4.391, 0 failed
+progress: 45.0 s, 868.4 tps, lat 18.421 ms stddev 4.525, 0 failed
+progress: 50.0 s, 866.8 tps, lat 18.452 ms stddev 4.541, 0 failed
+progress: 55.0 s, 867.8 tps, lat 18.444 ms stddev 4.537, 0 failed
+progress: 60.0 s, 872.9 tps, lat 18.329 ms stddev 4.334, 0 failed
+progress: 65.0 s, 871.8 tps, lat 18.349 ms stddev 4.178, 0 failed
+progress: 70.0 s, 862.0 tps, lat 18.548 ms stddev 4.619, 0 failed
+progress: 75.0 s, 867.8 tps, lat 18.445 ms stddev 4.418, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 18.552 ms
+tps = 862.349081 (without initial connection time)
+== 01:00:01 p1_old_c96 clients=96 jobs=32 PGOPTIONS=''
+progress: 5.0 s, 456.8 tps, lat 207.418 ms stddev 566.360, 0 failed
+progress: 10.0 s, 1092.0 tps, lat 87.983 ms stddev 29.985, 0 failed
+progress: 15.0 s, 1093.1 tps, lat 87.765 ms stddev 28.317, 0 failed
+progress: 20.0 s, 1083.6 tps, lat 88.588 ms stddev 29.871, 0 failed
+progress: 25.0 s, 1098.5 tps, lat 87.429 ms stddev 26.998, 0 failed
+progress: 30.0 s, 1094.8 tps, lat 87.653 ms stddev 27.773, 0 failed
+progress: 35.0 s, 1101.6 tps, lat 87.127 ms stddev 27.386, 0 failed
+progress: 40.0 s, 1087.6 tps, lat 88.315 ms stddev 29.231, 0 failed
+progress: 45.0 s, 1100.7 tps, lat 87.116 ms stddev 26.990, 0 failed
+progress: 50.0 s, 1081.8 tps, lat 88.647 ms stddev 29.378, 0 failed
+progress: 55.0 s, 1094.9 tps, lat 87.761 ms stddev 28.219, 0 failed
+progress: 60.0 s, 1077.9 tps, lat 89.041 ms stddev 30.474, 0 failed
+progress: 65.0 s, 1086.6 tps, lat 88.432 ms stddev 29.454, 0 failed
+progress: 70.0 s, 1087.9 tps, lat 88.280 ms stddev 28.650, 0 failed
+progress: 75.0 s, 1087.8 tps, lat 88.305 ms stddev 28.091, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 91.469 ms
+tps = 1049.020356 (without initial connection time)
+== 01:01:21 p1_new_c16 clients=16 jobs=16 PGOPTIONS=''
+progress: 5.0 s, 986.4 tps, lat 16.192 ms stddev 33.806, 0 failed
+progress: 10.0 s, 1118.8 tps, lat 14.299 ms stddev 1.993, 0 failed
+progress: 15.0 s, 1118.2 tps, lat 14.313 ms stddev 2.057, 0 failed
+progress: 20.0 s, 1112.8 tps, lat 14.364 ms stddev 2.093, 0 failed
+progress: 25.0 s, 1120.0 tps, lat 14.294 ms stddev 1.951, 0 failed
+progress: 30.0 s, 1125.0 tps, lat 14.217 ms stddev 1.898, 0 failed
+progress: 35.0 s, 1118.4 tps, lat 14.306 ms stddev 2.032, 0 failed
+progress: 40.0 s, 1122.8 tps, lat 14.246 ms stddev 1.950, 0 failed
+progress: 45.0 s, 1118.2 tps, lat 14.313 ms stddev 2.023, 0 failed
+progress: 50.0 s, 1108.6 tps, lat 14.434 ms stddev 2.129, 0 failed
+progress: 55.0 s, 1115.6 tps, lat 14.347 ms stddev 1.895, 0 failed
+progress: 60.0 s, 1112.0 tps, lat 14.368 ms stddev 1.796, 0 failed
+progress: 65.0 s, 1109.8 tps, lat 14.433 ms stddev 2.146, 0 failed
+progress: 70.0 s, 1126.2 tps, lat 14.198 ms stddev 1.830, 0 failed
+progress: 75.0 s, 1120.2 tps, lat 14.288 ms stddev 1.981, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 14.426 ms
+tps = 1108.960957 (without initial connection time)
+== 01:02:36 p1_new_c96 clients=96 jobs=32 PGOPTIONS=''
+progress: 5.0 s, 657.0 tps, lat 144.509 ms stddev 446.172, 0 failed
+progress: 10.0 s, 1429.4 tps, lat 67.137 ms stddev 20.363, 0 failed
+progress: 15.0 s, 1428.3 tps, lat 67.186 ms stddev 20.688, 0 failed
+progress: 20.0 s, 1432.0 tps, lat 67.091 ms stddev 20.374, 0 failed
+progress: 25.0 s, 1430.3 tps, lat 67.171 ms stddev 21.108, 0 failed
+progress: 30.0 s, 1433.9 tps, lat 66.931 ms stddev 19.959, 0 failed
+progress: 35.0 s, 1428.4 tps, lat 67.136 ms stddev 20.038, 0 failed
+progress: 40.0 s, 1432.0 tps, lat 67.059 ms stddev 20.890, 0 failed
+progress: 45.0 s, 1436.4 tps, lat 66.890 ms stddev 19.869, 0 failed
+progress: 50.0 s, 1433.0 tps, lat 66.935 ms stddev 20.522, 0 failed
+progress: 55.0 s, 1437.0 tps, lat 66.805 ms stddev 20.005, 0 failed
+progress: 60.0 s, 1433.6 tps, lat 67.034 ms stddev 20.445, 0 failed
+progress: 65.0 s, 1427.4 tps, lat 67.200 ms stddev 20.573, 0 failed
+progress: 70.0 s, 1429.2 tps, lat 67.202 ms stddev 20.595, 0 failed
+progress: 75.0 s, 1430.6 tps, lat 67.042 ms stddev 20.212, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 69.507 ms
+tps = 1380.699588 (without initial connection time)
+== 01:03:52 p1_newsp1_c16 clients=16 jobs=16 PGOPTIONS='-c turbovec.scan_parallelism=1'
+progress: 5.0 s, 420.4 tps, lat 37.839 ms stddev 180.700, 0 failed
+progress: 10.0 s, 727.2 tps, lat 22.001 ms stddev 2.125, 0 failed
+progress: 15.0 s, 728.4 tps, lat 21.987 ms stddev 2.013, 0 failed
+progress: 20.0 s, 727.2 tps, lat 21.985 ms stddev 1.926, 0 failed
+progress: 25.0 s, 724.6 tps, lat 22.083 ms stddev 2.177, 0 failed
+progress: 30.0 s, 723.6 tps, lat 22.094 ms stddev 2.323, 0 failed
+progress: 35.0 s, 727.8 tps, lat 22.018 ms stddev 2.038, 0 failed
+progress: 40.0 s, 727.6 tps, lat 21.959 ms stddev 1.843, 0 failed
+progress: 45.0 s, 726.8 tps, lat 22.026 ms stddev 2.063, 0 failed
+progress: 50.0 s, 729.2 tps, lat 21.944 ms stddev 1.917, 0 failed
+progress: 55.0 s, 727.2 tps, lat 21.994 ms stddev 2.066, 0 failed
+progress: 60.0 s, 727.0 tps, lat 22.008 ms stddev 2.088, 0 failed
+progress: 65.0 s, 727.2 tps, lat 22.007 ms stddev 2.093, 0 failed
+progress: 70.0 s, 727.8 tps, lat 21.985 ms stddev 1.980, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 22.634 ms
+tps = 706.811871 (without initial connection time)
+== 01:05:07 p1_newsp1_c96 clients=96 jobs=32 PGOPTIONS='-c turbovec.scan_parallelism=1'
+progress: 5.0 s, 702.3 tps, lat 135.393 ms stddev 443.536, 0 failed
+progress: 10.0 s, 1556.0 tps, lat 61.703 ms stddev 6.751, 0 failed
+progress: 15.0 s, 1554.8 tps, lat 61.706 ms stddev 6.669, 0 failed
+progress: 20.0 s, 1553.6 tps, lat 61.816 ms stddev 6.931, 0 failed
+progress: 25.0 s, 1557.4 tps, lat 61.640 ms stddev 6.536, 0 failed
+progress: 30.0 s, 1554.0 tps, lat 61.762 ms stddev 6.711, 0 failed
+progress: 35.0 s, 1558.2 tps, lat 61.592 ms stddev 6.337, 0 failed
+progress: 40.0 s, 1558.6 tps, lat 61.651 ms stddev 6.407, 0 failed
+progress: 45.0 s, 1553.6 tps, lat 61.716 ms stddev 6.668, 0 failed
+progress: 50.0 s, 1560.6 tps, lat 61.576 ms stddev 6.319, 0 failed
+progress: 55.0 s, 1559.8 tps, lat 61.561 ms stddev 6.195, 0 failed
+progress: 60.0 s, 1556.6 tps, lat 61.700 ms stddev 6.665, 0 failed
+progress: 65.0 s, 1555.6 tps, lat 61.637 ms stddev 6.588, 0 failed
+progress: 70.0 s, 1559.2 tps, lat 61.589 ms stddev 6.564, 0 failed
+progress: 75.0 s, 1554.4 tps, lat 61.722 ms stddev 6.644, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 63.965 ms
+tps = 1500.090717 (without initial connection time)
+== 01:06:27 p2_old_c16 clients=16 jobs=16 PGOPTIONS=''
+progress: 5.0 s, 753.4 tps, lat 21.176 ms stddev 44.064, 0 failed
+progress: 10.0 s, 864.6 tps, lat 18.514 ms stddev 4.619, 0 failed
+progress: 15.0 s, 879.6 tps, lat 18.186 ms stddev 3.916, 0 failed
+progress: 20.0 s, 861.1 tps, lat 18.580 ms stddev 4.642, 0 failed
+progress: 25.0 s, 875.7 tps, lat 18.275 ms stddev 4.061, 0 failed
+progress: 30.0 s, 863.0 tps, lat 18.527 ms stddev 4.600, 0 failed
+progress: 35.0 s, 875.2 tps, lat 18.294 ms stddev 4.076, 0 failed
+progress: 40.0 s, 860.4 tps, lat 18.580 ms stddev 4.685, 0 failed
+progress: 45.0 s, 865.6 tps, lat 18.490 ms stddev 4.574, 0 failed
+progress: 50.0 s, 873.1 tps, lat 18.324 ms stddev 4.336, 0 failed
+progress: 55.0 s, 864.5 tps, lat 18.515 ms stddev 4.579, 0 failed
+progress: 60.0 s, 864.3 tps, lat 18.509 ms stddev 4.653, 0 failed
+progress: 65.0 s, 862.5 tps, lat 18.552 ms stddev 4.572, 0 failed
+progress: 70.0 s, 872.2 tps, lat 18.344 ms stddev 4.077, 0 failed
+progress: 75.0 s, 860.8 tps, lat 18.581 ms stddev 4.659, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 18.606 ms
+tps = 859.831953 (without initial connection time)
+== 01:07:42 p2_old_c96 clients=96 jobs=32 PGOPTIONS=''
+progress: 5.0 s, 440.1 tps, lat 215.208 ms stddev 600.463, 0 failed
+progress: 10.0 s, 1091.4 tps, lat 87.938 ms stddev 29.731, 0 failed
+progress: 15.0 s, 1090.2 tps, lat 88.066 ms stddev 29.885, 0 failed
+progress: 20.0 s, 1090.0 tps, lat 88.134 ms stddev 29.225, 0 failed
+progress: 25.0 s, 1084.7 tps, lat 88.441 ms stddev 28.742, 0 failed
+progress: 30.0 s, 1104.3 tps, lat 86.950 ms stddev 27.022, 0 failed
+progress: 35.0 s, 1096.7 tps, lat 87.574 ms stddev 27.981, 0 failed
+progress: 40.0 s, 1088.9 tps, lat 88.068 ms stddev 28.895, 0 failed
+progress: 45.0 s, 1089.0 tps, lat 88.220 ms stddev 29.193, 0 failed
+progress: 50.0 s, 1095.0 tps, lat 87.616 ms stddev 28.009, 0 failed
+progress: 55.0 s, 1093.2 tps, lat 87.869 ms stddev 28.511, 0 failed
+progress: 60.0 s, 1094.1 tps, lat 87.738 ms stddev 27.914, 0 failed
+progress: 65.0 s, 1095.3 tps, lat 87.670 ms stddev 28.287, 0 failed
+progress: 70.0 s, 1086.0 tps, lat 88.395 ms stddev 28.921, 0 failed
+progress: 75.0 s, 1084.2 tps, lat 88.514 ms stddev 29.153, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 91.484 ms
+tps = 1048.810489 (without initial connection time)
+== 01:09:03 p2_new_c16 clients=16 jobs=16 PGOPTIONS=''
+progress: 5.0 s, 976.8 tps, lat 16.346 ms stddev 34.010, 0 failed
+progress: 10.0 s, 1119.2 tps, lat 14.292 ms stddev 2.079, 0 failed
+progress: 15.0 s, 1117.0 tps, lat 14.328 ms stddev 2.074, 0 failed
+progress: 20.0 s, 1115.2 tps, lat 14.341 ms stddev 2.104, 0 failed
+progress: 25.0 s, 1116.4 tps, lat 14.338 ms stddev 1.976, 0 failed
+progress: 30.0 s, 1108.0 tps, lat 14.430 ms stddev 2.050, 0 failed
+progress: 35.0 s, 1114.6 tps, lat 14.362 ms stddev 1.938, 0 failed
+progress: 40.0 s, 1109.8 tps, lat 14.417 ms stddev 2.110, 0 failed
+progress: 45.0 s, 1115.0 tps, lat 14.343 ms stddev 2.012, 0 failed
+progress: 50.0 s, 1116.6 tps, lat 14.334 ms stddev 2.007, 0 failed
+progress: 55.0 s, 1108.6 tps, lat 14.427 ms stddev 2.063, 0 failed
+progress: 60.0 s, 1117.0 tps, lat 14.326 ms stddev 2.237, 0 failed
+progress: 65.0 s, 1112.4 tps, lat 14.388 ms stddev 1.926, 0 failed
+progress: 70.0 s, 1116.6 tps, lat 14.326 ms stddev 2.041, 0 failed
+progress: 75.0 s, 1114.0 tps, lat 14.358 ms stddev 2.001, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 14.475 ms
+tps = 1105.227939 (without initial connection time)
+== 01:10:18 p2_new_c96 clients=96 jobs=32 PGOPTIONS=''
+progress: 5.0 s, 661.4 tps, lat 143.430 ms stddev 445.765, 0 failed
+progress: 10.0 s, 1426.6 tps, lat 67.321 ms stddev 21.229, 0 failed
+progress: 15.0 s, 1433.8 tps, lat 67.019 ms stddev 19.972, 0 failed
+progress: 20.0 s, 1431.2 tps, lat 67.027 ms stddev 20.733, 0 failed
+progress: 25.0 s, 1428.0 tps, lat 67.215 ms stddev 20.858, 0 failed
+progress: 30.0 s, 1423.2 tps, lat 67.419 ms stddev 21.538, 0 failed
+progress: 35.0 s, 1431.8 tps, lat 67.146 ms stddev 20.536, 0 failed
+progress: 40.0 s, 1428.1 tps, lat 67.154 ms stddev 20.582, 0 failed
+progress: 45.0 s, 1432.1 tps, lat 67.042 ms stddev 20.501, 0 failed
+progress: 50.0 s, 1429.2 tps, lat 67.174 ms stddev 20.749, 0 failed
+progress: 55.0 s, 1435.6 tps, lat 66.862 ms stddev 20.410, 0 failed
+progress: 60.0 s, 1423.2 tps, lat 67.462 ms stddev 20.922, 0 failed
+progress: 65.0 s, 1431.6 tps, lat 67.008 ms stddev 20.199, 0 failed
+progress: 70.0 s, 1432.0 tps, lat 67.079 ms stddev 20.923, 0 failed
+progress: 75.0 s, 1432.8 tps, lat 67.029 ms stddev 20.544, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 69.569 ms
+tps = 1379.458872 (without initial connection time)
+== 01:11:33 p2_newsp1_c16 clients=16 jobs=16 PGOPTIONS='-c turbovec.scan_parallelism=1'
+progress: 5.0 s, 419.4 tps, lat 37.966 ms stddev 182.366, 0 failed
+progress: 10.0 s, 726.4 tps, lat 22.014 ms stddev 1.924, 0 failed
+progress: 15.0 s, 726.0 tps, lat 22.035 ms stddev 2.108, 0 failed
+progress: 20.0 s, 729.2 tps, lat 21.943 ms stddev 1.920, 0 failed
+progress: 25.0 s, 724.2 tps, lat 22.081 ms stddev 2.358, 0 failed
+progress: 30.0 s, 727.2 tps, lat 22.020 ms stddev 2.138, 0 failed
+progress: 35.0 s, 727.6 tps, lat 21.988 ms stddev 2.018, 0 failed
+progress: 40.0 s, 724.2 tps, lat 22.084 ms stddev 2.311, 0 failed
+progress: 45.0 s, 727.2 tps, lat 22.007 ms stddev 2.111, 0 failed
+progress: 50.0 s, 728.6 tps, lat 21.971 ms stddev 1.938, 0 failed
+progress: 55.0 s, 728.4 tps, lat 21.968 ms stddev 1.923, 0 failed
+progress: 60.0 s, 727.8 tps, lat 21.977 ms stddev 1.871, 0 failed
+progress: 65.0 s, 725.6 tps, lat 22.035 ms stddev 2.135, 0 failed
+progress: 70.0 s, 726.0 tps, lat 22.061 ms stddev 2.235, 0 failed
+progress: 75.0 s, 727.6 tps, lat 21.989 ms stddev 2.047, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 22.644 ms
+tps = 706.513604 (without initial connection time)
+== 01:12:48 p2_newsp1_c96 clients=96 jobs=32 PGOPTIONS='-c turbovec.scan_parallelism=1'
+progress: 5.0 s, 702.4 tps, lat 135.339 ms stddev 442.407, 0 failed
+progress: 10.0 s, 1559.2 tps, lat 61.481 ms stddev 6.210, 0 failed
+progress: 15.0 s, 1561.3 tps, lat 61.578 ms stddev 6.528, 0 failed
+progress: 20.0 s, 1556.4 tps, lat 61.659 ms stddev 6.761, 0 failed
+progress: 25.0 s, 1558.6 tps, lat 61.582 ms stddev 6.512, 0 failed
+progress: 30.0 s, 1554.8 tps, lat 61.725 ms stddev 6.956, 0 failed
+progress: 35.0 s, 1559.0 tps, lat 61.613 ms stddev 6.503, 0 failed
+progress: 40.0 s, 1555.8 tps, lat 61.674 ms stddev 6.601, 0 failed
+progress: 45.0 s, 1559.8 tps, lat 61.588 ms stddev 6.487, 0 failed
+progress: 50.0 s, 1558.2 tps, lat 61.626 ms stddev 6.554, 0 failed
+progress: 55.0 s, 1557.4 tps, lat 61.608 ms stddev 6.470, 0 failed
+progress: 60.0 s, 1556.4 tps, lat 61.668 ms stddev 6.529, 0 failed
+progress: 65.0 s, 1558.6 tps, lat 61.603 ms stddev 6.471, 0 failed
+progress: 70.0 s, 1559.4 tps, lat 61.554 ms stddev 6.250, 0 failed
+progress: 75.0 s, 1555.8 tps, lat 61.709 ms stddev 6.738, 0 failed
+number of failed transactions: 0 (0.000%)
+latency average = 63.912 ms
+tps = 1501.273102 (without initial connection time)

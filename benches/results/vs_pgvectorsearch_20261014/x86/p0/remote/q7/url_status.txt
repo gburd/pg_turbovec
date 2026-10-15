@@ -1,0 +1,5 @@
+http://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 404
+https://ann-benchmarks.com/cohere-wikipedia-22-12-1M-angular.hdf5 404
+http://ann-benchmarks.com/glove-100-angular.hdf5 200
+https://huggingface.co/datasets/Cohere/wikipedia-22-12-en-embeddings 401
+https://huggingface.co/api/datasets/CohereLabs/wikipedia-2023-11-embed-multilingual-v3 200

@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/home/fedora/tail_diag.py", line 11, in <module>
+    conn = psycopg.connect("host=/tmp dbname=bench", autocommit=True, prepare_threshold=0); cur = conn.cursor()
+  File "/home/fedora/.local/lib/python3.14/site-packages/psycopg/connection.py", line 126, in connect
+    raise last_ex.with_traceback(None)
+psycopg.OperationalError: connection failed: connection to server on socket "/tmp/.s.PGSQL.5432" failed: FATAL:  the database system is shutting down

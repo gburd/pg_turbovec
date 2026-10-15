@@ -1,0 +1,170 @@
+[heartbeat] starting: bash /home/fedora/load_tv.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ D=/data/co1024_1m/copy
++ R=/home/fedora/results/q
++ mkdir -p /home/fedora/results/q
++ PS='psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv'
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'DROP TABLE IF EXISTS docs, docs_ivf, queries' -c 'CREATE TABLE queries(qid int PRIMARY KEY, q turbovec.vector)' -c 'ALTER TABLE queries ALTER COLUMN q SET STORAGE PLAIN'
+NOTICE:  table "docs" does not exist, skipping
+NOTICE:  table "docs_ivf" does not exist, skipping
+NOTICE:  table "queries" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+ALTER TABLE
++ for t in docs docs_ivf
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'CREATE TABLE docs(id bigint PRIMARY KEY, emb turbovec.vector)' -c 'ALTER TABLE docs ALTER COLUMN emb SET STORAGE PLAIN'
+CREATE TABLE
+ALTER TABLE
+++ date +%s.%N
++ t0=1792023691.645715876
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_00.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_01.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_02.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_03.tsv'\'''
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_04.tsv'\'''
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_05.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_06.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_07.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_08.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_09.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_10.tsv'\'''
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_11.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_12.tsv'\'''
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_13.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_14.tsv'\'''
++ wait
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_15.tsv'\'''
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
++ tee -a /home/fedora/results/q/load_times.txt
+++ bc
++++ date +%s.%N
+++ echo 1792023701.521989181-1792023691.645715876
++ echo 'LOAD docs 9.876273305 s'
+LOAD docs 9.876273305 s
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'VACUUM (FREEZE, ANALYZE) docs'
+VACUUM
++ for t in docs docs_ivf
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'CREATE TABLE docs_ivf(id bigint PRIMARY KEY, emb turbovec.vector)' -c 'ALTER TABLE docs_ivf ALTER COLUMN emb SET STORAGE PLAIN'
+CREATE TABLE
+ALTER TABLE
+++ date +%s.%N
++ t0=1792023707.153565677
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_00.tsv'\'''
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_01.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_02.tsv'\'''
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_03.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_04.tsv'\'''
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_05.tsv'\'''
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_06.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_07.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_08.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_09.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_10.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_11.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_12.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_13.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_14.tsv'\'''
++ wait
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs_ivf FROM '\''/data/co1024_1m/copy/docs_15.tsv'\'''
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
++ tee -a /home/fedora/results/q/load_times.txt
+++ bc
++++ date +%s.%N
+++ echo 1792023717.097424652-1792023707.153565677
++ echo 'LOAD docs_ivf 9.943858975 s'
+LOAD docs_ivf 9.943858975 s
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'VACUUM (FREEZE, ANALYZE) docs_ivf'
+VACUUM
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy queries FROM '\''/data/co1024_1m/copy/queries.tsv'\'''
+COPY 5200
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'VACUUM (FREEZE, ANALYZE) queries'
+VACUUM
+. [bash 00:22:31 elapsed]
+. [bash 00:23:31 elapsed]
++ cat /home/fedora/results/q/load_checksums.txt
++ for t in docs docs_ivf
++ echo '== docs'
+== docs
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*), sum(id), sum((emb::real[])[1]::float8), sum((emb::real[])[1024]::float8) FROM docs'
+1000000|499999500000|2920.76620036346|6826.9381384790395
++ for t in docs docs_ivf
++ echo '== docs_ivf'
+== docs_ivf
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*), sum(id), sum((emb::real[])[1]::float8), sum((emb::real[])[1024]::float8) FROM docs_ivf'
+1000000|499999500000|2920.7662003634596|6826.938138479041
++ echo '== queries'
+== queries
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT count(*), sum((q::real[])[1]::float8) FROM queries'
+5200|9.138857103799182
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -Atc 'SELECT c.relname, c.relpersistence, pg_relation_size(c.oid), c.relpages, c.reltuples FROM pg_class c WHERE relname IN ('\''docs'\'','\''docs_ivf'\'','\''queries'\'')'
+queries|p|42598400|5200|5200
+docs|p|8191557632|999946|999913
+docs_ivf|p|8192000000|1000000|1e+06
++ echo LOAD_DONE
+LOAD_DONE
+[heartbeat] DONE rc=0 (clean exit)

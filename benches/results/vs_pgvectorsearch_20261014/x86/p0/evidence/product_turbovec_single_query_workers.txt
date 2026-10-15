@@ -1,0 +1,15 @@
+61:pub const SINGLE_QUERY_PARALLEL_MIN_BLOCKS: usize = 1024;
+89:///   SINGLE_QUERY_PARALLEL_MIN_BLOCKS` is exactly the branch condition,
+106:/// `SINGLE_QUERY_PARALLEL_MIN_BLOCKS` inline at its own branch, and
+114:/// While `SINGLE_QUERY_PARALLEL_MIN_BLOCKS == MIN_TILE_BLOCKS` (both
+121:    n_vectors.div_ceil(crate::BLOCK) >= SINGLE_QUERY_PARALLEL_MIN_BLOCKS
+/// Workers a single query's scan is split over: the pool's count when the
+/// mask leaves at least the gate's worth of blocks to visit, else one, so
+/// the scan runs on the calling thread with no handoff (#554).
+fn single_query_workers(mask: Option<&[u64]>, n_blocks: usize) -> usize {
+    if allowed_blocks(mask, n_blocks) >= SINGLE_QUERY_PARALLEL_MIN_BLOCKS {
+        rayon::current_num_threads().max(1)
+    } else {
+        1
+    }
+}

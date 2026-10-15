@@ -1,0 +1,103 @@
+[heartbeat] starting: bash /home/fedora/load_both.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
++ export PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ PATH=/opt/pg18/bin:/home/fedora/.cargo/bin:/home/fedora/.local/bin:/home/fedora/bin:/usr/local/bin:/usr/bin
++ D=/data/co1024_1m/copy
++ R=/home/fedora/results/p0
++ mkdir -p /home/fedora/results/p0
++ PS='psql -h /tmp -v ON_ERROR_STOP=1 -X'
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -c $'DROP TABLE IF EXISTS docs, queries; CREATE TABLE docs(id bigint PRIMARY KEY, emb vector(1024)); ALTER TABLE docs ALTER COLUMN emb SET STORAGE PLAIN;\n  CREATE TABLE queries(qid int PRIMARY KEY, q vector(1024)); ALTER TABLE queries ALTER COLUMN q SET STORAGE PLAIN;'
+DROP TABLE
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c $'DROP TABLE IF EXISTS docs, queries; CREATE TABLE docs(id bigint PRIMARY KEY, emb turbovec.vector); ALTER TABLE docs ALTER COLUMN emb SET STORAGE PLAIN;\n  CREATE TABLE queries(qid int PRIMARY KEY, q turbovec.vector); ALTER TABLE queries ALTER COLUMN q SET STORAGE PLAIN;'
+DROP TABLE
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
++ for db in ${DBS:-db_pv db_tv}
++ '[' 1 = 1 ']'
++ '[' db_pv = db_pv ']'
+++ date +%s.%N
++ t1=1792005926.281335627
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_pv -c 'VACUUM (FREEZE, ANALYZE) docs' -c 'VACUUM (FREEZE, ANALYZE) queries'
+VACUUM
+VACUUM
+++ date +%s.%N
++ t2=1792005926.285760560
++ tee -a /home/fedora/results/p0/load_times.txt
+++ echo 1792005926.285760560-1792005926.281335627
+++ bc
++ echo 'VACUUM_FREEZE_ANALYZE db_pv .004424933 s'
+VACUUM_FREEZE_ANALYZE db_pv .004424933 s
++ for db in ${DBS:-db_pv db_tv}
++ '[' 1 = 1 ']'
++ '[' db_tv = db_pv ']'
+++ date +%s.%N
++ t0=1792005926.288135723
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_00.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_01.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_02.tsv'\'''
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_03.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_04.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_05.tsv'\'''
++ for f in $D/docs_*.tsv
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_06.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_07.tsv'\'''
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_08.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_09.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_10.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_11.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_12.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_13.tsv'\'''
++ for f in $D/docs_*.tsv
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_14.tsv'\'''
++ wait
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy docs FROM '\''/data/co1024_1m/copy/docs_15.tsv'\'''
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
+COPY 62500
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c '\copy queries FROM '\''/data/co1024_1m/copy/queries.tsv'\'''
+COPY 5200
+++ date +%s.%N
++ t1=1792005936.699416495
++ tee -a /home/fedora/results/p0/load_times.txt
+++ echo 1792005936.699416495-1792005926.288135723
+++ bc
++ echo 'LOAD db_tv 10.411280772 s'
+LOAD db_tv 10.411280772 s
++ psql -h /tmp -v ON_ERROR_STOP=1 -X -d db_tv -c 'VACUUM (FREEZE, ANALYZE) docs' -c 'VACUUM (FREEZE, ANALYZE) queries'
+[heartbeat] DONE rc=143 (failed)
+VACUUM
+VACUUM

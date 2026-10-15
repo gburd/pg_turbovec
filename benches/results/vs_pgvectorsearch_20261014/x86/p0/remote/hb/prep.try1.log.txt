@@ -1,0 +1,165 @@
+[heartbeat] starting: python3 /home/fedora/prep_co1024.py 1000000 5200 /data/co1024_1m
+[heartbeat] interval: 60s
+[heartbeat] label:    python3
+/home/fedora/.local/lib/python3.14/site-packages/huggingface_hub/constants.py:302: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  shard 0: corpus 99943/1000000 queries 0/5200 3s
+  shard 1: corpus 199883/1000000 queries 0/5200 6s
+  shard 2: corpus 299814/1000000 queries 0/5200 9s
+  shard 3: corpus 399664/1000000 queries 0/5200 11s
+  shard 4: corpus 499455/1000000 queries 0/5200 14s
+  shard 5: corpus 599337/1000000 queries 0/5200 18s
+  shard 6: corpus 699271/1000000 queries 0/5200 21s
+  shard 7: corpus 799246/1000000 queries 0/5200 23s
+  shard 8: corpus 899214/1000000 queries 0/5200 26s
+  shard 9: corpus 999159/1000000 queries 0/5200 29s
+  shard 10: corpus 1000000/1000000 queries 5200/5200 31s
+vectors saved 35s
+. [python3 19:18:45 elapsed]
+GT done 73s
+/home/fedora/.local/lib/python3.14/site-packages/huggingface_hub/constants.py:302: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+  warnings.warn(
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  shard 0: corpus 99943/1000000 queries 0/5200 2s
+  shard 1: corpus 199883/1000000 queries 0/5200 3s
+  shard 2: corpus 299814/1000000 queries 0/5200 5s
+  shard 3: corpus 399664/1000000 queries 0/5200 7s
+  shard 4: corpus 499455/1000000 queries 0/5200 9s
+  shard 5: corpus 599337/1000000 queries 0/5200 10s
+  shard 6: corpus 699271/1000000 queries 0/5200 12s
+  shard 7: corpus 799246/1000000 queries 0/5200 14s
+  shard 8: corpus 899214/1000000 queries 0/5200 15s
+  shard 9: corpus 999159/1000000 queries 0/5200 17s
+  shard 10: corpus 1000000/1000000 queries 5200/5200 18s
+vectors saved 22s
+. [python3 19:19:45 elapsed]
+GT done 60s
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import sys; from multiprocessing.forkserver import main; main(23, 24, ['__main__'], sys_argv=sys.argv[1:], **{'sys_path': ['/home/fedora', '/usr/lib64/python314.zip', '/usr/lib64/python3.14', '/usr/lib64/python3.14/lib-dynload', '/home/fedora/.local/lib/python3.14/site-packages', '/usr/lib64/python3.14/site-packages', '/usr/lib/python3.14/site-packages'], 'main_path': '/home/fedora/prep_co1024.py', 'authkey_r': 26})
+                                                             ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/forkserver.py", line 230, in main
+    spawn.import_main_path(main_path)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/spawn.py", line 307, in import_main_path
+    _fixup_main_from_path(main_path)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/spawn.py", line 297, in _fixup_main_from_path
+    main_content = runpy.run_path(main_path,
+                                  run_name="__mp_main__")
+  File "<frozen runpy>", line 294, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/fedora/prep_co1024.py", line 91, in <module>
+    with Pool(PARTS) as pool: list(pool.map(write_part, range(PARTS)))
+         ~~~~^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/context.py", line 119, in Pool
+    return Pool(processes, initializer, initargs, maxtasksperchild,
+                context=self.get_context())
+  File "/usr/lib64/python3.14/multiprocessing/pool.py", line 215, in __init__
+    self._repopulate_pool()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/multiprocessing/pool.py", line 306, in _repopulate_pool
+    return self._repopulate_pool_static(self._ctx, self.Process,
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+                                        self._processes,
+                                        ^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                                        self._maxtasksperchild,
+                                        ^^^^^^^^^^^^^^^^^^^^^^^
+                                        self._wrap_exception)
+                                        ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/pool.py", line 329, in _repopulate_pool_static
+    w.start()
+    ~~~~~~~^^
+  File "/usr/lib64/python3.14/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ~~~~~~~~~~~^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/context.py", line 306, in _Popen
+    return Popen(process_obj)
+  File "/usr/lib64/python3.14/multiprocessing/popen_forkserver.py", line 35, in __init__
+    super().__init__(process_obj)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/popen_fork.py", line 20, in __init__
+    self._launch(process_obj)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/popen_forkserver.py", line 42, in _launch
+    prep_data = spawn.get_preparation_data(process_obj._name)
+  File "/usr/lib64/python3.14/multiprocessing/spawn.py", line 164, in get_preparation_data
+    _check_not_importing_main()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/multiprocessing/spawn.py", line 140, in _check_not_importing_main
+    raise RuntimeError('''
+    ...<16 lines>...
+    ''')
+RuntimeError: 
+        An attempt has been made to start a new process before the
+        current process has finished its bootstrapping phase.
+
+        This probably means that you are not using fork to start your
+        child processes and you have forgotten to use the proper idiom
+        in the main module:
+
+            if __name__ == '__main__':
+                freeze_support()
+                ...
+
+        The "freeze_support()" line can be omitted if the program
+        is not going to be frozen to produce an executable.
+
+        To fix this issue, refer to the "Safe importing of main module"
+        section in https://docs.python.org/3/library/multiprocessing.html
+        
+Traceback (most recent call last):
+  File "/home/fedora/prep_co1024.py", line 91, in <module>
+    with Pool(PARTS) as pool: list(pool.map(write_part, range(PARTS)))
+         ~~~~^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/context.py", line 119, in Pool
+    return Pool(processes, initializer, initargs, maxtasksperchild,
+                context=self.get_context())
+  File "/usr/lib64/python3.14/multiprocessing/pool.py", line 215, in __init__
+    self._repopulate_pool()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/multiprocessing/pool.py", line 306, in _repopulate_pool
+    return self._repopulate_pool_static(self._ctx, self.Process,
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+                                        self._processes,
+                                        ^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                                        self._maxtasksperchild,
+                                        ^^^^^^^^^^^^^^^^^^^^^^^
+                                        self._wrap_exception)
+                                        ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/pool.py", line 329, in _repopulate_pool_static
+    w.start()
+    ~~~~~~~^^
+  File "/usr/lib64/python3.14/multiprocessing/process.py", line 121, in start
+    self._popen = self._Popen(self)
+                  ~~~~~~~~~~~^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/context.py", line 306, in _Popen
+    return Popen(process_obj)
+  File "/usr/lib64/python3.14/multiprocessing/popen_forkserver.py", line 35, in __init__
+    super().__init__(process_obj)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/popen_fork.py", line 20, in __init__
+    self._launch(process_obj)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/popen_forkserver.py", line 51, in _launch
+    self.sentinel, w = forkserver.connect_to_new_process(self._fds)
+                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/forkserver.py", line 106, in connect_to_new_process
+    connection.answer_challenge(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+            wrapped_client, self._forkserver_authkey)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/multiprocessing/connection.py", line 995, in answer_challenge
+    message = connection.recv_bytes(256)         # reject large message
+  File "/usr/lib64/python3.14/multiprocessing/connection.py", line 226, in recv_bytes
+    buf = self._recv_bytes(maxlength)
+  File "/usr/lib64/python3.14/multiprocessing/connection.py", line 451, in _recv_bytes
+    buf = self._recv(4)
+  File "/usr/lib64/python3.14/multiprocessing/connection.py", line 416, in _recv
+    chunk = read(handle, to_read)
+ConnectionResetError: [Errno 104] Connection reset by peer
+[heartbeat] DONE rc=1 (failed)

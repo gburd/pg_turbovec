@@ -1,0 +1,44 @@
+== swap -> old 2026-10-15T00:58:43Z installed_so_md5=66fcaeee66dd1483c590303bf94e4fd6 postmaster=57248
+affinity: pid 57248's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.12.1
+search_concurrency_guc_present=1
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+== swap -> new 2026-10-15T01:01:18Z installed_so_md5=9a157a6ce35fda2cfffcaf903807156b postmaster=68407
+affinity: pid 68407's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.13.0
+search_concurrency_guc_present=0
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+== swap -> old 2026-10-15T01:06:24Z installed_so_md5=66fcaeee66dd1483c590303bf94e4fd6 postmaster=69714
+affinity: pid 69714's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.12.1
+search_concurrency_guc_present=1
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200
+== swap -> new 2026-10-15T01:09:00Z installed_so_md5=9a157a6ce35fda2cfffcaf903807156b postmaster=80776
+affinity: pid 80776's current affinity list: 0-95
+postmaster env: no RAYON*/GLIBC*
+turbovec_version=2.13.0
+search_concurrency_guc_present=0
+extversion=2.12.1
+prewarm docs 999946
+prewarm docs_tv_flat 68353
+prewarm docs_ivf 1000000
+prewarm docs_ivf_tv 68857
+prewarm queries 5200

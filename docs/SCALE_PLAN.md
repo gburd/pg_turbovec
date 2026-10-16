@@ -1,8 +1,10 @@
 # Scale plan — from here to best-at-TB–PB-under-pooled-concurrency
 
 > **Status:** DRAFT roadmap, 2026-10-15 (revised 2026-10-16 after
-> `.agent/notes/SCALE_PLAN_REVIEW.md` — 2 blockers + 8 should-fixes resolved).
-> Grounded in the measured pg_vectorsearch comparison (`benches/results/vs_pgvectorsearch_20261014/FINDINGS.md`),
+> `.agent/notes/SCALE_PLAN_REVIEW.md` — 2 blockers + 8 should-fixes resolved;
+> blocker [B2] since RESOLVED by the S2 feasibility spike,
+> `.agent/notes/S2_SPIKE_FINDINGS.md`). Grounded in the measured
+> pg_vectorsearch comparison (`benches/results/vs_pgvectorsearch_20261014/FINDINGS.md`),
 > the code-level bottleneck analysis (`.agent/notes/SCALE_RESEARCH_concurrency.md`,
 > every claim cited to `file:line`), and the benchmark methodology
 > (`benches/METHODOLOGY.md`). Not a release schedule — a direction with
@@ -151,8 +153,10 @@ single biggest per-query CPU lever at `sp=1`, at **every** scale.
 ### Phase S2 — one decoded index per relation in shared memory (bottleneck #1) — THE KEYSTONE
 
 The structural fix that removes the 0.5–5 TB duplication and the 250–500 ms
-cold build. **Highest risk in the plan; gated by a feasibility spike — see
-[B2] — before any engineering commitment, with a named fallback track.**
+cold build. **Feasibility [B2] is RESOLVED (spike, 2026-10-16): buildable, but
+only via the turbovec API additions in S2a below — there is no fallback.**
+Highest *engineering* risk in the plan; prototype behind a GUC and prove on
+the rig before defaulting.
 
 - **What is actually duplicated vs already shared** (the win is precise): the
   *raw relfile pages* already live once in `shared_buffers`; sharing them
@@ -163,24 +167,6 @@ cold build. **Highest risk in the plan; gated by a feasibility spike — see
   (`FINDINGS.md:214`) and the 0.5–5 GB private footprint. S2 materialises that
   decoded form **once per index relation** in DSA / a dynamic shared-memory
   segment, mapped read-only by all backends.
-- **[B2] Feasibility spike FIRST (may be disqualifying).** The scorers hold
-  **raw host pointers** today — `packed_codes: *const u8`, `scales: *const f32`
-  (`src/cache.rs:488-491`) — which are `!Send + !Sync` and meaningless in
-  another backend's address space. A shared image requires every structure in
-  it to be **position-independent** (base + offset, DSA-relative), which the
-  current `Vec`/`Arc`/`*const` layout is not, and turbovec's `prepare()`
-  output / Lloyd-Max codebook may embed owned `Vec`s or thread-local state
-  that does not survive a memcpy into a segment. **Before committing S2
-  engineering, run a spike that answers: can turbovec's prepared structures be
-  made position-independent (or re-derived into a PIC layout on the
-  segment-build side)?** If not, S2 is infeasible as specified and the plan
-  falls back to the track below.
-- **Fallback track if the spike fails:** share only the small derived
-  structures that are cheap to make position-independent — the **rotation
-  matrix + centroid graph + codebook** per relation (plain float arrays, no
-  pointers). This does not lift the whole memory wall (the big item is the
-  blocked codes layout) but removes the per-query rotation rebuild (overlaps
-  S5-era wins) and part of the cold cost, and is a safe partial win.
 - **Cross-backend lifecycle (the OOM/leak class, not corruption).**
   Invalidation keyed on `(relfilenode, freshness)` as today, but freeing a
   superseded DSA allocation is now **cross-process refcounting**: a
@@ -277,14 +263,17 @@ private cache.
   cheapest change and the biggest single-core CPU/query lever, at every scale.
   Neither alone closes the gap to prism, and the plan says so plainly (S1
   honest-scope note).
-- **S4 before S2** — S4 is cheap, broad, and low-risk; S2 is the opposite and
-  must pass a feasibility spike [B2] before it is even known to be buildable.
-- **S2 is the keystone, gated by a spike with a named fallback** — it is the
-  only fix for the memory-per-backend wall that caps pooled-client count. If
-  the position-independence spike [B2] fails, the plan falls back to sharing
-  only rotation + centroid graph + codebook per relation (a partial win) and
-  S3/S5 lose their shared-image foundation — so the spike result gates the
-  whole lower half of the roadmap.
+- **S4 before S2** — S4 is cheap, broad, and low-risk; S2 is the highest
+  *engineering* effort (its feasibility is now resolved — see [B2] — but it
+  needs the S2a turbovec API work first).
+- **S2 is the keystone; [B2] feasibility now RESOLVED** (spike 2026-10-16) —
+  it is the only fix for the memory-per-backend wall. It is **feasible only
+  via turbovec API additions** (S2a: `serialize_prepared` + a borrowed-view
+  `search_from_prepared`), which is additive fork work we own; the
+  small-structures fallback is a **dead end** (saves ~0) and has been dropped,
+  so S2 has a single route. S3/S5 still depend on S2b (the shared image)
+  landing. The remaining S2 risk is engineering effort + the cross-backend
+  lifecycle/NUMA items, not whether it can be built.
 - **S3 then S5** turn the 10M and write-heavy stories around; both depend on
   S2 (or its fallback). S5 is design-only until the [B1] gate conflict with
   drift-check §11a is resolved.
@@ -306,12 +295,14 @@ private cache.
 
 ## 7. Open questions to resolve before committing engineering
 
-- **[B2 spike, gates S2]** Can turbovec's prepared structures
-  (`packed_codes: *const u8` / `scales: *const f32`, `src/cache.rs:488-491`,
-  plus the `prepare()` blocked layout and Lloyd-Max codebook) be made
-  position-independent in a shared segment, or re-derived into a PIC layout on
-  the segment-build side? If not, S2 falls back to sharing only
-  rotation+graph+codebook.
+- **[B2 — RESOLVED]** Spike (2026-10-16, `.agent/notes/S2_SPIKE_FINDINGS.md`)
+  proved turbovec serialized bytes are position-independent and
+  foreign-read-only-mappable, but the decoded index has no borrowed-view
+  constructor — so S2 needs turbovec API additions (`serialize_prepared` +
+  `search_from_prepared`, phase S2a), which is additive fork work we own. pgrx
+  exposes the full DSA/DSM/shmem surface. The small-structures fallback saves
+  ~0 and is dropped. No open question remains on *whether* S2 is buildable;
+  the open items are the lifecycle/NUMA ones below.
 - **[B1, gates S5]** Does `log_newpage` replay correctly on the managed-PG
   variants drift-check §11a protects? If yes, amend §11a with the argument
   answered; if no, stay inside `GenericXLog` with a partial-page delta.

@@ -44,7 +44,7 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.3"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "78731577c79b18f264b4604381fe7451acb5c20d", features = ["mask-skip-counter"] }
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "1202a9ea3194b979c747002a967a6bc2ac48d0f1", features = ["mask-skip-counter"] }
 # ^ turbovec 1.1.2 (upstream c3b043b: staged search keeps the scan's recall on
 #   bunched corpora) + SIX additive fork carries on branch
 #   gburd/turbovec@main (= pgtv-2.12.1-port + carry #6): `pub fn repack` (3ed5708), the

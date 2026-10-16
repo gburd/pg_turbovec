@@ -39,3 +39,27 @@ stdarch binds the intrinsic with LLVM 22's operand types). Pinned by
 Carry #5 is a good upstream candidate on its own: any Nix user of turbovec
 hits the same error. It is not yet filed. File it as an issue first, per
 `00-strategy.md`; nothing is posted without the user.
+
+## 2026-10-15: carry #6 (fork `main` = `7873157`, pinned by pg_turbovec 2.13.0)
+
+`codebook()`'s `memo_lock()` retries `try_lock` for up to 10 ms
+(`MEMO_PATIENCE`) instead of re-solving the Lloyd-Max codebook on a lost
+race. A contended warm codebook used to be re-solved (25-100 ms), which was
+the out-of-core IVF ~100 ms tail. Pinned by
+`warm_codebook_is_never_resolved_under_contention` and
+`warm_lookup_waits_for_a_briefly_held_lock`. Upstream candidate: any caller
+that builds throwaway indexes concurrently hits it.
+
+## 2026-10-16: carry #7, Phase S2a (fork `main` = `1202a9e`, pinned by pg_turbovec main after 2.14.0)
+
+Additive `prepared` module: `TurboQuantIndex::serialize_prepared() -> PiImage`
+(pointer-free, `(offset,len)`-sectioned blob of the decoded search
+structures), `PreparedView::new(&[u8])` (zero-copy borrowed view; validates
+header, section bounds/alignment, and that section lengths match the
+geometry, since `search::search` reads them with unchecked SIMD loads), and
+`search_from_prepared`. Results are bit-identical to the owned `search`,
+including over a relocated copy, in both classic and planes layouts
+(`turbovec/tests/prepared_view.rs`, 6 tests). Prerequisite for pg_turbovec
+Phase S2b (one decoded index per relation in shared memory). Upstream
+candidate only if upstream wants foreign-memory search; otherwise a
+long-lived carry.

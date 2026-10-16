@@ -31,6 +31,12 @@ tag_ver=$(git tag --list 'v*' --sort=-creatordate | head -1 | sed 's/^v//')
 
 [ "$cargo_ver" = "$ctrl_ver" ] || fail "Cargo.toml ($cargo_ver) ≠ pg_turbovec.control ($ctrl_ver)"
 [ "$cargo_ver" = "$chlog_ver" ] || fail "Cargo.toml ($cargo_ver) ≠ CHANGELOG.md top entry ($chlog_ver)"
+# flake.nix carries its own package version (the Nix derivation name); v2.14.0
+# shipped with it still at 2.13.0 because nothing checked it.
+if [ -f flake.nix ]; then
+    flake_ver=$(grep -A2 'pname = "pg_turbovec"' flake.nix | grep -oE 'version = "[^"]+"' | head -1 | cut -d'"' -f2)
+    [ "$cargo_ver" = "$flake_ver" ] || fail "Cargo.toml ($cargo_ver) ≠ flake.nix pg_turbovec version ($flake_ver)"
+fi
 
 # Tag drift is informational, not failure: a freshly-bumped Cargo.toml
 # may legitimately precede the tag for that version.

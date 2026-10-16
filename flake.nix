@@ -48,7 +48,7 @@
         cargoLock = {
           lockFile = ./Cargo.lock;
           outputHashes = {
-            "turbovec-1.1.2" = "sha256-obX0DZncpJK0CaCd7zAyf3qKfkZNv2FOkCfRO3NXme4=";
+            "turbovec-1.1.2" = "sha256-6zde/GqNtf328IP6iqKfXSlQ4mrGo3KvmVfK4clxsCQ=";
           };
         };
 
@@ -59,7 +59,7 @@
           postgresql:
           pkgs.buildPgrxExtension {
             pname = "pg_turbovec";
-            version = "2.13.0";
+            version = "2.14.0";
             src = self;
             inherit postgresql cargoLock;
             cargo-pgrx = cargo-pgrx_0_19;

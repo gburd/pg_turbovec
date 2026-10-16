@@ -254,6 +254,38 @@ private cache.
   `FINDINGS.md:365`) — ties into the long-planned raw-vector-varlena work
   (`design/raw-vector-varlena`, already renumbered; reconcile with this plan).
 
+### Phase S7 — sparse bitmaps for tombstones + the IVF probe mask (independent)
+
+pg_turbovec rolls its own **dense** bitmaps in two places that are sparse in
+practice and grow with the corpus — so at TB–PB scale they waste on-disk/WAL
+bytes and per-query RAM. `~/ws/sparsemap` (our C fork, v5.8.3) is a
+compressed sparse bitmap built for exactly this (long runs of set/unset
+bits). This phase is **independent of the S2 keystone chain** and can run in
+parallel.
+
+- **On-disk tombstone bitmap.** `relfile::read/write_tombstones` +
+  `src/index/vacuum.rs:358-371,405-466` persist a dense `Vec<u8>` of
+  `n_vectors/8` bytes — one bit per slot, written to the relfile even when few
+  slots are dead. At billions of slots this is large and almost all zeros.
+  Replacing it with a sparsemap-encoded chunk shrinks the persisted tombstone
+  region and its WAL. **Wire-format impact:** the tombstone chain layout
+  changes, so this is additive-decode (read old dense, write new sparse) or a
+  new `kind`/version per the HARD MANDATE — scope it like any format change,
+  with a fails-before/passes-after corruption test and a sustained-load soak.
+- **Per-query IVF probe mask.** `ivf.rs:195` `probe_mask() -> Vec<bool>`
+  allocates one byte per vector over the whole corpus per query (the in-kernel
+  allowlist/cell mask). A sparse representation cuts per-query allocation and
+  cache footprint — overlaps the per-query-cost work in S3/S4. In-memory only,
+  no wire impact.
+- **Prerequisite / scope:** confirm whether we want a Rust binding to the C
+  library (FFI/`cc` build, like the turbovec kernel) or a pure-Rust
+  equivalent; measure the compressed size + encode/decode cost against the
+  dense baseline on a realistically-sparse tombstone set BEFORE adopting —
+  sparsemap wins only when the bitmap is actually sparse, so a densely-churned
+  index must not regress. **sparsemap currency:** pg_turbovec does **not**
+  depend on sparsemap today (no cargo dep, no vendored copy); `~/ws/sparsemap`
+  is at v5.8.3. If/when adopted, pin the version and track it.
+
 ## 5. Sequencing and why
 
 - **S0 first, always** — no measurement rig and no multi-backend test harness,
@@ -278,6 +310,10 @@ private cache.
   S2 (or its fallback). S5 is design-only until the [B1] gate conflict with
   drift-check §11a is resolved.
 - **S6 is cleanup** gated on profiles, not speculation.
+- **S7 (sparse bitmaps) is independent** of the S2 keystone chain and can run
+  in parallel with any phase; sequence it by appetite, not dependency. Its
+  tombstone half is a wire-format change (additive-decode), so it carries the
+  same corruption-test + soak bar as S2b/S3.
 
 ## 6. Non-negotiables threaded through every phase
 

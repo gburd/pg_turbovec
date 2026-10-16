@@ -3,7 +3,9 @@
 > **Status:** DRAFT roadmap, 2026-10-15 (revised 2026-10-16 after
 > `.agent/notes/SCALE_PLAN_REVIEW.md` — 2 blockers + 8 should-fixes resolved;
 > blocker [B2] since RESOLVED by the S2 feasibility spike,
-> `.agent/notes/S2_SPIKE_FINDINGS.md`). Grounded in the measured
+> `.agent/notes/S2_SPIKE_FINDINGS.md`; blocker [B1] since RESOLVED by the
+> `log_newpage` investigation, `.agent/notes/B1_log_newpage_investigation.md`).
+> Grounded in the measured
 > pg_vectorsearch comparison (`benches/results/vs_pgvectorsearch_20261014/FINDINGS.md`),
 > the code-level bottleneck analysis (`.agent/notes/SCALE_RESEARCH_concurrency.md`,
 > every claim cited to `file:line`), and the benchmark methodology
@@ -223,26 +225,42 @@ private cache.
 
 ### Phase S5 — write path for write-heavy TB-scale (bottleneck #6, then #1-writer)
 
-- **[B1] The `log_newpage` route is BLOCKED by the release gate.**
-  drift-check §11a (`scripts/drift-check.sh:289`) hard-`fail`s on a grep that
-  lists `log_newpage`/`log_newpage_buffer` *by name*; releases require
-  drift-check to pass, so a `log_newpage` call site cannot ship as-is. The ban
-  exists for a real portability reason (the comment: "some managed variants
-  route custom resource-manager / raw full-page-image records differently").
-  **Before S5 is actionable, resolve BOTH:** (a) prove `log_newpage` replays
-  correctly on the managed variants §11a protects, then amend §11a with that
-  argument answered — **or** (b) stay inside `GenericXLog` and find a
-  delta-logging approach (e.g. avoid `GENERIC_XLOG_FULL_IMAGE` where a page
-  genuinely changed only in part). Until one is done, S5 is design-only.
-- *Goal unchanged:* cut build WAL from ~2× index size (per-page
-  `GenericXLog FULL_IMAGE`, 10 sites in `src/index/relfile.rs`) toward ~1×,
-  halving ZIL pressure / replication bandwidth. Keep the existing
-  skip-unchanged delta for incremental flushes (`write_chain_at`,
-  `src/index/relfile.rs:544-612`).
+- **[B1] RESOLVED by investigation** (2026-10-16,
+  `.agent/notes/B1_log_newpage_investigation.md`): `log_newpage` is a **dead
+  end for this goal and the §11a ban stays.** Measured: the ~2× build WAL is
+  **99.56% full-page-image payload**, and `log_newpage` emits the *identical*
+  FPI through the *identical* core mechanism (`XLOG_FPI`/`RM_XLOG_ID` vs
+  GenericXLog's `GENERIC_XLOG_FULL_IMAGE`/`RM_GENERIC_ID` — same bytes,
+  rmgr-agnostic), so switching WAL primitive cannot cut the 2× (≤0.44%
+  framing is all that's reachable). `log_newpage` is in fact portability-safe
+  (not a custom rmgr), but allowing it buys nothing, so keep §11a's clarity
+  intact. **No §11a change; S5 stays 100% GenericXLog.**
+- **The real cause of the 2× (what S5 must attack):** build logs **7093 FPIs
+  for 3623 index pages (~1.96× re-logging)** — `extend_to`, per-chain
+  `write_chain_at`, and the trailing `write_meta` each WAL-log overlapping
+  pages as *full* images. The lever is the **number of full images emitted**,
+  not the WAL API. Two sub-targets, both inside GenericXLog, wire-neutral:
+  1. **Write each build page once.** Audit `extend_to` + `write_chain_at` +
+     `write_meta` (`src/index/relfile.rs:413,588,632`) so a build touches each
+     block a single time under one pass — the extend-then-rewrite and
+     trailing-meta FPIs are pure waste. Estimated upside: toward ~1× (the real
+     S5 goal), reachable with no §11a change.
+  2. **Drop `GENERIC_XLOG_FULL_IMAGE` only on genuinely-partial-page
+     rewrites** — `copy_slot_in_chain` (`:2443,2467`, VACUUM swap-remove) and
+     the production meta-field pokes change a few bytes of an *existing* page,
+     so `computeDelta` can log just the fragment and `generic_redo` replays it
+     safely (`REGBUF_STANDARD`). Keep FULL_IMAGE on the whole-page/`PageInit`'d
+     writes (`:413,588,632`) — dropping it there risks the hole-zeroing
+     corruption the `relfile.rs:414-418` comments warn about. (Sites
+     `:3287,3325,3357,3408,3451` are `#[cfg(test)]` helpers — do not count
+     them.) Small for the bulk build, real for VACUUM/incremental flushes.
+  **Must-keep guard:** any FULL_IMAGE drop needs a fails-before/passes-after
+  corruption test AND a sustained-load soak (HARD MANDATE) — a torn/zeroed
+  page here is exactly the corruption class fixed six times.
 - Revisit the writer-side cache once S2 lands (shared read image + per-backend
   write buffer, flushed to the shared image on commit).
-- *Must respect:* durability stays 100% crash-safe; reconcile the §11a
-  invariant text and its managed-PG portability intent before touching WAL.
+- *Must respect:* durability stays 100% crash-safe and 100% GenericXLog
+  (§11a unchanged).
 
 ### Phase S6 — residual contention + polish (bottleneck #7)
 
@@ -307,8 +325,10 @@ parallel.
   landing. The remaining S2 risk is engineering effort + the cross-backend
   lifecycle/NUMA items, not whether it can be built.
 - **S3 then S5** turn the 10M and write-heavy stories around; both depend on
-  S2 (or its fallback). S5 is design-only until the [B1] gate conflict with
-  drift-check §11a is resolved.
+  S2 (or its fallback). **S5's [B1] blocker is RESOLVED** (stays in
+  GenericXLog; the lever is emitting each page's image once + delta-logging
+  partial rewrites, not `log_newpage`), so S5 is no longer design-only on that
+  axis.
 - **S6 is cleanup** gated on profiles, not speculation.
 - **S7 (sparse bitmaps) is independent** of the S2 keystone chain and can run
   in parallel with any phase; sequence it by appetite, not dependency. Its
@@ -339,9 +359,11 @@ parallel.
   exposes the full DSA/DSM/shmem surface. The small-structures fallback saves
   ~0 and is dropped. No open question remains on *whether* S2 is buildable;
   the open items are the lifecycle/NUMA ones below.
-- **[B1, gates S5]** Does `log_newpage` replay correctly on the managed-PG
-  variants drift-check §11a protects? If yes, amend §11a with the argument
-  answered; if no, stay inside `GenericXLog` with a partial-page delta.
+- **[B1] — RESOLVED** (investigation, 2026-10-16): `log_newpage` is a dead end
+  for the WAL goal (it emits the identical FPI bytes), so S5 stays 100%
+  GenericXLog and §11a is unchanged; the real lever is fewer full-page images
+  (write each build page once + delta-log partial rewrites). See
+  `.agent/notes/B1_log_newpage_investigation.md`.
 - DSA vs a fixed shared segment for the decoded image; cross-backend eviction
   policy for a shared cache (S2) when multiple large indexes exceed the
   segment — load-bearing for the many-large-indexes target market.

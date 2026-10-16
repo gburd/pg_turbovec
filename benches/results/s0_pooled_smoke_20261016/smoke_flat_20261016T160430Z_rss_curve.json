@@ -1,0 +1,31 @@
+{
+  "timestamp_utc": "20261016T160430Z", "topology": "collapsed-single-host DIAGNOSTIC (not a headline)",
+  "host": "ip-172-31-26-189", "ncpu": 8, "mem_total_kb": 16097668,
+  "ram_safe_frac": 0.80, "safe_ceiling_kb": 12878134,
+  "corpus_rows": 500000, "dim": 768, "index_kind": "flat",
+  "lists": 0, "bit_width": 4, "k": 10, "shared_buffers": "256MB",
+  "note": "per-backend RSS = PRIVATE decoded cache (SCALE_PLAN #1). N backends x mean_rss crosses host RAM => OOM. sp=1 cuts threads not cache size, so it should raise the ceiling only modestly.",
+  "curves": [
+  {"scan_parallelism":"auto","oom_or_ceiling_at_clients":24,"points":[
+      {"clients":1,"backends_sampled":1,"total_backend_rss_kb":569768,"mean_backend_rss_kb":569768,"frac_of_safe_ceiling":0.044,"crashed":0},
+      {"clients":2,"backends_sampled":2,"total_backend_rss_kb":1230624,"mean_backend_rss_kb":615312,"frac_of_safe_ceiling":0.096,"crashed":0},
+      {"clients":4,"backends_sampled":4,"total_backend_rss_kb":2454572,"mean_backend_rss_kb":613643,"frac_of_safe_ceiling":0.191,"crashed":0},
+      {"clients":8,"backends_sampled":8,"total_backend_rss_kb":4917872,"mean_backend_rss_kb":614734,"frac_of_safe_ceiling":0.382,"crashed":0},
+      {"clients":12,"backends_sampled":12,"total_backend_rss_kb":7367780,"mean_backend_rss_kb":613981,"frac_of_safe_ceiling":0.572,"crashed":0},
+      {"clients":16,"backends_sampled":16,"total_backend_rss_kb":9794336,"mean_backend_rss_kb":612146,"frac_of_safe_ceiling":0.761,"crashed":0},
+      {"clients":20,"backends_sampled":20,"total_backend_rss_kb":12237996,"mean_backend_rss_kb":611899,"frac_of_safe_ceiling":0.950,"crashed":0},
+      {"clients":24,"backends_sampled":24,"total_backend_rss_kb":14673452,"mean_backend_rss_kb":611393,"frac_of_safe_ceiling":1.139,"crashed":0}
+  ]}
+,
+  {"scan_parallelism":"1","oom_or_ceiling_at_clients":24,"points":[
+      {"clients":1,"backends_sampled":1,"total_backend_rss_kb":607420,"mean_backend_rss_kb":607420,"frac_of_safe_ceiling":0.047,"crashed":0},
+      {"clients":2,"backends_sampled":2,"total_backend_rss_kb":1210388,"mean_backend_rss_kb":605194,"frac_of_safe_ceiling":0.094,"crashed":0},
+      {"clients":4,"backends_sampled":4,"total_backend_rss_kb":2429760,"mean_backend_rss_kb":607440,"frac_of_safe_ceiling":0.189,"crashed":0},
+      {"clients":8,"backends_sampled":8,"total_backend_rss_kb":4857600,"mean_backend_rss_kb":607200,"frac_of_safe_ceiling":0.377,"crashed":0},
+      {"clients":12,"backends_sampled":12,"total_backend_rss_kb":7265284,"mean_backend_rss_kb":605440,"frac_of_safe_ceiling":0.564,"crashed":0},
+      {"clients":16,"backends_sampled":16,"total_backend_rss_kb":9684260,"mean_backend_rss_kb":605266,"frac_of_safe_ceiling":0.752,"crashed":0},
+      {"clients":20,"backends_sampled":20,"total_backend_rss_kb":12103008,"mean_backend_rss_kb":605150,"frac_of_safe_ceiling":0.940,"crashed":0},
+      {"clients":24,"backends_sampled":24,"total_backend_rss_kb":14522948,"mean_backend_rss_kb":605122,"frac_of_safe_ceiling":1.128,"crashed":0}
+  ]}
+  ]
+}

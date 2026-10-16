@@ -1,0 +1,15 @@
+[16:10:29] config: DB=localhost:28818 POOLER=localhost:6432 db=turbovec_pooled
+[16:10:29] config: rows=500000 dim=768 metric=cosine kind=flat lists=0 bit_width=4
+[16:10:29] config: k=10 oversample=default scan_parallelism=auto shared_buffers=256MB
+[16:10:29] closed-loop sweep: clients=[1 2 4 8 16] duration=15s
+[16:10:29]   closed c=1 j=1
+[run_load] closed_c1 c=1 FAILED (backend_crash_or_oom) — recording failure row, continuing
+[16:10:29]   closed c=2 j=2
+[16:10:44]   closed c=4 j=4
+[16:10:59]   closed c=8 j=8
+[16:11:14]   closed c=16 j=8
+[16:11:30] open-loop sweep: rates=[200 500 1000] clients=16
+[16:11:30]   open R=200 c=16
+[16:11:45]   open R=500 c=16
+[16:12:00]   open R=1000 c=16
+[16:12:15] wrote /home/admin/pg_turbovec/benches/results/smoke_flat_spauto_20261016T161029Z_local.json

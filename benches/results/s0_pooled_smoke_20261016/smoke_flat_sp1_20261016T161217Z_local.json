@@ -1,0 +1,52 @@
+{
+  "timestamp_utc": "20261016T161217Z", "run_tag": "smoke_flat_sp1_20261016T161217Z", "driver_id": "local",
+  "topology": "collapsed-single-host DIAGNOSTIC",
+  "db": "localhost:28818", "pooler": "localhost:6432",
+  "corpus_rows": 500000, "dim": 768, "metric": "cosine",
+  "index_kind": "flat", "lists": 0, "bit_width": 4,
+  "k": 10, "scan_parallelism": "1",
+  "ncpu": 8, "host": "ip-172-31-26-189",
+  "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+  "runs": [
+    {"mode":"closed","label":"closed_c1","clients":1,"jobs":1,"rate":null,
+     "tps":15.459695,"qps_per_core":15.5,"backend_cores_busy":0.998,"cpu_ms_per_query":64.555,
+     "p50_ms":64.547,"p95_ms":67.015,"p99_ms":67.464,"p999_ms":67.700,"max_ms":68.133,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"closed","label":"closed_c2","clients":2,"jobs":2,"rate":null,
+     "tps":28.993441,"qps_per_core":14.5,"backend_cores_busy":1.996,"cpu_ms_per_query":68.843,
+     "p50_ms":68.711,"p95_ms":72.235,"p99_ms":73.054,"p999_ms":73.789,"max_ms":73.790,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"closed","label":"closed_c4","clients":4,"jobs":4,"rate":null,
+     "tps":57.778134,"qps_per_core":14.5,"backend_cores_busy":3.987,"cpu_ms_per_query":69.005,
+     "p50_ms":68.848,"p95_ms":73.197,"p99_ms":76.568,"p999_ms":78.023,"max_ms":78.071,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"closed","label":"closed_c8","clients":8,"jobs":8,"rate":null,
+     "tps":96.848584,"qps_per_core":12.8,"backend_cores_busy":7.542,"cpu_ms_per_query":77.874,
+     "p50_ms":80.031,"p95_ms":96.609,"p99_ms":108.234,"p999_ms":117.792,"max_ms":136.476,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"closed","label":"closed_c16","clients":16,"jobs":8,"rate":null,
+     "tps":99.758229,"qps_per_core":12.5,"backend_cores_busy":7.956,"cpu_ms_per_query":79.753,
+     "p50_ms":158.391,"p95_ms":224.921,"p99_ms":261.668,"p999_ms":291.072,"max_ms":301.081,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"open","label":"open_r200","clients":16,"jobs":8,"rate":200,
+     "tps":100.663044,"qps_per_core":12.7,"backend_cores_busy":7.946,"cpu_ms_per_query":78.937,
+     "p50_ms":4981.333,"p95_ms":7641.031,"p99_ms":8533.943,"p999_ms":8998.154,"max_ms":9130.277,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"open","label":"open_r500","clients":16,"jobs":8,"rate":500,
+     "tps":100.278864,"qps_per_core":12.6,"backend_cores_busy":7.943,"cpu_ms_per_query":79.209,
+     "p50_ms":7696.211,"p95_ms":11648.128,"p99_ms":12061.836,"p999_ms":12256.378,"max_ms":12348.432,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+,
+    {"mode":"open","label":"open_r1000","clients":16,"jobs":8,"rate":1000,
+     "tps":100.904405,"qps_per_core":12.7,"backend_cores_busy":7.950,"cpu_ms_per_query":78.787,
+     "p50_ms":8765.798,"p95_ms":13176.732,"p99_ms":13510.281,"p999_ms":13615.172,"max_ms":13663.934,
+     "duration_s":15,"warmup_s":4,"driver_id":"local"}
+
+  ]
+}

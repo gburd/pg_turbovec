@@ -1,0 +1,14 @@
+[16:12:17] config: DB=localhost:28818 POOLER=localhost:6432 db=turbovec_pooled
+[16:12:17] config: rows=500000 dim=768 metric=cosine kind=flat lists=0 bit_width=4
+[16:12:17] config: k=10 oversample=default scan_parallelism=1 shared_buffers=256MB
+[16:12:17] closed-loop sweep: clients=[1 2 4 8 16] duration=15s
+[16:12:17]   closed c=1 j=1
+[16:12:32]   closed c=2 j=2
+[16:12:47]   closed c=4 j=4
+[16:13:02]   closed c=8 j=8
+[16:13:17]   closed c=16 j=8
+[16:13:32] open-loop sweep: rates=[200 500 1000] clients=16
+[16:13:32]   open R=200 c=16
+[16:13:48]   open R=500 c=16
+[16:14:03]   open R=1000 c=16
+[16:14:18] wrote /home/admin/pg_turbovec/benches/results/smoke_flat_sp1_20261016T161217Z_local.json

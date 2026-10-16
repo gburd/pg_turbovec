@@ -1,0 +1,49 @@
+[heartbeat] starting: bash /home/admin/pg_turbovec/benches/scripts/pooled/rss_curve.sh
+[heartbeat] interval: 60s
+[heartbeat] label:    bash
+[16:04:30] config: DB=localhost:28818 POOLER=localhost:6432 db=turbovec_pooled
+[16:04:30] config: rows=500000 dim=768 metric=cosine kind=flat lists=0 bit_width=4
+[16:04:30] config: k=10 oversample=default scan_parallelism=auto shared_buffers=256MB
+[16:04:30] MemTotal=16097668kB safe_ceiling=12878134kB (0.80)
+[16:04:30] === RSS curve: scan_parallelism=auto (guc=0) ===
+[16:04:30]   ramp 1 persistent backends, hold 6s
+[16:04:43]     N=1: backends=1 total_rss=569768kB mean=569768kB (0.044 of safe); crashed=0
+[16:04:43]   ramp 2 persistent backends, hold 6s
+[16:04:55]     N=2: backends=2 total_rss=1230624kB mean=615312kB (0.096 of safe); crashed=0
+[16:04:55]   ramp 4 persistent backends, hold 6s
+[16:05:07]     N=4: backends=4 total_rss=2454572kB mean=613643kB (0.191 of safe); crashed=0
+[16:05:07]   ramp 8 persistent backends, hold 6s
+[16:05:19]     N=8: backends=8 total_rss=4917872kB mean=614734kB (0.382 of safe); crashed=0
+[16:05:19]   ramp 12 persistent backends, hold 6s
+. [bash 16:05:30 elapsed]
+[16:05:31]     N=12: backends=12 total_rss=7367780kB mean=613981kB (0.572 of safe); crashed=0
+[16:05:31]   ramp 16 persistent backends, hold 6s
+[16:05:43]     N=16: backends=16 total_rss=9794336kB mean=612146kB (0.761 of safe); crashed=0
+[16:05:43]   ramp 20 persistent backends, hold 6s
+[16:05:56]     N=20: backends=20 total_rss=12237996kB mean=611899kB (0.950 of safe); crashed=0
+[16:05:56]   ramp 24 persistent backends, hold 6s
+[16:06:09]     N=24: backends=24 total_rss=14673452kB mean=611393kB (1.139 of safe); crashed=0
+[16:06:09]     reached safe ceiling at N=24; stopping this curve
+[16:06:09] === RSS curve: scan_parallelism=1 (guc=1) ===
+[16:06:09]   ramp 1 persistent backends, hold 6s
+[16:06:21]     N=1: backends=1 total_rss=607420kB mean=607420kB (0.047 of safe); crashed=0
+[16:06:21]   ramp 2 persistent backends, hold 6s
+. [bash 16:06:30 elapsed]
+[16:06:33]     N=2: backends=2 total_rss=1210388kB mean=605194kB (0.094 of safe); crashed=0
+[16:06:33]   ramp 4 persistent backends, hold 6s
+[16:06:45]     N=4: backends=4 total_rss=2429760kB mean=607440kB (0.189 of safe); crashed=0
+[16:06:45]   ramp 8 persistent backends, hold 6s
+[16:06:57]     N=8: backends=8 total_rss=4857600kB mean=607200kB (0.377 of safe); crashed=0
+[16:06:57]   ramp 12 persistent backends, hold 6s
+[16:07:10]     N=12: backends=12 total_rss=7265284kB mean=605440kB (0.564 of safe); crashed=0
+[16:07:10]   ramp 16 persistent backends, hold 6s
+[16:07:22]     N=16: backends=16 total_rss=9684260kB mean=605266kB (0.752 of safe); crashed=0
+[16:07:22]   ramp 20 persistent backends, hold 6s
+. [bash 16:07:30 elapsed]
+[16:07:35]     N=20: backends=20 total_rss=12103008kB mean=605150kB (0.940 of safe); crashed=0
+[16:07:35]   ramp 24 persistent backends, hold 6s
+[16:07:48]     N=24: backends=24 total_rss=14522948kB mean=605122kB (1.128 of safe); crashed=0
+[16:07:48]     reached safe ceiling at N=24; stopping this curve
+[16:07:48] wrote /home/admin/pg_turbovec/benches/results/smoke_flat_20261016T160430Z_rss_curve.json
+/home/admin/pg_turbovec/benches/results/smoke_flat_20261016T160430Z_rss_curve.json
+[heartbeat] DONE rc=0 (clean exit)

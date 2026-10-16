@@ -1,5 +1,15 @@
 # pg_turbovec Benchmarks
 
+> **Methodology is canonical in [`../benches/METHODOLOGY.md`](../benches/METHODOLOGY.md).**
+> Our target market is TB–PB-scale indexes hit by thousands of pooled clients
+> on a tuned host. Every published benchmark MUST lead with that workload —
+> sustained **QPS / QPS-per-core and tail latency under a connection pooler**,
+> with the working set larger than RAM and the storage path (ZFS + ZIL +
+> L2ARC on NVMe, huge pages, big `shared_buffers`) exercised. A single-client
+> warm p50 is a diagnostic, never the headline. The 2026-10-14 pg_vectorsearch
+> comparison led with single-client p50 and that is where we lost worst; future
+> runs follow `METHODOLOGY.md`.
+
 Canonical, reproducible head-to-head benchmark page for `pg_turbovec` vs
 `pgvector`. The goal is a standardized, VectorDBBench-style result on a public
 corpus so the numbers are comparable to published ANN benchmarks — not a

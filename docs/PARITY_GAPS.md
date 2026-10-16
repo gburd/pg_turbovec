@@ -503,6 +503,62 @@ still has to happen somewhere.
   graph build. Our deprecated Vamana kind is **not** a DiskANN equivalent and
   should not be revived on the strength of this.
 
+## Measured against pg_vectorsearch (prism) — 2026-10-15
+
+Unlike the zvec section above (a source review), this one is **measured**:
+full three-host A/B, matched-recall Pareto, exact fp64 ground truth
+([`benches/results/vs_pgvectorsearch_20261014/FINDINGS.md`](../benches/results/vs_pgvectorsearch_20261014/FINDINGS.md),
+methodology in [`../benches/METHODOLOGY.md`](../benches/METHODOLOGY.md)).
+pg_vectorsearch is Timescale's `prism` AM (RaBitQ 1-bit + posting lists,
+v0.1.0 alpha, commit `7a9716b`). Headline: **we are competitive at 1M flat,
+prism wins decisively at 10M and under concurrency.**
+
+### Real, measured gaps (priority order; the roadmap is `docs/SCALE_PLAN.md`)
+
+1. **Concurrency / QPS — the worst gap.** At 96 clients prism delivers
+   **15–100× our QPS** (QPS/core 220–1050 vs our 2–40). Root cause, verified
+   in code (`.agent/notes/SCALE_RESEARCH_concurrency.md`): prism serves from
+   `shared_buffers` at ~1 core/query holding ~3 MB per backend; we hold a
+   **multi-GB private per-backend decoded cache** (`static CACHE`,
+   `src/cache.rs:1585`, no shared memory) and run N threads/query. Fix:
+   Phase S1 (one core/query) + S2 (shared per-relation decoded index).
+2. **10M ANN latency.** prism is **17–29× faster at matched 0.95** (2.2 ms vs
+   63 ms x86). Root cause: our IVF OOC path **builds a throwaway index +
+   `prepare()` per chunk per query** (`src/cache.rs:1135/1167`); prism walks
+   precomputed posting lists with no per-query build. Fix: Phase S3.
+3. **Memory per backend.** 0.5 GB (1M) – 5 GB (10M) private per backend vs
+   prism's ~3 MB — 1,000 pooled backends = 0.5–5 TB duplicated RAM for one
+   on-disk artefact. This caps pooled-client count before QPS matters. Fix:
+   Phase S2.
+4. **Cold first-query.** 250–500 ms to build the per-backend cache vs prism's
+   ~40–100 ms amcache — bad for poolerless/short-lived connections. Fix: S2.
+5. **Adoption friction.** prism indexes an existing pgvector `vector` column
+   in place; we need a `turbovec.vector` column copy or an expression index
+   (+~40% query latency). Tracked in the migration docs.
+6. **Build WAL.** We write ~2× index size in WAL (per-page `GenericXLog`
+   full-page images, `src/index/relfile.rs`); prism ~1×. Fix: Phase S5.
+
+### Where we hold up (also measured)
+
+- **1M at high recall:** flat 4-bit serves ~0.998 recall at ~2.0/2.6 ms,
+  faster than prism's 0.99 point (2.9/5.6 ms).
+- **Exact filtered results:** `iterative_scan = relaxed_order` returns recall
+  1.0 with no short results; prism's filtered recall falls to 0.79 at 1%
+  selectivity with 0.7–2.4% short results (its issue #188).
+- **Deterministic builds** (byte-identical across runs); prism's parallel
+  build is non-deterministic by design.
+- **Postgres-native** ACID/joins and the storage-vs-HNSW win are unchanged.
+
+### The RaBitQ note above, revisited
+
+The "deliberately deferred" stance on RaBitQ now has a **measured**
+counterpoint: prism's RaBitQ 1-bit + posting-list design is why it is
+17–29× faster at 10M and 4.4× → 3.0 GB vs our 5.2 GB smaller there. This does
+not by itself justify importing RaBitQ (our 1-bit sign-BQ exists; the gap is
+the **per-query-build IVF architecture**, not the quantizer), but a
+posting-list IVF with no per-query build (S3 long horizon) is now a measured
+priority, not a maybe.
+
 ## ~~Known ceiling: IVF builds are not memory-bounded~~ — FIXED (Phase Z6)
 
 **Root cause: the build callback had no memory-context management.** `Vector`

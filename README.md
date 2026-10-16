@@ -153,6 +153,61 @@ Where we are measurably better: **storage** (4.4–20× smaller), **build time**
 (2.6× faster), **larger-than-RAM corpora** (IVF is out-of-core end-to-end),
 and **exact recall** when you need R@10 = 1.000 rather than 0.96.
 
+#### "How does it compare to pg_vectorsearch (Timescale's prism)?"
+
+**Honestly: pg_turbovec is competitive at ~1M with its flat index;
+pg_vectorsearch is substantially faster at 10M and under high concurrency.**
+We benchmarked pg_turbovec **v2.13.0** against **pg_vectorsearch** (the
+`prism` access method, commit `7a9716b`, v0.1.0 alpha) and pgvector 0.8.7
+(HNSW, reference) on PostgreSQL 18.6, on AWS bare-metal single-socket
+96-vCPU / 768 GiB hosts — **i7i.metal-24xl** (Intel Emerald Rapids, AVX-512
+VBMI/VNNI) and **r8gd.metal-24xl** (Graviton4). Cosine on L2-normalised
+Cohere wikipedia-2023-11 1024-d embeddings, 5,000 held-out queries, exact
+fp64-rescored ground truth, matched-recall Pareto. Full harness, raw
+per-query data, and configs:
+[`benches/results/vs_pgvectorsearch_20261014/`](benches/results/vs_pgvectorsearch_20261014/FINDINGS.md).
+
+- **At 1M (flat, warm single client):** at recall@10 ≥ 0.99 pg_turbovec's
+  flat 4-bit index serves ~0.998 recall at **p50 ≈ 2.0 ms** (x86) / **2.6 ms**
+  (arm); prism's 0.99 point is 2.9 ms (x86) / 5.6 ms (arm) — pg_turbovec is
+  faster at the high-recall end. At 0.95 prism is faster in wall-time
+  (1.3 ms vs 2.0 ms on x86) at ⅕ the CPU.
+- **At 10M (IVF √n vs prism, warm single client): prism wins decisively** —
+  **~29× faster** on x86 (2.2 ms vs 63 ms) and **~17× faster** on arm
+  (3.5 ms vs 61 ms) at matched 0.95; at 0.99 prism is 8.6 ms (x86) / 15.9 ms
+  (arm) vs pg_turbovec IVF 284 ms / 96 ms. pg_turbovec's exact flat scan at
+  10M (R@10 = 1.0) is 42 ms / 26 ms — faster than its own IVF at high recall,
+  still ~2–5× slower than prism's 0.99 point. **If you have ≳ a few million
+  vectors and want ANN speed, prism's RaBitQ + posting-list design is the
+  stronger engine today.**
+- **Throughput (96 clients): prism delivers 15–100× the QPS** because it uses
+  one core per query; pg_turbovec's multi-thread-per-query scan trades
+  aggregate throughput for single-client latency. For throughput, set
+  `turbovec.scan_parallelism = 1`.
+- **Where pg_turbovec holds up:** sub-~1M corpora where its flat index is
+  near-exact and ~2 ms; exact filtered results
+  (`iterative_scan = relaxed_order` returns recall 1.0 with no short results);
+  deterministic builds; Postgres-native ACID/joins.
+
+> **Caveats (read before quoting a number):** written and run by the
+> pg_turbovec authors (harness + raw data + exact commits are published;
+> Timescale is invited to review the prism configs before any wider claim).
+> pg_vectorsearch is **v0.1.0 alpha** — its numbers will change. x86 numbers
+> are AVX-512 VBMI/VNNI; **AVX2-only hosts were not measured**. Warm =
+> RAM-resident. pg_turbovec's default scan uses up to `min(cores,4)`
+> threads/query, prism uses 1 — every latency in the full report carries
+> CPU-ms/query and QPS/core. A pg_turbovec IVF index degrades to a flat scan
+> once inserts exceed `ivf_max_delta_pct` (observable via
+> `index_is_degraded()`); adopting from a pgvector `vector` column needs a
+> column copy or an expression index (+~40% query latency), where prism
+> indexes the pgvector column in place. **These are single-client
+> warm-p50 numbers on a collapsed single-host topology; our target workload
+> is thousands of pooled clients at TB–PB scale, and the pooled-concurrency
+> frontier is where we are investing next (see
+> [`docs/SCALE_PLAN.md`](docs/SCALE_PLAN.md) and
+> [`benches/METHODOLOGY.md`](benches/METHODOLOGY.md)).**
+
+
 ---
 
 ## Choosing `lists` — the ANN tuning knob

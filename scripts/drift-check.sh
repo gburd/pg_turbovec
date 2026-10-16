@@ -328,6 +328,19 @@ if [ -n "$cur_ver" ] && [ -d sql ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 13. Benchmark methodology must exist and be linked from docs/BENCHMARKS.md.
+#     The target market is pooled TB-PB-scale concurrency; a published
+#     benchmark must lead with that workload (benches/METHODOLOGY.md), not a
+#     single-client warm p50. Enforce the file + the link so it can't rot
+#     back into ad-hoc single-client runs (the 2026-10-14 miss).
+# ----------------------------------------------------------------------
+if [ ! -f benches/METHODOLOGY.md ]; then
+    fail "benches/METHODOLOGY.md is missing -- the canonical benchmark methodology (pooled TB-PB concurrency as the headline) must exist."
+elif ! grep -q 'METHODOLOGY.md' docs/BENCHMARKS.md; then
+    fail "docs/BENCHMARKS.md does not link benches/METHODOLOGY.md -- the methodology must be discoverable from the benchmark page."
+fi
+
+# ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
 

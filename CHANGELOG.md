@@ -6,25 +6,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [2.14.0] — 2026-10-16
 
-MINOR: **one core per query is now the default** (`turbovec.scan_parallelism`
-auto resolves to `1`, was `min(cores, 4)`). This is Phase S1 of the scale
-roadmap (`docs/SCALE_PLAN.md`): it removes the oversubscription collapse
-where, under pooled high concurrency, ~N concurrent queries each fanning
-across several cores saturate the host and crush aggregate QPS. Multi-thread
-is now an explicit low-concurrency latency knob — set
-`turbovec.scan_parallelism` to the core count for single-query latency on an
-otherwise idle server. No wire-format change (`MetaPageData::version` stays
-**8**), index bytes unchanged, **no REINDEX**. Minor rather than patch because
-it changes how many threads a query uses by default.
+MINOR: two scale-roadmap wins (`docs/SCALE_PLAN.md`). **(S1) one core per
+query is now the default** (`turbovec.scan_parallelism` auto resolves to `1`,
+was `min(cores, 4)`), removing the oversubscription collapse where, under
+pooled high concurrency, ~N concurrent queries each fanning across several
+cores saturate the host and crush aggregate QPS; multi-thread is now an
+explicit low-concurrency latency knob. **(S4) the exact-rerank candidate
+window is now a function of the requested `k`, not the index `dim`** — a new
+`turbovec.rerank_multiplier` GUC (default 16.0) replaces the old
+`clamp(dim, 256..=1024)` floor, so a `LIMIT 10` / `search_k = 32` query at
+1024-d reranks ~512 candidates instead of ~1024, at measured recall@10 1.000
+(mean and min), roughly halving the per-query exact-recheck CPU. No
+wire-format change (`MetaPageData::version` stays **8**), index bytes
+unchanged, **no REINDEX**. Minor rather than patch because it changes the
+default thread count and adds a GUC (now **20** GUCs).
 
 **Honest scope (per Phase S0, `benches/results/s0_pooled_smoke_20261016/`):**
 S1 does **not** fix the per-backend memory wall. S0 measured that
 `scan_parallelism = 1` cuts per-backend RSS by only ~1.5% and does not move
 the OOM ceiling — the private decoded per-backend index cache is the memory
 wall, not threads. Lifting it is Phase S2 (one shared decoded index per
-relation). S1 also does not close the single-core CPU/query gap to prism
-(that is S3/S4); at `sp=1` the per-query brute-force scan + always-full exact
-recheck still dominate.
+relation). S4 cuts the single-core CPU/query term that survives at `sp=1`,
+but the remaining gap to prism at scale is the per-query IVF index
+construction (S3) and the shared cache (S2).
 
 ### Changed
 
@@ -41,14 +45,27 @@ recheck still dominate.
 - To restore the old latency on an idle, low-concurrency server, set
   `turbovec.scan_parallelism` to your core count (e.g.
   `SET turbovec.scan_parallelism = 8`).
+- **Exact-rerank window scales with requested `k`, not `dim` (S4).** The
+  `hi_dim_rerank` candidate floor was `clamp(dim, 256..=1024)` — a `LIMIT 10`
+  query at 1024-d exact-rechecked ~1024 heap tuples regardless of how few
+  rows it asked for (the single biggest per-query CPU term,
+  `.agent/notes/SCALE_RESEARCH_concurrency.md` §3-4). It is now
+  `clamp(ceil(search_k × oversample) × rerank_multiplier, 64 ..= 1024)`.
+  New GUC **`turbovec.rerank_multiplier`** (float, default 16.0, range
+  1.0–1024.0) is the recall-safety head-room; `RERANK_MIN_FLOOR = 64` is the
+  measured recall knee; the 1024 cap is unchanged. `hi_dim_rerank = off` still
+  disables widening entirely. **The exact distance kernels and `normalise_into`
+  are untouched — scoring stays bit-identical; only the candidate *count*
+  changes** (a recall/latency trade, validated recall@10-neutral on the
+  matched-recall check, hence a minor not a scoring change).
 
 ### Migration
 
 `ALTER EXTENSION pg_turbovec UPDATE TO '2.14.0';` then reconnect so backends
-pick up the new default. No REINDEX, no SQL-object change, index bytes
-unchanged (wire format stays v8). A `postgresql.conf` that pins
-`turbovec.scan_parallelism` to an explicit value is unaffected; only the
-`0` (auto) default moved.
+pick up the new default. No REINDEX, no index-bytes change (wire format stays
+v8). The upgrade registers the new `turbovec.rerank_multiplier` GUC; a
+`postgresql.conf` that pins `turbovec.scan_parallelism` to an explicit value
+is unaffected (only the `0`/auto default moved).
 
 ## [2.13.0] — 2026-10-15
 

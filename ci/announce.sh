@@ -14,24 +14,41 @@
 # gate is postgresql.org's. Even fully configured, this queues an article for
 # human moderation. In the common case (secrets unset) it is a maintainer
 # draft to paste into https://www.postgresql.org/account/news/new/ .
+#
+# Only feature (X.Y.0) and major (X.0.0) releases are announced. A patch
+# release (X.Y.Z, Z>0) is skipped unless ANNOUNCE=1 or its CHANGELOG section
+# has a "### Security" heading.
 set -euo pipefail
 
 VERSION="${1:?usage: announce.sh VERSION}"
+VERSION="${VERSION#v}"
 REPO_WEB="https://codeberg.org/gregburd/pg_turbovec"
+CHANGELOG="CHANGELOG.md"
 
-# --- Build the announcement body from the CHANGELOG's top section ------------
-# Lines from the first "## <version>" (or "## [<version>]") heading to the
-# next "## " heading.
+# --- The CHANGELOG section for VERSION ----------------------------------------
+# Headings look like "## [2.13.0] — 2026-10-15". Print from the
+# heading whose version is exactly VERSION up to the next "## " heading.
 changelog_section() {
+  [ -f "$CHANGELOG" ] || return 0
   awk -v ver="$VERSION" '
     /^## / {
-      if (inblk) exit;
-      if ($0 ~ ("## \\[?v?" ver)) inblk=1
+      if (inblk) exit
+      h = $0; sub(/^## +\[?v?/, "", h); sub(/[^0-9A-Za-z.+-].*$/, "", h)
+      if (h == ver) inblk = 1
     }
     inblk { print }
-  ' CHANGELOG.md
+  ' "$CHANGELOG"
 }
-CHANGES="$(changelog_section || true)"
+CHANGES="$(changelog_section)"
+
+# --- Gate: announce feature/major releases, not trivial patch bumps -----------
+patch="$(printf '%s\n' "$VERSION" | sed -nE 's/^[0-9]+\.[0-9]+\.([0-9]+).*/\1/p')"
+if [ -n "$patch" ] && [ "$patch" -gt 0 ] && [ "${ANNOUNCE:-}" != 1 ] \
+   && ! printf '%s\n' "$CHANGES" | grep -q '^### Security'; then
+  echo "pg_turbovec ${VERSION} is a patch release without a '### Security' section; not announcing (ANNOUNCE=1 to force)."
+  exit 0
+fi
+
 [ -n "$CHANGES" ] || CHANGES="See ${REPO_WEB}/src/branch/main/CHANGELOG.md"
 
 TITLE="pg_turbovec ${VERSION} released"

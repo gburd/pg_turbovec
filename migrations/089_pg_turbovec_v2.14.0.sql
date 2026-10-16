@@ -1,0 +1,18 @@
+-- pg_turbovec v2.14.0
+--
+-- MINOR (Phase S1 — one core per query): turbovec.scan_parallelism auto
+-- default changes from min(cores, 4) to 1. Under pooled high concurrency the
+-- old default let ~N concurrent queries each fan across several cores and
+-- oversubscribe the host, collapsing aggregate QPS; one core per query is the
+-- throughput-optimal default for the pooled target market. Multi-thread is
+-- now an explicit low-concurrency latency knob (set scan_parallelism to the
+-- core count for single-query latency).
+--
+-- No SQL-object change (a GUC default is not an SQL object), no wire-format
+-- change (MetaPageData::version stays 8), index bytes unchanged, so NO
+-- REINDEX. The result SET of every scan is unchanged — thread count only
+-- affects latency/CPU, never which rows return.
+--
+-- NOTE (Phase S0): this does NOT fix the per-backend memory wall. S0 measured
+-- sp=1 cutting per-backend RSS by only ~1.5%. The private decoded per-backend
+-- cache is the memory wall; lifting it is Phase S2, not S1.

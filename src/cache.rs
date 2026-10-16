@@ -1290,10 +1290,26 @@ pub(crate) enum ScanHandle {
 /// `turbovec.scan_parallelism` ([`guc::scan_threads`]). turbovec's search
 /// parallelises on whatever pool it runs in (`rayon::current_num_threads()`),
 /// so without this it used rayon's GLOBAL pool -- one thread per core for
-/// every query. The pool is the same per-backend one the out-of-core
-/// fine-scan uses (`build_pool::scan_pool_with`), built once and rebuilt
-/// only when the setting changes. With 1 thread, `f` runs on a reused
-/// 1-thread pool's worker, so turbovec sees one thread and scans inline.
+/// every query.
+///
+/// **S1 default (one core per query).** Since 2.14.0 `scan_threads()` auto
+/// resolves to 1, so by default every scan takes the `t <= 1` arm: `f` runs
+/// on a reused, per-backend, already-parked 1-thread pool worker (a single
+/// futex wake, NOT a thread spawn). It is NOT run bare-inline on the backend
+/// thread, even though that would skip the futex: turbovec's
+/// `single_query_workers` reads `rayon::current_num_threads()` for any scan
+/// of >= 1,024 blocks (32,768 vectors) and fans the `par_chunks` out over
+/// whatever pool is ambient. On the backend thread (no ambient pool) that
+/// is rayon's GLOBAL pool = every core -- exactly the oversubscription this
+/// phase removes. The 1-thread pool pins `current_num_threads()` to 1 so a
+/// large index scans serially; a sub-1,024-block index would run serial
+/// either way, so the futex is the only cost and it is bounded to one
+/// parked-worker wake. The result SET is independent of this choice (the
+/// executor re-ranks by exact distance).
+///
+/// `>1` (an explicit low-concurrency latency knob) installs onto the
+/// per-backend `build_pool::scan_pool_with` pool, built once and rebuilt
+/// only when the setting changes.
 ///
 /// `f` runs on a pool WORKER thread, not the backend thread, so it must not
 /// touch PostgreSQL. The GUC is read here, before the hand-off, because
@@ -1303,12 +1319,18 @@ pub(crate) enum ScanHandle {
 /// read a GUC and are deliberately NOT routed through here.
 pub(crate) fn bounded<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     let t = guc::scan_threads();
+    if t <= 1 {
+        // One core per query (the S1 default, or an explicit `= 1`). A
+        // reused 1-thread pool so turbovec's `rayon::current_num_threads()`
+        // reads 1 and it scans serially; running `f` bare-inline on the
+        // backend thread would let a >=1,024-block scan escape to rayon's
+        // global pool (all cores). See the doc comment above.
+        return single_thread_pool().install(f);
+    }
     crate::index::build_pool::scan_pool_with(t, |pool| match pool {
         Some(p) => p.install(f),
-        // t <= 1: a single-thread pool so turbovec's
-        // `rayon::current_num_threads()` reads 1 and it scans inline, rather
-        // than running `f` here, where nested rayon calls would escape to
-        // the global pool.
+        // Unreachable for t > 1 (scan_pool_with returns a pool), but keep a
+        // serial-safe fallback should pool construction ever fail.
         None => single_thread_pool().install(f),
     })
 }

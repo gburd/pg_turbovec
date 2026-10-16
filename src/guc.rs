@@ -580,14 +580,18 @@ pub fn graph_scan_ef_decide(setting: i32, k: usize, n: usize) -> usize {
 /// Asserted by `ivf_parallel_scan_matches_serial`.
 ///
 /// **Values:** `1` = serial (no fan-out); `>1` = pin the chunk/thread
-/// count; `0` (the default) = auto = `min(probed_rows_worth_it, cores,
-/// AUTO_SCAN_PARALLELISM_CAP)`. The auto cap is deliberately MODEST
-/// (see [`AUTO_SCAN_PARALLELISM_CAP`]): intra-query parallelism cuts
-/// single-query latency (the 332ms target) but many concurrent queries
-/// each grabbing every core thrashes and hurts aggregate QPS. The
-/// conservative default helps the isolated-latency benchmark without
-/// wrecking a high-concurrency workload; raise it explicitly for a
-/// latency-bound single-query deployment, set `1` to disable.
+/// count; `0` (the default) = auto. **Since 2.14.0 auto resolves to 1**
+/// (one core per query) — Phase S1 of the scale roadmap
+/// (`docs/SCALE_PLAN.md`). The old auto was `min(cores, 4)`, which cut
+/// single-query latency but, under pooled high concurrency, let ~N
+/// concurrent queries × 4 threads oversubscribe the host and collapse
+/// aggregate QPS (the measured oversubscription collapse,
+/// `.agent/notes/SCALE_RESEARCH_concurrency.md` §1). One core per query is
+/// the throughput-optimal default for the stated target market (thousands
+/// of pooled clients); multi-thread is now an **explicit low-concurrency
+/// latency knob** — set it to the core count for single-query latency,
+/// e.g. `SET turbovec.scan_parallelism = 8`. `1` is the default and
+/// means serial.
 ///
 /// **Since 2.13.0 it bounds every scan kind**, not just this out-of-core
 /// fine-scan: flat, whole-load IVF, ColBERT's ANN stage and 1-bit searches
@@ -597,15 +601,6 @@ pub fn graph_scan_ef_decide(setting: i32, k: usize, n: usize) -> usize {
 /// is a pure scan-time compute knob.
 pub static SCAN_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
-/// Modest ceiling on `turbovec.scan_parallelism = 0` (auto) fan-out.
-/// A single query going wide cuts its own latency, but N concurrent
-/// queries each fanning to all cores oversubscribes badly. 4 is a
-/// conservative middle ground: a meaningful latency cut on the hot
-/// high-dim fine-scan without letting one query monopolise a
-/// many-core box under concurrency. Pin a higher value explicitly for
-/// a latency-bound, low-concurrency deployment.
-const AUTO_SCAN_PARALLELISM_CAP: usize = 4;
-
 /// Below this many compact rows the per-thread top-k + merge overhead
 /// swamps the parallel IVF fine-scan; keep it serial. Used by
 /// [`resolve_scan_parallelism`] to cap the chunk count so a tiny
@@ -614,26 +609,31 @@ const MIN_ROWS_PER_SCAN_CHUNK: usize = 2048;
 
 /// Resolve the IVF fine-scan chunk/thread count for a compact scan of
 /// `n_compact` rows. `1` (or a compact set too small to bother
-/// splitting) means run inline/serial. Auto (`0`) caps at
-/// [`AUTO_SCAN_PARALLELISM_CAP`] and never exceeds the machine's core
-/// count or a floor of [`MIN_ROWS_PER_SCAN_CHUNK`] rows per chunk (so
+/// splitting) means run inline/serial. Auto (`0`) resolves to 1 since
+/// 2.14.0 (Phase S1, [`scan_threads`]); an explicit `>1` is still
+/// capped by a floor of [`MIN_ROWS_PER_SCAN_CHUNK`] rows per chunk so
 /// a tiny compact set isn't split into thread-startup-dominated
-/// slivers).
+/// slivers.
 pub fn resolve_scan_parallelism(n_compact: usize) -> usize {
     cap_scan_chunks(scan_threads(), n_compact)
 }
 
 /// Threads one query's scan may use, from `turbovec.scan_parallelism`:
-/// the configured value, or for `0` (auto) `min(cores,
-/// AUTO_SCAN_PARALLELISM_CAP)`. Applies to every scan kind since 2.13.0
+/// the configured value, or for `0` (auto) **1** since 2.14.0 (Phase S1,
+/// one core per query). Applies to every scan kind since 2.13.0
 /// (flat, whole-load IVF, out-of-core IVF, ColBERT's ANN stage, 1-bit).
-/// Before that only the out-of-core IVF fine-scan was bounded, and flat
+/// Before 2.13.0 only the out-of-core IVF fine-scan was bounded, and flat
 /// and whole-load IVF ran each query on rayon's global pool, one thread
 /// per core: measured on a 96-vCPU host, ~100 CPU-ms per 7 ms query, ~58%
-/// of it work-stealing bookkeeping. The out-of-core path additionally caps
-/// this by its rows-per-chunk floor ([`resolve_scan_parallelism`]); the
-/// whole-index paths leave the split to turbovec, which runs serially
-/// below 1,024 blocks.
+/// of it work-stealing bookkeeping. 2.13.0 bounded them to `min(cores, 4)`;
+/// S1 (2.14.0) drops the auto default to 1, because under pooled
+/// concurrency ~N concurrent queries × 4 threads oversubscribe the host
+/// and collapse aggregate QPS — one core per query is throughput-optimal
+/// for the target market. Multi-thread stays an explicit latency knob
+/// (`SET turbovec.scan_parallelism = <cores>`). The out-of-core path
+/// additionally caps an explicit value by its rows-per-chunk floor
+/// ([`resolve_scan_parallelism`]); the whole-index paths leave the split
+/// to turbovec, which runs serially below 1,024 blocks.
 pub fn scan_threads() -> usize {
     // Plain `#[test]`s run in the cargo test harness, not a backend, on many
     // threads at once; pgrx allows a GUC read from only one thread per
@@ -648,10 +648,9 @@ pub fn scan_threads() -> usize {
     if configured > 0 {
         configured as usize
     } else {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        cores.min(AUTO_SCAN_PARALLELISM_CAP)
+        // S1 (one core per query): auto = 1, independent of core count.
+        // The old `min(cores, 4)` oversubscribed under pooled concurrency.
+        1
     }
 }
 
@@ -897,9 +896,9 @@ pub fn register_gucs() {
 
     GucRegistry::define_int_guc(
         c_str(b"turbovec.scan_parallelism\0"),
-        c_str(b"OS threads one index scan may use (0 = auto = min(cores, 4); 1 = serial).\0"),
+        c_str(b"OS threads one index scan may use (0 = auto = 1 one core per query; set to core count for single-query latency).\0"),
         c_str(
-            b"The out-of-core IVF scan gathers the probed cells into one compact contiguous code buffer on the backend thread, then fine-scans it for the top-k. At high dim and high probes that fine-scan dominates query latency and runs single-threaded on one core. This GUC splits the compact rows into N disjoint chunks, runs the SIMD LUT top-k per chunk in a bounded rayon pool (pure compute over owned bytes; no buffer-manager access inside threads), and merges the per-chunk top-k heaps into the global top-k. 1 = serial (no fan-out); a positive value pins the chunk/thread count; 0 (the default) = auto = min(cores, 4), a deliberately MODEST cap: intra-query parallelism cuts single-query latency but many concurrent queries each grabbing every core thrashes and hurts aggregate QPS, so the default favours the isolated-latency case without wrecking high concurrency (raise it for a latency-bound low-concurrency deployment). The returned top-k SET is identical to a serial scan (the executor re-ranks by exact distance regardless of tie order). Since 2.13.0 the same bound applies to every scan kind (flat, whole-load IVF, ColBERT, 1-bit), which before ran each query on one thread per core; it does not affect ambuild (that is turbovec.build_parallelism). Never changes on-disk bytes.\0",
+            b"The out-of-core IVF scan gathers the probed cells into one compact contiguous code buffer on the backend thread, then fine-scans it for the top-k. At high dim and high probes that fine-scan dominates single-query latency and runs single-threaded on one core; this GUC can split the compact rows into N disjoint chunks, run the SIMD LUT top-k per chunk in a bounded rayon pool (pure compute over owned bytes; no buffer-manager access inside threads), and merge the per-chunk top-k heaps into the global top-k. 1 = serial (no fan-out); a positive value pins the chunk/thread count; 0 (the default) = auto = 1 (one core per query) since 2.14.0 (Phase S1). The old auto was min(cores, 4): intra-query parallelism cuts single-query latency, but under pooled high concurrency ~N concurrent queries each fanning to several cores oversubscribe the host and collapse aggregate QPS, so one core per query is the throughput-optimal default for the pooled target market. For a latency-bound low-concurrency deployment set it to the core count (e.g. SET turbovec.scan_parallelism = 8). The returned top-k SET is identical regardless of thread count (the executor re-ranks by exact distance). Since 2.13.0 the same bound applies to every scan kind (flat, whole-load IVF, ColBERT, 1-bit), which before ran each query on one thread per core; it does not affect ambuild (that is turbovec.build_parallelism). Never changes on-disk bytes.\0",
         ),
         &SCAN_PARALLELISM,
         0,
@@ -1004,7 +1003,30 @@ mod graph_ef_tests {
 
 #[cfg(test)]
 mod scan_parallelism_tests {
-    use super::{MIN_ROWS_PER_SCAN_CHUNK, cap_scan_chunks};
+    use super::{MIN_ROWS_PER_SCAN_CHUNK, cap_scan_chunks, scan_threads};
+
+    /// Phase S1 (one core per query): the auto default
+    /// (`turbovec.scan_parallelism = 0`) resolves to a SINGLE thread,
+    /// independent of the machine's core count. Under `#[cfg(test)]`
+    /// `scan_threads()` reads the auto value (it can't touch a GUC off the
+    /// backend thread), so this exercises exactly the auto branch.
+    ///
+    /// FAILS on v2.13.0, where auto was `min(cores, 4)` (so 2–4 on any
+    /// multi-core CI host); PASSES after S1 drops the default to 1. This is
+    /// the fails-before/passes-after anchor for the one-core-per-query
+    /// default change. The old fan-out collapsed aggregate QPS under pooled
+    /// concurrency (oversubscription); multi-thread is now an explicit
+    /// latency knob (`SET turbovec.scan_parallelism = <cores>`).
+    #[test]
+    fn auto_scan_parallelism_is_one_core_per_query() {
+        assert_eq!(
+            scan_threads(),
+            1,
+            "S1: auto scan_parallelism must resolve to 1 (one core per query), \
+             not min(cores, 4); got {}",
+            scan_threads()
+        );
+    }
 
     /// The chunk-count cap: never split below MIN_ROWS_PER_SCAN_CHUNK
     /// rows per chunk, never drop below 1, and honour the ceiling.

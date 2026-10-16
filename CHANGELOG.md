@@ -4,6 +4,52 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.14.0] — 2026-10-16
+
+MINOR: **one core per query is now the default** (`turbovec.scan_parallelism`
+auto resolves to `1`, was `min(cores, 4)`). This is Phase S1 of the scale
+roadmap (`docs/SCALE_PLAN.md`): it removes the oversubscription collapse
+where, under pooled high concurrency, ~N concurrent queries each fanning
+across several cores saturate the host and crush aggregate QPS. Multi-thread
+is now an explicit low-concurrency latency knob — set
+`turbovec.scan_parallelism` to the core count for single-query latency on an
+otherwise idle server. No wire-format change (`MetaPageData::version` stays
+**8**), index bytes unchanged, **no REINDEX**. Minor rather than patch because
+it changes how many threads a query uses by default.
+
+**Honest scope (per Phase S0, `benches/results/s0_pooled_smoke_20261016/`):**
+S1 does **not** fix the per-backend memory wall. S0 measured that
+`scan_parallelism = 1` cuts per-backend RSS by only ~1.5% and does not move
+the OOM ceiling — the private decoded per-backend index cache is the memory
+wall, not threads. Lifting it is Phase S2 (one shared decoded index per
+relation). S1 also does not close the single-core CPU/query gap to prism
+(that is S3/S4); at `sp=1` the per-query brute-force scan + always-full exact
+recheck still dominate.
+
+### Changed
+
+- **`turbovec.scan_parallelism` auto default: `min(cores, 4)` → `1`.** The
+  result SET of every scan is unchanged (thread count only affects
+  latency/CPU; the executor re-ranks by exact distance). At the default,
+  a scan runs on a reused, already-parked, per-backend 1-thread rayon pool
+  (one futex wake, not a thread spawn). It is deliberately *not* run
+  bare-inline on the backend thread: turbovec's single-query scan consults
+  `rayon::current_num_threads()` for any index of ≥ 1,024 blocks (32,768
+  vectors) and fans its `par_chunks` over whatever pool is ambient — on the
+  backend thread that is rayon's *global* pool (every core), exactly the
+  oversubscription this phase removes. The 1-thread pool pins it to serial.
+- To restore the old latency on an idle, low-concurrency server, set
+  `turbovec.scan_parallelism` to your core count (e.g.
+  `SET turbovec.scan_parallelism = 8`).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.14.0';` then reconnect so backends
+pick up the new default. No REINDEX, no SQL-object change, index bytes
+unchanged (wire format stays v8). A `postgresql.conf` that pins
+`turbovec.scan_parallelism` to an explicit value is unaffected; only the
+`0` (auto) default moved.
+
 ## [2.13.0] — 2026-10-15
 
 MINOR: **every index scan now runs on a bounded per-query thread pool**, the

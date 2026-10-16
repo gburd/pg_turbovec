@@ -724,22 +724,30 @@ RESET turbovec.allowlist;
 ### `turbovec.scan_parallelism`: threads per query
 
 Every index scan (flat, IVF, ColBERT, 1-bit) runs on a small per-backend
-thread pool of `turbovec.scan_parallelism` threads. The default `0` means
-`min(cores, 4)`; `1` runs the scan serially, on one thread; a positive
-value pins it. Only scans big enough to split use more than one thread
-(about 32k rows or more for flat, or several thousand probed rows for IVF);
-smaller ones run serially regardless.
+thread pool of `turbovec.scan_parallelism` threads. **Since 2.14.0 the
+default `0` means 1 — one core per query.** `1` runs the scan serially on
+one thread; a positive value pins it (set it to your core count for
+single-query latency on an idle server). Only scans big enough to split use
+more than one thread (about 32k rows or more for flat, or several thousand
+probed rows for IVF); smaller ones run serially regardless.
+
+**Changed in 2.14.0 (Phase S1).** The auto default dropped from
+`min(cores, 4)` to 1. Under pooled high concurrency the old default let
+~N concurrent queries each fan across several cores and oversubscribe the
+host, collapsing aggregate QPS; one core per query is the throughput-optimal
+default for a server answering many queries at once. Multi-thread is now an
+explicit low-concurrency latency knob — set `turbovec.scan_parallelism` to
+your core count for single-query latency on an otherwise idle server. This
+changes only latency/CPU, never which rows a query returns.
 
 **Changed in 2.13.0.** Before 2.13.0 only the out-of-core IVF scan was
 bounded. Flat and whole-load IVF scans used rayon's global pool, one thread
 per core, for every single query. On a 96-vCPU host a 1M-row flat query
 then cost ~100 ms of CPU for ~7 ms of latency, most of it thread
-coordination, and concurrent queries fought over the same cores. If you
-relied on that for single-query latency on an otherwise idle server, set
-`turbovec.scan_parallelism` to your core count. For a server answering many
-queries at once, `1` gives the most queries per second per core. Measure on
-your hardware; the benchmark in `benches/results/vs_pgvectorsearch_*`
-reports both.
+coordination, and concurrent queries fought over the same cores. 2.13.0
+bounded that to `min(cores, 4)`; 2.14.0 (above) drops the default to 1.
+Measure on your hardware; the benchmark in
+`benches/results/vs_pgvectorsearch_*` reports both.
 
 `turbovec.search_concurrency` was removed in 2.13.0. It never had any
 effect. A `postgresql.conf` that still sets it keeps working: PostgreSQL

@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.13.0 -> 2.14.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.14.0';`.
+--
+-- No new or changed SQL objects. This release (Phase S1) changes the
+-- turbovec.scan_parallelism auto default from min(cores, 4) to 1 (one core
+-- per query); a GUC default is not an SQL object. No wire-format change
+-- (stays v8), no REINDEX. Intentionally empty apart from this comment.

@@ -637,7 +637,7 @@ ambulkdelete `ShareUpdateExclusiveLock` — unchanged.
 | `turbovec.iterative_scan`        | enum | off     | off, relaxed_order | off is the default since v1.20.1 (the old `relaxed_order` default drove a 450× latency regression — see CHANGELOG) |
 | `turbovec.max_scan_tuples`       | int  | 20000   | 1..=10000000   | cap on total candidates examined under iterative refill |
 | `turbovec.build_parallelism`     | int  | 0       | 0..=128        | 0 = auto; bounds the rayon pool used by IVF build (k-means + assign-sweep) |
-| `turbovec.scan_parallelism`      | int  | 0       | 0..=128        | 0 = auto = `min(cores,4)`; threads ONE index scan may use, on every scan kind (flat, whole-load and out-of-core IVF, ColBERT, 1-bit) since 2.13.0 |
+| `turbovec.scan_parallelism`      | int  | 0       | 0..=128        | 0 = auto = 1 (one core per query) since 2.14.0 (Phase S1; was `min(cores,4)`); threads ONE index scan may use, on every scan kind (flat, whole-load and out-of-core IVF, ColBERT, 1-bit) since 2.13.0. Set to core count for single-query latency. |
 | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    | widens the initial candidate set to `ceil(search_k * oversample)` |
 | `turbovec.max_probes`            | int  | 64      | 1..=65536      | cap on IVF probe-set widening under iterative refill |
 | `turbovec.out_of_core`           | enum | auto    | off, auto, on  | auto goes cell-scoped only when an IVF index's codes exceed half of `turbovec.cache_size_mb` |

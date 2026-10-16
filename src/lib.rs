@@ -8990,7 +8990,7 @@ mod tests {
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
-            "2.12.0", "2.12.1", "2.13.0",
+            "2.12.0", "2.12.1", "2.13.0", "2.14.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10973,14 +10973,9 @@ mod tests {
              ({cores} cores) -- it ran on rayon's global pool, not the bounded scan pool"
         );
 
-        // (2) the pool size follows the setting in both directions
-        for (setting, cap) in [
-            ("8", 8usize),
-            ("1", 1),
-            ("2", 2),
-            ("0", cores.min(4)),
-            ("1", 1),
-        ] {
+        // (2) the pool size follows the setting in both directions. Auto
+        // (`0`) resolves to 1 since S1 (one core per query), was min(cores,4).
+        for (setting, cap) in [("8", 8usize), ("1", 1), ("2", 2), ("0", 1), ("1", 1)] {
             Spi::run(&format!("SET turbovec.scan_parallelism = {setting}")).unwrap();
             crate::cache::invalidate_all();
             let ids = pull();
@@ -11033,6 +11028,82 @@ mod tests {
         Spi::run("RESET turbovec.scan_parallelism").unwrap();
     }
 
+    /// Phase S1 end-to-end: with `turbovec.scan_parallelism` at its DEFAULT
+    /// (unset, auto), a flat scan runs ONE CORE PER QUERY -- it does not fan
+    /// out across the backend. This reads the REAL GUC (the extension `.so`
+    /// is not built with `cfg(test)`), so it asserts the production default,
+    /// not the `#[cfg(test)]` auto value.
+    ///
+    /// Corpus is 40,000 rows = 1,250 blocks, past turbovec's
+    /// `SINGLE_QUERY_PARALLEL_MIN_BLOCKS` (1,024) gate, so a multi-thread
+    /// default WOULD fan out here. On v2.13.0 the default was
+    /// `min(cores, 4)`, so on a multi-core host this scan spawned/used a
+    /// 2-4-thread pool and `scan_threads()` returned > 1 -- this test FAILS
+    /// there. After S1 the default is 1: `scan_threads() == 1`, the scan
+    /// runs on the reused 1-thread pool, and the first scan in a fresh
+    /// backend adds no more than that one worker thread.
+    #[pg_test]
+    fn default_scan_is_one_core_per_query() {
+        use_turbovec();
+        ivf2_make_corpus("s1def", 40_000);
+        Spi::run(
+            "CREATE INDEX s1def_idx ON s1def USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        // Default: do NOT set the GUC. A RESET makes the intent explicit and
+        // clears anything a prior test in this backend set.
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+        crate::cache::invalidate_all();
+
+        // The resolved default thread count IS one core per query.
+        assert_eq!(
+            crate::guc::scan_threads(),
+            1,
+            "S1: the default (unset) scan_parallelism must resolve to 1 core per query"
+        );
+
+        let sql =
+            "SELECT id FROM s1def ORDER BY emb <=> (SELECT emb FROM s1def WHERE id = 777) LIMIT 10";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|c| {
+                c.select(sql, None, &[])
+                    .unwrap()
+                    .map(|r| r.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // First scan in this backend at the default: it must not fan the
+        // 1,250-block scan across the backend's cores. At most the reused
+        // 1-thread pool's single worker appears.
+        let before = backend_thread_count();
+        let ids = pull();
+        let grew = backend_thread_count().saturating_sub(before);
+        assert_eq!(ids.len(), 10, "{ids:?}");
+        assert_distinct_ids(&ids);
+        assert!(
+            grew <= 1,
+            "S1 default: the first flat scan added {grew} threads -- it fanned \
+             out instead of running one core per query"
+        );
+
+        // Result-set invariance: the default (1 core) returns the SAME top-k
+        // SET as an explicit multi-thread scan. Thread count must never
+        // change which rows return (the executor re-ranks by exact
+        // distance); S1 is latency/CPU only.
+        let default_set: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        Spi::run("SET turbovec.scan_parallelism = 4").unwrap();
+        crate::cache::invalidate_all();
+        let multi = pull();
+        let multi_set: std::collections::HashSet<i64> = multi.iter().copied().collect();
+        assert_eq!(
+            default_set, multi_set,
+            "one-core default and 4-thread scan returned different top-k SETs"
+        );
+        Spi::run("RESET turbovec.scan_parallelism").unwrap();
+    }
+
     /// 2.13.0 removed `turbovec.search_concurrency`: it was registered in
     /// Phase 1 and never read, while its description claimed it capped the
     /// fan-out (it did not; `turbovec.scan_parallelism` now does). Checks it
@@ -11062,10 +11133,10 @@ mod tests {
     }
 
     /// The GUC default (`scan_parallelism = 0`, auto) must return
-    /// correct results — the auto path picks a modest thread count and
-    /// its top-k SET must match the explicit serial scan. Guards the
-    /// resolve-auto branch (cores.min(cap), row-floor cap) against a
-    /// mis-sized or degenerate split.
+    /// correct results. Since S1 (2.14.0) auto resolves to 1 (one core
+    /// per query), so this is also the serial path; its top-k SET must
+    /// still match an explicit `= 1` scan. Guards the resolve-auto branch
+    /// (and the OOC row-floor cap) against a mis-sized or degenerate split.
     #[pg_test]
     fn ivf_parallel_scan_default_guc_correct() {
         use_turbovec();

@@ -4408,6 +4408,94 @@ mod tests {
         Spi::run("RESET turbovec.oversample").unwrap();
     }
 
+    /// **Phase S4 — the exact-rerank window scales with the requested k,
+    /// not the index `dim`, and that does NOT cost recall@10.**
+    ///
+    /// On v2.13.0 `hi_dim_rerank = auto` floored the candidate window at
+    /// `clamp(dim, 256..=1024)`, so a `search_k=32` / `LIMIT 10` query at
+    /// 1024-d exact-rechecked ~1024 heap tuples regardless of how few rows
+    /// it asked for — the single biggest per-query CPU term. S4 makes the
+    /// window `clamp(ceil(search_k*oversample) * rerank_multiplier,
+    /// 64..=1024)`, so the default (mult 8.0, search_k 32) reranks 256,
+    /// not ~1024.
+    ///
+    /// This test proves the trade is recall-neutral *through the real scan
+    /// path*: the NEW default (512-candidate window) must match the OLD
+    /// wide window (reproduced here by raising `rerank_multiplier` to 32,
+    /// which gives `32*32` capped at 1024 — the pre-S4 dim floor at
+    /// 1024-d) to within a small epsilon, on every query AND in aggregate.
+    /// It is the end-to-end companion to the pure
+    /// `guc::hi_dim_rerank_tests::s4_*` unit tests (which prove the counts)
+    /// — this proves the *recall* those smaller counts actually deliver.
+    #[pg_test]
+    fn s4_rerank_window_by_k_preserves_recall() {
+        // 1024-d is the dim the research doc calls out (a LIMIT-10 query
+        // there exact-rechecked ~1024 tuples pre-S4). 2500 rows keeps the
+        // pg_test corpus build fast while leaving enough rows that the
+        // quantized ranking genuinely scatters true NNs (so the window
+        // width matters).
+        build_oversample_corpus("t_s4_recall", 2500, 1024, 4);
+        Spi::run("SET turbovec.iterative_scan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 32").unwrap();
+        Spi::run("SET turbovec.oversample = 1.0").unwrap();
+        // auto engages at dim >= 256, so the window is governed purely by
+        // rerank_multiplier here.
+        Spi::run("SET turbovec.hi_dim_rerank = auto").unwrap();
+
+        let mut new_total = 0.0f64; // default: mult 16.0 => 512 window
+        let mut wide_total = 0.0f64; // old-style: mult 32 => 1024 window
+        let mut n = 0.0f64;
+        let mut new_ge_wide_minus_eps_everywhere = true;
+        // Per-query recall must not drop more than this vs the wide window.
+        const PER_Q_SLACK: f64 = 0.10;
+        for seed in [
+            "s4a", "s4b", "s4c", "s4d", "s4e", "s4f", "s4g", "s4h", "s4i", "s4j",
+        ] {
+            let qlit = query_vector_literal(1024, &seed);
+            let truth = exact_topk_ids("t_s4_recall", &qlit, 10);
+
+            // New default window (512 candidates).
+            Spi::run("SET turbovec.rerank_multiplier = 16.0").unwrap();
+            let r_new = recall_at(&index_topk_ids("t_s4_recall", &qlit, 10), &truth);
+            // Old wide window (1024 candidates — pre-S4 dim floor at 1024-d).
+            Spi::run("SET turbovec.rerank_multiplier = 32.0").unwrap();
+            let r_wide = recall_at(&index_topk_ids("t_s4_recall", &qlit, 10), &truth);
+
+            if r_new + PER_Q_SLACK + 1e-9 < r_wide {
+                new_ge_wide_minus_eps_everywhere = false;
+            }
+            new_total += r_new;
+            wide_total += r_wide;
+            n += 1.0;
+        }
+        let new_mean = new_total / n;
+        let wide_mean = wide_total / n;
+        pgrx::log!(
+            "S4 recall@10 (1024-d, search_k=32): new 512-window mean {new_mean:.3}, \
+             old 1024-window mean {wide_mean:.3}"
+        );
+
+        // No query may lose more than PER_Q_SLACK recall vs the wide window.
+        assert!(
+            new_ge_wide_minus_eps_everywhere,
+            "S4 512-candidate window regressed recall@10 by more than \
+             {PER_Q_SLACK} on some query vs the old 1024-candidate window"
+        );
+        // In aggregate the narrow default must essentially match the wide
+        // window (the whole point: ~dim rechecks buy no recall at LIMIT 10).
+        assert!(
+            new_mean + 0.02 >= wide_mean,
+            "S4 512-candidate window mean recall@10 ({new_mean:.3}) must be \
+             within 0.02 of the old 1024-candidate window ({wide_mean:.3}); \
+             a materially-worse narrow default is not acceptable (HARD MANDATE)"
+        );
+
+        Spi::run("RESET turbovec.rerank_multiplier").unwrap();
+        Spi::run("RESET turbovec.hi_dim_rerank").unwrap();
+        Spi::run("RESET turbovec.search_k").unwrap();
+        Spi::run("RESET turbovec.oversample").unwrap();
+    }
+
     /// Oversample composes with a selective WHERE filter: iterative
     /// scan still kicks in. Oversample sets the initial k; iterative
     /// refill grows from there to satisfy the LIMIT over a sparse

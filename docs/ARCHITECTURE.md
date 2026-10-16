@@ -17,7 +17,7 @@ only storage strategy.
 > v1.3.0-era design). For anything that must be exact today, prefer the code
 > and these current references: wire format + meta page — `src/index/page.rs`
 > (`VERSION = 8`); build pipeline — `src/index/build.rs`; the GUC surface —
-> `src/guc.rs` (19 GUCs) and the README Configuration table; index kinds —
+> `src/guc.rs` (20 GUCs) and the README Configuration table; index kinds —
 > the `KIND_*` constants in `src/index/page.rs` (flat/single, ColBERT, graph
 > [DEPRECATED v2.5.0], 1-bit BQ) plus IVF (`WITH (lists = N)`).
 **Target Postgres:** 13–18, plus 19beta4 (experimental); every leg tested in

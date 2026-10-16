@@ -722,6 +722,7 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             bit_width_u8,
             k_pref,
             oversample,
+            crate::guc::RERANK_MULTIPLIER.get(),
         );
         let k = k_oversampled.min(n_live.max(1)).max(1);
         let mut k_used = k;

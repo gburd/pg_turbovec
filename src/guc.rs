@@ -18,6 +18,7 @@
 //! | `turbovec.build_parallelism`     | int  | 0       | 0..=128        |
 //! | `turbovec.scan_parallelism`      | int  | 0       | 0..=128        |
 //! | `turbovec.oversample`            | float| 1.0     | 1.0..=100.0    |
+//! | `turbovec.rerank_multiplier`     | float| 16.0    | 1.0..=1024.0   |
 //! | `turbovec.max_probes`            | int  | 64      | 1..=65536      |
 //! | `turbovec.out_of_core`           | enum | auto    | off, auto, on  |
 //! | `turbovec.coarse_graph`          | enum | auto    | off, auto, on  |
@@ -37,6 +38,16 @@ pub static CACHE_SIZE_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 pub static WARN_ON_REBUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static NORMALIZE_ON_INSERT: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub static SEARCH_K: GucSetting<i32> = GucSetting::<i32>::new(32);
+/// S4: the exact-rerank candidate window is `user_count * this`,
+/// clamped to `[RERANK_MIN_FLOOR, 1024]` — a function of the
+/// REQUESTED k, not the index `dim`. See
+/// `hi_dim_rerank_candidate_count`. Default 16.0 (search_k=32 =>
+/// 512-candidate rerank window, measured recall@10-neutral at
+/// mean/min 1.000 vs the old dim-floored ~1024 window while halving
+/// per-query CPU — see `~/s4/FINDINGS.md`). Raise for more head-room,
+/// lower for less CPU; `hi_dim_rerank = off` disables widening
+/// entirely.
+pub static RERANK_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(16.0);
 pub static PROBES: GucSetting<i32> = GucSetting::<i32>::new(16);
 
 /// IVF-3: iterative-scan cap on probe-set growth under a selective
@@ -213,21 +224,46 @@ pub static HI_DIM_RERANK: GucSetting<HiDimRerankMode> =
 /// 1536, and the 512/768-d embedding families get the wider window.
 pub const HI_DIM_RERANK_MIN_DIM: usize = 256;
 
-/// The dim-scaled candidate-count floor `auto`/`on` enforce, grounded
-/// in the Gap-B measurement (~800 candidates ≈ full recovery at
-/// 960-d). Scales linearly with dim past the threshold and is capped
-/// so it never explodes: `floor = clamp(dim, 256..=1024)` candidates.
-/// A dim=960 index floors at 960; a dim=1536 index caps at 1024
-/// (past which the recheck cost outweighs the marginal recall on the
-/// measured curve). Returns the candidate count the scan should use,
-/// given the user's own `k_pref`/`oversample` (their override always
-/// wins — the floor only ever RAISES the count, never lowers it).
+/// S4: the absolute minimum exact-rerank window, independent of
+/// `dim`. Even a tiny `search_k` reranks at least this many
+/// candidates when `hi_dim_rerank` engages, because the high-dim /
+/// 1-bit quantized ranking places true neighbours a few dozen ranks
+/// deep (Gap-B). 64 was the recall knee in the S4 sweep (R@10 held
+/// at 64; 32 lost a point at 1024-d). Below `hi_dim_rerank`'s reach
+/// (low-dim 2/3/4-bit) this floor never applies.
+pub const RERANK_MIN_FLOOR: usize = 64;
+
+/// S4: candidate-rerank floor is a function of the REQUESTED k, not
+/// the index `dim`. Before S4 the floor was `clamp(dim, 256..=1024)`,
+/// so a `search_k=32`/`LIMIT 10` query at 1024-d exact-rechecked ~1024
+/// heap tuples regardless of how few rows it asked for — the single
+/// biggest per-query CPU term (`.agent/notes/SCALE_RESEARCH_concurrency.md`
+/// §3-4, `docs/SCALE_PLAN.md` Phase S4). Now the floor is
+/// `clamp(user_count * rerank_multiplier, RERANK_MIN_FLOOR..=1024)`,
+/// where `user_count = ceil(search_k * oversample)` is the user's own
+/// requested candidate count and `rerank_multiplier`
+/// (`turbovec.rerank_multiplier`, default 16.0) is the recall-safety
+/// head-room. This still RAISES the count for the high-dim/1-bit
+/// quantized-ranking noise Gap-B documented, but proportional to what
+/// was asked for: search_k=32 => a 512-candidate window instead of
+/// ~1024, measured recall@10-neutral at 1024-d (see
+/// `~/s4/FINDINGS.md`). The 1024 cap is unchanged (the measured knee).
+/// `auto` engages only at `dim >= HI_DIM_RERANK_MIN_DIM` (or any 1-bit
+/// index); `on` always; `off` honours search_k/oversample exactly.
+/// An explicit search_k/oversample override past the floor always
+/// wins — the floor only ever RAISES the count, never lowers it.
+///
+/// Scoring is untouched (the exact kernels / `normalise_into` are the
+/// release contract); this changes only HOW MANY candidates the
+/// executor exact-rechecks, a recall/latency trade and therefore a
+/// MINOR, never a patch.
 pub fn hi_dim_rerank_candidate_count(
     mode: HiDimRerankMode,
     dim: usize,
     bit_width: u8,
     user_k: usize,
     user_oversample: f64,
+    rerank_multiplier: f64,
 ) -> usize {
     let user_count = (user_k as f64 * user_oversample).ceil() as usize;
     // 1-bit sign-BQ is lossy at ANY dim (the coarse Hamming rank places
@@ -256,7 +292,19 @@ pub fn hi_dim_rerank_candidate_count(
     if !apply {
         return user_count;
     }
-    let floor = effective_dim.clamp(HI_DIM_RERANK_MIN_DIM, 1024);
+    // S4: window scales with the REQUESTED k, not dim. A `LIMIT 10` /
+    // search_k=32 query reranks `32 * rerank_multiplier` candidates,
+    // not ~dim. RERANK_MIN_FLOOR keeps a sane absolute minimum for a
+    // tiny search_k (the high-dim quantized ranking still needs a few
+    // dozen survivors to recover the true top-k); 1024 is the measured
+    // upper knee (past it the recheck cost outweighs marginal recall).
+    let mult = if rerank_multiplier.is_finite() && rerank_multiplier >= 1.0 {
+        rerank_multiplier
+    } else {
+        1.0
+    };
+    let scaled = (user_count as f64 * mult).ceil();
+    let floor = (scaled as usize).clamp(RERANK_MIN_FLOOR, 1024);
     user_count.max(floor)
 }
 
@@ -868,6 +916,19 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_float_guc(
+        c_str(b"turbovec.rerank_multiplier\0"),
+        c_str(b"Exact-rerank candidate window as a multiple of the requested k (default 16.0).\0"),
+        c_str(
+            b"S4. When turbovec.hi_dim_rerank engages (high-dim or 1-bit indexes), the scan widens the exact-L2 reorder-queue recheck beyond the user's search_k*oversample so the executor re-ranks enough quantized survivors to recover the true top-k (Gap-B). Before 2.13 that window was floored at clamp(dim, 256..=1024) -- a function of the index dimension, so a search_k=32 / LIMIT 10 query at 1024-d exact-rechecked ~1024 heap tuples no matter how few rows it asked for, the single biggest per-query CPU term. This knob makes the window a function of the REQUESTED k instead: the floor is clamp(ceil(search_k*oversample) * rerank_multiplier, 64..=1024). Default 16.0 (search_k=32 => a 512-candidate rerank window), measured recall@10-neutral (mean and min 1.000) at 1024-d vs the old ~1024 window while HALVING the per-query exact rechecks (48ms -> 24ms at scan_parallelism=1 on a clustered 20k x 1024-d corpus). Raise it toward the old behaviour for more recall head-room, lower it for less CPU; hi_dim_rerank=off disables the widening entirely and honours search_k/oversample exactly. Changes only the candidate COUNT, never the scoring kernels (bit-identical), so it is a recall/latency trade, not a wire change -- no REINDEX.\0",
+        ),
+        &RERANK_MULTIPLIER,
+        1.0,
+        1024.0,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c_str(b"turbovec.build_parallelism\0"),
         c_str(b"OS threads used to quantize + repack vectors during CREATE INDEX / REINDEX (0 = auto).\0"),
@@ -1145,93 +1206,133 @@ mod graph_build_partitions_tests {
 
 #[cfg(test)]
 mod hi_dim_rerank_tests {
-    use super::{HI_DIM_RERANK_MIN_DIM, HiDimRerankMode, hi_dim_rerank_candidate_count};
+    use super::{
+        HI_DIM_RERANK_MIN_DIM, HiDimRerankMode, RERANK_MIN_FLOOR, hi_dim_rerank_candidate_count,
+    };
+
+    // Default multiplier (matches `turbovec.rerank_multiplier`'s GUC default).
+    const M: f64 = 16.0;
 
     /// off honours the user's search_k*oversample exactly, at any dim.
     #[test]
     fn off_never_widens() {
-        assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 2, 32, 1.0),
-            32
-        );
-        assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 960, 2, 32, 1.0),
-            32
-        );
-        assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 1536, 2, 32, 1.0),
-            32
-        );
+        for dim in [128usize, 960, 1536] {
+            assert_eq!(
+                hi_dim_rerank_candidate_count(HiDimRerankMode::Off, dim, 2, 32, 1.0, M),
+                32
+            );
+        }
         // off means off even for a 1-bit index.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 1, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Off, 128, 1, 32, 1.0, M),
             32
         );
     }
 
-    /// auto leaves low-dim untouched (below the threshold the recall
-    /// plateau holds, widening is pure latency tax).
+    /// auto leaves low-dim 2/4-bit untouched (below the threshold the
+    /// recall plateau holds; widening is pure latency tax).
     #[test]
     fn auto_does_not_touch_low_dim() {
-        // dim just below the threshold -> user's 32 unchanged.
         assert_eq!(
             hi_dim_rerank_candidate_count(
                 HiDimRerankMode::Auto,
                 HI_DIM_RERANK_MIN_DIM - 1,
                 2,
                 32,
-                1.0
+                1.0,
+                M
             ),
             32
         );
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 2, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 2, 32, 1.0, M),
             32
         );
     }
 
-    /// auto floors the candidate count at clamp(dim, 256..=1024) for
-    /// high-dim indexes, grounded in the Gap-B ~800-candidate recovery.
+    /// **S4 — the fails-before/passes-after guarantee.** The exact-rerank
+    /// window is a function of the REQUESTED k (search_k*oversample), NOT
+    /// the index `dim`. On v2.13.0 a search_k=32 query at 1024-d floored
+    /// at `clamp(dim, 256..=1024) == 1024` candidates; the S4 policy floors
+    /// at `clamp(32*16, 64..=1024) == 512`. This asserts the bounded,
+    /// k-driven window and will FAIL on the pre-S4 (dim-floored) code.
     #[test]
-    fn auto_floors_high_dim_at_dim_scaled_window() {
-        // dim exactly at threshold -> floor = 256.
+    fn s4_rerank_window_scales_with_k_not_dim() {
+        // search_k=32 at 1024-d: 32*16 = 512, NOT ~dim (1024 pre-S4).
+        let c = hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 32, 1.0, M);
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, HI_DIM_RERANK_MIN_DIM, 2, 32, 1.0),
-            HI_DIM_RERANK_MIN_DIM
+            c, 512,
+            "search_k=32 at 1024-d must rerank 512 (k-driven), not ~dim 1024"
         );
-        // GIST-960 -> floor 960.
-        assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 32, 1.0),
-            960
+        assert!(
+            c < 1024,
+            "must NOT exact-recheck ~dim candidates for a small k"
         );
-        // OpenAI-1536 -> capped at 1024 (past which the recheck cost
-        // outweighs the marginal recall on the measured curve).
+
+        // The window is independent of dim: 512-d and 1536-d give the
+        // SAME window for the same requested k (pre-S4 gave 512 and 1024).
+        let c512 = hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 512, 2, 32, 1.0, M);
+        let c1536 = hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 2, 32, 1.0, M);
+        assert_eq!(c512, 512);
+        assert_eq!(c1536, 512);
+        assert_eq!(c512, c1536, "window must not depend on dim");
+
+        // A smaller requested k gives a proportionally smaller window
+        // (clamped at the modest RERANK_MIN_FLOOR, never ~dim).
+        let c_k8 = hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 8, 1.0, M);
+        assert_eq!(c_k8, 128, "8*16=128");
+        // search_k=2 => 2*16=32 < floor 64 => clamped UP to 64.
+        let c_k2 = hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 2, 1.0, M);
+        assert_eq!(c_k2, RERANK_MIN_FLOOR);
+
+        // A larger requested k widens proportionally, up to the 1024 cap.
+        let c_k200 = hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 200, 1.0, M);
+        assert_eq!(c_k200, 1024, "200*16=3200 caps at 1024");
+    }
+
+    /// The multiplier is the recall head-room dial: raising it widens the
+    /// window proportionally (so an operator can recover the old wide
+    /// window), lowering it narrows it.
+    #[test]
+    fn s4_multiplier_dials_the_window() {
+        // mult 32 at search_k=32 => 1024 (the old wide window, now opt-in).
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 2, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 32, 1.0, 32.0),
             1024
+        );
+        // mult 2 at search_k=32 => 64 (narrow, min-floor).
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 32, 1.0, 2.0),
+            64
+        );
+        // A sub-1.0 / NaN multiplier is treated as 1.0 (never shrinks
+        // below the requested count), then the min-floor still applies.
+        assert_eq!(
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 100, 1.0, 0.5),
+            100,
+            "mult<1 => 1.0: window never drops below user_count"
         );
     }
 
     /// A 1-bit (sign-BQ) index widens under `auto` at ANY dim: 1-bit is
-    /// lossy even below the high-dim threshold, so it gets at least the
-    /// 256 candidate floor. This is the Gap-A analog for binary
-    /// quantization -- reuse the same exact-heap-rerank lever.
+    /// lossy even below the high-dim threshold. The window is still
+    /// k-driven, not dim-driven.
     #[test]
     fn auto_widens_onebit_regardless_of_dim() {
         // SIFT-128 at 1-bit: 2/4-bit would NOT widen (dim < 256), but
-        // 1-bit floors at 256.
+        // 1-bit engages the floor: 32*16 = 512.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 1, 32, 1.0),
-            256
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 1, 32, 1.0, M),
+            512
         );
-        // 1536-d at 1-bit still caps at 1024 like 2-bit.
+        // 1536-d at 1-bit: still k-driven (512), not dim.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 1, 32, 1.0),
-            1024
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1536, 1, 32, 1.0, M),
+            512
         );
         // Contrast: 2-bit at dim 128 does NOT widen.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 2, 32, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 128, 2, 32, 1.0, M),
             32
         );
     }
@@ -1240,32 +1341,27 @@ mod hi_dim_rerank_tests {
     /// past the floor always wins (search_k or oversample).
     #[test]
     fn user_override_past_floor_wins() {
-        // user asks for 2000 via search_k on a 960-d index: floor 960
+        // user asks for 2000 via search_k on a 1024-d index: floor 256
         // does not lower it.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 2000, 1.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 2000, 1.0, M),
             2000
         );
-        // user asks for 1000 via oversample (search_k=32, os=32 ->
-        // 1024) on a 960-d index: 1024 > 960, user wins.
+        // user asks for a wide window via oversample (search_k=32, os=32
+        // => user_count=1024): 1024 >= floor, user wins.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 32, 32.0),
+            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 1024, 2, 32, 32.0, M),
             1024
-        );
-        // below the floor, the floor wins (that's the whole point).
-        assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::Auto, 960, 2, 10, 1.0),
-            960
         );
     }
 
-    /// on applies the floor regardless of dim (even low dim).
+    /// on applies the k-driven floor regardless of dim (even low dim).
     #[test]
     fn on_floors_regardless_of_dim() {
-        // low dim under `on` -> floored at 256 (the min clamp).
+        // low dim under `on`: 32*16 = 512 window.
         assert_eq!(
-            hi_dim_rerank_candidate_count(HiDimRerankMode::On, 64, 2, 32, 1.0),
-            256
+            hi_dim_rerank_candidate_count(HiDimRerankMode::On, 64, 2, 32, 1.0, M),
+            512
         );
     }
 }

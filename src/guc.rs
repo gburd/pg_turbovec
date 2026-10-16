@@ -195,7 +195,7 @@ pub static COARSE_GRAPH: GucSetting<CoarseGraphMode> =
 /// applied only when the user has left `search_k`/`oversample` at
 /// their defaults (an explicit user override always wins).
 ///
-/// `auto` (default): apply the dim-scaled floor for high-dim indexes
+/// `auto` (default): apply the k-scaled rerank floor for high-dim indexes
 /// only. `on`: always apply it. `off`: never (pre-fix behaviour —
 /// the user tunes `search_k`/`oversample` by hand). No wire-format
 /// change, no REINDEX; a scan-side GUC only.
@@ -208,7 +208,7 @@ pub enum HiDimRerankMode {
     /// left `search_k`/`oversample` at their defaults (the default).
     #[name = c"auto"]
     Auto,
-    /// Always apply the dim-scaled floor, regardless of dim.
+    /// Always apply the k-scaled rerank floor, regardless of dim.
     #[name = c"on"]
     On,
 }
@@ -865,7 +865,7 @@ pub fn register_gucs() {
         c_str(b"turbovec.hi_dim_rerank\0"),
         c_str(b"Auto-widen the exact-L2 rerank candidate window for high-dimension indexes (off | auto | on; default auto).\0"),
         c_str(
-            b"Gap-B fix. At high dimension the lossy quantized score is noisy enough that a true nearest neighbour often sits at rank ~200-800 WITHIN the probed cells, below a small search_k -- so end-to-end recall caps well below the retrieval ceiling (e.g. GIST-1M/960d ~0.86). This is an in-cell quantized-RANKING loss, NOT a retrieval one (the true NNs ARE in the probed cells; measured cell recall 0.98-0.996 at probes 64-128). The cure is scan-side only: fetch a WIDER candidate set so the executor's exact-L2 reorder-queue recheck (xs_recheckorderby) re-ranks enough survivors to recover the true top-k -- measured to lift an SQ4 analog from R@10=0.666 to 0.978 at 960-dim by reranking ~800 candidates. This must not blanket-widen: at low dim recall already plateaus by search_k~=25, so widening there is pure latency tax. auto (the default) therefore applies a DIM-SCALED candidate floor (clamp(dim, 256..=1024)) ONLY for indexes with dim >= 256, and only ever RAISES the count -- an explicit search_k/oversample override past the floor always wins. on applies the floor regardless of dim; off honours search_k/oversample exactly (pre-fix behaviour). No wire-format change, no REINDEX; identical result set to setting search_k/oversample by hand to the same candidate count.\0",
+            b"Gap-B fix. At high dimension the lossy quantized score is noisy enough that a true nearest neighbour often sits at rank ~200-800 WITHIN the probed cells, below a small search_k -- so end-to-end recall caps well below the retrieval ceiling (e.g. GIST-1M/960d ~0.86). This is an in-cell quantized-RANKING loss, NOT a retrieval one (the true NNs ARE in the probed cells; measured cell recall 0.98-0.996 at probes 64-128). The cure is scan-side only: fetch a WIDER candidate set so the executor's exact-L2 reorder-queue recheck (xs_recheckorderby) re-ranks enough survivors to recover the true top-k -- measured to lift an SQ4 analog from R@10=0.666 to 0.978 at 960-dim by reranking ~800 candidates. This must not blanket-widen: at low dim recall already plateaus by search_k~=25, so widening there is pure latency tax. auto (the default) therefore applies a candidate floor ONLY for indexes with dim >= 256 (or any 1-bit index), and only ever RAISES the count -- an explicit search_k/oversample override past the floor always wins. Since 2.14.0 (Phase S4) that floor is a function of the REQUESTED k, not the index dim: clamp(ceil(search_k*oversample) * turbovec.rerank_multiplier, 64..=1024) (was clamp(dim, 256..=1024)). on applies the floor regardless of dim; off honours search_k/oversample exactly (pre-fix behaviour). No wire-format change, no REINDEX; identical result set to setting search_k/oversample by hand to the same candidate count.\0",
         ),
         &HI_DIM_RERANK,
         GucContext::Userset,

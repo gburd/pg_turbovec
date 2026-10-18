@@ -133,22 +133,22 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.13.0, 2026-10-14)
+### Current (as of v2.14.1, 2026-10-17)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.13.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.12.1 | 2.13.0 | `ALTER EXTENSION` only — no REINDEX. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.14.1 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.14.0 | 2.14.1 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.13.0)
+### Where the project actually is (v2.14.1)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -204,14 +204,40 @@ patch (`docs/UPGRADING.md`: patches require bit-identical scoring), and
 `normalise_into` must stay bit-identical forever (it feeds persisted codes;
 `normalise_bit_identical_to_old` guards it, including the returned norm).
 
-**Corruption history — read before touching persist/scan code.** Six
+**Corruption history — read before touching persist/scan code.** Seven
 distinct root causes have been found and fixed (counter-drift, VACUUM
 lost-update, interrupted-flush torn write, graph unlocked RMW, BQ tombstone
-resurrection, and stale `touched_ids` re-splice in v2.11.0). The recurring one is a **chain-offset running sum that omits a
-chain** — it has bitten four times (`graph_count` in v1.24.0, three sites
-missing `bq_mean_count` in v2.6.0, two more in v2.7.0). If you add a chain,
-grep every running sum in `page.rs` and `relfile.rs` and add it to all of
-them. Meta page is always written **LAST**, after every chain.
+resurrection, stale `touched_ids` re-splice in v2.11.0, and reused
+`am_version` in v2.14.1; the v2.14.1 review also found the deferred flush
+dropping an IVF index's tombstone list and rewriting a stale snapshot onto a
+VACUUM-emptied index). **Every relfile rewrite must carry forward every
+chain it does not own** -- tombstones included: a writer that plans a fresh
+meta page and passes `None` for a chain erases it. The recurring one is a **chain-offset running sum
+that omits a chain** — it has bitten four times (`graph_count` in v1.24.0,
+three sites missing `bq_mean_count` in v2.6.0, two more in v2.7.0). If you add
+a chain, grep every running sum in `page.rs` and `relfile.rs` and add it to all
+of them. Meta page is always written **LAST**, after every chain.
+
+**`am_version` is a cache key and must strictly increase on every rewrite
+that changes content.** The scan cache is keyed on `(relfilenode,
+am_version)`; a rewrite that reuses a version leaves every backend that cached
+the old content serving it (silently missing rows, invisible to
+`turbovec_check`). A deferred-commit writer's own `version_existing + rows`
+is stale once another writer commits, so the deferred flush stamps
+`relfile::next_am_version` (max of disk+1 and its own count); the
+synchronous writers (BQ and graph insert, every VACUUM path) read the meta
+under the exclusive rewrite lock and stamp disk+1, which is equally safe.
+**The committing backend's cache entry is only current if nobody else
+changed the index since it loaded:** `reconcile_and_write_flush` returns a
+`FlushOutcome`, and `cache::clear_dirty` keeps the entry (relabelled with
+the version actually stamped) only when the written image equals the
+snapshot, else drops it. Labelling a stale snapshot with a current version
+is the same bug from the other side. Detector: `benches/corruption-repro/am_version_soak.sh`,
+whose writers burst then go QUIET; a busy soak hides this class, because the
+next write bumps the version within milliseconds (an earlier draft saw 30
+collisions in 120 s and zero stale reads). Its writers never read their own
+writes, so the committing-backend case is covered by the pg_test
+`committing_backend_does_not_serve_its_stale_snapshot` instead.
 
 **Degradation must be OBSERVABLE.** An insert into an IVF index cannot place
 the row in its cell without an O(n) reshuffle, so both insert paths append and
@@ -282,7 +308,19 @@ cut, and `||`/halfvec arithmetic. v1.9.0 added `turbovec.oversample`
 
 ---
 
-## Build environment (NixOS local worktree)
+## Where builds, tests and benchmarks run — EC2, never the workstation
+
+> **(2026-10-17, user rule.)** Do NOT build, test or benchmark on the local
+> workstation (`floki`). That covers `cargo build`, `cargo pgrx test`,
+> `cargo pgrx install`, `cargo test`, `nix build`, the corruption repros and
+> soaks, and any local PostgreSQL cluster. Run them on an EC2 host (Debian 12,
+> on-demand, the current burner account, tagged `run=`, ssh with
+> `IdentitiesOnly=yes`; see § AWS burner accounts). The workstation is for
+> editing, git, review, and driving EC2 over ssh. Put this rule in every
+> sub-agent brief. A Debian 12 / LLVM 14 host builds and tests the extension
+> as-is (`benches/results/s0_pooled_smoke_20261016/host/env.sh`).
+
+## Build environment (NixOS local worktree — editing/reference only; see above)
 
 ```bash
 export LIBCLANG_PATH=/nix/store/10y7v0cqr8xqsqlqnfzw6i9s42f6f8rd-clang-17.0.6-lib/lib
@@ -324,11 +362,17 @@ pkill -9 -f "test-pgdata"; sleep 2
 test -d target/test-pgdata && mv target/test-pgdata /tmp/orphan-$$
 ```
 
-Then `cargo pgrx test pg16` is the full local test loop.
+Then `cargo pgrx test pg16` is the full test loop -- run it on the EC2 host, not here.
 `cargo build --release` compiles the production binary.
 `bash scripts/drift-check.sh` enforces project-level invariants.
 
 ### Bench hosts
+
+> **Historical table.** Since 2026-10-17 new build/test/benchmark work runs
+> on EC2 (§ "Where builds, tests and benchmarks run"). These hosts are kept
+> for re-checking published historical results only. The SIMD lesson below
+> still holds: pick an EC2 instance with AVX2 or better (c7i/m7i are AVX-512
+> VNNI) for any latency or QPS number, and Graviton (c8g) for the planes path.
 
 | Host    | Arch     | SIMD | Cores | RAM     | Disk      | Notes |
 |---------|----------|------|------:|--------:|----------:|-------|
@@ -439,7 +483,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 472 passed,
+3. Pass `cargo pgrx test pg16` cleanly (current count: 488 passed,
    9 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`

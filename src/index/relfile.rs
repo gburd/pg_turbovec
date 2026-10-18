@@ -1188,6 +1188,54 @@ pub(crate) fn reconcile_flush_image(
     (out_codes, out_scales, out_ids)
 }
 
+/// The `am_version` a relfile rewrite must stamp: strictly greater than the
+/// version currently on disk, and never below what the writer computed.
+///
+/// `am_version` is half of the scan cache's freshness key
+/// `(relfilenode, am_version)` (`cache::scan_lookup`). Every rewrite that
+/// changes index content MUST advance it, or a backend that cached the
+/// previous state keeps serving it. A deferred-commit writer computes its
+/// version as `version_existing + rows` from the meta it loaded at its first
+/// insert, which is stale if another writer committed in between; taking the
+/// max with `disk + 1` under the exclusive rewrite lock makes every committed
+/// rewrite's version unique and increasing. At `u32::MAX` (4 billion
+/// rewrites, unreachable in practice) the version saturates and would be
+/// reused; `saturating_add` only prevents it wrapping back to a small value.
+pub(crate) fn next_am_version(on_disk: Option<u32>, proposed: u32) -> u32 {
+    match on_disk {
+        Some(d) => proposed.max(d.saturating_add(1)),
+        None => proposed,
+    }
+}
+
+#[cfg(test)]
+mod next_am_version_tests {
+    use super::next_am_version;
+
+    #[test]
+    fn overlapping_writer_is_pushed_past_the_committed_version() {
+        // A and B both loaded V=1 and each inserted one row (proposed 2);
+        // A committed 2, so B must stamp 3, not 2.
+        assert_eq!(next_am_version(Some(2), 2), 3);
+    }
+
+    #[test]
+    fn a_writer_ahead_of_disk_keeps_its_own_count() {
+        // One writer, 10 rows from V=1: proposed 11 is already > disk+1.
+        assert_eq!(next_am_version(Some(1), 11), 11);
+    }
+
+    #[test]
+    fn no_meta_on_disk_uses_the_proposal() {
+        assert_eq!(next_am_version(None, 1), 1);
+    }
+
+    #[test]
+    fn never_wraps_at_u32_max() {
+        assert_eq!(next_am_version(Some(u32::MAX), 5), u32::MAX);
+    }
+}
+
 /// v1.29.1 corruption fix #2: the reconcile-on-flush write path used
 /// by the deferred-commit `aminsert` PreCommit callback
 /// (`xact::flush_to_relfile`). Takes the EXCLUSIVE relfile-rewrite
@@ -1221,7 +1269,7 @@ pub(crate) unsafe fn reconcile_and_write_flush(
     touched_ids: &[u64],
     am_version: u32,
     prepared: PreparedParts<'_>,
-) {
+) -> FlushOutcome {
     // Take the exclusive rewrite lock for the WHOLE reconcile (read
     // current disk state -> splice -> write). Same-xact re-entry
     // (write_full_inner takes it again) does not self-conflict. The
@@ -1230,6 +1278,16 @@ pub(crate) unsafe fn reconcile_and_write_flush(
     lock_relfile_write(rel);
 
     let disk_meta = read_meta(rel);
+    // v2.14.1: the version this flush stamps must be STRICTLY greater than
+    // what is on disk now. `am_version` is this writer's own
+    // `version_existing + rows`, computed from the meta it loaded at its first
+    // insert; a writer that committed in between has already stamped at least
+    // that, so two overlapping writers each inserting one row would both stamp
+    // V+1 and the second content change would leave the scan cache's
+    // `(relfilenode, am_version)` key unchanged -- a backend that cached the
+    // first commit keeps serving it. Read under the exclusive rewrite lock
+    // taken above, so no other writer can slip in between.
+    let am_version = next_am_version(disk_meta.as_ref().map(|m| m.am_version), am_version);
     // Phase Z1: remember whether this index was built IVF, BEFORE the
     // rewrite plans a fresh (necessarily flat) meta page. This append
     // cannot place the row in its cell without an O(n) reshuffle, so the
@@ -1282,6 +1340,18 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         _ => None,
     };
     let stride = (dim as usize) * (bit_width as usize) / 8;
+
+    // v2.14.1: carry the on-disk tombstone bitmap through this rewrite. An
+    // IVF (or 1-bit) index TOMBSTONES dead slots on VACUUM rather than
+    // removing them; `write_full_inner` plans a fresh meta with no
+    // tombstone chain, so before this fix every insert flush silently
+    // un-tombstoned every VACUUM delete and the dead rows came back in
+    // results. Read under the held rewrite lock, like the chains.
+    let disk_tombstones: Vec<u8> = match &disk_meta {
+        Some(m) if m.n_vectors > 0 => read_tombstones(rel, m),
+        _ => Vec::new(),
+    };
+    let disk_n: usize = disk_meta.as_ref().map_or(0, |m| m.n_vectors as usize);
 
     let (n_vectors, out_codes, out_scales, out_ids) = match disk_meta {
         Some(m) if m.n_vectors > 0 => {
@@ -1365,14 +1435,30 @@ pub(crate) unsafe fn reconcile_and_write_flush(
             (n, oc, os, oi)
         }
         _ => {
-            // No existing on-disk rows (fresh index) or no meta:
-            // nothing to reconcile against, write the snapshot as-is.
-            (
-                snap_ids.len() as u64,
-                snap_codes.to_vec(),
-                snap_scales.to_vec(),
-                snap_ids.to_vec(),
-            )
+            // No rows on disk. That is NOT "nothing to reconcile against":
+            // the disk may be empty because a VACUUM removed every row after
+            // this backend loaded its snapshot, and writing the snapshot
+            // as-is would resurrect all of them (v2.14.1; their heap tuples
+            // are dead and the TIDs may already be reused). Reconcile
+            // against an EMPTY image like any other flush, so only this
+            // transaction's own upserts land. A genuinely fresh index gives
+            // the same result: every row in its snapshot is a touched id.
+            // Keep the snapshot rows this transaction touched, in snapshot
+            // order: the same row set reconcile_flush_image would give, but
+            // order-preserving (a fresh index's bulk load stays byte-identical
+            // to 2.14.0) and with one set instead of two O(n) maps.
+            let touched: std::collections::HashSet<u64> = touched_ids.iter().copied().collect();
+            let mut oc = Vec::with_capacity(snap_codes.len());
+            let mut os = Vec::with_capacity(snap_scales.len());
+            let mut oi = Vec::with_capacity(snap_ids.len());
+            for (slot, id) in snap_ids.iter().enumerate() {
+                if touched.contains(id) {
+                    oc.extend_from_slice(&snap_codes[slot * stride..(slot + 1) * stride]);
+                    os.push(snap_scales[slot]);
+                    oi.push(*id);
+                }
+            }
+            (oi.len() as u64, oc, os, oi)
         }
     };
 
@@ -1412,7 +1498,25 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         degraded_lists
     };
 
-    write_full_inner(
+    // Existing slots keep their positions (UPDATEs in place, INSERTs
+    // append), so the disk bitmap stays valid for slots `[0, disk_n)`.
+    // Clear the bit of any slot this transaction re-upserted (that id is
+    // live again), and extend with live (0) bits for appended slots.
+    let tombstones: Vec<u8> = if disk_tombstones.iter().all(|&b| b == 0) {
+        Vec::new()
+    } else {
+        let mut t = disk_tombstones;
+        t.resize((n_vectors as usize).div_ceil(8), 0);
+        let touched: std::collections::HashSet<u64> = touched_ids.iter().copied().collect();
+        for (slot, id) in out_ids.iter().enumerate().take(disk_n) {
+            if touched.contains(id) {
+                t[slot / 8] &= !(1u8 << (slot % 8));
+            }
+        }
+        t
+    };
+
+    write_full_inner_with_tombstones(
         rel,
         bit_width,
         dim,
@@ -1424,10 +1528,43 @@ pub(crate) unsafe fn reconcile_and_write_flush(
         Some(prepared),
         ivf_carry,
         None,
+        (!tombstones.is_empty()).then_some(tombstones.as_slice()),
         degraded_lists,
     );
 
     unlock_relfile_write(rel);
+
+    // The committing backend keeps its in-memory snapshot cached after the
+    // flush. That copy is only current if the image just written IS the
+    // snapshot, i.e. no other writer or VACUUM changed the index since this
+    // backend loaded it. Compare the persisted ids + codes + scales with the
+    // snapshot rather than reasoning about versions: a reconcile that merged
+    // anyone else's change (or dropped a VACUUM'd row) differs here.
+    FlushOutcome {
+        stamped_version: am_version,
+        carries_tombstones: !tombstones.is_empty(),
+        snapshot_is_current: out_ids.as_slice() == snap_ids
+            && out_codes.as_slice() == snap_codes
+            && out_scales.len() == snap_scales.len()
+            && out_scales
+                .iter()
+                .zip(snap_scales)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+    }
+}
+
+/// Result of [`reconcile_and_write_flush`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlushOutcome {
+    /// The `am_version` written to the meta page.
+    pub stamped_version: u32,
+    /// Whether the committing backend's cached snapshot equals the image
+    /// written. When false the caller must not keep serving the snapshot.
+    pub snapshot_is_current: bool,
+    /// Whether the written image carries a VACUUM tombstone bitmap (IVF after
+    /// VACUUM). A cached `Mutable` copy cannot apply it, so even a current
+    /// snapshot must not be SCANNED; it may still seed the next insert.
+    pub carries_tombstones: bool,
 }
 
 /// IVF coarse-quantizer parts persisted in v4 (IVF-1). Written by
@@ -3247,14 +3384,16 @@ pub(crate) unsafe fn write_tombstones_and_meta(
     // Meta page LAST (atomic-complete signal). We KEEP every IVF
     // field intact (lists, coarse/cell chains) so the index stays
     // IVF; we only stamp the tombstone chain offsets + the bumped
-    // am_version. ivf_degraded stays false: a tombstoned IVF index is
-    // healthy, just carrying some dead space until the next REINDEX.
+    // am_version. Tombstoning never DEGRADES an index, but it must not
+    // HEAL one either: v2.14.1 found this hard-coded `false`, so the
+    // first VACUUM of an IVF index that had degraded to a flat scan wiped
+    // `ivf_degraded`, `turbovec.index_is_degraded()` reported it healthy,
+    // and the flat fallback stopped applying tombstones. Carry it.
     let new_meta = MetaPageData {
         am_version: new_am_version,
         tombstone_first,
         tombstone_count,
         tombstone_bytes,
-        ivf_degraded: false,
         ..*old
     };
     write_meta(rel, &new_meta);

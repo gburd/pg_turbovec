@@ -182,6 +182,11 @@ pub(crate) struct ScanOpaque {
     /// diverged from the cell directory) — all of which use the flat
     /// `arc.search` path unchanged.
     ivf: Option<IvfScanCtx>,
+    /// v2.14.1: VACUUM tombstone bitmap for a flat scan of an index that
+    /// carries one (an IVF index degraded to a flat scan). Read once when the
+    /// flat fallback is chosen and re-applied on every iterative refill. Empty
+    /// for plain flat indexes, which swap-remove and never tombstone.
+    flat_tombstones: Vec<u8>,
     /// Phase C operator-path allowlist: the parsed `turbovec.allowlist`
     /// id-set for this scan, or `None` when the GUC is empty/unset
     /// (the unfiltered hot path — zero added work). Parsed ONCE on
@@ -362,6 +367,7 @@ pub(crate) unsafe extern "C-unwind" fn ambeginscan(
             emitted: HashSet::new(),
             ivf: None,
             allow: None,
+            flat_tombstones: Vec::new(),
         },
     );
 
@@ -423,6 +429,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
         (*opaque).n_live = 0;
         (*opaque).emitted.clear();
         (*opaque).allow = None;
+        (*opaque).flat_tombstones = Vec::new();
         return;
     }
     let order = orderbys.add(0);
@@ -453,6 +460,7 @@ pub(crate) unsafe extern "C-unwind" fn amrescan(
     (*opaque).emitted.clear();
     (*opaque).ivf = None;
     (*opaque).allow = None;
+    (*opaque).flat_tombstones = Vec::new();
 }
 
 /// `amgettuple`: on first call run the search and cache results;
@@ -502,6 +510,18 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
             // signal is `turbovec.index_is_degraded(regclass)`.
             if m.is_degraded() {
                 warn_index_degraded((*scan).indexRelation, indexrelid);
+            }
+            // v2.14.1: an index that carries a VACUUM tombstone bitmap (an
+            // IVF index, possibly degraded to a flat scan) needs it on the flat
+            // fallback too. Read it here, under the same meta read, only when
+            // the meta says one exists; plain flat indexes never pay for it.
+            // Only a DEGRADED TurboQuant IVF index scans flat while carrying a
+            // bitmap: a healthy IVF index masks tombstones on its cell path,
+            // graph and 1-bit BQ apply their own, and plain flat indexes never
+            // tombstone. Keeping it this narrow leaves every other scan
+            // byte-for-byte as in 2.14.0.
+            if m.tombstone_bytes > 0 && m.is_degraded() && !m.is_bq() && !m.is_graph() {
+                (*opaque).flat_tombstones = relfile::read_tombstones((*scan).indexRelation, &m);
             }
             (m.bit_width, m.dim, m.n_vectors, m.am_version)
         };
@@ -779,7 +799,15 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
                 }
                 None => {
                     (*opaque).ivf = None;
-                    flat_search(&arc, &(*opaque).query, k, (*opaque).allow.as_ref())
+                    // v2.14.1: an IVF index degraded to a flat scan is still
+                    // tombstoned by VACUUM; mask its tombstones here too.
+                    flat_search_live(
+                        &arc,
+                        &(*opaque).query,
+                        k,
+                        (*opaque).allow.as_ref(),
+                        &(*opaque).flat_tombstones,
+                    )
                 }
             }
         };
@@ -1625,6 +1653,41 @@ fn tid_to_bigint(ctid: pg_sys::ItemPointerData) -> i64 {
 ///     the post-filtered top-`k` correct, the unfiltered search is
 ///     widened so the allowlisted neighbours that would survive aren't
 ///     starved by non-allowed ids ranking ahead of them.
+/// [`flat_search`] that also excludes VACUUM-tombstoned slots, for an index
+/// that carries a tombstone bitmap (an IVF index scanned flat). The bitmap is
+/// indexed by ON-DISK slot, so it is applied only as an in-kernel slot mask on
+/// a handle whose slot order IS the on-disk order (`ReadOnly`, `Bq`). The
+/// writer's own `Mutable` copy is not masked: `IdMapIndex::remove`
+/// swap-removes on an ON CONFLICT re-add, so its slots can diverge from disk
+/// and a slot-position filter could drop a live row. That copy is short-lived:
+/// `cache::clear_dirty` drops it at commit whenever the index carries
+/// tombstones, so other backends and this backend's later transactions always
+/// scan a freshly loaded `ReadOnly` copy. Within the writing transaction its
+/// tombstoned candidates are still rejected by the heap fetch unless their TID
+/// was reused (the pre-existing in-transaction gap, unchanged).
+fn flat_search_live(
+    arc: &cache::ScanHandle,
+    query: &[f32],
+    k: usize,
+    allow: Option<&HashSet<u64>>,
+    tombstones: &[u8],
+) -> (Vec<f32>, Vec<u64>) {
+    if tombstones.iter().all(|&b| b == 0) {
+        return flat_search(arc, query, k, allow);
+    }
+    let mask = match allow {
+        Some(set) => arc.allow_slot_mask(set),
+        None => arc.allow_all_slot_mask(),
+    };
+    if let Some(mut m) = mask {
+        apply_tombstones(&mut m, tombstones);
+        if let Some(res) = arc.search_masked(query, k, &m) {
+            return res;
+        }
+    }
+    flat_search(arc, query, k, allow)
+}
+
 fn flat_search(
     arc: &cache::ScanHandle,
     query: &[f32],
@@ -1805,7 +1868,13 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
             // returns Some; fall back to flat only if that ever
             // changes (e.g. handle swapped mid-scan).
             .unwrap_or_else(|| {
-                flat_search(&arc, &(*opaque).query, new_k, (*opaque).allow.as_ref())
+                flat_search_live(
+                    &arc,
+                    &(*opaque).query,
+                    new_k,
+                    (*opaque).allow.as_ref(),
+                    &(*opaque).flat_tombstones,
+                )
             });
         (*opaque).current_k = new_k;
         (*opaque).ivf = Some(ctx);
@@ -1827,7 +1896,13 @@ unsafe fn try_refill(scan: pg_sys::IndexScanDesc, opaque: *mut ScanOpaque) -> bo
     }
     let new_k = (old_k.saturating_mul(2)).min(k_ceiling).max(old_k + 1);
     let before = (*opaque).results.len();
-    let (scores, ids) = flat_search(&arc, &(*opaque).query, new_k, (*opaque).allow.as_ref());
+    let (scores, ids) = flat_search_live(
+        &arc,
+        &(*opaque).query,
+        new_k,
+        (*opaque).allow.as_ref(),
+        &(*opaque).flat_tombstones,
+    );
     (*opaque).current_k = new_k;
     populate_batch(opaque, &scores, &ids);
     if (*opaque).results.len() > before {

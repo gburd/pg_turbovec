@@ -142,7 +142,7 @@ unsafe fn flush_to_relfile(
     indexrelid: pg_sys::Oid,
     idx: &turbovec::IdMapIndex,
     state: &cache::PersistState,
-) {
+) -> Option<crate::index::relfile::FlushOutcome> {
     // RowExclusiveLock is sufficient — VACUUM holds
     // ShareUpdateExclusiveLock, REINDEX holds AccessExclusiveLock,
     // and our writer must NOT block readers.
@@ -152,7 +152,7 @@ unsafe fn flush_to_relfile(
         // (e.g. user did INSERT then DROP INDEX in the same tx).
         // Bail silently; the heap rows aren't indexed but that's
         // already the user's stated intent.
-        return;
+        return None;
     }
     // v1.29.1 corruption fix #2 (deferred-flush lost-update):
     // RECONCILE this transaction's upserts onto the CURRENT on-disk
@@ -180,7 +180,7 @@ unsafe fn flush_to_relfile(
         },
     );
     idx.prepare();
-    crate::index::relfile::reconcile_and_write_flush(
+    let outcome = crate::index::relfile::reconcile_and_write_flush(
         rel,
         state.bit_width as u8,
         state.dim as u32,
@@ -197,6 +197,7 @@ unsafe fn flush_to_relfile(
         },
     );
     pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);
+    Some(outcome)
 }
 
 /// Test-only handle to drive [`flush_to_relfile`] within a
@@ -216,8 +217,8 @@ pub(crate) unsafe fn flush_to_relfile_for_test(
     indexrelid: pg_sys::Oid,
     idx: &turbovec::IdMapIndex,
     state: &cache::PersistState,
-) {
-    flush_to_relfile(indexrelid, idx, state);
+) -> Option<crate::index::relfile::FlushOutcome> {
+    flush_to_relfile(indexrelid, idx, state)
 }
 
 thread_local! {
@@ -283,11 +284,9 @@ pub(crate) fn ensure_xact_callbacks_registered() {
             }
             for d in &dirty {
                 let guard = d.index.read();
-                unsafe {
-                    flush_to_relfile(d.key.rel_oid, &*guard, &d.persist);
-                }
+                let outcome = unsafe { flush_to_relfile(d.key.rel_oid, &*guard, &d.persist) };
                 drop(guard);
-                cache::clear_dirty(d.key);
+                cache::clear_dirty(d.key, outcome);
             }
             unsafe {
                 pg_sys::PopActiveSnapshot();

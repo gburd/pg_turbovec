@@ -1011,13 +1011,21 @@ mod tests {
                 .into_iter()
                 .find(|d| d.key == key)
                 .expect("dirty");
-            unsafe { crate::xact::flush_to_relfile_for_test(oid, &d.index.read(), &d.persist) };
-            cache::clear_dirty(key);
+            let outcome =
+                unsafe { crate::xact::flush_to_relfile_for_test(oid, &d.index.read(), &d.persist) };
+            cache::clear_dirty(key, outcome);
         };
         const A: u64 = 0x7100_0000_0001; // txn 1's row
         const B: u64 = 0x7100_0000_0002; // txn 2's row
         txn(A);
         assert!(disk_ids().contains(&A), "txn 1 must persist A");
+        // Nobody else wrote during txn 1, so its snapshot IS the disk image and
+        // the entry survives into txn 2 -- the reuse path this test exists for.
+        assert_eq!(
+            cache::am_touched_ids(oid),
+            Some(vec![]),
+            "txn 1's snapshot equals disk, so its entry must be kept (and emptied)"
+        );
         // Between the transactions VACUUM removes A on disk (A's heap row
         // died). Model it with the same primitives ambulkdelete uses:
         // swap the last slot into A's, shrink by one.
@@ -1065,6 +1073,13 @@ mod tests {
             "txn 2's flush resurrected id A, which txn 1 already persisted and VACUUM removed"
         );
         assert_eq!(crate::index::scan::first_duplicate_id(&ids), None);
+        // v2.14.1: txn 2's snapshot still held A (VACUUM removed it on disk
+        // only), so it differs from what was written and must be dropped.
+        assert_eq!(
+            cache::am_touched_ids(oid),
+            None,
+            "a snapshot that lags a concurrent VACUUM must not stay cached"
+        );
         cache::invalidate_all();
     }
 
@@ -1306,6 +1321,377 @@ mod tests {
             );
             Spi::run(&format!("DROP INDEX {name}")).unwrap();
         }
+    }
+
+    /// v2.14.1: two OVERLAPPING deferred-commit writers must leave a strictly
+    /// increasing on-disk `am_version`. The scan cache's freshness key is
+    /// `(relfilenode, am_version)`; before the fix each writer stamped its own
+    /// `version_existing + rows`, so two writers that both loaded version V and
+    /// each inserted one row both committed V+1. The second commit changed the
+    /// index content without changing the key, and a backend that cached
+    /// `(rfn, V+1)` between the two commits kept serving the stale index:
+    /// silently missing rows on a long-lived pooled reader
+    /// (reproduced with three real backends,
+    /// `benches/corruption-repro/am_version_collision.sh`).
+    ///
+    /// Drives the real flush path (`flush_to_relfile_for_test`): a plain
+    /// INSERT here never reaches PreCommit, so it would test nothing.
+    #[pg_test]
+    fn overlapping_flushes_never_reuse_an_am_version() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_amv (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_amv SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+             FROM generate_series(1, 16) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_amv_idx ON t_amv USING turbovec (emb vec_ip_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_amv_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        let on_disk_version = || unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let v = relfile::read_meta(rel).expect("meta").am_version;
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            v
+        };
+
+        // What `aminsert` builds at a writer's FIRST insert: the on-disk index
+        // plus a PersistState whose version is `version_existing`, bumped once
+        // per row. Both writers call this BEFORE either flushes, so both load
+        // the same base version -- the overlap.
+        let load_writer = |new_id: u64| unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(rel, &meta);
+            let dim = meta.dim as usize;
+            let mut idx = IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                tqplus_shift,
+                tqplus_scale,
+            )
+            .expect("from_id_map_parts");
+            let mut state = PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let v: Vec<f32> = (0..dim).map(|j| (new_id as f32) + j as f32).collect();
+            idx.add_with_ids(&v, &[new_id]).expect("add");
+            state.live_ids.push(new_id);
+            state.touched_ids.push(new_id);
+            state.n_vectors += 1;
+            state.version += 1;
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state)
+        };
+
+        let base = on_disk_version();
+        let (idx_a, state_a) = load_writer(1001);
+        let (idx_b, state_b) = load_writer(1002);
+        assert_eq!(
+            state_a.version, state_b.version,
+            "precondition: both overlapping writers computed the same version"
+        );
+
+        unsafe { crate::xact::flush_to_relfile_for_test(indexrelid, &idx_a, &state_a) };
+        let after_a = on_disk_version();
+        unsafe { crate::xact::flush_to_relfile_for_test(indexrelid, &idx_b, &state_b) };
+        let after_b = on_disk_version();
+
+        assert!(
+            after_a > base,
+            "writer A's flush must advance am_version ({base} -> {after_a})"
+        );
+        assert!(
+            after_b > after_a,
+            "writer B's flush changed the index content, so it MUST advance \
+             am_version past A's ({after_a} -> {after_b}); an equal version lets a \
+             backend that cached A's state keep serving it, silently missing B's row"
+        );
+        // And B's row really is on disk (the reconcile merged it).
+        let ids = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            ids
+        };
+        assert!(
+            ids.contains(&1001) && ids.contains(&1002),
+            "both rows reconciled onto disk"
+        );
+    }
+
+    /// v2.14.1 review blocker: after its flush, the COMMITTING backend's own
+    /// cache entry still holds that backend's in-memory snapshot, not the
+    /// reconciled image that went to disk. `clear_dirty` used to relabel it
+    /// with the writer's proposed version, so when another writer had
+    /// committed in between, the writer's own next scan served its snapshot
+    /// (missing the other writer's rows) under a label equal to the disk
+    /// version: invisible to the freshness check. W loads V, inserts 2 rows
+    /// (proposes V+2); X inserts 1 row and commits V+1; W stamps V+2 == its
+    /// proposal, and its entry lacks X's row. After the flush the entry must
+    /// not be served as current.
+    #[pg_test]
+    fn committing_backend_does_not_serve_its_stale_snapshot() {
+        use crate::cache::{self, CacheKey, PersistState};
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_own (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_own SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+             FROM generate_series(1, 16) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_own_idx ON t_own USING turbovec (emb vec_ip_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 't_own_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+        cache::invalidate_all();
+
+        // Load the on-disk index the way aminsert's first insert does.
+        let load = || unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (sh, sc) = relfile::read_tqplus(rel, &meta);
+            let idx = IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                meta.dim as usize,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                sh,
+                sc,
+            )
+            .expect("from_id_map_parts");
+            let state = PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: meta.dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let relfile_node = cache::relfilenode_from_relation(rel);
+            let key = CacheKey {
+                rel_oid: oid,
+                attnum: 0,
+                bit_width: meta.bit_width,
+                dim: meta.dim,
+            };
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (key, relfile_node, idx, state)
+        };
+        let vec_for = |id: u64, dim: usize| -> Vec<f32> {
+            (0..dim).map(|j| (id as f32) + j as f32).collect()
+        };
+        let disk = || unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (m.am_version, ids)
+        };
+
+        // W: loads V, installs its entry, inserts 2 rows (proposes V+2), stays open.
+        let (key, rfn, w_idx, w_state) = load();
+        let dim = w_state.dim as usize;
+        let base_version = w_state.version as i64;
+        let w_arc = cache::am_install(key, w_idx, 1 << 20, rfn, base_version, w_state);
+        assert!(
+            cache::scan_lookup(key, rfn, base_version).is_some(),
+            "control: the installed entry must be found under its own key"
+        );
+        for id in [2001u64, 2002] {
+            w_arc
+                .write()
+                .add_with_ids(&vec_for(id, dim), &[id])
+                .expect("add");
+            assert!(cache::am_mark_dirty(key, |p| {
+                p.touched_ids.push(id);
+                p.live_ids.push(id);
+                p.n_vectors += 1;
+                p.version += 1;
+            }));
+        }
+
+        // X: another backend's transaction, 1 row, commits first (V+1).
+        let (_, _, mut x_idx, mut x_state) = load();
+        x_idx
+            .add_with_ids(&vec_for(3001, dim), &[3001])
+            .expect("add");
+        x_state.live_ids.push(3001);
+        x_state.touched_ids.push(3001);
+        x_state.n_vectors += 1;
+        x_state.version += 1;
+        unsafe { crate::xact::flush_to_relfile_for_test(oid, &x_idx, &x_state) };
+
+        // W commits, exactly as xact.rs's PreCommit does: flush, then clear_dirty.
+        let d = cache::drain_dirty()
+            .into_iter()
+            .find(|d| d.key == key)
+            .expect("dirty W");
+        let outcome =
+            unsafe { crate::xact::flush_to_relfile_for_test(oid, &d.index.read(), &d.persist) };
+        cache::clear_dirty(key, outcome);
+
+        let (v_disk, ids_disk) = disk();
+        assert!(
+            ids_disk.contains(&2001) && ids_disk.contains(&2002) && ids_disk.contains(&3001),
+            "precondition: the reconcile merged all three rows onto disk"
+        );
+
+        // W's snapshot holds 16 + 2 = 18 rows; the merged image on disk holds 19.
+        // The fix drops W's entry (its snapshot lacks X's row). Pre-fix it was
+        // kept and labelled with W's own count, which equals the disk version.
+        assert!(
+            cache::am_touched_ids(oid).is_none(),
+            "W's stale snapshot must be dropped after a flush that merged X's row"
+        );
+        if let Some(h) = cache::scan_lookup(key, rfn, v_disk as i64) {
+            assert_eq!(
+                h.len(),
+                ids_disk.len(),
+                "the committing backend served its own pre-merge snapshot ({} rows) \
+                 under the current version {v_disk}; disk holds {} rows incl. X's row 3001",
+                h.len(),
+                ids_disk.len()
+            );
+        }
+        // Search what this backend would serve next: either nothing cached (the
+        // fix) or an index that contains X's row. The ids here are synthetic
+        // (not heap TIDs), so this goes through the handle's own search rather
+        // than SQL ORDER BY, which would filter them out at the heap fetch.
+        if let Some(h) = cache::scan_lookup(key, rfn, v_disk as i64) {
+            let q: Vec<f32> = vec_for(3001, dim);
+            let (_, ids) = h.search(&q, ids_disk.len());
+            assert!(
+                ids.contains(&3001),
+                "the served index cannot find X's row 3001: {ids:?}"
+            );
+        }
+        cache::invalidate_all();
+    }
+
+    /// v2.14.1 review finding: when the on-disk index has NO rows, the flush
+    /// used to write the committing backend's whole snapshot "as-is" instead of
+    /// reconciling. If a VACUUM emptied the index after this backend loaded it,
+    /// that resurrected every id VACUUM removed (rows whose heap tuples are
+    /// dead, so their TIDs may since have been reused). The empty-disk case must
+    /// reconcile against an empty image: only this transaction's own upserts
+    /// land.
+    #[pg_test]
+    fn flush_onto_vacuum_emptied_index_does_not_resurrect_rows() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+
+        Spi::run("CREATE TABLE t_empt (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_empt SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+             FROM generate_series(1, 8) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_empt_idx ON t_empt USING turbovec (emb vec_ip_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 't_empt_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // The writer loads the 8-row index and upserts one new row (id 1001).
+        let (w_idx, w_state) = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (sh, sc) = relfile::read_tqplus(rel, &meta);
+            let dim = meta.dim as usize;
+            let mut idx = IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                sh,
+                sc,
+            )
+            .expect("from_id_map_parts");
+            let mut state = PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let v: Vec<f32> = (0..dim).map(|j| 1001.0 + j as f32).collect();
+            idx.add_with_ids(&v, &[1001]).expect("add");
+            state.live_ids.push(1001);
+            state.touched_ids.push(1001);
+            state.n_vectors += 1;
+            state.version += 1;
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (idx, state)
+        };
+
+        // Meanwhile VACUUM removes all 8 rows: model it the way a flat
+        // VACUUM shrinks the relfile (meta-only shrink to 0 under the lock).
+        unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::RowExclusiveLock as i32);
+            relfile::lock_relfile_write(rel);
+            let m = relfile::read_meta(rel).expect("meta");
+            relfile::write_meta_shrink_in_place(rel, &m, 0, m.am_version + 1);
+            relfile::unlock_relfile_write(rel);
+            pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);
+        }
+
+        unsafe { crate::xact::flush_to_relfile_for_test(oid, &w_idx, &w_state) };
+
+        let ids = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            ids
+        };
+        assert_eq!(
+            ids,
+            vec![1001],
+            "flushing onto a VACUUM-emptied index must land only this transaction's \
+             upsert; resurrected ids: {:?}",
+            ids.iter().filter(|&&i| i != 1001).collect::<Vec<_>>()
+        );
     }
 
     /// v1.29.4 regression: VACUUM-INDEPENDENT torn-write on interrupt.
@@ -9078,7 +9464,7 @@ mod tests {
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
-            "2.12.0", "2.12.1", "2.13.0", "2.14.0",
+            "2.12.0", "2.12.1", "2.13.0", "2.14.0", "2.14.1",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -11748,6 +12134,302 @@ mod tests {
             assert!(meta.has_ivf(), "tombstoned index stays IVF");
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
         }
+    }
+
+    /// v2.14.1 review finding 8 (suspected): the deferred flush rewrites the
+    /// whole relfile through `write_full_inner`, which passes NO tombstones.
+    /// On an IVF index VACUUM tombstones dead slots instead of removing them,
+    /// so a later INSERT's flush that dropped the bitmap would bring every
+    /// tombstoned (deleted + vacuumed) row back into results.
+    #[pg_test]
+    fn ivf_insert_flush_keeps_vacuum_tombstones() {
+        use crate::cache::PersistState;
+        use crate::index::relfile;
+        use std::collections::HashSet;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+        ivf2_make_corpus("ivf_tflush", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run("SET turbovec.probes = 16").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_tflush_idx ON ivf_tflush \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        let query = "(SELECT emb FROM ivf_tflush WHERE id = 1500)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("SELECT id FROM ivf_tflush ORDER BY emb <=> {query} LIMIT 10"),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_tflush_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // Tombstone row 1500 (heap row stays, exactly like the E-2 test).
+        let dead_set: HashSet<u64> = Spi::connect(|client| {
+            client
+                .select("SELECT ctid FROM ivf_tflush WHERE id = 1500", None, &[])
+                .unwrap()
+                .map(|row| {
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
+                    pgrx::itemptr::item_pointer_to_u64(tid)
+                })
+                .collect()
+        });
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+        assert!(
+            !pull().contains(&1500),
+            "precondition: the tombstone hides row 1500"
+        );
+
+        // A later INSERT's deferred flush, through the real flush path AND the
+        // real cache lifecycle: this backend installs its writer entry, flushes,
+        // and clear_dirty decides whether it may keep serving that entry.
+        crate::cache::invalidate_all();
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (sh, sc) = relfile::read_tqplus(rel, &meta);
+            let dim = meta.dim as usize;
+            let mut idx = IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                sh,
+                sc,
+            )
+            .expect("from_id_map_parts");
+            let mut state = PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let new_id: u64 = 0x7300_0000_0001;
+            let v: Vec<f32> = (0..dim).map(|j| ((j as f32) * 0.37).sin()).collect();
+            idx.add_with_ids(&v, &[new_id]).expect("add");
+            state.live_ids.push(new_id);
+            state.touched_ids.push(new_id);
+            state.n_vectors += 1;
+            state.version += 1;
+            let rfn = crate::cache::relfilenode_from_relation(rel);
+            let key = crate::cache::CacheKey {
+                rel_oid: indexrelid,
+                attnum: 0,
+                bit_width: meta.bit_width,
+                dim: meta.dim,
+            };
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            let base = state.version as i64 - 1;
+            crate::cache::am_install(key, idx, 1 << 20, rfn, base, state);
+            assert!(crate::cache::am_mark_dirty(key, |_| {}));
+            let d = crate::cache::drain_dirty()
+                .into_iter()
+                .find(|d| d.key == key)
+                .expect("dirty writer entry");
+            let outcome =
+                crate::xact::flush_to_relfile_for_test(indexrelid, &d.index.read(), &d.persist);
+            crate::cache::clear_dirty(key, outcome);
+            // The writer's Mutable copy holds every slot incl. the tombstoned
+            // one and cannot apply the on-disk bitmap, so after the commit of an
+            // index that carries tombstones no SCAN may be served from it.
+            let v_disk = {
+                let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+                let m = relfile::read_meta(rel).expect("meta");
+                pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+                m.am_version as i64
+            };
+            assert!(
+                crate::cache::am_touched_ids(indexrelid).is_some(),
+                "precondition: an uncontended flush keeps the writer copy (for the next insert)"
+            );
+            assert!(
+                !matches!(
+                    crate::cache::scan_lookup(key, rfn, v_disk),
+                    Some(crate::cache::ScanHandle::Mutable(_))
+                ),
+                "a scan was served the writer's tombstone-blind Mutable copy after commit"
+            );
+        }
+
+        // This backend's very next scan, with NO invalidate_all: it must not
+        // see the tombstoned row through a cached writer entry.
+        let own = pull();
+        assert!(
+            !own.contains(&1500),
+            "the committing backend's cached entry served tombstoned row 1500: {own:?}"
+        );
+        // And a fresh load from disk must not see it either.
+        crate::cache::invalidate_all();
+        let post = pull();
+        assert!(
+            !post.contains(&1500),
+            "a later insert's flush resurrected tombstoned row 1500: {post:?}"
+        );
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let tomb = relfile::read_tombstones(rel, &meta);
+            let set_bits: u32 = tomb.iter().map(|b| b.count_ones()).sum();
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            assert!(set_bits >= 1, "the tombstone bitmap must survive the flush");
+        }
+    }
+
+    /// v2.14.1 review round 3, finding 5: an IVF index that DEGRADES to a flat
+    /// scan (an insert flush past `ivf_max_delta_pct` drops the cell layout but
+    /// keeps `lists`) is still tombstoned by VACUUM. Its flat fallback must
+    /// apply the bitmap, or every VACUUMed row is a candidate again for every
+    /// backend.
+    #[pg_test]
+    fn degraded_ivf_flat_fallback_masks_tombstones() {
+        use crate::index::relfile;
+        use std::collections::HashSet;
+        use_turbovec();
+        ivf2_make_corpus("ivf_dgt", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_dgt_idx ON ivf_dgt \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+        let query = "(SELECT emb FROM ivf_dgt WHERE id = 1500)";
+        let pull = || -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("SELECT id FROM ivf_dgt ORDER BY emb <=> {query} LIMIT 10"),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 'ivf_dgt_idx'::regclass::oid")
+            .unwrap()
+            .expect("index oid");
+
+        // 1. Degrade the index: one insert flush with the delta bound at 0.
+        Spi::run("SET turbovec.ivf_max_delta_pct = 0").unwrap();
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let meta = relfile::read_meta(rel).expect("meta");
+            let (codes, scales, ids) = relfile::read_full(rel, &meta);
+            let (sh, sc) = relfile::read_tqplus(rel, &meta);
+            let dim = meta.dim as usize;
+            let mut idx = turbovec::IdMapIndex::from_id_map_parts(
+                meta.bit_width as usize,
+                dim,
+                meta.n_vectors as usize,
+                codes,
+                scales,
+                ids,
+                sh,
+                sc,
+            )
+            .expect("from_id_map_parts");
+            let mut state = crate::cache::PersistState {
+                bit_width: meta.bit_width as i32,
+                dim: dim as i32,
+                n_vectors: meta.n_vectors as i64,
+                version: meta.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let new_id: u64 = 0x7400_0000_0001;
+            let v: Vec<f32> = (0..dim).map(|j| ((j as f32) * 0.41).cos()).collect();
+            idx.add_with_ids(&v, &[new_id]).expect("add");
+            state.live_ids.push(new_id);
+            state.touched_ids.push(new_id);
+            state.n_vectors += 1;
+            state.version += 1;
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            crate::xact::flush_to_relfile_for_test(indexrelid, &idx, &state);
+        }
+        Spi::run("RESET turbovec.ivf_max_delta_pct").unwrap();
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            assert!(
+                m.is_degraded(),
+                "precondition: the insert flush degraded the IVF index"
+            );
+            assert!(
+                m.has_ivf(),
+                "precondition: lists kept, so VACUUM still tombstones"
+            );
+        }
+        crate::cache::invalidate_all();
+        assert!(
+            pull().contains(&1500),
+            "precondition: row 1500 is its own nearest neighbour"
+        );
+
+        // 2. VACUUM tombstones row 1500 (heap row stays).
+        let dead_set: HashSet<u64> = Spi::connect(|client| {
+            client
+                .select("SELECT ctid FROM ivf_dgt WHERE id = 1500", None, &[])
+                .unwrap()
+                .map(|row| {
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
+                    pgrx::itemptr::item_pointer_to_u64(tid)
+                })
+                .collect()
+        });
+        unsafe extern "C-unwind" fn dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(dead_cb));
+        crate::cache::invalidate_all();
+        unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            assert!(
+                m.is_degraded(),
+                "VACUUM must not clear ivf_degraded: index_is_degraded() would then hide it"
+            );
+        }
+
+        // 3. The degraded flat fallback must not return the tombstoned row.
+        let post = pull();
+        assert_eq!(post.len(), 10, "still a full top-10: {post:?}");
+        assert!(
+            !post.contains(&1500),
+            "the degraded IVF flat fallback returned tombstoned row 1500: {post:?}"
+        );
     }
 
     /// Phase E-2a: when an IVF index DOES degrade to flat (the

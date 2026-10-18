@@ -1,0 +1,22 @@
+-- pg_turbovec v2.14.1
+--
+-- PATCH: fixes stale ANN results on long-lived connections under concurrent
+-- writes. Two overlapping transactions that each inserted into the same
+-- index could commit the same am_version, so a backend that cached the index
+-- between the two commits kept serving it and silently missed the second
+-- transaction's rows until a later write. A VACUUM that removed rows while a
+-- writer was open could collide the same way. A deferred-commit flush now
+-- stamps max(on-disk am_version + 1, its own count), under the exclusive
+-- rewrite lock it already holds, so every committed rewrite gets a strictly
+-- larger version. Present since v1.29.2.
+--
+-- Also fixed: the committing backend kept its own pre-merge copy labelled as
+-- current; every insert flush dropped an IVF index's tombstone list, making
+-- VACUUMed rows live entries again (since v1.11.0); a flush onto a
+-- VACUUM-emptied index rewrote every deleted row (since v1.29.2).
+--
+-- No SQL-surface change, no GUC change, no wire-format change
+-- (MetaPageData::version stays 8), scoring bit-identical. REINDEX once: IVF
+-- indexes (lists > 0) that took inserts after a VACUUM, and any index VACUUM
+-- fully emptied while a writer was open. `ALTER EXTENSION pg_turbovec UPDATE TO
+-- '2.14.1'` is sufficient; reconnecting clears any stale cached copy at once.

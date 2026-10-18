@@ -1472,6 +1472,21 @@ impl ScanHandle {
             ScanHandle::Mutable(_) | ScanHandle::Ooc(_) | ScanHandle::Graph(_) => None,
         }
     }
+
+    /// An all-live slot mask (every slot `true`) for a `ReadOnly` handle, whose
+    /// slot order is the on-disk order a tombstone bitmap is indexed by; `None`
+    /// for every other arm.
+    pub(crate) fn allow_all_slot_mask(&self) -> Option<Vec<bool>> {
+        match self {
+            ScanHandle::ReadOnly(_) => Some(vec![true; self.len()]),
+            // Bq applies its own tombstones; Mutable/Ooc/Graph slot order is not
+            // the on-disk order the bitmap is indexed by.
+            ScanHandle::Bq(_)
+            | ScanHandle::Mutable(_)
+            | ScanHandle::Ooc(_)
+            | ScanHandle::Graph(_) => None,
+        }
+    }
 }
 
 /// Composite cache key. `attnum = 0` is reserved for the index AM
@@ -1761,7 +1776,10 @@ pub fn am_find_dirty_by_rel(
 ) -> Option<(CacheKey, Arc<RwLock<IdMapIndex>>, PersistState)> {
     let g = CACHE.lock();
     for (k, e) in g.iter() {
-        if k.rel_oid == rel_oid && k.attnum == 0 {
+        // Only an un-flushed (dirty) entry is "this transaction's own view";
+        // a clean entry from an earlier commit may predate a VACUUM that
+        // emptied the index, and serving it would return dead rows.
+        if k.rel_oid == rel_oid && k.attnum == 0 && e.dirty {
             if let (Stored::Mutable(a), Some(p)) = (&e.index, e.persist.as_ref()) {
                 return Some((*k, a.clone(), p.clone()));
             }
@@ -2025,13 +2043,43 @@ pub fn drain_dirty() -> Vec<DirtyEntry> {
 /// -- so only a byte-level comparison against a fresh build sees it.
 /// Present since v1.29.1 (which introduced `touched_ids`). Repro:
 /// `flush_does_not_resplice_previous_txn_ids`.
-pub fn clear_dirty(key: CacheKey) {
+///
+/// v2.14.1: `outcome` is what the flush actually wrote. The entry's index is
+/// this backend's in-memory snapshot; it equals the on-disk image only when
+/// nobody else changed the index since this backend loaded it. If another
+/// writer or a VACUUM did, the reconcile merged their changes on disk but the
+/// snapshot lacks them, so the entry is DROPPED (the next scan or insert in
+/// this backend reloads from disk). Otherwise it is kept and labelled with the
+/// version actually stamped, which `next_am_version` may have pushed past this
+/// backend's own count. Before this, the entry was always kept and labelled
+/// with the backend's own count: when another writer had committed in
+/// between, that label could equal the disk version, so this backend's next
+/// scan served its pre-merge snapshot as current and silently missed the
+/// other writer's rows. `None` (index dropped mid-transaction) also drops it.
+pub fn clear_dirty(key: CacheKey, outcome: Option<crate::index::relfile::FlushOutcome>) {
     let mut g = CACHE.lock();
-    if let Some(entry) = g.get_mut(&key) {
-        entry.dirty = false;
-        if let Some(p) = entry.persist.as_mut() {
-            entry.n_rows = p.version as i64;
-            p.touched_ids.clear();
+    match outcome {
+        Some(o) if o.snapshot_is_current => {
+            if let Some(entry) = g.get_mut(&key) {
+                entry.dirty = false;
+                // An index carrying tombstones keeps the copy for the NEXT
+                // INSERT (`am_lookup_for_mutation` ignores this slot) but makes
+                // every SCAN miss it (no meta carries version -1), so scans load
+                // a ReadOnly copy that applies the bitmap. Reloading on every
+                // commit instead cost 28% IVF insert throughput (2.14.1 qualification).
+                entry.n_rows = if o.carries_tombstones {
+                    -1
+                } else {
+                    o.stamped_version as i64
+                };
+                if let Some(p) = entry.persist.as_mut() {
+                    p.version = o.stamped_version as i32;
+                    p.touched_ids.clear();
+                }
+            }
+        }
+        _ => {
+            g.remove(&key);
         }
     }
 }

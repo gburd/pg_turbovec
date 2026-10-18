@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.14.0 -> 2.14.1
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.14.1';`.
+--
+-- No new or changed SQL objects: this release fixes the deferred-commit flush
+-- so overlapping writers can no longer commit the same am_version (stale ANN
+-- results on long-lived connections). No wire-format change (stays v8), no
+-- REINDEX. Intentionally empty apart from this comment.

@@ -4,6 +4,121 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.14.1] — RELEASE_DATE
+
+PATCH: **fixes five bugs that, under writes and VACUUM, served stale results or
+brought deleted rows back.** The
+oldest dates from v1.11.0. No wire-format change (`MetaPageData::version` stays
+**8**), scoring bit-identical, no SQL or GUC change. **Most indexes need no
+REINDEX; see Migration for the two cases that do.**
+
+### Fixed
+
+- **A backend could keep serving a stale cached index after concurrent
+  commits** (since v1.29.2). The per-backend scan cache is keyed on
+  `(relfilenode, am_version)`. A deferred-commit writer computed its version as
+  `version_existing + rows` from the meta it loaded at its first insert, and
+  the flush stamped that unchanged. Two overlapping transactions that each
+  inserted one row therefore both committed `V+1`: the second commit changed
+  the index without changing the key. A backend that cached the index between
+  the two commits kept serving it, and its `ORDER BY` results silently omitted
+  the second transaction's rows until some later write bumped the version. A
+  `VACUUM` that removed rows while a writer was open collided the same way. The
+  flush now stamps `max(on-disk am_version + 1, its own count)` under the
+  exclusive rewrite lock it already holds, so every committed rewrite gets a
+  strictly larger version. Only cached copies were affected; the on-disk index
+  was correct.
+- **The committing backend could serve its own stale copy.** After its flush,
+  a writer kept its in-memory snapshot cached and labelled it with its own
+  count. If another writer had committed in between (say this one inserted 2
+  rows and the other 1), that label equalled the disk version, so the writer's
+  own next scan served a copy missing the other writer's rows. The flush now
+  reports what it wrote, and the writer keeps its cached copy only when that
+  copy equals the written image; otherwise it is dropped and the next scan
+  reloads from disk. On an index that carries tombstones the copy is kept only
+  to seed the next insert: a cached writer copy cannot apply the on-disk
+  tombstone list, so scans load a fresh copy that does. Only cached copies were
+  affected.
+- **An insert after VACUUM brought tombstoned rows back on IVF indexes**
+  (since v1.11.0). VACUUM marks dead rows in an IVF index (`WITH (lists = N)`)
+  as tombstoned instead of removing them. Every deferred-commit flush rewrote
+  the index without its tombstone list, so the first `INSERT` committed after
+  a VACUUM made every row that VACUUM had removed a live entry again, on disk.
+  (Before v2.10.0 that same flush also dropped the IVF layout, turning those
+  entries into permanent flat ones.) Usually the effect is wasted candidate
+  slots and lower recall, because the dead row's heap tuple is gone and the
+  heap fetch rejects it, or because a new row at the reused heap slot rewrote
+  the entry. But on a **partial index**, or when the new row at a reused heap
+  slot has a **NULL vector** (and so gets no entry of its own), a row that does
+  not belong in the result could be returned (the old row's quantized code
+  made it a candidate; it was then ranked by its exact distance). The flush now carries the tombstone list forward, clearing
+  it only for rows it re-inserts.
+- **A flush onto an index that VACUUM had emptied rewrote every deleted row**
+  (since v1.29.2). When the index on disk had no rows left, the flush wrote the
+  committing backend's whole snapshot back instead of only its own changes,
+  restoring on disk every row a concurrent VACUUM had just removed. This
+  affected flat and IVF indexes alike, but only when VACUUM emptied the entire
+  index while a writer was open. It now writes only the transaction's own
+  changes (and stays byte-identical to 2.14.0 for a genuinely new index). A
+  related fallback that served a backend's committed copy when the index looked
+  empty now applies only to a transaction's own un-flushed changes.
+- **A degraded IVF index ignored its tombstones** (since v2.8.4; 2/3/4-bit
+  only, 1-bit applies its own). Once an IVF index degrades to a flat scan (inserts past `turbovec.ivf_max_delta_pct`;
+  `turbovec.index_is_degraded()` reports it), VACUUM still tombstones its dead
+  rows, but the flat scan did not apply the tombstone list, so every row VACUUM
+  had removed was a candidate again, with the same consequences as the item
+  above. Worse, VACUUM cleared the index's degraded flag when it tombstoned
+  rows (since v1.11.0), so `turbovec.index_is_degraded()` reported a degraded
+  IVF index as healthy after its first VACUUM. VACUUM now keeps the flag, and
+  the flat fallback, including its iterative refills, masks tombstoned rows.
+  Regression test `degraded_ivf_flat_fallback_masks_tombstones`.
+
+### Verification
+
+Each fix has a pg_test that fails with only that fix disabled and passes with
+it: `overlapping_flushes_never_reuse_an_am_version`,
+`committing_backend_does_not_serve_its_stale_snapshot`,
+`ivf_insert_flush_keeps_vacuum_tombstones` (tombstone carry, and the
+committing backend's copy being dropped),
+`flush_onto_vacuum_emptied_index_does_not_resurrect_rows`, and
+`degraded_ivf_flat_fallback_masks_tombstones`, plus 4 unit tests for the
+version rule. Three-backend repros
+`benches/corruption-repro/am_version_collision.sh` and
+`am_version_collision_vacuum.sh`: 3/3 reproduced on 2.14.0, 0/3 on 2.14.1, on
+x86 and Graviton4. Sustained-load soak `benches/corruption-repro/am_version_soak.sh`
+(overlapping writer bursts with quiet gaps, a VACUUM loop, persistent readers
+that check every answer, and a final check that the index's live entries equal
+the table's live rows after `VACUUM (INDEX_CLEANUP ON)`), flat and IVF
+(`LISTS=16`): SOAK_PLACEHOLDER
+
+After the soak, an index can legitimately hold a few more entries than live
+rows: on PostgreSQL 14 and later, VACUUM skips index cleanup when only a few
+pages carry dead items (the `INDEX_CLEANUP AUTO` bypass), so those entries
+wait for a later VACUUM. They are never returned, and
+`VACUUM (INDEX_CLEANUP ON)` removes them.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.14.1';`, then recycle long-lived
+backends (reconnect, or restart the pooler's server connections): a backend
+keeps running the old shared library until it exits, so an already-connected
+pooled backend is still on 2.14.0 until it is recycled. Recycling also clears
+any stale cached copy at once.
+
+`REINDEX` only these indexes, once:
+- an **IVF index** (`WITH (lists = N)`) that took inserts after a VACUUM on an
+  earlier version (bug 3 left tombstoned rows live on disk);
+- **any index** where VACUUM emptied every row while a writer transaction was
+  open (bug 4; rare).
+
+To check an index instead of reindexing blindly, on a quiet table: run
+`VACUUM (INDEX_CLEANUP ON) <table>`, then compare
+`SELECT round(n_vectors * (1 - tombstone_density)) FROM turbovec.turbovec_check('<index>'::regclass)`
+with the number of rows the index covers:
+`SELECT count(*) FROM <table> WHERE <vector column> IS NOT NULL [AND <partial-index predicate>]`.
+More index entries than covered rows means `REINDEX`. Include the predicate for
+a partial index: those are where a wrong row could be returned.
+
 ## [2.14.0] — 2026-10-16
 
 MINOR: two scale-roadmap wins (`docs/SCALE_PLAN.md`). **(S1) one core per

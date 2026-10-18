@@ -4,7 +4,7 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.14.1] — RELEASE_DATE
+## [2.14.1] — 2026-10-17
 
 PATCH: **fixes five bugs that, under writes and VACUUM, served stale results or
 brought deleted rows back.** The
@@ -89,7 +89,22 @@ x86 and Graviton4. Sustained-load soak `benches/corruption-repro/am_version_soak
 (overlapping writer bursts with quiet gaps, a VACUUM loop, persistent readers
 that check every answer, and a final check that the index's live entries equal
 the table's live rows after `VACUUM (INDEX_CLEANUP ON)`), flat and IVF
-(`LISTS=16`): SOAK_PLACEHOLDER
+(`LISTS=16`): 30-minute runs on x86 (c7i, AVX-512 VBMI/VNNI) and Graviton4
+(c8g), 6 writers + a VACUUM loop + 6 persistent readers, ~0.5-0.7M reads each,
+**0 stale reads, 0 corruption, index live-entry count == live heap count after
+`VACUUM (INDEX_CLEANUP ON)`**. The IVF soak with only the tombstone carry
+disabled FAILS the live-vs-heap check (resurrected entries), confirming the
+oracle. Full pg16 suite 488/0/9 and PG19rc1 488/0/9; every fix fails-before /
+passes-after on both arches.
+
+**Throughput note.** On an IVF index that has been VACUUMed, a writer's cached
+index is dropped at commit whenever its flush merged another transaction's
+rows, so the next insert reloads it. Measured cost at 6 concurrent writers,
+5 rows/transaction, after a 1% VACUUM: IVF insert throughput ~27% lower than
+2.14.0 (Graviton4 42 -> 30 tps, x86 22 -> 16 tps). This is the price of not
+serving a tombstone-blind cached copy; flat indexes, read throughput, and
+uncontended inserts are unaffected. Set a larger batch size per transaction to
+amortise the reload.
 
 After the soak, an index can legitimately hold a few more entries than live
 rows: on PostgreSQL 14 and later, VACUUM skips index cleanup when only a few

@@ -1,0 +1,24 @@
+-- pg_turbovec v2.15.0
+--
+-- MINOR: fixes four open GitHub issues, all additive. No SQL-surface change,
+-- no GUC change, no wire-format change (MetaPageData::version stays 8),
+-- scoring bit-identical. No REINDEX required.
+--
+--   #1  An IVF index built on an empty table (or reloaded after TRUNCATE) is
+--       now reported as degraded: the empty build stamps `ivf_degraded` and
+--       preserves the requested `lists`, so `turbovec.index_is_degraded()`
+--       returns true, `turbovec.index_degradation()` reports lists (not 0),
+--       and the scan-time WARNING fires. Also fixes a latent crash
+--       ("rotation dim must be a positive multiple of 8") on scanning an
+--       empty-then-loaded IVF index whose column dim was never pinned.
+--   #2  A query vector that arrives as an on-disk TOAST pointer is now
+--       detoasted once per scan rather than re-fetched per candidate row
+--       (same decoded bytes, results bit-identical).
+--   #8  The IVF block-Hadamard rotation matrix (a pure function of dim) is
+--       memoized per backend instead of rebuilt per query (bit-identical).
+--
+-- The empty-IVF reporting fix changes only two scalar fields written at build
+-- time; both binaries read each other's empty indexes. To get the degraded
+-- report on an already-empty-built index, REINDEX it (optional; reporting
+-- only, not correctness). `ALTER EXTENSION pg_turbovec UPDATE TO '2.15.0'` is
+-- sufficient. Intentionally empty apart from this comment.

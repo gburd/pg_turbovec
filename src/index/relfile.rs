@@ -2045,6 +2045,63 @@ pub(crate) unsafe fn write_blocked_phase_and_meta(
     }
 }
 
+/// Issue #1: write an EMPTY IVF relfile (TurboQuant/flat-coded kind)
+/// that is explicitly marked *degraded* rather than silently flat.
+///
+/// An IVF index built over zero rows (empty table, or `TRUNCATE`d and
+/// reloaded) has no cells to train, so it serves as a flat scan. That
+/// trade-off is fine; being SILENT about it violates the AGENTS.md
+/// "degradation must be observable" rule. Stamping `ivf_degraded`
+/// (with `lists` preserved) makes `index_was_ivf()` true so
+/// `turbovec.index_is_degraded()` returns true and the throttled
+/// `ambeginscan` WARNING fires, telling the operator to `REINDEX`
+/// once the table is loaded. No chains are written, so the scan path
+/// takes the flat fallback deterministically. Byte-identical to the
+/// Z1 degrading-flush contract (`degraded_lists` branch of
+/// `write_full_inner_with_tombstones`); `lists == 0` writes a plain
+/// flat meta as before.
+///
+/// # Safety
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_full_empty_ivf_degraded(
+    rel: pg_sys::Relation,
+    bit_width: u8,
+    dim: u32,
+    am_version: u32,
+    lists: u32,
+) {
+    write_full_inner(
+        rel,
+        bit_width,
+        dim,
+        0,
+        &[],
+        &[],
+        &[],
+        am_version,
+        None,
+        None,
+        None,
+        lists,
+    );
+}
+
+/// Issue #1, 1-bit sign-BQ twin: write an EMPTY IVF+BQ relfile marked
+/// degraded. Same contract as [`write_full_empty_ivf_degraded`] via
+/// `write_full_bq_parts`' `degraded_lists` branch; `lists == 0`
+/// writes a plain flat-BQ meta as before.
+///
+/// # Safety
+/// Caller must hold an exclusive relation lock.
+pub(crate) unsafe fn write_full_empty_bq_ivf_degraded(
+    rel: pg_sys::Relation,
+    dim: u32,
+    am_version: u32,
+    lists: u32,
+) {
+    write_full_bq_parts(rel, dim, 0, &[], &[], &[], am_version, None, &[], lists);
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn write_full_inner(
     rel: pg_sys::Relation,

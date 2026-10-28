@@ -96,6 +96,12 @@ pub(crate) static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// prove the `fn_mcxt` reset callback really frees them.
 #[cfg(any(test, feature = "pg_test"))]
 pub(crate) static LIVE_CACHES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// Test-only: `pg_detoast_datum_packed` calls performed. Issue #2: an
+/// external (on-disk TOAST) query operand repeated per candidate must
+/// detoast ONCE, not once per row — each detoast of an external value
+/// is a TOAST fetch (disk reads).
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) static DETOASTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One decoded operand and the exact payload bytes it was decoded from.
 #[derive(Default)]
@@ -107,6 +113,51 @@ struct Slot {
     norm2: Option<f64>,
     /// Whether the last `get` reused the cached decode.
     hit: bool,
+    /// Issue #2: the 16-byte `varatt_external` identity of the last
+    /// datum, when it arrived as an on-disk TOAST pointer. Lets a
+    /// repeated external operand (e.g. `ORDER BY tv <=> (SELECT tv
+    /// FROM src WHERE id = 7)`) skip the per-row TOAST FETCH entirely,
+    /// not just the decode: a reviewer measured 300 TOAST block reads
+    /// for 300 candidate rows before this. Keyed on the full external
+    /// pointer (valueid + toastrelid + rawsize + extinfo), never on
+    /// bare pointer identity; the cache lives in `fn_mcxt` and is
+    /// dropped on executor-run reset, so a VACUUM-reused value OID
+    /// cannot alias across statements.
+    toast_ptr: Option<[u8; TOAST_PTR_IDENT_LEN]>,
+}
+
+/// Byte length of an on-disk TOAST pointer's `varatt_external` payload
+/// (`va_rawsize` + `va_extinfo` + `va_valueid` + `va_toastrelid`).
+const TOAST_PTR_IDENT_LEN: usize = std::mem::size_of::<pg_sys::varatt_external>();
+
+/// If `datum` points at an ON-DISK external TOAST pointer, return a
+/// copy of its `varatt_external` identity bytes; otherwise `None`
+/// (inline, short-header, indirect, or expanded datum — for which the
+/// cheap payload compare in `Slot::get` is already correct and
+/// fetch-free).
+///
+/// # Safety
+/// `datum` must be a live `vector` datum for the duration of the call.
+unsafe fn ondisk_toast_ident(datum: pg_sys::Datum) -> Option<[u8; TOAST_PTR_IDENT_LEN]> {
+    let p = datum.cast_mut_ptr::<u8>();
+    if p.is_null() {
+        return None;
+    }
+    // A 1-byte-header EXTERNAL datum has `va_header == 0x01`
+    // (VARATT_IS_1B_E), with the vartag in the next byte and the
+    // type-specific payload after it (postgres.h: varattrib_1b_e).
+    // Any other header (4-byte, 1-byte short, compressed-inline) is
+    // not an on-disk pointer we can fetch-skip.
+    if *p != 0x01u8 {
+        return None;
+    }
+    let tag = *p.add(1);
+    if u32::from(tag) != pg_sys::vartag_external::VARTAG_ONDISK {
+        return None;
+    }
+    let mut ident = [0u8; TOAST_PTR_IDENT_LEN];
+    std::ptr::copy_nonoverlapping(p.add(2), ident.as_mut_ptr(), TOAST_PTR_IDENT_LEN);
+    Some(ident)
 }
 
 impl Slot {
@@ -120,7 +171,23 @@ impl Slot {
     /// ever shows up in a profile.
     unsafe fn get(&mut self, datum: pg_sys::Datum) -> &Vector {
         unsafe {
+            // Issue #2 fast path: if the datum is the SAME on-disk TOAST
+            // pointer we already decoded, reuse the cached vector
+            // without detoasting — this skips the per-row TOAST FETCH,
+            // not just the CBOR decode. `ondisk_toast_ident` reads only
+            // the 18-byte pointer header (no fetch); a match means the
+            // identical external value (valueid+toastrelid+size), and
+            // the cache's `fn_mcxt` lifetime rules out OID reuse across
+            // statements.
+            if let Some(ident) = ondisk_toast_ident(datum) {
+                if self.vec.is_some() && self.toast_ptr == Some(ident) {
+                    self.hit = true;
+                    return self.vec.as_ref().expect("slot filled above");
+                }
+            }
             // Same detoast pgrx's cbor_decode does; a no-op for inline values.
+            #[cfg(any(test, feature = "pg_test"))]
+            DETOASTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let p = pg_sys::pg_detoast_datum_packed(datum.cast_mut_ptr());
             let bytes =
                 std::slice::from_raw_parts(vardata_any(p).cast::<u8>(), varsize_any_exhdr(p));
@@ -138,6 +205,9 @@ impl Slot {
                 self.raw.extend_from_slice(bytes);
                 self.vec = Some(v);
             }
+            // Record the external identity (or clear it for an inline
+            // datum) so the next call's fast-path test is correct.
+            self.toast_ptr = ondisk_toast_ident(datum);
             self.vec.as_ref().expect("slot filled above")
         }
     }

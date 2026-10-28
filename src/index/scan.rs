@@ -3,7 +3,7 @@
 //! `amgettuple`, runs a single batch search, then drains results
 //! one TID per call.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_int;
 
 use pgrx::pg_sys;
@@ -22,6 +22,33 @@ thread_local! {
     /// signal without flooding the log on every query.
     static DEGRADED_WARNED: std::cell::RefCell<HashSet<pg_sys::Oid>> =
         std::cell::RefCell::new(HashSet::new());
+
+    /// Issue #8: the IVF block-Hadamard rotation matrix is a pure
+    /// function of `dim` and identical for every query (and every
+    /// index) on this backend, but was rebuilt per query via
+    /// `materialize_rotation_matrix` (O(dim^2): ~4.8 ms at 1024-d,
+    /// ~9.8 ms at 1536-d; 5-10% of IVF query CPU at 1024-d). Memoize
+    /// it per backend keyed by `dim`. Bit-identical to the per-query
+    /// build (same pure function), so this is scoring-neutral. One
+    /// `Rc` per distinct `dim` seen; a backend serves one or a few
+    /// dims, so the map stays tiny.
+    static ROTATION_CACHE: std::cell::RefCell<HashMap<usize, std::rc::Rc<Vec<f32>>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Return this backend's cached block-Hadamard rotation matrix for
+/// `dim`, materializing and caching it on first use (issue #8). The
+/// matrix is a pure function of `dim`, so the cached value is
+/// bit-identical to `ivf::materialize_rotation_matrix(dim)`.
+fn cached_rotation_matrix(dim: usize) -> std::rc::Rc<Vec<f32>> {
+    ROTATION_CACHE.with(|c| {
+        if let Some(r) = c.borrow().get(&dim) {
+            return std::rc::Rc::clone(r);
+        }
+        let r = std::rc::Rc::new(crate::index::ivf::materialize_rotation_matrix(dim));
+        c.borrow_mut().insert(dim, std::rc::Rc::clone(&r));
+        r
+    })
 }
 
 /// Read an index relation's own name for use in a HINT.
@@ -1258,10 +1285,11 @@ unsafe fn try_install_ooc(
     if coarse_centroids.len() != lists * dim {
         return None;
     }
-    let rotation = crate::index::ivf::materialize_rotation_matrix(dim);
-    if rotation.len() != dim * dim {
+    let rotation_rc = cached_rotation_matrix(dim);
+    if rotation_rc.len() != dim * dim {
         return None;
     }
+    let rotation = (*rotation_rc).clone();
     let directory = relfile::read_cell_directory(rel, meta)?;
     // Phase Z5: the directory may partition FEWER slots than the index holds
     // -- the difference is the append region (`aminsert` appends at the tail,
@@ -1370,6 +1398,15 @@ unsafe fn ivf_setup_and_search(
     }
     let dim = meta.dim as usize;
     let lists = meta.lists as usize;
+    // A degraded/empty IVF index whose column dim was never pinned has
+    // `dim == 0` (issue #1): it was built WITH (lists > 0) over an empty
+    // table, so `has_ivf()` is true, but there are no cells, no
+    // rotation, and `Rotation::new(0)` would ERROR. The flat fallback
+    // handles an empty/degraded index correctly, so bail to it. (A real
+    // IVF index always has `dim > 0`; this cannot mask a healthy one.)
+    if dim == 0 {
+        return None;
+    }
 
     // Coarse centroids + cell directory.
     //
@@ -1391,11 +1428,11 @@ unsafe fn ivf_setup_and_search(
     let rotation = if is_bq {
         Vec::new()
     } else {
-        let r = crate::index::ivf::materialize_rotation_matrix(dim);
+        let r = cached_rotation_matrix(dim);
         if r.len() != dim * dim {
             return None;
         }
-        r
+        (*r).clone()
     };
     let directory = relfile::read_cell_directory((*scan).indexRelation, &meta)?;
     // Phase Z5: the directory may partition FEWER slots than are live -- the

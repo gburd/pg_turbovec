@@ -40,6 +40,13 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+/// Test-only: number of `materialize_rotation_matrix` calls (issue
+/// #8). The scan path memoizes the matrix per backend, so repeated
+/// IVF queries at the same `dim` must NOT keep incrementing this.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) static ROTATION_MATERIALIZATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Fixed seed for the k-means RNG. Mirrors turbovec's
 /// `ROTATION_SEED` determinism precedent: a constant seed makes the
 /// whole coarse-training pipeline reproducible, so the same sample
@@ -682,6 +689,11 @@ pub fn coarse_probe_dispatch(
 /// (fixed ROTATION_SEED). Cost is O(dim^2) applies, negligible vs the
 /// corpus GEMM. See P1_PROGRESS.md D-ivf-rotation.
 pub fn materialize_rotation_matrix(dim: usize) -> Vec<f32> {
+    // Issue #8: counts materializations so a test can prove the scan
+    // path memoizes the matrix per backend (it is a pure function of
+    // `dim`, rebuilt O(dim^2) per query before the memo).
+    #[cfg(any(test, feature = "pg_test"))]
+    ROTATION_MATERIALIZATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // R is column-major-defined but stored row-major: R[k*dim + j] is
     // the k-th coordinate of `apply(e_j)`. Build e_j, apply, scatter
     // the resulting column into R's j-th column.

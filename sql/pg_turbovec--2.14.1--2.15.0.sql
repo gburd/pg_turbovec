@@ -1,0 +1,10 @@
+-- pg_turbovec upgrade 2.14.1 -> 2.15.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.15.0';`.
+--
+-- No new or changed SQL objects. v2.15.0 fixes four open GitHub issues
+-- (#1 empty-IVF degraded reporting + a latent empty-scan crash, #2 TOAST
+-- query-vector re-fetch, #8 per-query IVF rotation-matrix rebuild) entirely
+-- in the library; none add SQL surface.
+--
+-- No wire-format change (stays v8), scoring bit-identical, no REINDEX
+-- required. Intentionally empty apart from this comment.

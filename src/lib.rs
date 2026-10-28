@@ -7116,6 +7116,50 @@ mod tests {
         assert!(dd <= dc + 4, "{dd} decodes for {dc} calls");
     }
 
+    /// Issue #2: when the query operand arrives as an EXTERNAL (on-disk
+    /// TOAST) pointer — e.g. `ORDER BY tv <=> (SELECT tv FROM src WHERE
+    /// id = 7)` at high dim under default storage — it must be detoasted
+    /// (TOAST-fetched) ONCE for the whole scan, not once per candidate.
+    /// Before the fix every row re-detoasted the external query vector
+    /// (a reviewer measured 300 TOAST block reads for 300 rows).
+    #[pg_test]
+    fn distance_cache_external_query_vector_detoasted_once() {
+        use crate::distance::{CALLS, DETOASTS};
+        use std::sync::atomic::Ordering::Relaxed;
+        use_turbovec();
+        Spi::run("SET max_parallel_workers_per_gather = 0").unwrap();
+        // 1024-d, EXTERNAL storage so each vector is stored out of line
+        // (an on-disk TOAST pointer in the tuple, not inlined).
+        qc_make("qc_ext_q", 1024, 300, "EXTERNAL", false);
+        let toast: String = Spi::get_one(
+            "SELECT reltoastrelid::regclass::text FROM pg_class WHERE oid = 'qc_ext_q'::regclass",
+        )
+        .unwrap()
+        .unwrap();
+        let chunks: Option<i64> = Spi::get_one(&format!("SELECT count(*) FROM {toast}")).unwrap();
+        assert!(chunks.unwrap() >= 2, "qc_ext_q values must be out of line");
+
+        // The query operand is itself an external value pulled from the
+        // table, so it reaches the distance function as an on-disk TOAST
+        // pointer, re-evaluated per candidate row. Seq scan keeps the
+        // whole path in our distance function (no index recheck).
+        let sql = "SELECT sum(tv <=> (SELECT tv FROM qc_ext_q WHERE id = 7)) \
+                   FROM qc_ext_q";
+        let (t0, c0) = (DETOASTS.load(Relaxed), CALLS.load(Relaxed));
+        Spi::run(sql).unwrap();
+        let (td, cd) = (DETOASTS.load(Relaxed) - t0, CALLS.load(Relaxed) - c0);
+        assert!(cd >= 300, "one distance call per row, got {cd}");
+        // Each call detoasts the per-row candidate (always a fetch), but
+        // the repeated external query operand must be fetched ONCE. So
+        // total detoasts <= calls + a small constant, NOT ~2x calls.
+        assert!(
+            td <= cd + 4,
+            "external query vector re-fetched per row: {td} detoasts for {cd} calls \
+             (expected ~{cd}, one extra for the query operand, not ~{})",
+            cd * 2
+        );
+    }
+
     /// Dimension-mismatch errors are unchanged, including when the
     /// mismatching row arrives after the constant is already cached.
     fn qc_mismatch(table: &str, op: &str) {
@@ -10246,6 +10290,143 @@ mod tests {
              FROM generate_series(1, {n}) g"
         ))
         .unwrap();
+    }
+
+    /// Issue #1: an IVF index built on an EMPTY table has no cells to
+    /// train, so it serves as a flat scan once rows load. That trade
+    /// is fine; being SILENT about it violated the "degradation must be
+    /// observable" rule. The empty build must stamp `ivf_degraded`
+    /// (preserving the requested `lists`) so `index_is_degraded()`
+    /// returns true and `index_degradation()` reports `lists` != 0,
+    /// telling the operator to REINDEX. Before the fix: `lists = 0,
+    /// degraded = f`.
+    #[pg_test]
+    fn ivf_built_on_empty_table_is_reported_degraded() {
+        use_turbovec();
+        Spi::run("CREATE TABLE ivf_empty (id bigint, emb vector)").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_empty_idx ON ivf_empty \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 16)",
+        )
+        .unwrap();
+
+        // Nothing trained, but it must announce itself as degraded.
+        let (deg, lists_col, nvec): (bool, i32, i64) = Spi::get_three(
+            "SELECT degraded, lists, n_vectors \
+             FROM turbovec.index_degradation('ivf_empty_idx'::regclass)",
+        )
+        .map(|(a, b, c)| (a.unwrap(), b.unwrap(), c.unwrap()))
+        .unwrap();
+        assert_eq!(
+            (deg, lists_col, nvec),
+            (true, 16, 0),
+            "an IVF index over an empty table must report degraded=t, lists=16, \
+             n_vectors=0 (got degraded={deg}, lists={lists_col}, n_vectors={nvec}); \
+             it must not silently blank lists to 0"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('ivf_empty_idx'::regclass)")
+                .unwrap(),
+            Some(true),
+            "an IVF index over an empty table must report as DEGRADED, not silently flat"
+        );
+        // `lists` preserved (the degradation flag needs index_was_ivf()
+        // true), not blanked to 0.
+        let lists: Option<i64> =
+            Spi::get_one("SELECT lists FROM turbovec.index_degradation('ivf_empty_idx'::regclass)")
+                .unwrap();
+        assert_eq!(
+            lists,
+            Some(16),
+            "the requested lists must survive the empty build so the operator sees it"
+        );
+
+        // Load rows AFTER the build (the exact repro): the index stays a
+        // degraded flat scan until REINDEX, and must STILL be correct.
+        Spi::run(
+            "INSERT INTO ivf_empty \
+             SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g::float8 / 50.0 + s::float8)::float8 \
+                FROM generate_series(1, 16) s), ',') || ']')::vector \
+             FROM generate_series(1, 2000) g",
+        )
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT turbovec.index_is_degraded('ivf_empty_idx'::regclass)")
+                .unwrap(),
+            Some(true),
+            "still degraded after a post-build load (cells are only trained by REINDEX)"
+        );
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 200").unwrap();
+        let self_nn: Option<i64> = Spi::get_one(
+            "SELECT id FROM ivf_empty ORDER BY emb <=> \
+             (SELECT emb FROM ivf_empty WHERE id = 500) LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(
+            self_nn,
+            Some(500),
+            "a degraded (flat) IVF index must still return correct nearest neighbours"
+        );
+    }
+
+    /// Issue #8: the IVF block-Hadamard rotation matrix is a pure
+    /// function of `dim` and identical for every query, but was
+    /// rebuilt per query (O(dim^2)). The scan path now memoizes it per
+    /// backend; repeated IVF queries at the same `dim` must trigger at
+    /// most one materialization, and results must be unchanged (the
+    /// cached matrix is bit-identical to the per-query build).
+    #[pg_test]
+    fn ivf_rotation_matrix_cached_per_backend() {
+        use crate::index::ivf::ROTATION_MATERIALIZATIONS;
+        use std::sync::atomic::Ordering::Relaxed;
+        use_turbovec();
+        ivf2_make_corpus("ivf_rot", 3000);
+        Spi::run(
+            "CREATE INDEX ivf_rot_idx ON ivf_rot \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 32)",
+        )
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 50").unwrap();
+        Spi::run("SET max_parallel_workers_per_gather = 0").unwrap();
+
+        let run_query = |id: i64| -> Vec<i64> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT id FROM ivf_rot ORDER BY emb <=> \
+                             (SELECT emb FROM ivf_rot WHERE id = {id}) LIMIT 10"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .unwrap()
+                    .map(|row| row.get::<i64>(1).unwrap().unwrap())
+                    .collect()
+            })
+        };
+
+        // Warm the cache with the first query, then measure the rest.
+        let first = run_query(100);
+        assert_eq!(first.first().copied(), Some(100), "self is nearest");
+        let m0 = ROTATION_MATERIALIZATIONS.load(Relaxed);
+        for id in [200, 400, 800, 1600, 2400] {
+            let got = run_query(id);
+            assert_eq!(
+                got.first().copied(),
+                Some(id),
+                "self must remain the nearest neighbour (cache is bit-identical)"
+            );
+        }
+        let grew = ROTATION_MATERIALIZATIONS.load(Relaxed) - m0;
+        assert_eq!(
+            grew, 0,
+            "5 further IVF queries at the same dim must reuse the cached \
+             rotation matrix, but it was rebuilt {grew} time(s)"
+        );
     }
 
     /// Drive `ambulkdelete` directly with a synthetic dead-tuple

@@ -737,8 +737,30 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
         // `kind = KIND_SINGLE`, and the first aminsert would then extend
         // it down the TurboQuant path (which rejects bit_width = 1) rather
         // than the BQ one.
+        //
+        // Issue #1: an empty IVF request (`lists > 0`) reaches HERE when
+        // the column's dim is unpinned, SHORT of `ivf_build_and_write`'s
+        // own empty branch. Stamp it degraded (lists preserved) so the
+        // silent-flat case is reported whether or not dim was pinned.
         if cfg_bit_width == 1 {
-            relfile::write_full_bq(index_relation, /*dim=*/ 0, 0, &[], &[], &[], 1);
+            if state.lists > 0 {
+                relfile::write_full_empty_bq_ivf_degraded(
+                    index_relation,
+                    /*dim=*/ 0,
+                    /*am_version=*/ 1,
+                    state.lists as u32,
+                );
+            } else {
+                relfile::write_full_bq(index_relation, /*dim=*/ 0, 0, &[], &[], &[], 1);
+            }
+        } else if state.lists > 0 {
+            relfile::write_full_empty_ivf_degraded(
+                index_relation,
+                cfg_bit_width as u8,
+                /*dim=*/ 0,
+                /*am_version=*/ 1,
+                state.lists as u32,
+            );
         } else {
             relfile::write_full(
                 index_relation,
@@ -1013,11 +1035,20 @@ unsafe fn ivf_build_and_write(
         .expect("ivf_build_and_write: spill not opened");
     let n_vectors = spill.rows;
 
-    // Empty corpus: write an empty (flat-shaped) meta page. An IVF
-    // index over zero rows has no cells; readers treat it as empty.
+    // Empty corpus: an IVF index over zero rows has no cells to
+    // train, so it serves as a flat scan. Issue #1: mark it DEGRADED
+    // (preserving the requested `lists`) rather than writing a silent
+    // flat meta, so `turbovec.index_is_degraded()` and the scan
+    // WARNING tell the operator to REINDEX once the table is loaded.
     // (The spill drops here, unlinking the temp file.)
     if n_vectors == 0 {
-        relfile::write_full(index_relation, bit_width, dim as u32, 0, &[], &[], &[], 1);
+        relfile::write_full_empty_ivf_degraded(
+            index_relation,
+            bit_width,
+            dim as u32,
+            1,
+            state.lists as u32,
+        );
         return 0;
     }
 
@@ -1512,11 +1543,16 @@ unsafe fn bq_ivf_build_and_write(
         .expect("bq_ivf_build_and_write: spill not opened");
     let n_vectors = spill.rows;
     if n_vectors == 0 {
-        // Empty build: a BQ-shaped meta page with no chains (and no IVF
-        // chains — there are no cells over zero rows), so later inserts
-        // have stable state to extend. Same convention as every other
-        // kind's empty-build case.
-        relfile::write_full_bq(index_relation, dim as u32, 0, &[], &[], &[], 1);
+        // Empty IVF+BQ build: no cells over zero rows. Issue #1: mark
+        // DEGRADED (preserving `lists`) rather than a silent flat-BQ
+        // meta, so the operator-facing degradation signals fire and
+        // later inserts still have stable state to extend.
+        relfile::write_full_empty_bq_ivf_degraded(
+            index_relation,
+            dim as u32,
+            1,
+            state.lists as u32,
+        );
         return 0;
     }
 
@@ -2148,7 +2184,7 @@ pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Rela
         // TurboQuant path, whose `IdMapIndex::new(dim, 1)` turbovec rejects.
         // (Latent since v2.6.0, reachable only for an UNLOGGED 1-bit index
         // after a crash, which is why no test caught it.)
-        let meta = if bw == 1 {
+        let mut meta = if bw == 1 {
             crate::index::page::MetaPageData::plan_bq(
                 dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
             )
@@ -2157,6 +2193,13 @@ pub(crate) unsafe extern "C-unwind" fn ambuildempty(index_relation: pg_sys::Rela
                 bw as u8, dim_u32, /*n_vectors=*/ 0, /*am_version=*/ 1,
             )
         };
+        // Issue #1: an empty IVF index (UNLOGGED init fork here) is a
+        // silent flat scan; mark it degraded so the signal matches the
+        // logged `ambuild` empty path (lists preserved, no chains).
+        if _lists > 0 {
+            meta.lists = _lists as u32;
+            meta.ivf_degraded = true;
+        }
         relfile::write_meta_in_fork(index_relation, pg_sys::ForkNumber::INIT_FORKNUM, &meta);
     }
     // If dim was supplied as a non-multiple-of-8 we silently

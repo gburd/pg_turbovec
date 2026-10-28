@@ -133,22 +133,23 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.14.1, 2026-10-17)
+### Current (as of v2.15.0, 2026-10-28)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.14.1 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.14.0 | 2.14.1 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.15.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.14.0 | 2.15.0 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| 2.14.1      | 2.15.0 | `ALTER EXTENSION` only — no REINDEX. Four GitHub-issue fixes, all additive (empty-IVF degraded reporting + a latent empty-scan crash, TOAST query-vector re-fetch, per-query IVF rotation rebuild). Optionally `REINDEX` an ALREADY-empty-built IVF index to get its new degraded report (reporting only). |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.14.1)
+### Where the project actually is (v2.15.0)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -483,7 +484,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 488 passed,
+3. Pass `cargo pgrx test pg16` cleanly (current count: 491 passed,
    9 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`

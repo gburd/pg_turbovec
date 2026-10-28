@@ -4,6 +4,65 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.15.0] — 2026-10-28
+
+MINOR: **four open GitHub issues fixed** — all additive, no wire-format change
+(`MetaPageData::version` stays **8**), scoring bit-identical, no SQL-surface
+change. Existing indexes keep working with no REINDEX; see Migration.
+
+### Fixed
+
+- **Empty-table IVF index is now reported as degraded (#1).** An IVF index
+  built on an empty table (or one reloaded after `TRUNCATE`) has no cells to
+  train, so it serves as a flat scan once rows arrive. That trade is fine; being
+  *silent* about it broke the project rule that any path dropping trained
+  structure must leave a machine-readable flag and a user-visible warning. The
+  empty build now stamps `ivf_degraded` and preserves the requested `lists`, so
+  `turbovec.index_is_degraded()` returns true, `turbovec.index_degradation()`
+  reports `lists` (not 0), and the throttled `ambeginscan` WARNING fires —
+  telling the operator to `REINDEX` once the table is loaded. Fixing this also
+  closed a latent crash: scanning an empty-then-loaded IVF index whose column
+  dim was never pinned used to ERROR `rotation dim must be a positive multiple
+  of 8`; it now takes the flat fallback correctly.
+- **Query vector passed as a TOAST pointer is detoasted once, not per row
+  (#2).** When the query operand arrives as an on-disk TOAST pointer — e.g.
+  `ORDER BY tv <=> (SELECT tv FROM src WHERE id = 7)` at high dim under default
+  storage — every candidate used to re-fetch it from TOAST (a reviewer measured
+  300 TOAST block reads for 300 rows). The per-expression operand cache now
+  recognises a repeated external pointer and reuses the already-decoded vector
+  without re-fetching. Keyed on the full external pointer identity
+  (valueid + toastrelid + size), never bare pointer identity; the cache lives in
+  `fn_mcxt` and is dropped on executor-run reset, so a VACUUM-reused value OID
+  cannot alias across statements. Decoded bytes are unchanged, so results and
+  ORDER BY are bit-identical.
+- **IVF rotation matrix cached per backend (#8).** Each IVF scan rebuilt the
+  dim×dim block-Hadamard rotation matrix from scratch (O(dim²): ~4.8 ms at
+  1024-d, ~9.8 ms at 1536-d; 5–10 % of IVF query CPU at 1024-d), though it is a
+  pure function of `dim` and identical for every query. It is now memoized per
+  backend keyed by `dim`. Bit-identical to the per-query build, so this is
+  scoring-neutral.
+
+### Notes
+
+- **#7 (whole-load IVF latency tail) remains open** as a tracked performance
+  follow-up. Its root cause is turbovec's classic masked kernel
+  (`avx512_post_flush_heap_update`, an O(candidates×k) top-k heap at widened
+  `k`); the recommended serving mode at scale, out-of-core
+  (`turbovec.out_of_core = on`), already avoids it. Scores and recall are
+  unaffected. Not a release blocker; scheduled with the scale-plan S3 work.
+- **#4 (pgvector binary-compatible type)** is answered in v2.12.1: use an
+  expression index over your existing pgvector column (see
+  `docs/MIGRATING_FROM_PGVECTOR.md`). No code change needed.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.15.0';` — no REINDEX. The empty-IVF
+reporting fix only changes two scalar fields written at build time; a v2.15.0
+binary reads a v2.14.x empty index fine (it simply won't report degraded until
+rebuilt), and a v2.14.x binary reads a v2.15.0 empty-degraded index fine. To
+*get* the degraded report on an index that is already empty-built, `REINDEX` it
+(optional — only affects reporting, not correctness).
+
 ## [2.14.1] — 2026-10-17
 
 PATCH: **fixes five bugs that, under writes and VACUUM, served stale results or

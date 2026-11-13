@@ -543,6 +543,18 @@ pub(crate) unsafe extern "C-unwind" fn ambuild(
     // Hamming).
     let indexrelid = (*index_relation).rd_id;
     let normalise = guc::NORMALIZE_ON_INSERT.get();
+
+    // Drop any cached per-backend entry for this `rel_oid`. A REINDEX
+    // rebuilds the relfile under a new relfilenode while keeping the
+    // same `rel_oid`, so a cached entry (especially a dirty one with
+    // unflushed mutations) now describes the OLD relfile; splicing it
+    // onto the fresh relfile would persist stale ids.
+    // `am_lookup_for_mutation` already drops a relfilenode-mismatched
+    // entry on the read side, but purging at rebuild time guarantees a
+    // clean slate regardless. Harmless when nothing is cached (the
+    // common first-build case).
+    crate::cache::invalidate(indexrelid);
+
     let lists = cfg_lists.max(0) as usize;
     let assign_dups = cfg_assign_dups.clamp(1, options::MAX_ASSIGN_DUPS) as usize;
 

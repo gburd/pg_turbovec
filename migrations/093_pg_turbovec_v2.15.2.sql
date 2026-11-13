@@ -1,0 +1,24 @@
+-- pg_turbovec v2.15.2
+--
+-- PATCH: closes a latent REINDEX stale-cache hazard, and reframes the BUG#6
+-- ctid tripwire now that upstream PostgreSQL has fixed the core defect. No
+-- SQL-surface change, no GUC change, no wire-format change
+-- (MetaPageData::version stays 8), scoring bit-identical.
+--
+--   REINDEX stale-cache: a long-lived backend could hold a dirty per-backend
+--   cache entry across a REINDEX (which keeps the index rel_oid but assigns a
+--   new relfilenode). `am_lookup_for_mutation` used to serve that stale dirty
+--   index on a relfilenode mismatch, which would splice obsolete ids onto the
+--   freshly-rebuilt relfile. It now drops the entry and reloads from the fresh
+--   relfile; `ambuild` also purges the rel_oid's cache entries on rebuild.
+--   (This was NOT the agora field corruption -- that was the cancelled-VACUUM
+--   bug fixed in 2.15.1 -- but it is a real latent hazard.)
+--
+--   BUG#6 ctid: PostgreSQL fixed ExecForceStoreHeapTuple losing tts_tid
+--   (filed 2026-09-08; confirmed in 16.16). The regression test now accepts a
+--   fixed core (kNN-scan ctid round-trips) as well as an unfixed one, and
+--   docs/FILTERING.md names the fix while keeping the version-independent
+--   "chain on your key column" rule.
+--
+-- No REINDEX required. `ALTER EXTENSION pg_turbovec UPDATE TO '2.15.2';` is
+-- sufficient. Intentionally empty apart from this comment.

@@ -300,10 +300,17 @@ intersects a *set of physical rows*, identified by TID.)
 > `nodeIndexscan.c`'s reorder queue and re-stored through that branch.
 > **Core GiST reproduces it with no turbovec installed** (thin diagonal
 > polygons, where the bbox distance under-estimates the true distance,
-> so tuples get queued), and the code is identical in every PG major
-> 13 through master. A one-line core patch restoring `tts_tid` fixes
-> both. Tracked by the `knn_scan_ctid_projection_upstream_limitation`
-> regression test, which doubles as a tripwire for the upstream fix.
+> so tuples get queued). A one-line core patch restoring `tts_tid`
+> fixes both. The fix was filed on pgsql-hackers (2026-09-08) and has
+> since reached released PostgreSQL (confirmed on 16.16); a core that
+> carries it projects real ctids and the self-joins below return all
+> `k`. On a PostgreSQL that still lacks the fix the sentinel behaviour
+> stands, so the rule here remains the safe, version-independent one:
+> chain on your own key column, never on a ctid harvested from a kNN
+> scan. Tracked by the
+> `knn_scan_ctid_projection_roundtrips_or_sentinels` regression test,
+> which accepts both regimes and forbids a partial (buggy-AM)
+> round-trip.
 >
 > Verified by building PostgreSQL both ways on one machine and running
 > one script (stock 18.4 vs an 18.3 tree with only that hunk applied):

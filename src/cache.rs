@@ -1739,14 +1739,19 @@ pub fn am_lookup_for_mutation(
     };
     let arc = arc.clone();
     if entry.relfilenode != expected_relfile {
-        if entry.dirty {
-            // Dirty + relfile mismatch is impossible in practice
-            // (we don't reindex our own index mid-aminsert), but be
-            // conservative and keep the dirty entry rather than
-            // silently dropping unflushed mutations.
-            entry.seq = next_seq();
-            return Some(arc);
-        }
+        // The relfile was rebuilt out from under this cache entry
+        // (REINDEX keeps the index `rel_oid` but assigns a new
+        // relfilenode; TRUNCATE likewise). A dirty entry's unflushed
+        // mutations reference the OLD relfile's slot order, so splicing
+        // them onto the freshly-rebuilt relfile would re-introduce
+        // stale ids. The pre-fix branch kept and served the dirty
+        // entry here ("impossible in practice -- we don't reindex our
+        // own index mid-aminsert"), but a long-lived pooled backend
+        // whose transaction spans a REINDEX makes exactly that happen.
+        // Drop the entry unconditionally and reload from the current
+        // relfile, dirty or not: a mutation targeting a relfile that no
+        // longer exists must never be preserved. (`ambuild` also purges
+        // the entry on rebuild; this is the matching read-side guard.)
         g.remove(&key);
         return None;
     }
@@ -2101,9 +2106,9 @@ pub fn invalidate_dirty() {
     g.retain(|_, e| !e.dirty);
 }
 
-/// Drop every entry referencing `rel_oid`. Called from index/table
-/// DROP paths; harmless to call unconditionally.
-#[allow(dead_code)]
+/// Drop every entry referencing `rel_oid`. Called from the DROP
+/// paths and from `ambuild` (so a REINDEX, which keeps `rel_oid` but
+/// changes the relfilenode, cannot leave a stale entry behind).
 pub fn invalidate(rel_oid: pg_sys::Oid) {
     let mut g = CACHE.lock();
     g.retain(|k, _| k.rel_oid != rel_oid);

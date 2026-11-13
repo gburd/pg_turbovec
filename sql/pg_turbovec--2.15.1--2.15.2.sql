@@ -1,0 +1,9 @@
+-- pg_turbovec upgrade 2.15.1 -> 2.15.2
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.15.2';`.
+--
+-- No new or changed SQL objects. v2.15.2 is library + test/docs only:
+-- closes a latent REINDEX stale-cache hazard (a dirty per-backend cache
+-- entry is no longer served after the relfilenode changes under a REINDEX),
+-- and reframes the BUG#6 ctid test + docs now that upstream PostgreSQL fixed
+-- the core defect. No wire change (stays v8), scoring bit-identical, no
+-- REINDEX required. Intentionally empty apart from this comment.

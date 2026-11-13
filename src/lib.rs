@@ -1600,6 +1600,121 @@ mod tests {
         cache::invalidate_all();
     }
 
+    /// REINDEX stale-dirty-entry hazard: a long-lived backend holds a
+    /// DIRTY AM-cache entry (unflushed inserts) keyed on the index
+    /// `rel_oid`. A `REINDEX` rebuilds the relfile under a NEW
+    /// relfilenode while keeping the same `rel_oid`. The next
+    /// `aminsert` on that backend calls `am_lookup_for_mutation` with
+    /// the NEW relfilenode; the pre-fix branch returned the
+    /// pre-REINDEX dirty index anyway ("impossible in practice" -- but
+    /// a pooled backfill writer whose transaction spans a REINDEX makes
+    /// it routine), so its obsolete `slot_to_id` would be spliced onto
+    /// the freshly-rebuilt relfile, re-introducing a duplicate id.
+    /// DROP+CREATE sidesteps it because a new `rel_oid` never matches
+    /// the stale entry.
+    ///
+    /// Found while investigating the 2026-11-13 agora dup-id report;
+    /// that report turned out to be a different cause (a cancelled
+    /// VACUUM, fixed in v2.15.1), but this stale-serve path is a real
+    /// latent hazard in its own right and is closed here.
+    ///
+    /// The fix: a relfilenode change under a dirty entry means the index
+    /// was rebuilt out from under us; the dirty in-memory mutations
+    /// target a relfile that no longer exists, so the entry MUST be
+    /// dropped and reloaded from the fresh relfile, never served.
+    #[pg_test]
+    fn mutation_lookup_drops_stale_dirty_entry_after_relfilenode_change() {
+        use crate::cache::{self, CacheKey, PersistState};
+        use crate::index::relfile;
+        use turbovec::IdMapIndex;
+        use_turbovec();
+        cache::invalidate_all();
+
+        const DIM: usize = 8;
+        Spi::run("CREATE TABLE t_rfn (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_rfn SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+             FROM generate_series(1, 8) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_rfn_idx ON t_rfn USING turbovec (emb vec_ip_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let oid: pg_sys::Oid = Spi::get_one("SELECT 't_rfn_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+
+        // Install a DIRTY entry exactly like aminsert's first mutation,
+        // recording the relfilenode it was loaded against (R1).
+        let (key, r1) = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let (c, s, ids) = relfile::read_full(rel, &m);
+            let (sh, sc) = relfile::read_tqplus(rel, &m);
+            let idx =
+                IdMapIndex::from_id_map_parts(4, DIM, m.n_vectors as usize, c, s, ids, sh, sc)
+                    .expect("parts");
+            let key = CacheKey {
+                rel_oid: oid,
+                attnum: 0,
+                bit_width: 4,
+                dim: DIM as u32,
+            };
+            let state = PersistState {
+                bit_width: 4,
+                dim: DIM as i32,
+                n_vectors: m.n_vectors as i64,
+                version: m.am_version as i32,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+            };
+            let r1 = cache::relfilenode_from_relation(rel);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            cache::am_install(key, idx, 1, r1, m.am_version as i64, state);
+            (key, r1)
+        };
+        // Mark it dirty: an unflushed upsert pending in this backend.
+        let v = |j: u64| -> Vec<f32> {
+            (0..DIM)
+                .map(|d| (j as f32 * 0.3 + d as f32).cos())
+                .collect()
+        };
+        {
+            let arc = cache::am_lookup_for_mutation(key, r1).expect("entry present at R1");
+            arc.write().add_with_ids(&v(9001), &[9001]).expect("add");
+        }
+        assert!(cache::am_mark_dirty(key, |p| {
+            p.touched_ids.push(9001);
+            p.live_ids.push(9001);
+            p.n_vectors += 1;
+            p.version += 1;
+        }));
+
+        // Look the DIRTY entry up with a DIFFERENT relfilenode, exactly
+        // what the next aminsert sees after a REINDEX rebuilds the
+        // relfile. The entry (loaded against R1) MUST NOT be served; its
+        // obsolete slot_to_id would re-corrupt the rebuilt relfile. This
+        // isolates the lookup guard itself -- it does NOT go through a
+        // SQL REINDEX (which would also purge the entry via ambuild's
+        // invalidate), so it proves the guard alone is sufficient.
+        let r2 = r1.wrapping_add(1);
+        assert_ne!(r1, r2);
+        let got = cache::am_lookup_for_mutation(key, r2);
+        assert!(
+            got.is_none(),
+            "a dirty entry from the pre-REINDEX relfilenode must be dropped, not served"
+        );
+        // And the entry is gone, so the caller reloads from the fresh relfile.
+        assert_eq!(
+            cache::am_touched_ids(oid),
+            None,
+            "the stale dirty entry must be removed from the cache"
+        );
+        cache::invalidate_all();
+    }
+
     /// v2.14.1 review finding: when the on-disk index has NO rows, the flush
     /// used to write the committing backend's whole snapshot "as-is" instead of
     /// reconciling. If a VACUUM emptied the index after this backend loaded it,
@@ -9508,7 +9623,7 @@ mod tests {
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
-            "2.12.0", "2.12.1", "2.13.0", "2.14.0", "2.14.1", "2.15.0", "2.15.1",
+            "2.12.0", "2.12.1", "2.13.0", "2.14.0", "2.14.1", "2.15.0", "2.15.1", "2.15.2",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10773,10 +10888,12 @@ mod tests {
     ///
     /// So this test pins the SUPPORTED contract -- chain on your own
     /// id column (or `turbovec.knn()`, which returns ids) and never on
-    /// a ctid harvested from a kNN scan -- plus a tripwire that fires
-    /// when upstream fixes core.
+    /// a ctid harvested from a kNN scan -- and checks the ctid
+    /// round-trip is all-or-nothing: 10 on a core that fixed BUG#6
+    /// (released in e.g. PG 16.16), 0 on an unfixed one, never a
+    /// partial count (which would be a turbovec regression).
     #[pg_test]
-    fn knn_scan_ctid_projection_upstream_limitation() {
+    fn knn_scan_ctid_projection_roundtrips_or_sentinels() {
         use_turbovec();
         Spi::run("CREATE TABLE t_ctid (id bigint PRIMARY KEY, emb vector)").unwrap();
         // Deterministic 16-dim corpus (same shape as the parallel-build
@@ -10832,14 +10949,24 @@ mod tests {
         .unwrap();
         assert_eq!(nearest, Some(1), "kNN row DATA must be correct");
 
-        // (3) UPSTREAM TRIPWIRE. This is the self-join the bug report
-        // asks about: join the scanned ctid back to the heap. With the
-        // core bug present every scanned ctid is the sentinel, so it
-        // matches nothing and the count is 0. When core restores
-        // `slot->tts_tid` in ExecForceStoreHeapTuple this becomes 10 --
-        // at which point FLIP THIS ASSERTION TO 10, drop the
-        // limitation note from docs/FILTERING.md, and delete
-        // /mnt/nvme-style upstream patch tracking.
+        // (3) ctid round-trip from a kNN scan. This is the self-join
+        // the BUG#6 report asks about: project the scanned `ctid` and
+        // join it back to the heap. Two outcomes are both CORRECT,
+        // depending on the running PostgreSQL:
+        //   * fixed core (ExecForceStoreHeapTuple keeps tts_tid): every
+        //     ctid is the real item pointer, so all 10 join back (==10);
+        //   * unfixed core: every reorder-queued ctid is the sentinel
+        //     (4294967295,0), so none join back (==0).
+        // The INVARIANT across both is all-or-nothing: the bug hits
+        // every reorder-queued row identically, so a partial count
+        // (1..=9) would be a real turbovec regression. The fix was
+        // filed upstream 2026-09-08 and has reached released PGs (e.g.
+        // 16.16); supported older minors may still show the sentinel,
+        // so the test accepts either regime and only forbids a partial
+        // join. The user-facing DATA contract (ids, nearest) is checked
+        // above and is correct regardless. See
+        // docs/upstream/bug6-pgsql-hackers-FILED.md and the ctid note
+        // in docs/FILTERING.md.
         let ctid_chain = Spi::get_one::<i64>(
             "WITH k AS (SELECT ctid AS sctid FROM t_ctid \
                         ORDER BY emb <=> (SELECT emb FROM t_ctid WHERE id = 1) \
@@ -10848,14 +10975,30 @@ mod tests {
         )
         .unwrap()
         .unwrap_or(-1);
-        assert_eq!(
-            ctid_chain, 0,
-            "BUG#6 tripwire: a ctid harvested from a reorder-queued kNN \
-             scan cannot be joined back (upstream ExecForceStoreHeapTuple \
-             drops tts_tid). If this is now 10, PostgreSQL fixed the core \
-             bug -- change this expectation to 10 and retire the \
-             limitation note in docs/FILTERING.md."
+        assert!(
+            ctid_chain == 10 || ctid_chain == 0,
+            "BUG#6: a kNN-scan ctid round-trip must be all-or-nothing \
+             (10 on a fixed core, 0 on an unfixed one), got {ctid_chain}. \
+             A partial count is a turbovec regression. See \
+             docs/upstream/bug6-pgsql-hackers-FILED.md."
         );
+        if ctid_chain == 10 {
+            // Fixed core: belt-and-suspenders, the projected ctids must
+            // NOT be the invalid-item-pointer sentinel.
+            let sentinel = Spi::get_one::<i64>(
+                "WITH k AS (SELECT ctid AS sctid FROM t_ctid \
+                            ORDER BY emb <=> (SELECT emb FROM t_ctid WHERE id = 1) \
+                            LIMIT 10) \
+                 SELECT count(*) FROM k \
+                 WHERE turbovec.tid_to_bigint(sctid) = -4294967296",
+            )
+            .unwrap()
+            .unwrap_or(-1);
+            assert_eq!(
+                sentinel, 0,
+                "fixed core must project real ctids, not the (4294967295,0) sentinel"
+            );
+        }
     }
 
     /// Flat index: SET turbovec.allowlist, ORDER BY <=> LIMIT k

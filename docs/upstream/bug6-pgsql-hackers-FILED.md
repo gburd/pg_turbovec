@@ -27,19 +27,23 @@ than no test.
 
 ## Tracking on our side
 
-`knn_scan_ctid_projection_upstream_limitation` in `src/lib.rs` is the
-tripwire: it asserts the CURRENT (broken) behaviour, so **it will fail
-loudly once a fixed PostgreSQL reaches CI**. That failure is the signal to:
+`knn_scan_ctid_projection_roundtrips_or_sentinels` in `src/lib.rs` was the
+tripwire: it asserted the CURRENT (broken) behaviour, so it failed loudly
+once a fixed PostgreSQL reached CI. That happened (confirmed on PG 16.16 on
+the 2026-11-13 EC2 qualification host), so as of pg_turbovec v2.15.2 it has
+been reframed:
 
-1. flip the tripwire to assert correct ctids, gated on the PG version that
-   ships the fix;
-2. relax the `docs/FILTERING.md` "do not harvest ctid from a kNN scan"
-   warning to name the fixed versions;
-3. note the fix in `CHANGELOG.md`.
+1. the test now asserts the ctid round-trip is ALL-OR-NOTHING -- 10 on a
+   fixed core, 0 on an unfixed one -- and forbids a partial count (which
+   would be a real turbovec regression); it also verifies a fixed core does
+   not project the `(4294967295,0)` sentinel;
+2. the `docs/FILTERING.md` ctid note names the fix and the fixed versions
+   while keeping the version-independent "chain on your key column" rule;
+3. this file records the resolution.
 
-Until then the workaround guidance stands unchanged, and it is a proven
-necessity rather than a preference: `MATERIALIZED`, text casts and subquery
-nesting were all tested and all still yield the sentinel.
+The workaround guidance in `docs/FILTERING.md` still stands for any
+PostgreSQL that has not yet taken the backport: `MATERIALIZED`, text casts
+and subquery nesting all still yield the sentinel there.
 
 ---
 

@@ -133,23 +133,24 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.15.1, 2026-11-13)
+### Current (as of v2.15.2, 2026-11-13)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.15.1 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.14.0 | 2.15.1 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.15.2 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.14.0 | 2.15.2 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 | 2.14.1–2.15.0 | 2.15.1 | `ALTER EXTENSION` only — no REINDEX by the upgrade. `REINDEX` any FLAT index already showing `turbovec_check` `is_corrupt` from the cancelled-VACUUM bug (a plain REINDEX holds; the fault does not recur once 2.15.1 is installed). |
+| 2.15.1      | 2.15.2 | `ALTER EXTENSION` only — no REINDEX; reconnect long-lived pooled backends. Latent REINDEX stale-cache hazard closed + BUG#6 ctid test/docs reframed (upstream fixed it); library+test/docs only, no wire/SQL/scoring change. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.15.1)
+### Where the project actually is (v2.15.2)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -289,14 +290,18 @@ is often something PostgreSQL gives us for free (scalar filtering, durability,
 full-text), and a rival's *directory* is not a shipped capability - check the
 public dispatch path before believing an algorithm is exposed.
 
-**Known upstream bug.** `SELECT ctid ... ORDER BY <vec-op>` projects
-`(4294967295,0)` — a PostgreSQL core defect in
-`ExecForceStoreHeapTuple` (reproduces with core GiST and no turbovec
-loaded), reported upstream 2026-09-08 with a verified one-line fix. The
-`knn_scan_ctid_projection_upstream_limitation` test asserts today's broken
-behaviour on purpose and will FAIL when a fixed PG lands — that failure is
-the signal to flip it, not a regression. See
-`docs/upstream/bug6-pgsql-hackers-FILED.md`.
+**Known upstream bug (now fixed in recent PG).** `SELECT ctid ... ORDER BY
+<vec-op>` projected `(4294967295,0)` — a PostgreSQL core defect in
+`ExecForceStoreHeapTuple` (reproduced with core GiST and no turbovec
+loaded), reported upstream 2026-09-08 with a verified one-line fix. The fix
+has since reached released PostgreSQL (confirmed on 16.16). The
+`knn_scan_ctid_projection_roundtrips_or_sentinels` test (renamed from
+`..._upstream_limitation` in v2.15.2) now accepts BOTH regimes: a kNN-scan
+ctid round-trip must be all-or-nothing (10 on a fixed core, 0 on an unfixed
+one) and a partial count is a turbovec regression; on a fixed core it also
+checks the projected ctids are not the sentinel. The version-independent
+user rule (chain on your key column, never a kNN-scan ctid) stands for PGs
+that lack the backport. See `docs/upstream/bug6-pgsql-hackers-FILED.md`.
 
 `MetaPageData::version` is **8** as of v2.0.0 (was **7** for
 v1.27.0–v1.29.x, **6** for v1.23.0–v1.26.x, **5** for v1.17.0–v1.22.x,

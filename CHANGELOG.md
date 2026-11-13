@@ -4,6 +4,49 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.15.2] — 2026-11-13
+
+PATCH: closes a latent REINDEX stale-cache hazard and reframes the BUG#6 ctid
+test now that upstream PostgreSQL fixed the core defect. No wire-format change
+(`MetaPageData::version` stays **8**), no SQL-surface change, scoring
+bit-identical. No REINDEX.
+
+### Fixed
+
+- **A REINDEX no longer risks a stale per-backend cache entry being spliced
+  onto the rebuilt relfile.** A long-lived backend can hold a dirty AM-cache
+  entry (unflushed inserts) across a `REINDEX`, which keeps the index
+  `rel_oid` but assigns a new relfilenode. `am_lookup_for_mutation` used to
+  serve that stale dirty index when the relfilenode no longer matched
+  ("impossible in practice" — but a pooled backfill writer whose transaction
+  spans a REINDEX makes it routine), which would persist obsolete ids onto the
+  fresh relfile. It now drops the entry and reloads from the current relfile,
+  and `ambuild` purges the `rel_oid`'s cache entries on rebuild. This is a
+  latent hazard found while investigating the 2026-11-13 agora report; that
+  report's actual cause was the cancelled-VACUUM bug fixed in 2.15.1, but this
+  path is closed in its own right. A fails-before/passes-after `#[pg_test]`
+  (`mutation_lookup_drops_stale_dirty_entry_after_relfilenode_change`) covers
+  it.
+
+### Changed
+
+- **BUG#6 (kNN-scan `ctid` projection) is fixed upstream.** PostgreSQL fixed
+  `ExecForceStoreHeapTuple` losing `tts_tid` (filed on pgsql-hackers
+  2026-09-08; confirmed present in 16.16), so a kNN (`ORDER BY <=>`) index
+  scan on a fixed core now projects real ctids that round-trip. The
+  regression test (renamed `knn_scan_ctid_projection_roundtrips_or_sentinels`)
+  now accepts both a fixed core (round-trip returns all `k`) and an unfixed
+  one (the `(4294967295,0)` sentinel, returns 0), and forbids a partial count
+  (which would be a turbovec regression); on a fixed core it also checks the
+  ctids are not the sentinel. `docs/FILTERING.md` names the fix while keeping
+  the version-independent rule: chain on your own key column, never on a ctid
+  harvested from a kNN scan (still required on PGs that lack the backport).
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.15.2';` — no REINDEX. Reconnect
+long-lived pooled backends so they load the new library.
+
 ## [2.15.1] — 2026-11-13
 
 PATCH: **fixes a `.tvim` duplicate-id corruption that a cancelled VACUUM left

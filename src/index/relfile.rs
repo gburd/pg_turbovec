@@ -125,6 +125,14 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     pub(crate) static INJECT_TEAR_BEFORE_IDS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Cancelled-VACUUM regression harness (operator report 2026-11-13).
+    /// When `Some(k)`, the flat swap-remove loop in `vacuum.rs` aborts
+    /// (returns) after `k` atomic swap-remove steps, simulating a
+    /// `check_for_interrupts!()` cancel landing mid-loop. With the fix
+    /// the partial result is still a clean bijection; the pre-fix code
+    /// left the moved rows counted twice. `None` disables injection.
+    pub(crate) static ABORT_SWAP_REMOVE_AFTER: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Take the shared side of the relfile-rewrite lock (a reader
@@ -2604,6 +2612,11 @@ unsafe fn write_full_inner_with_tombstones(
 /// Caller must hold an exclusive relation lock and have ensured
 /// the chain extends at least up to `max(from_slot, to_slot) + 1`
 /// rows. Both slots must be within the existing chain length.
+// Now only exercised by the swap-remove regression tests: the
+// production flat-VACUUM path moved to the atomic
+// `swap_remove_slot_and_shrink`, which folds the move and the
+// `n_vectors` shrink into one GenericXLog record.
+#[cfg_attr(not(any(test, feature = "pg_test")), allow(dead_code))]
 pub(crate) unsafe fn copy_slot_in_chain(
     rel: pg_sys::Relation,
     first_blkno: u32,
@@ -2667,6 +2680,147 @@ pub(crate) unsafe fn copy_slot_in_chain(
     std::ptr::copy_nonoverlapping(row.as_ptr(), dst_data.add(dst_off), stride_us);
     pg_sys::GenericXLogFinish(state);
     pg_sys::UnlockReleaseBuffer(dst_buf);
+}
+
+/// Atomically move one live tail slot into a dead hole AND lower the
+/// meta's `n_vectors`, in a SINGLE `GenericXLog` record.
+///
+/// This is the crash- and cancel-safe primitive for the flat VACUUM
+/// swap-remove. The previous code moved `last -> dead_slot` with three
+/// independent `copy_slot_in_chain` calls (each its own durable WAL
+/// record) and lowered `n_vectors` only after the whole loop. A cancel
+/// (`check_for_interrupts!()`) or a crash between a move and the final
+/// shrink left the moved row counted at BOTH its new slot and its old
+/// tail slot -- the "id N appears in more than one slot" corruption a
+/// routine autovacuum lock-conflict cancellation hits (operator report
+/// 2026-11-13). Folding the three destination-page writes and the meta
+/// shrink into one record makes every durable state bijective: the
+/// image either has the row moved AND the count lowered, or neither.
+///
+/// `old` is the meta as it stood before this step; `new_n_vectors` is
+/// the post-move live count (`old.n_vectors - 1` for one dead slot,
+/// i.e. the new `alive`). The codes/scales/ids chain layout is
+/// preserved (only `n_vectors` and the derived `*_count` page counts
+/// change, exactly as `write_meta_shrink_in_place` computes them), so
+/// the swap-removed slots stay at their on-disk positions for reads.
+/// `new_am_version` bumps the scan-cache freshness key.
+///
+/// The four registered buffers are the meta page (block 0) and the
+/// codes/scales/ids DESTINATION pages, which live in distinct chains
+/// (all `*_first > 0`, each a separate block), so no buffer is
+/// registered twice and the count stays at `MAX_GENERIC_XLOG_PAGES`.
+/// When `from_slot == to_slot` (the dead slot IS the last live slot)
+/// no row moves and only the meta page is registered.
+///
+/// # Safety
+/// Caller must hold the exclusive relfile-rewrite lock. `from_slot`
+/// and `to_slot` must be `< old.n_vectors`.
+pub(crate) unsafe fn swap_remove_slot_and_shrink(
+    rel: pg_sys::Relation,
+    old: &MetaPageData,
+    from_slot: u64,
+    to_slot: u64,
+    new_n_vectors: u64,
+    new_am_version: u32,
+) {
+    // Read the three source rows into locals FIRST, under shared
+    // locks, with no WAL -- exactly as `copy_slot_in_chain`'s
+    // different-page branch does (the source isn't dirtied, so it
+    // never forces a full-page image). Skipped entirely when the dead
+    // slot is already the last live slot (nothing to move).
+    let moving = from_slot != to_slot;
+    let chains: [(u32, u32, u32); 3] = [
+        (old.codes_first, old.stride_bytes, old.rows_per_codes_page),
+        (
+            old.scales_first,
+            std::mem::size_of::<f32>() as u32,
+            old.rows_per_scales_page,
+        ),
+        (
+            old.ids_first,
+            std::mem::size_of::<u64>() as u32,
+            old.rows_per_ids_page,
+        ),
+    ];
+    // Per chain: (dst_blkno, dst_off, row_bytes).
+    let mut plan: [(u32, usize, Vec<u8>); 3] = Default::default();
+    if moving {
+        for (i, &(first, stride, rpp)) in chains.iter().enumerate() {
+            let rpp64 = u64::from(rpp);
+            let stride_us = stride as usize;
+            let src_blkno = first + (from_slot / rpp64) as u32;
+            let dst_blkno = first + (to_slot / rpp64) as u32;
+            let src_off = ((from_slot % rpp64) as usize) * stride_us;
+            let dst_off = ((to_slot % rpp64) as usize) * stride_us;
+            let mut row = vec![0u8; stride_us];
+            let src_buf = read_block(rel, src_blkno, /*exclusive=*/ false);
+            let src_data = page_data(src_buf);
+            std::ptr::copy_nonoverlapping(src_data.add(src_off), row.as_mut_ptr(), stride_us);
+            pg_sys::UnlockReleaseBuffer(src_buf);
+            plan[i] = (dst_blkno, dst_off, row);
+        }
+    }
+
+    // Build the shrunk meta exactly as `write_meta_shrink_in_place`
+    // would, so this path and the planner agree on chain page counts.
+    let new_meta = meta_shrunk(old, new_n_vectors, new_am_version);
+
+    // One GenericXLog record: the meta page plus (when moving) the
+    // three destination pages. Register the meta first (block 0), then
+    // the distinct destination blocks.
+    let state = pg_sys::GenericXLogStart(rel);
+    let meta_buf = read_block(rel, META_BLKNO, /*exclusive=*/ true);
+    let meta_page =
+        pg_sys::GenericXLogRegisterBuffer(state, meta_buf, pg_sys::GENERIC_XLOG_FULL_IMAGE as i32);
+    page_init_no_hole(meta_page);
+    let meta_dst = meta_page.cast::<u8>().add(PAGE_HEADER_BYTES);
+    let encoded = new_meta.encode();
+    std::ptr::copy_nonoverlapping(encoded.as_ptr(), meta_dst, encoded.len());
+
+    let mut dst_bufs: Vec<pg_sys::Buffer> = Vec::with_capacity(3);
+    if moving {
+        for (dst_blkno, dst_off, row) in &plan {
+            let dst_buf = read_block(rel, *dst_blkno, /*exclusive=*/ true);
+            let page = pg_sys::GenericXLogRegisterBuffer(
+                state,
+                dst_buf,
+                pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+            );
+            // Do NOT page_init here: the destination page already
+            // carries live rows whose bytes must be preserved (only
+            // one row is overwritten).
+            let dst_data = page.cast::<u8>().add(PAGE_HEADER_BYTES);
+            std::ptr::copy_nonoverlapping(row.as_ptr(), dst_data.add(*dst_off), row.len());
+            dst_bufs.push(dst_buf);
+        }
+    }
+
+    pg_sys::GenericXLogFinish(state);
+    for b in dst_bufs {
+        pg_sys::UnlockReleaseBuffer(b);
+    }
+    pg_sys::UnlockReleaseBuffer(meta_buf);
+}
+
+/// The meta page a flat swap-remove leaves after shrinking to
+/// `new_n_vectors`. Factored out of `write_meta_shrink_in_place` so
+/// the per-step atomic primitive stamps a byte-identical meta.
+fn meta_shrunk(old: &MetaPageData, new_n_vectors: u64, new_am_version: u32) -> MetaPageData {
+    MetaPageData {
+        n_vectors: new_n_vectors,
+        am_version: new_am_version,
+        codes_count: MetaPageData::padded_pages_needed(new_n_vectors, old.rows_per_codes_page),
+        scales_count: MetaPageData::padded_pages_needed(new_n_vectors, old.rows_per_scales_page),
+        ids_count: MetaPageData::padded_pages_needed(new_n_vectors, old.rows_per_ids_page),
+        blocked_first: 0,
+        blocked_count: 0,
+        blocked_bytes: 0,
+        n_blocks_blocked: 0,
+        codebook_n_levels: 0,
+        centroids: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS],
+        boundaries: [0.0; crate::index::page::MAX_CODEBOOK_LEVELS - 1],
+        ..*old
+    }
 }
 
 /// Read the ids chain (only) into a `Vec<u64>`. Cheaper than
@@ -2904,6 +3058,12 @@ pub(crate) unsafe fn read_scales_only(rel: pg_sys::Relation, meta: &MetaPageData
 /// # Safety
 ///
 /// Caller must hold an exclusive relation lock.
+// Retained for the swap-remove regression tests + as a readable
+// reference for the meta layout a shrink leaves; the production
+// flat-VACUUM path now shrinks `n_vectors` incrementally inside
+// `swap_remove_slot_and_shrink` (atomic with each move), so this
+// whole-shrink-after-the-loop writer is no longer on the hot path.
+#[cfg_attr(not(any(test, feature = "pg_test")), allow(dead_code))]
 pub(crate) unsafe fn write_meta_shrink_in_place(
     rel: pg_sys::Relation,
     old: &MetaPageData,

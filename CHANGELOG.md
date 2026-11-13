@@ -4,6 +4,59 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.15.1] — 2026-11-13
+
+PATCH: **fixes a `.tvim` duplicate-id corruption that a cancelled VACUUM left
+in a flat index.** No wire-format change (`MetaPageData::version` stays **8**),
+no SQL-surface change, scoring bit-identical. The upgrade needs no REINDEX; an
+index already corrupted by the bug is repaired by a plain `REINDEX INDEX`.
+
+### Fixed
+
+- **A cancelled VACUUM no longer leaves a duplicate id in a flat index.**
+  Cancelling a VACUUM while it is in the index-vacuum phase of a flat turbovec
+  index (no `lists=`) could leave the `.tvim` id table with a real heap id in
+  two slots, after which `turbovec_check` reported `is_corrupt`, every INSERT
+  failed with `duplicate ids in the .tvim id table`, and every later VACUUM
+  refused to shrink. The cancel did not have to be manual: PostgreSQL's own
+  autovacuum lock-conflict cancellation (an INSERT waits on the index lock
+  autovacuum holds, and after `deadlock_timeout` the server cancels the
+  autovacuum) triggers it on any table with a busy writer. Reported and
+  reproduced deterministically by the pg.ddx.io operators (2026-11-13), the
+  same deployment behind the 2026-08 dup-id reports.
+
+  Root cause: the flat swap-remove moved each surviving tail slot into a dead
+  hole with three independent `GenericXLog` records (codes, scales, ids), each
+  durable on its own, and lowered the meta's `n_vectors` only after the whole
+  loop. A cancel (`check_for_interrupts!()`) or a crash between a move and that
+  final shrink left the moved row counted at both its new slot and its old
+  tail slot. The swap-remove now lowers `n_vectors` in the **same**
+  `GenericXLog` record as each move
+  (`relfile::swap_remove_slot_and_shrink`), so every durable image is a clean
+  bijection: an interrupt or crash leaves a smaller but correct table, never a
+  duplicate. This also closes the equivalent crash-mid-loop window. IVF,
+  graph, and 1-bit-BQ indexes were never affected (they vacuum through the
+  tombstone path, which moves no slots).
+
+### Tests
+
+- `cancelled_vacuum_swap_remove_stays_bijective` (`#[pg_test]`): drives
+  `ambulkdelete` on a flat index and aborts the swap-remove loop mid-way via a
+  new test hook (`ABORT_SWAP_REMOVE_AFTER`), then asserts the on-disk id table
+  is still a bijection and `turbovec_check` is clean. Fails before this fix
+  (duplicate id after the abort), passes after.
+- `benches/corruption-repro/cancelled_vacuum_dup_id.sh`: the operators'
+  field-realistic repro (background VACUUM cancelled during
+  `pg_stat_progress_vacuum` phase `vacuuming indexes`). 3/3 corrupt on the
+  unpatched 2.15.0 binary; 15/15 clean after the fix.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.15.1';` — no REINDEX required by the
+upgrade. An index **already** corrupted by this bug is repaired by a plain
+`REINDEX INDEX <name>;` (unlike the 2026-08 writer-restart dup-ids, which
+needed DROP + CREATE); the corruption does not recur once 2.15.1 is installed.
+
 ## [2.15.0] — 2026-10-28
 
 MINOR: **four open GitHub issues fixed** — all additive, no wire-format change

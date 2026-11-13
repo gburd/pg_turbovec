@@ -1,0 +1,9 @@
+-- pg_turbovec upgrade 2.15.0 -> 2.15.1
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.15.1';`.
+--
+-- No new or changed SQL objects. v2.15.1 fixes a flat-index .tvim
+-- duplicate-id corruption left by a CANCELLED VACUUM (the swap-remove now
+-- lowers n_vectors atomically with each slot move). Library-only; no wire
+-- change (stays v8), scoring bit-identical, no REINDEX required by the
+-- upgrade. An index already corrupted by the bug is repaired by a plain
+-- `REINDEX INDEX <name>;`. Intentionally empty apart from this comment.

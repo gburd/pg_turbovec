@@ -1,0 +1,22 @@
+-- pg_turbovec v2.15.1
+--
+-- PATCH: fixes a .tvim duplicate-id corruption that a CANCELLED VACUUM
+-- could leave in a FLAT index (operator report 2026-11-13). No SQL-surface
+-- change, no GUC change, no wire-format change (MetaPageData::version stays
+-- 8), scoring bit-identical.
+--
+-- The flat VACUUM swap-remove moved each live tail slot into a dead hole with
+-- separate per-slot GenericXLog records and lowered n_vectors only after the
+-- loop. A cancel (routinely, an autovacuum lock-conflict cancellation) or a
+-- crash between a move and that final shrink left the moved row counted at
+-- both its new slot and its old tail slot -- "id N appears in more than one
+-- slot", which then blocked every INSERT. The swap-remove now lowers
+-- n_vectors in the SAME GenericXLog record as each move, so every durable
+-- image is a clean bijection; an interrupt or crash leaves a smaller but
+-- correct table. IVF/graph/1-bit-BQ indexes were never affected (they use
+-- the tombstone path, no slot moves).
+--
+-- No REINDEX required by the upgrade. An index ALREADY corrupted by this bug
+-- is repaired by a plain `REINDEX INDEX <name>;` (it does not recur once this
+-- release is installed). `ALTER EXTENSION pg_turbovec UPDATE TO '2.15.1';` is
+-- sufficient. Intentionally empty apart from this comment.

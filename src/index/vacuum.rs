@@ -223,51 +223,51 @@ unsafe fn ambulkdelete_relfile(
     // unlocked ids read.) The in-place swap-remove overwrites
     // codes/scales/ids pages and then shrinks + truncates the meta,
     // all across many separate GenericXLog records.
+    // Swap-remove, atomically per step. Each dead hole is filled by the
+    // current last live slot, and the meta's `n_vectors` is lowered in
+    // the SAME GenericXLog record as the move (see
+    // `relfile::swap_remove_slot_and_shrink`). This is the crash- and
+    // cancel-safe shape: `check_for_interrupts!()` can raise between
+    // steps, but every durable image is bijective -- a row is either
+    // moved AND uncounted at its old tail, or neither. The pre-fix code
+    // moved the three chains in separate records and lowered `n_vectors`
+    // only after the loop, so a cancel (routinely, an autovacuum
+    // lock-conflict cancellation) or a crash between a move and the
+    // post-loop shrink left the moved row counted twice -- the
+    // "id N appears in more than one slot" corruption (operator report
+    // 2026-11-13). dead_slots is ascending; reverse-iterate so we always
+    // pull from the live tail.
+    //
+    // v1.29.1 corruption fix #3: the exclusive relfile-rewrite lock is
+    // held from the top of this function (across the ids read + dead-
+    // slot computation), so no concurrent flush can move a slot under us.
+    let next_version = meta.am_version.saturating_add(1);
     let mut alive: u64 = meta.n_vectors;
+    #[cfg(any(test, feature = "pg_test"))]
+    let mut steps_done: u64 = 0;
     for &dead_slot in dead_slots.iter().rev() {
-        // A VACUUM deleting millions of rows holds the exclusive
-        // relfile-rewrite lock across this whole loop (blocking all
-        // readers); without an interrupt poll here the loop is
-        // uncancellable. `copy_slot_in_chain` holds only page-level
-        // heavyweight locks it takes+releases internally, so a cancel
-        // between slots unwinds cleanly and the lock manager releases
-        // everything at abort.
         pg_sys::check_for_interrupts!();
         let s = dead_slot as u64;
         let last = alive - 1;
-        if s != last {
-            // Codes chain.
-            relfile::copy_slot_in_chain(
-                index,
-                meta.codes_first,
-                meta.stride_bytes,
-                meta.rows_per_codes_page,
-                last,
-                s,
-            );
-            // Scales chain.
-            relfile::copy_slot_in_chain(
-                index,
-                meta.scales_first,
-                std::mem::size_of::<f32>() as u32,
-                meta.rows_per_scales_page,
-                last,
-                s,
-            );
-            // Ids chain. Updating the on-disk id at slot `s`
-            // matters for the next ambulkdelete pass: the
-            // callback walks ids chain -> ItemPointer -> heap
-            // tuple lookup.
-            relfile::copy_slot_in_chain(
-                index,
-                meta.ids_first,
-                std::mem::size_of::<u64>() as u32,
-                meta.rows_per_ids_page,
-                last,
-                s,
-            );
-        }
+        // Move `last -> s` (a no-op move when s == last) AND shrink to
+        // `last` in one atomic record. `read_ids_only`/`read_chain` for
+        // the next pass still see a consistent table at every point.
+        relfile::swap_remove_slot_and_shrink(index, &meta, last, s, last, next_version);
         alive -= 1;
+        // TEST-ONLY: simulate a cancel landing mid-loop. The swap-remove
+        // steps already done are durable; bail out exactly as a
+        // check_for_interrupts!() longjmp would, leaving the on-disk
+        // image for the test to inspect. With the per-step atomic shrink
+        // that image is a clean bijection; the pre-fix code left a dup.
+        #[cfg(any(test, feature = "pg_test"))]
+        {
+            steps_done += 1;
+            if relfile::ABORT_SWAP_REMOVE_AFTER.with(|c| c.get()) == Some(steps_done) {
+                relfile::unlock_relfile_write(index);
+                (*stats).num_index_tuples = alive as f64;
+                return stats;
+            }
+        }
     }
     debug_assert_eq!(alive, meta.n_vectors - dead_count as u64);
 
@@ -305,15 +305,12 @@ unsafe fn ambulkdelete_relfile(
         }
     }
 
-    // Pass 3: persist the new n_vectors via the meta page. The
-    // chain layout (codes_first / scales_first / ids_first /
-    // rows_per_*_page / stride_bytes) is preserved so the swap-
-    // removed slots remain at their on-disk positions for
-    // subsequent reads. Bump am_version so the per-backend cache
-    // (cache.rs) re-loads next scan.
+    // Pass 3: the meta already carries the shrunk `n_vectors` and the
+    // bumped `am_version` -- `swap_remove_slot_and_shrink` lowered the
+    // count in the same atomic record as each move, so no separate
+    // shrink write is needed (and issuing one would be a redundant WAL
+    // record). `new_n` is the final live count for the stats + truncate.
     let new_n = alive;
-    let next_version = meta.am_version.saturating_add(1);
-    relfile::write_meta_shrink_in_place(index, &meta, new_n, next_version);
 
     // Pass 4: release trailing ids-chain pages that the shrink
     // left orphaned. RelationTruncate emits XLOG_SMGR_TRUNCATE

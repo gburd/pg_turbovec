@@ -133,23 +133,23 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.15.0, 2026-10-28)
+### Current (as of v2.15.1, 2026-11-13)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.15.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.14.0 | 2.15.0 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
-| 2.14.1      | 2.15.0 | `ALTER EXTENSION` only — no REINDEX. Four GitHub-issue fixes, all additive (empty-IVF degraded reporting + a latent empty-scan crash, TOAST query-vector re-fetch, per-query IVF rotation rebuild). Optionally `REINDEX` an ALREADY-empty-built IVF index to get its new degraded report (reporting only). |
+| any 1.x     | 2.15.1 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.14.0 | 2.15.1 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| 2.14.1–2.15.0 | 2.15.1 | `ALTER EXTENSION` only — no REINDEX by the upgrade. `REINDEX` any FLAT index already showing `turbovec_check` `is_corrupt` from the cancelled-VACUUM bug (a plain REINDEX holds; the fault does not recur once 2.15.1 is installed). |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.15.0)
+### Where the project actually is (v2.15.1)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -205,15 +205,24 @@ patch (`docs/UPGRADING.md`: patches require bit-identical scoring), and
 `normalise_into` must stay bit-identical forever (it feeds persisted codes;
 `normalise_bit_identical_to_old` guards it, including the returned norm).
 
-**Corruption history — read before touching persist/scan code.** Seven
+**Corruption history — read before touching persist/scan code.** Eight
 distinct root causes have been found and fixed (counter-drift, VACUUM
 lost-update, interrupted-flush torn write, graph unlocked RMW, BQ tombstone
-resurrection, stale `touched_ids` re-splice in v2.11.0, and reused
-`am_version` in v2.14.1; the v2.14.1 review also found the deferred flush
+resurrection, stale `touched_ids` re-splice in v2.11.0, reused
+`am_version` in v2.14.1, and a cancelled-VACUUM swap-remove leaving a
+duplicate id in v2.15.1; the v2.14.1 review also found the deferred flush
 dropping an IVF index's tombstone list and rewriting a stale snapshot onto a
-VACUUM-emptied index). **Every relfile rewrite must carry forward every
-chain it does not own** -- tombstones included: a writer that plans a fresh
-meta page and passes `None` for a chain erases it. The recurring one is a **chain-offset running sum
+VACUUM-emptied index). The v2.15.1 one is the sharpest lesson on
+**partial-progress durability**: the flat VACUUM swap-remove wrote each slot
+move as its own `GenericXLog` record but lowered `n_vectors` only after the
+loop, so a cancel (routinely an autovacuum lock-conflict cancellation) or a
+crash between a move and the shrink left a live row counted at both its new
+and old tail slot. Any multi-step relfile mutation must make each durable
+image self-consistent: `swap_remove_slot_and_shrink` folds the move AND the
+`n_vectors` decrement into ONE record. **Every relfile rewrite must carry
+forward every chain it does not own** -- tombstones included: a writer that
+plans a fresh meta page and passes `None` for a chain erases it. The
+recurring one is a **chain-offset running sum
 that omits a chain** — it has bitten four times (`graph_count` in v1.24.0,
 three sites missing `bq_mean_count` in v2.6.0, two more in v2.7.0). If you add
 a chain, grep every running sum in `page.rs` and `relfile.rs` and add it to all
@@ -484,7 +493,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 491 passed,
+3. Pass `cargo pgrx test pg16` cleanly (current count: 492 passed,
    9 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`

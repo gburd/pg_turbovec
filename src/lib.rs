@@ -9508,7 +9508,7 @@ mod tests {
             "2.0.0", "2.1.0", "2.2.0", "2.2.1", "2.2.2", "2.3.0", "2.4.0", "2.5.0", "2.6.0",
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
-            "2.12.0", "2.12.1", "2.13.0", "2.14.0", "2.14.1",
+            "2.12.0", "2.12.1", "2.13.0", "2.14.0", "2.14.1", "2.15.0", "2.15.1",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10463,6 +10463,98 @@ mod tests {
             assert!(!res.is_null());
             pg_sys::index_close(rel, pg_sys::ShareUpdateExclusiveLock as i32);
         }
+    }
+
+    /// Cancelled-VACUUM dup-id corruption (operator report 2026-11-13).
+    /// A flat index's VACUUM swap-remove moves live tail slots into dead
+    /// holes and lowers `n_vectors`. When a cancel
+    /// (`check_for_interrupts!()` -- routinely an autovacuum lock-conflict
+    /// cancellation) lands mid-loop, the moves already done are durable
+    /// but the shrink was not, so a moved live row ends up counted at
+    /// both its new slot and its old tail slot: "id N appears in more
+    /// than one slot". The fix lowers `n_vectors` in the SAME
+    /// GenericXLog record as each move, so a mid-loop abort leaves a
+    /// clean bijection.
+    ///
+    /// `ABORT_SWAP_REMOVE_AFTER` stops the loop after one atomic step,
+    /// modelling the cancel. Fails-before (separate per-record shrink):
+    /// the on-disk ids carry a duplicate. Passes-after: clean.
+    #[pg_test]
+    fn cancelled_vacuum_swap_remove_stays_bijective() {
+        use crate::index::relfile;
+        use_turbovec();
+        // Flat index over 200 rows; delete a scattered third so the
+        // swap-remove loop has many holes and runs several moves.
+        Spi::run("CREATE TABLE t_cvac (id bigint PRIMARY KEY, emb vector)").unwrap();
+        Spi::run(
+            "INSERT INTO t_cvac SELECT g, ('[' || g || ',1,2,3,4,5,6,7]')::vector \
+             FROM generate_series(1, 200) g",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE INDEX t_cvac_idx ON t_cvac USING turbovec (emb vec_ip_ops) \
+             WITH (bit_width = 4)",
+        )
+        .unwrap();
+        let indexrelid: pg_sys::Oid = Spi::get_one("SELECT 't_cvac_idx'::regclass::oid")
+            .unwrap()
+            .expect("oid");
+
+        let dead_set: std::collections::HashSet<u64> = {
+            let mut set = std::collections::HashSet::new();
+            Spi::connect(|client| {
+                let tup = client
+                    .select("SELECT ctid FROM t_cvac WHERE id % 3 = 1", None, &[])
+                    .unwrap();
+                for row in tup {
+                    let tid: pg_sys::ItemPointerData = row.get_by_name("ctid").unwrap().unwrap();
+                    set.insert(pgrx::itemptr::item_pointer_to_u64(tid));
+                }
+            });
+            set
+        };
+        assert!(dead_set.len() > 2, "need several dead rows for a real loop");
+        Spi::run("DELETE FROM t_cvac WHERE id % 3 = 1").unwrap();
+        unsafe extern "C-unwind" fn cvac_dead_cb(
+            tid: pg_sys::ItemPointer,
+            state: *mut std::ffi::c_void,
+        ) -> bool {
+            let set = &*(state as *const std::collections::HashSet<u64>);
+            set.contains(&pgrx::itemptr::item_pointer_to_u64(*tid))
+        }
+
+        // Abort the swap-remove loop after a single atomic step, exactly
+        // as a cancel landing mid-loop would.
+        relfile::ABORT_SWAP_REMOVE_AFTER.with(|c| c.set(Some(1)));
+        ivf_drive_ambulkdelete(indexrelid, &dead_set, Some(cvac_dead_cb));
+        relfile::ABORT_SWAP_REMOVE_AFTER.with(|c| c.set(None));
+        crate::cache::invalidate_all();
+
+        // Re-read the on-disk ids under the post-abort meta: `n_vectors`
+        // and the ids chain must agree and carry no duplicate. Pre-fix
+        // this had a dup (a moved row counted at both slots).
+        let (dup, ok): (Option<i64>, bool) = unsafe {
+            let rel = pg_sys::index_open(indexrelid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta after abort");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            let d = crate::index::scan::first_duplicate_id(&ids).map(|x| x as i64);
+            (d, ids.len() as u64 == m.n_vectors)
+        };
+        assert!(
+            ok,
+            "ids-chain length must equal the meta n_vectors after a mid-loop abort"
+        );
+        assert_eq!(
+            dup, None,
+            "a cancel mid swap-remove must leave a clean bijection, found duplicate id {dup:?}"
+        );
+        // And turbovec_check agrees it is healthy.
+        let corrupt: Option<bool> =
+            Spi::get_one("SELECT is_corrupt FROM turbovec.turbovec_check('t_cvac_idx'::regclass)")
+                .unwrap();
+        assert_eq!(corrupt, Some(false), "turbovec_check must report clean");
+        crate::cache::invalidate_all();
     }
 
     /// THE correctness anchor: with `probes >= lists`, the IVF scan

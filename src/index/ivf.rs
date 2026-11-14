@@ -1132,8 +1132,57 @@ fn gemm_lloyd_assign(
 ///   distinct sample points; the remaining `lists - n_sample` are
 ///   re-seeded from the largest cell (standard rule). Such a cluster
 ///   set is still valid (assignment picks the nearest of `lists`).
+/// IVF coarse-centroid trainer selection. Chosen at build time from
+/// `turbovec.ivf_use_emeans` and threaded in from the Postgres-coupled
+/// build path (this module stays Postgres-free).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trainer {
+    /// Classic k-means++-seeded Lloyd (the pre-v2.16 trainer).
+    Lloyd,
+    /// e-means (Bessa et al., Meta FAIR, arXiv 2611.09501): mini-batch
+    /// EMA k-means with scaling-law batch/step, cosine annealing, and
+    /// dead-cluster revival, run for `epochs` passes.
+    Emeans { epochs: usize },
+}
+
+/// Train coarse centroids with the default trainer (e-means since
+/// v2.16.0). The production build path calls [`train_kmeans_with`]
+/// with the GUC-selected trainer; this convenience wrapper is used by
+/// the determinism tests and is kept as the public "just train it"
+/// entry point.
+#[cfg_attr(not(any(test, feature = "pg_test")), allow(dead_code))]
 pub fn train_kmeans(sample: &[f32], n_sample: usize, lists: usize, dim: usize) -> CoarseModel {
-    train_kmeans_iters(sample, n_sample, lists, dim).0
+    // Default to e-means (v2.16.0): ~5x faster coarse training and
+    // higher measured IVF recall@10 than Lloyd-25 on SIFT1M. The Lloyd
+    // path stays available via `train_kmeans_with` / the
+    // `turbovec.ivf_use_emeans` GUC.
+    train_kmeans_with(sample, n_sample, lists, dim, Trainer::Emeans { epochs: 4 })
+}
+
+/// [`train_kmeans`] with an explicit [`Trainer`]. The e-means path
+/// delegates to `turbovec::cluster::cluster_emeans` (deterministic in
+/// [`IVF_SEED`]); the Lloyd path is the original k-means++ + Lloyd
+/// solver below. Both return centroids in the same `lists * dim`
+/// row-major layout, so the rest of the build is trainer-agnostic.
+pub fn train_kmeans_with(
+    sample: &[f32],
+    n_sample: usize,
+    lists: usize,
+    dim: usize,
+    trainer: Trainer,
+) -> CoarseModel {
+    match trainer {
+        Trainer::Lloyd => train_kmeans_iters(sample, n_sample, lists, dim).0,
+        Trainer::Emeans { epochs } => {
+            let r =
+                turbovec::cluster::cluster_emeans(sample, n_sample, lists, dim, epochs, IVF_SEED);
+            CoarseModel {
+                centroids: r.centroids,
+                lists,
+                dim,
+            }
+        }
+    }
 }
 
 /// As [`train_kmeans`], but also returns the number of Lloyd's

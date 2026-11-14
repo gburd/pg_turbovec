@@ -1,0 +1,9 @@
+-- pg_turbovec upgrade 2.15.2 -> 2.16.0
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.0';`.
+--
+-- No new or changed SQL objects. v2.16.0 switches the IVF coarse-centroid
+-- trainer to e-means (default) and adds two session GUCs
+-- (turbovec.ivf_use_emeans, turbovec.ivf_emeans_epochs), both registered by
+-- the library at load time rather than by SQL. No wire change (stays v8),
+-- scoring bit-identical, no forced REINDEX (REINDEX an IVF index to adopt the
+-- new trainer; optional). Intentionally empty apart from this comment.

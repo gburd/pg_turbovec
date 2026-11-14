@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "2.15.2"
+version = "2.16.0"
 edition = "2024"
 rust-version = "1.96.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -44,7 +44,7 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.3"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "1202a9ea3194b979c747002a967a6bc2ac48d0f1", features = ["mask-skip-counter"] }
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "662084cb06efd68439721f842fc5a0579ffbc6f6", features = ["mask-skip-counter"] }
 # ^ turbovec 1.1.2 (upstream c3b043b: staged search keeps the scan's recall on
 #   bunched corpora) + SIX additive fork carries on branch
 #   gburd/turbovec@main (= pgtv-2.12.1-port + carry #6): `pub fn repack` (3ed5708), the
@@ -58,6 +58,11 @@ turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "1202a9ea3194b
 #   (bounded 10 ms) instead of re-solved, pinned by
 #   `warm_lookup_waits_for_a_briefly_held_lock` and
 #   `warm_codebook_is_never_resolved_under_contention`.
+#   Carry #7 (1202a9e): position-independent prepared image + borrowed-view
+#   searcher (Phase S2a). NEW carry #8 (662084c): a `cluster` module with
+#   deterministic Euclidean k-means -- `cluster_lloyd` and `cluster_emeans`
+#   (Bessa et al., Meta FAIR, arXiv 2611.09501) -- which pg_turbovec's IVF
+#   coarse trainer uses (e-means default; see `turbovec.ivf_use_emeans`).
 #   Upstream issues #545/#546/#547. We persist only packed codes, never
 #   turbovec's v8 file container, so its file format does not touch our wire
 #   format. Pinned by git rev so the port builds anywhere.

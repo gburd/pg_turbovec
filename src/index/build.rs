@@ -227,6 +227,20 @@ use crate::index::{options, relfile};
 use crate::kernels;
 use crate::vec::Vector;
 
+/// Resolve the IVF coarse-centroid trainer from the GUCs
+/// (`turbovec.ivf_use_emeans`, `turbovec.ivf_emeans_epochs`). Must be
+/// called on the backend thread -- `GucSetting::get` is not valid on a
+/// rayon worker -- so the build path reads it before entering the
+/// build pool and passes the result into `ivf::train_kmeans_with`.
+fn ivf_trainer_from_guc() -> ivf::Trainer {
+    if guc::IVF_USE_EMEANS.get() {
+        let epochs = guc::IVF_EMEANS_EPOCHS.get().clamp(1, 64) as usize;
+        ivf::Trainer::Emeans { epochs }
+    } else {
+        ivf::Trainer::Lloyd
+    }
+}
+
 /// Phase F-2: is this index a ColBERT / multivector token index?
 ///
 /// Detected from the indexed attribute's type: a ColBERT index is
@@ -1136,8 +1150,11 @@ unsafe fn ivf_build_and_write(
     // into the pure-Rust ivf module (tracked follow-up); stage-
     // boundary polling is the first, lock-free increment.
     pg_sys::check_for_interrupts!();
+    // Read the trainer GUCs on the BACKEND thread (GucSetting::get must
+    // not run on a rayon worker; see guc.rs). e-means is the default.
+    let trainer = ivf_trainer_from_guc();
     let model = super::build_pool::install(build_pool, || {
-        ivf::train_kmeans(&sample, sample_count, lists, dim)
+        ivf::train_kmeans_with(&sample, sample_count, lists, dim, trainer)
     });
     drop(sample);
     trace_stage!("1_train_kmeans", t0);
@@ -1579,8 +1596,9 @@ unsafe fn bq_ivf_build_and_write(
     let sample = std::mem::take(&mut state.ivf_sample);
     let sample_count = state.ivf_sample_count;
     pg_sys::check_for_interrupts!(); // stage boundary; no lock held
+    let trainer = ivf_trainer_from_guc();
     let model = super::build_pool::install(build_pool, || {
-        ivf::train_kmeans(&sample, sample_count, lists, dim)
+        ivf::train_kmeans_with(&sample, sample_count, lists, dim, trainer)
     });
     drop(sample);
 

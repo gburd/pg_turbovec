@@ -9624,6 +9624,7 @@ mod tests {
             "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.8.0", "2.8.1",
             "2.8.2", "2.8.3", "2.8.4", "2.9.0", "2.10.0", "2.10.1", "2.10.2", "2.10.3", "2.11.0",
             "2.12.0", "2.12.1", "2.13.0", "2.14.0", "2.14.1", "2.15.0", "2.15.1", "2.15.2",
+            "2.16.0",
         ];
         let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         // Say WHICH versions differ, not just that they do. This assertion has
@@ -10405,6 +10406,53 @@ mod tests {
              FROM generate_series(1, {n}) g"
         ))
         .unwrap();
+    }
+
+    /// v2.16.0: IVF coarse centroids are trained with e-means by
+    /// default (`turbovec.ivf_use_emeans`), with a Lloyd fallback.
+    /// Both trainers must build a correct, searchable IVF index: a
+    /// vector's own nearest neighbour is itself. This exercises the
+    /// GUC dispatch in `build.rs` end to end (the unit tests in
+    /// `ivf.rs` cover the trainers' determinism directly).
+    #[pg_test]
+    fn ivf_emeans_and_lloyd_trainers_build_searchable_indexes() {
+        use_turbovec();
+        ivf2_make_corpus("ivf_tr", 3000);
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::run("SET turbovec.search_k = 100").unwrap();
+        let self_nn = || -> Option<i64> {
+            Spi::get_one::<i64>(
+                "SELECT id FROM ivf_tr ORDER BY emb <=> \
+                 (SELECT emb FROM ivf_tr WHERE id = 1500) LIMIT 1",
+            )
+            .unwrap()
+        };
+        // Default build (e-means).
+        Spi::run(
+            "CREATE INDEX ivf_tr_em ON ivf_tr \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 24)",
+        )
+        .unwrap();
+        assert_eq!(
+            self_nn(),
+            Some(1500),
+            "default (e-means) IVF index must find a vector's own nearest neighbour"
+        );
+        Spi::run("DROP INDEX ivf_tr_em").unwrap();
+
+        // Lloyd fallback via the GUC.
+        Spi::run("SET turbovec.ivf_use_emeans = off").unwrap();
+        Spi::run(
+            "CREATE INDEX ivf_tr_ll ON ivf_tr \
+             USING turbovec (emb vec_cosine_ops) WITH (bit_width = 4, lists = 24)",
+        )
+        .unwrap();
+        assert_eq!(
+            self_nn(),
+            Some(1500),
+            "Lloyd-trainer IVF index must also find a vector's own nearest neighbour"
+        );
+        Spi::run("RESET turbovec.ivf_use_emeans").unwrap();
     }
 
     /// Issue #1: an IVF index built on an EMPTY table has no cells to

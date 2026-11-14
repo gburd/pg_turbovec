@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "pg_turbovec"
-version = "2.15.2"
+version = "2.16.0"
 dependencies = [
  "criterion",
  "gemm",

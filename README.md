@@ -103,6 +103,17 @@ misreading on yours. Since v2.10.2 a flat build over 100 k rows emits a
 value — and note that on our own measurements, **flat is the right choice
 more often than you would expect** (that section says when).
 
+Since v2.16.0 the IVF coarse centroids are trained with **e-means** (Bessa
+et al., Meta FAIR, [arXiv 2611.09501](https://arxiv.org/abs/2611.09501)), a
+mini-batch exponential-moving-average k-means. It trains about 5x faster
+than the previous Lloyd and, measured on SIFT1M, lands slightly higher IVF
+recall@10 at matched probes (k=256: 0.959 vs 0.936; k=1024: 0.987 vs
+0.976). It is the default; `SET turbovec.ivf_use_emeans = off` falls back to
+classic Lloyd, and `turbovec.ivf_emeans_epochs` (default 4) tunes the epoch
+budget. The choice only affects a new build's trained centroids, never the
+on-disk format or the scan path, so existing indexes are unaffected and a
+REINDEX is optional (it just gets the newer centroids).
+
 #### "HNSW has a high memory footprint and is slow to build"
 
 **Agreed — that is why we did not build on HNSW.** Measured head-to-head on
@@ -914,7 +925,7 @@ nibble-LUT kernels (NEON, AVX2, AVX-512BW).
 
 ## Configuration
 
-`pg_turbovec` exposes 20 GUCs under the `turbovec.*` namespace (all
+`pg_turbovec` exposes 22 GUCs under the `turbovec.*` namespace (all
 USERSET — settable per session). The full reference with tuning
 guidance is in [docs/PRODUCTION.md](docs/PRODUCTION.md); the most
 commonly-tuned ones:
@@ -934,6 +945,8 @@ commonly-tuned ones:
 | `turbovec.graph_ef`              | int  | `0`     | 0 auto (=512) / `1..=1000000` |
 | `turbovec.graph_build_partitions`| int  | `-1`    | -1 auto / 0-1 single-pass / N |
 | `turbovec.build_parallelism`     | int  | `0`     | `0..=128`      |
+| `turbovec.ivf_use_emeans`        | bool | `true`  | -              |
+| `turbovec.ivf_emeans_epochs`     | int  | `4`     | `1..=64`       |
 | `turbovec.scan_parallelism`      | int  | `0`     | `0..=128`      |
 | `turbovec.cache_size_mb`         | int  | `256`   | `0..=65536`    |
 | `turbovec.normalize_on_insert`   | bool | `true`  | -              |

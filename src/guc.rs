@@ -528,6 +528,26 @@ pub static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(20_000);
 /// `parallel_build_matches_serial_query` `#[pg_test]`.
 pub static BUILD_PARALLELISM: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+/// IVF coarse-centroid trainer. `true` (the default) trains cells with
+/// e-means (Bessa et al., Meta FAIR, arXiv 2611.09501, 2026): mini-batch
+/// EMA k-means with scaling-law batch/step, cosine annealing, and
+/// dead-cluster revival, via `turbovec::cluster::cluster_emeans`.
+/// `false` falls back to classic k-means++-seeded Lloyd
+/// (`cluster_lloyd`). e-means trains ~5x faster and, measured on SIFT1M
+/// IVF recall@10, lands slightly HIGHER recall than Lloyd-25 at matched
+/// probes (k=256: 0.959 vs 0.936; k=1024: 0.987 vs 0.976), despite a
+/// marginally higher quantization MSE. A build-time choice only: it
+/// changes the trained centroids (and therefore the on-disk bytes of a
+/// NEW build), never the wire format or the scan path. Both trainers
+/// are byte-deterministic for a given sample + `lists`.
+pub static IVF_USE_EMEANS: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// Epoch budget for the e-means IVF trainer (one epoch = one pass over
+/// the training sample). The paper's sweet spot is a handful of epochs;
+/// 4 is the default. More epochs cost build time with diminishing
+/// recall return. Ignored when `turbovec.ivf_use_emeans` is off.
+pub static IVF_EMEANS_EPOCHS: GucSetting<i32> = GucSetting::<i32>::new(4);
+
 /// Phase G-2d(a): number of partitions/shards for the parallel
 /// (partition -> build shards -> stitch) graph-kind build
 ///. Single-pass Vamana is
@@ -988,6 +1008,30 @@ pub fn register_gucs() {
             b"A pre-materialized id-set the operator-path scan restricts to, the ORDER BY analogue of turbovec.knn(..., allowed). The index AM keys vectors by heap TID (it never sees a heap id column), so the allowlist is a CSV of heap TIDs encoded as bigint via (block << 32) | offset (the pgrx item_pointer_to_u64 layout); build it from ctid. SET it before an ORDER BY emb <=> q LIMIT k query and the scan returns only those rows, with the same in-kernel 32-vector-block short-circuit pushdown the knn() function gets, on both flat and IVF indexes (IVF-aware: scoped to probed cells AND the allowlist). Whitespace is tolerated; empty tokens are ignored; a non-integer token ERRORs the scan. Empty / unset (the default) is unfiltered with zero added cost. This is NOT arbitrary-WHERE pushdown: the AM never interprets scan keys, it only honours this pre-materialized TID set. RESET turbovec.allowlist after the query.\0",
         ),
         &ALLOWLIST,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c_str(b"turbovec.ivf_use_emeans\0"),
+        c_str(b"Train IVF coarse centroids with e-means (on) or classic Lloyd (off).\0"),
+        c_str(
+            b"When on (the default), `WITH (lists = N)` index builds train their coarse centroids with e-means (Bessa et al., Meta FAIR, arXiv 2611.09501): mini-batch EMA k-means with scaling-law batch/step, cosine annealing, and dead-cluster revival. e-means trains about 5x faster than the previous k-means++-seeded Lloyd and, measured on SIFT1M IVF recall@10 at matched probes, reaches slightly higher recall (k=256: 0.959 vs 0.936; k=1024: 0.987 vs 0.976). Set off to fall back to Lloyd. This is a build-time choice: it changes the trained centroids of a NEW build, never the wire format (stays v8) or the scan path, so existing indexes are unaffected and a REINDEX is optional. Both trainers are byte-deterministic for a given sample and `lists`.\0",
+        ),
+        &IVF_USE_EMEANS,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c_str(b"turbovec.ivf_emeans_epochs\0"),
+        c_str(b"Epoch budget for the e-means IVF trainer (passes over the training sample).\0"),
+        c_str(
+            b"One epoch is one pass over the coarse-training sample. e-means reaches a lower loss than Lloyd in a handful of epochs; 4 is the default sweet spot. Higher values cost build time with diminishing recall return. Ignored when turbovec.ivf_use_emeans is off.\0",
+        ),
+        &IVF_EMEANS_EPOCHS,
+        1,
+        64,
         GucContext::Userset,
         GucFlags::default(),
     );

@@ -4,6 +4,63 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.16.0] — 2026-11-14
+
+MINOR: **IVF coarse centroids are now trained with e-means**, a faster
+k-means that lands higher measured IVF recall. No wire-format change
+(`MetaPageData::version` stays **8**), no SQL-surface change, no forced
+REINDEX. Existing indexes are unaffected; a `REINDEX` is optional and gets
+the newer centroids.
+
+### Added
+
+- **e-means IVF trainer (default).** `WITH (lists = N)` index builds now
+  train their coarse centroids with e-means (Bessa et al., "e-means:
+  outperforming k-means in one-tenth the epochs", Meta FAIR, arXiv
+  2611.09501, 2026) instead of the previous k-means++-seeded Lloyd. e-means
+  is a mini-batch exponential-moving-average k-means with automatic
+  batch/step scaling laws, cosine step annealing, and dead-cluster revival.
+  It lives in the turbovec crate as a new `cluster` module (fork carry #8)
+  and is byte-deterministic for a given sample and `lists`, preserving
+  pg_turbovec's across-host build reproducibility.
+
+  Measured on SIFT1M (1M x 128, real descriptors), IVF recall@10 at matched
+  probes, centroids trained on the standard sample:
+
+  | lists | probes | Lloyd-25 recall | e-means (4 ep) recall | build speedup |
+  |------:|-------:|----------------:|----------------------:|--------------:|
+  | 256   | 8      | 0.936           | **0.959**             | ~5.4x         |
+  | 1024  | 31     | 0.976           | **0.987**             | ~5.5x         |
+
+  e-means trains about 5x faster AND reaches higher recall. (Its raw
+  quantization MSE is marginally higher, ~4%; the better local-minima
+  escape spreads centroids more usefully for nearest-neighbour retrieval,
+  which is what IVF recall measures.)
+
+- **`turbovec.ivf_use_emeans`** (bool, default `on`): set `off` to train IVF
+  centroids with classic Lloyd instead.
+- **`turbovec.ivf_emeans_epochs`** (int, default `4`, range `1..=64`): epoch
+  budget for the e-means trainer.
+
+### Tests
+
+- `ivf_emeans_and_lloyd_trainers_build_searchable_indexes` (`#[pg_test]`):
+  both trainer settings build a correct, searchable IVF index.
+- The turbovec `cluster` module carries 8 unit tests (determinism across
+  rayon pool sizes, scaling laws, IVF-scale quality vs Lloyd,
+  no-dead-clusters on imbalanced data, edge cases). The existing
+  `kmeans_deterministic*` / `ivf_kmeans_*` pg tests now validate e-means'
+  determinism as the default.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.16.0';` — no REINDEX. The change is
+build-time only: a NEW `WITH (lists = N)` build gets e-means-trained
+centroids; existing IVF indexes keep their current centroids and read fine.
+`REINDEX` an IVF index to adopt the new trainer (optional; gets the higher
+recall). `SET turbovec.ivf_use_emeans = off` before `CREATE INDEX` / `REINDEX`
+to keep Lloyd.
+
 ## [2.15.2] — 2026-11-13
 
 PATCH: closes a latent REINDEX stale-cache hazard and reframes the BUG#6 ctid

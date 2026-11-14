@@ -1,0 +1,17 @@
+-- pg_turbovec v2.16.0
+--
+-- MINOR: IVF coarse centroids are now trained with e-means (Bessa et al.,
+-- Meta FAIR, arXiv 2611.09501) instead of classic Lloyd. Faster build (~5x)
+-- and higher measured IVF recall@10 on SIFT1M. No SQL-surface change, no
+-- wire-format change (MetaPageData::version stays 8), scoring bit-identical.
+-- No forced REINDEX.
+--
+-- Two new GUCs (registered by the library at load time, not by SQL):
+--   turbovec.ivf_use_emeans  (bool, default on)  -- off = Lloyd fallback
+--   turbovec.ivf_emeans_epochs (int, default 4)  -- e-means epoch budget
+--
+-- The trainer is a build-time choice: a NEW `WITH (lists = N)` build gets
+-- e-means-trained centroids; existing IVF indexes keep their centroids and
+-- read fine. REINDEX an IVF index to adopt the new trainer (optional; higher
+-- recall). `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.0'` is sufficient.
+-- Intentionally empty apart from this comment.

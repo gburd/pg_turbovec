@@ -4,6 +4,37 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.16.1] — 2026-11-17
+
+PATCH: **fixes a stale `Cargo.lock` in the v2.16.0 tag** that blocked locked
+and offline builds. No code change, no wire-format change
+(`MetaPageData::version` stays **8**), no SQL-surface change, no REINDEX.
+
+### Fixed
+
+- **`Cargo.lock` now pins the turbovec fork rev that `Cargo.toml` requires.**
+  v2.16.0 bumped the turbovec dependency to fork carry #8 (`662084c`, the
+  `cluster` module e-means needs) in `Cargo.toml`, but the committed
+  `Cargo.lock` still pinned the previous rev (`1202a9e`). Any build that
+  respects the lock (`cargo build --locked`, `--offline`, Nix
+  `buildPgrxExtension` with `cargoLock.lockFile`) failed: the lock needed
+  updating, and the stale rev lacks the `cluster` module so it would not
+  compile either. The lock was regenerated against the release commit
+  (`cargo build` updated it on the build host for v2.16.0, but that update
+  was never committed back). v2.16.1 commits the correct lock. Reported
+  2026-11-14 by a Nix-packaged downstream.
+- **drift-check gains a lock-vs-manifest guard** (§ 1b): it fails if the
+  turbovec rev in `Cargo.lock` differs from `Cargo.toml`, catching this
+  class without invoking cargo.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.16.1';` — no REINDEX. v2.16.1 is
+identical to v2.16.0 at runtime; it only makes the source tag build under a
+locked/offline/Nix toolchain. If v2.16.0 already built and installed for you
+(an unlocked `cargo pgrx install` ignores the lock mismatch and resolves the
+right rev from `Cargo.toml`), nothing changes.
+
 ## [2.16.0] — 2026-11-14
 
 MINOR: **IVF coarse centroids are now trained with e-means**, a faster

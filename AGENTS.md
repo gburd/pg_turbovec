@@ -133,25 +133,26 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.16.0, 2026-11-14)
+### Current (as of v2.16.1, 2026-11-17)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
 
 | From        | To     | Action |
 |-------------|--------|--------|
-| any 1.x     | 2.16.0 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
-| 2.0.0–2.14.0 | 2.16.0 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
+| any 1.x     | 2.16.1 | `ALTER EXTENSION` **then `REINDEX INDEX`** (wire v7→v8 in v2.0.0 is NOT additive; migration is REINDEX-from-heap, and an in-place converter was measured too lossy at −20.7 pp R@10) |
+| 2.0.0–2.14.0 | 2.16.1 | `ALTER EXTENSION` only for flat indexes; `REINDEX` IVF indexes that took inserts after a VACUUM (tombstone-loss bug, v1.11.0–v2.14.0) and any index VACUUM fully emptied while a writer was open. Wire format has been **v8** since v2.0.0 and every 2.x bump has been additive-or-code-only. |
 | 2.14.1–2.15.0 | 2.15.1 | `ALTER EXTENSION` only — no REINDEX by the upgrade. `REINDEX` any FLAT index already showing `turbovec_check` `is_corrupt` from the cancelled-VACUUM bug (a plain REINDEX holds; the fault does not recur once 2.15.1 is installed). |
 | 2.15.1      | 2.15.2 | `ALTER EXTENSION` only — no REINDEX; reconnect long-lived pooled backends. Latent REINDEX stale-cache hazard closed + BUG#6 ctid test/docs reframed (upstream fixed it); library+test/docs only, no wire/SQL/scoring change. |
 | 2.15.2      | 2.16.0 | `ALTER EXTENSION` only — no forced REINDEX; reconnect backends. IVF coarse trainer switched to e-means (default, turbovec fork carry #8); build-time only, changes a NEW IVF build's centroids, not the wire format (v8) or scan path. `REINDEX` an IVF index to adopt it (optional, higher recall); `SET turbovec.ivf_use_emeans = off` to keep Lloyd. +2 GUCs. |
+| 2.16.0      | 2.16.1 | `ALTER EXTENSION` only — no REINDEX. Packaging fix: v2.16.0 tagged a stale `Cargo.lock` (turbovec `1202a9e` vs `Cargo.toml`'s carry #8 `662084c`), breaking `--locked`/`--offline`/Nix source builds. v2.16.1 commits the matching lock; identical at runtime. drift-check § 1b now guards lock-vs-manifest rev. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.16.0)
+### Where the project actually is (v2.16.1)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and

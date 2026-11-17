@@ -1,0 +1,8 @@
+-- pg_turbovec upgrade 2.16.0 -> 2.16.1
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.1';`.
+--
+-- No new or changed SQL objects. v2.16.1 is a packaging fix: it commits the
+-- Cargo.lock that matches Cargo.toml's turbovec fork rev (662084c), which the
+-- v2.16.0 tag shipped stale, so locked/offline/Nix builds of the source now
+-- succeed. No code, wire (stays v8), or SQL change; no REINDEX. Intentionally
+-- empty apart from this comment.

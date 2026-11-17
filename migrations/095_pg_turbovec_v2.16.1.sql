@@ -1,0 +1,13 @@
+-- pg_turbovec v2.16.1
+--
+-- PATCH: fixes a stale Cargo.lock in the v2.16.0 tag (Cargo.toml pinned the
+-- turbovec fork at carry #8 662084c but Cargo.lock still pinned the previous
+-- 1202a9e, so `cargo build --locked` / `--offline` / Nix cargoLock builds
+-- failed). No code change, no SQL-surface change, no wire-format change
+-- (MetaPageData::version stays 8), scoring bit-identical. No REINDEX.
+--
+-- Also adds a drift-check guard (section 1b) that fails when the turbovec rev
+-- in Cargo.lock differs from Cargo.toml.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.1'` is sufficient; v2.16.1 is
+-- identical to v2.16.0 at runtime. Intentionally empty apart from this comment.

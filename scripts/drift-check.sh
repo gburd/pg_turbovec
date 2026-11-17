@@ -45,6 +45,22 @@ if [ "$cargo_ver" != "$tag_ver" ]; then
 fi
 
 # ----------------------------------------------------------------------
+# 1b. Cargo.lock must pin the SAME turbovec fork rev as Cargo.toml.
+#     v2.16.0 tagged a stale lock (Cargo.toml at carry #8 662084c, but
+#     Cargo.lock still at 1202a9e), so `cargo build --locked` and Nix
+#     cargoLock builds could not build the release (field report
+#     2026-11-14). A rev mismatch here is caught WITHOUT invoking cargo:
+#     the lock rev must appear verbatim in Cargo.toml.
+# ----------------------------------------------------------------------
+toml_tv_rev=$(grep -oE 'gburd/turbovec\.git", rev = "[0-9a-f]+"' Cargo.toml \
+              | grep -oE '[0-9a-f]{7,40}' | head -1)
+lock_tv_rev=$(grep -oE 'gburd/turbovec\.git\?rev=[0-9a-f]+' Cargo.lock \
+              | grep -oE '[0-9a-f]{7,40}' | head -1)
+if [ -n "$toml_tv_rev" ] && [ -n "$lock_tv_rev" ] && [ "$toml_tv_rev" != "$lock_tv_rev" ]; then
+    fail "Cargo.toml pins turbovec rev $toml_tv_rev but Cargo.lock pins $lock_tv_rev. Run 'cargo update -p turbovec' at the release commit and commit Cargo.lock, or 'cargo build --locked' will fail (stale-lock class, v2.16.0 field report)."
+fi
+
+# ----------------------------------------------------------------------
 # 2. PG version matrix consistent across Cargo features, docs,
 #    and CI workflows.
 # ----------------------------------------------------------------------

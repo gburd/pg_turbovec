@@ -20,9 +20,9 @@ only storage strategy.
 > `src/guc.rs` (22 GUCs) and the README Configuration table; index kinds —
 > the `KIND_*` constants in `src/index/page.rs` (flat/single, ColBERT, graph
 > [DEPRECATED v2.5.0], 1-bit BQ) plus IVF (`WITH (lists = N)`).
-**Target Postgres:** 13–18, plus 19beta4 (experimental); every leg tested in
+**Target Postgres:** 13–19; every leg tested in
 CI (see [`docs/PG_VERSION_SUPPORT.md`](PG_VERSION_SUPPORT.md)).
-**Toolchain:** Rust 1.96+, `pgrx = "0.19.3"`.
+**Toolchain:** Rust 1.96+, `pgrx = "0.19.4"`.
 **Upstream:** [`turbovec`](https://github.com/RyanCodrai/turbovec) 1.1.2,
 pinned via a git fork (`gburd/turbovec`, branch `pgtv-2.12.1-port`) carrying
 five additive commits: `pub pack::repack`, the `IdMapIndex` parts API, the

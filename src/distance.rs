@@ -50,7 +50,7 @@ use crate::vec::{MAX_DIM, Vector};
 ///
 /// PGRX COUPLING: `ArgAbi` and `SqlTranslatable` are pgrx-internal
 /// traits ("very subject to change between versions"). These impls are
-/// sound for pgrx =0.19.1, which Cargo.toml pins exactly: unboxing
+/// sound for pgrx =0.19.4, which Cargo.toml pins exactly: unboxing
 /// mirrors what `#[derive(PostgresType)]` generates for `Vector` minus
 /// the CBOR decode, and the `SqlTranslatable` consts are `Vector`'s, so
 /// the generated CREATE FUNCTION is unchanged (pinned by

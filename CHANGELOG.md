@@ -4,6 +4,36 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.16.2] — 2026-11-19
+
+PATCH: **PostgreSQL 19 is now GA-supported** (was experimental against the
+beta), and the pgrx dependency moves to **0.19.4** for the CVE-2026-6460 fix.
+No wire-format change (`MetaPageData::version` stays **8**), no SQL-surface
+change, no REINDEX. Bit-identical scoring.
+
+### Changed
+
+- **PostgreSQL 19 promoted from experimental to supported.** PostgreSQL 19.0
+  went GA on 2026-11-16. pg_turbovec's full test suite builds and passes
+  against the GA release (**494 passed / 9 ignored**, the same count as every
+  other major) with no new C-ABI shims: the PG19 deltas handled since the
+  beta (`LockBuffer`'s `mode` parameter becoming `BufferLockMode::Type`,
+  shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` unchanged
+  from pg16+) all hold on GA. Verified on a from-source build of the official
+  `postgresql-19.0.tar.bz2` (sha256 `a89fd70e…`), not pgrx's bundled beta.
+- **pgrx and pgrx-tests bumped `=0.19.3` → `=0.19.4`.** 0.19.4 is a security
+  release for CVE-2026-6460 (composite-datum version checking on attribute
+  reads, affecting `PgHeapTuple`) and the last 0.19.x. pg16 is unchanged
+  (control leg: 494 passed / 9 ignored). The `VectorArg` pgrx-coupling note
+  in `src/distance.rs` is updated to the new exact pin.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE;` — no REINDEX, no reconnect needed. The
+index on-disk format is unchanged. PostgreSQL 19 users who were running the
+experimental build get no behavioural change; the promotion is a support-status
+and dependency-security change only.
+
 ## [2.16.1] — 2026-11-17
 
 PATCH: **fixes a stale `Cargo.lock` in the v2.16.0 tag** that blocked locked

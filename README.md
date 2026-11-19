@@ -45,7 +45,7 @@ time recovery, JOINs, GUCs, parallel-safe aggregates, and all of the
 > format v8; staged 2/4-bit search on aarch64 and AVX-512 VBMI+VNNI hosts,
 > 1.14-1.17x faster 4-bit end-to-end on Graviton4 at 1M x 1024-d -- see
 > [CHANGELOG](CHANGELOG.md)). The full `#[pg_test]` suite passes against
-> PostgreSQL 13, 14, 15, 16, 17, and 18 (and 19beta1, experimentally).
+> PostgreSQL 13, 14, 15, 16, 17, 18, and 19.
 > **v2.0.0 is a MAJOR wire-format break (v7 → v8): upgrading from any
 > 1.x requires `ALTER EXTENSION ... UPDATE` then a one-time `REINDEX
 > INDEX` per turbovec index** (a pre-v8 index ERRORs at first scan with
@@ -526,14 +526,14 @@ For dimensions other than 1536, multiply storage through by `dim / 1536`.
 
 ## Installation
 
-`pg_turbovec` requires PostgreSQL 13–18 (19beta1 experimental) and a
+`pg_turbovec` requires PostgreSQL 13–19 and a
 Rust toolchain ≥ 1.96 (pgrx 0.19's MSRV; the default stable toolchain
 works). PostgreSQL 16 is the
 reference development platform; 13/14/15/17/18/19 are tested in CI.
 
 ```bash
 # One-time setup.
-cargo install --locked cargo-pgrx --version 0.19.3
+cargo install --locked cargo-pgrx --version 0.19.4
 cargo pgrx init                # bootstraps a private PostgreSQL cluster
 
 # Build & install into the dev cluster.
@@ -569,7 +569,7 @@ For PG13–17, copy (or symlink) `lib/pg_turbovec.so` into `pg_config
 --pkglibdir` and `share/postgresql/extension/*` into `pg_config
 --sharedir`/extension, or overlay the extension into nixpkgs'
 `postgresql_NN.pkgs`. A dev shell with the full toolchain (rust,
-cargo-pgrx 0.19.3, clang/bindgen, openblas, bison/flex/readline/icu)
+cargo-pgrx 0.19.4, clang/bindgen, openblas, bison/flex/readline/icu)
 is available via `nix develop`.
 
 For a Nix-based build (the dev environment for this project) see
@@ -1046,7 +1046,7 @@ The `real[]` (or `text`) bridge is the supported interop path.
   replicas, cancellation, and the memory / insert-cost model for
   managed or hosted PostgreSQL.
 - [`docs/PG_VERSION_SUPPORT.md`](docs/PG_VERSION_SUPPORT.md) - the
-  per-major support matrix (PG 13-18, 19beta1 experimental).
+  per-major support matrix (PG 13-19).
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) - the published
   head-to-head benchmark (Cohere-wiki 1M vs pgvector HNSW), incl.
   the AVX2 latency frontier and the honest "flat-scan loses on

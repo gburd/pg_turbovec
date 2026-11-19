@@ -1,24 +1,24 @@
 # PostgreSQL version support matrix
 
-`pg_turbovec` supports PostgreSQL **13, 14, 15, 16, 17, 18** (and
-**19beta4**, experimentally). CI builds the latest patch of each major on
+`pg_turbovec` supports PostgreSQL **13, 14, 15, 16, 17, 18, and 19**. CI builds
+the latest patch of each major on
 every push (`cargo pgrx init --download`), so the "Tested patch" column below
 is the floor at the time of writing, not a pin.
 
-The test count (**472 passed / 9 ignored**, uniform across every native leg and
-the pg16 classic leg as of v2.12.1, CI run 38600107797) is the same on all
+The test count (**494 passed / 9 ignored**, uniform across every native leg and
+the pg16 classic leg as of v2.16.2) is the same on all
 majors. The per-major notes below record only the C-ABI shape differences the
 extension shims, not test-count differences.
 
 | Version | Status | Tests | Notes |
 |---|---|---|---|
-| 13.x | ✅ Supported | 472 passed / 9 ignored | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.x | ✅ Supported | 472 passed / 9 ignored | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.x | ✅ Supported | 472 passed / 9 ignored | Same shape as 14. |
-| 16.x | ✅ Supported | 472 passed / 9 ignored | Reference platform during development. |
-| 17.x | ✅ Supported | 472 passed / 9 ignored | Benchmark platform. |
-| 18.x | ✅ Supported | 472 passed / 9 ignored | `relopt_parse_elt` gained `isset_offset`. CI-validated every push (`.github/workflows/test.yml` matrix leg `test (18)`). |
-| 19.0beta4 | ✅ **Experimental** (beta PG) | 472 passed / 9 ignored | pgrx 0.19.3 (19beta4; 0.19.1 built against 19beta1). PG19 deltas handled: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. PG19 is upstream BETA — re-validate at RC/GA before production use. |
+| 13.x | ✅ Supported | 494 passed / 9 ignored | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.x | ✅ Supported | 494 passed / 9 ignored | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.x | ✅ Supported | 494 passed / 9 ignored | Same shape as 14. |
+| 16.x | ✅ Supported | 494 passed / 9 ignored | Reference platform during development. |
+| 17.x | ✅ Supported | 494 passed / 9 ignored | Benchmark platform. |
+| 18.x | ✅ Supported | 494 passed / 9 ignored | `relopt_parse_elt` gained `isset_offset`. CI-validated every push (`.github/workflows/test.yml` matrix leg `test (18)`). |
+| 19.x | ✅ Supported | 494 passed / 9 ignored | PostgreSQL 19.0 went GA 2026-11-16; validated on a from-source build of the official `postgresql-19.0.tar.bz2`. pgrx 0.19.4. PG19 C-ABI deltas: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. |
 
 > Test counts and patch versions above are the exact numbers CI
 > installs and reports as of the most recent green run
@@ -152,8 +152,11 @@ new callback you split follows the same convention.
 
 ## PostgreSQL 19
 
-**Experimental**, built and tested in CI against PG19 beta (`19beta4` as of
-pgrx 0.19.3 / pg_turbovec 2.12.1; pgrx 0.19.1 built against `19beta1`). PG19 is
-still an upstream beta, so its C API can still change; treat a beta
-PostgreSQL as unsupported for production. The C-API deltas handled so far are
-listed in the table row above.
+**Supported** (GA). PostgreSQL 19.0 was released 2026-11-16. pg_turbovec's
+full suite builds and passes against the GA release (494 passed / 9 ignored,
+pgrx 0.19.4), verified on a from-source build of the official
+`postgresql-19.0.tar.bz2` (sha256 `a89fd70e…`). The C-ABI deltas handled
+across the 19 beta/RC cycle (`LockBuffer`'s `mode` becoming
+`BufferLockMode::Type`, `relNumber` unchanged from pg16+) all hold on GA; no
+new shims were needed at GA. The specific deltas are listed in the table row
+above.

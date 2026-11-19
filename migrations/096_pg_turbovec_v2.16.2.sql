@@ -1,0 +1,10 @@
+-- pg_turbovec v2.16.2
+--
+-- PATCH: PostgreSQL 19 promoted from experimental to GA-supported (PG 19.0
+-- released 2026-11-16; full suite passes against the GA build, 494/9), and
+-- pgrx bumped 0.19.3 -> 0.19.4 for the CVE-2026-6460 security fix. No code
+-- behaviour change, no SQL-surface change, no wire-format change
+-- (MetaPageData::version stays 8), scoring bit-identical. No REINDEX.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.2'` is sufficient; v2.16.2 is
+-- identical to v2.16.1 at runtime. Intentionally empty apart from this comment.

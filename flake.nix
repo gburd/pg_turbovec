@@ -19,17 +19,17 @@
         lib = pkgs.lib;
 
         # nixpkgs' pinned cargo-pgrx set stops at 0.18.x; pg_turbovec
-        # pins pgrx 0.19.3 (pg19 support; the 0.19 line), so we
+        # pins pgrx 0.19.4 (PG19 GA support; the 0.19 line), so we
         # build the matching cargo-pgrx here with the same `generic`
         # shape nixpkgs uses (pkgs/development/tools/rust/cargo-pgrx).
         cargo-pgrx_0_19 = pkgs.rustPlatform.buildRustPackage rec {
           pname = "cargo-pgrx";
-          version = "0.19.3";
+          version = "0.19.4";
           src = pkgs.fetchCrate {
             inherit pname version;
-            hash = "sha256-TyViMU+ZLUHNK5CRi8CN3tThFNUJQnuWTeCxT2JTYG0=";
+            hash = "sha256-ePwf0BrzjZGlYda8OBIZ15QBTtbDEu7I69lF/llA1v4=";
           };
-          cargoHash = "sha256-43B3zl/mJXuBD/w8x+lek7Wtg/lZ/bZWuJdv5v9ImSE=";
+          cargoHash = "sha256-ZUxcx6AXzv5IahiKl3YfqPh9A9PL/QbL6qcGBdp/hNc=";
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.openssl ];
           # cargo-pgrx's test suite wants a pgrx-init'd home; skip.
@@ -48,7 +48,7 @@
         cargoLock = {
           lockFile = ./Cargo.lock;
           outputHashes = {
-            "turbovec-1.1.2" = "sha256-6zde/GqNtf328IP6iqKfXSlQ4mrGo3KvmVfK4clxsCQ=";
+            "turbovec-1.1.2" = "sha256-JkWcOP0mQL6e14bS1DJ1wD/5eR2vRd03Omy5sfOwmEY=";
           };
         };
 
@@ -59,7 +59,7 @@
           postgresql:
           pkgs.buildPgrxExtension {
             pname = "pg_turbovec";
-            version = "2.16.1";
+            version = "2.16.2";
             src = self;
             inherit postgresql cargoLock;
             cargo-pgrx = cargo-pgrx_0_19;

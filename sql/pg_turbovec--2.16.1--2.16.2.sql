@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.16.1 -> 2.16.2
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.2';`.
+--
+-- No new or changed SQL objects. v2.16.2 promotes PostgreSQL 19 from
+-- experimental to GA-supported and bumps pgrx 0.19.3 -> 0.19.4 (CVE-2026-6460
+-- fix). No code behaviour change, wire format stays v8, scoring bit-identical;
+-- no REINDEX. Intentionally empty apart from this comment.

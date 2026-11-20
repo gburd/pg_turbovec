@@ -1,7 +1,7 @@
 [package]
 name = "pg_turbovec"
 description = "PostgreSQL extension: vector index backed by the TurboQuant quantizer (turbovec)"
-version = "2.16.2"
+version = "2.16.3"
 edition = "2024"
 rust-version = "1.96.0"
 authors = ["Greg Burd <greg@burd.me>"]
@@ -44,7 +44,7 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.19.4"
-turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "662084cb06efd68439721f842fc5a0579ffbc6f6", features = ["mask-skip-counter"] }
+turbovec = { git = "https://github.com/gburd/turbovec.git", rev = "545febcc45f79df22469cfc574042aaec1aeb88f", features = ["mask-skip-counter"] }
 # ^ turbovec 1.1.2 (upstream c3b043b: staged search keeps the scan's recall on
 #   bunched corpora) + SIX additive fork carries on branch
 #   gburd/turbovec@main (= pgtv-2.12.1-port + carry #6): `pub fn repack` (3ed5708), the

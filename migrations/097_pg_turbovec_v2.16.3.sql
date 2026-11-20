@@ -1,0 +1,13 @@
+-- pg_turbovec v2.16.3
+--
+-- PATCH: the e-means IVF coarse trainer now parallelises its batch assignment
+-- across the build pool, fixing a CREATE INDEX that stalled on one core at
+-- scale (a 10M-row, lists=3162 index hung >40 min; now ~12 min, whole machine
+-- busy). The trained centroids are BYTE-IDENTICAL to prior e-means builds (the
+-- parallel assignment matches the serial one; the f64 EMA accumulation still
+-- runs in batch order), so recall, scoring, and the on-disk format (wire v8)
+-- are unchanged. Also two flaky IVF test fixes. No code-behaviour change for
+-- existing indexes, no SQL-surface change, no REINDEX.
+--
+-- `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.3'` is sufficient; v2.16.3 is a
+-- build-time fix. Intentionally empty apart from this comment.

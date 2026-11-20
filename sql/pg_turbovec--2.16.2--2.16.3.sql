@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.16.2 -> 2.16.3
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.3';`.
+--
+-- No new or changed SQL objects. v2.16.3 parallelises the e-means IVF build
+-- (previously stalled on one core at scale) with byte-identical centroids, and
+-- fixes two flaky tests. No code-behaviour/wire/SQL/scoring change; no REINDEX.
+-- Intentionally empty apart from this comment.

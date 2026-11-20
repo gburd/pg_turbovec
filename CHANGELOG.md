@@ -4,6 +4,48 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.16.3] — 2026-11-20
+
+PATCH: **the e-means IVF coarse trainer now parallelises its build**, fixing a
+build that stalled at scale, plus two flaky-test fixes. No wire-format change
+(`MetaPageData::version` stays **8**), no SQL-surface change, no REINDEX.
+**Centroids are byte-identical** to v2.16.0–v2.16.2 e-means builds (the trained
+output is unchanged; only the wall-clock changes), so scoring and recall are
+unchanged.
+
+### Fixed
+
+- **e-means IVF build no longer stalls on one core.** Since v2.16.0 e-means has
+  been the default IVF coarse trainer. Its batch nearest-centroid assignment
+  ran serially on a single core (`O(sample · lists · dim)`), which was fine at
+  the ~1M / `lists` ≤ 1024 scale it was qualified on but pathological at scale:
+  on a 10M-row, 1024-dim index with `lists = round(√n) = 3162`, a
+  `CREATE INDEX` pinned one core for over 40 minutes and never finished, while
+  Lloyd (`turbovec.ivf_use_emeans = off`) built the same index in minutes. The
+  assignment (and the dead-cluster revival's coverage scan) now run across the
+  build-pool threads. On a 96-core host the previously-stuck 10M e-means build
+  completes in ~12 minutes with the whole machine busy. The parallel assignment
+  is **bit-identical** to the serial one (each point's nearest cell is an
+  independent pure function of the point and the fixed-for-the-batch centroids;
+  the f64 EMA accumulation still runs in the original batch order), so trained
+  centroids, recall, and the on-disk format are all unchanged — this is a
+  build-time fix only. Found on a metal 10M competitive benchmark; the turbovec
+  fork carries the change (carry #8, rev `545febc`).
+- **Two IVF tests no longer flake across CI hosts.**
+  `ivf_rotation_matrix_cached_per_backend` and
+  `ivf_emeans_and_lloyd_trainers_build_searchable_indexes` asserted recall of a
+  specific row from an approximate 4-bit IVF scan whose cell layout varies with
+  the build host's core count; they failed on a shifting subset of PG legs. They
+  now assert their real contracts (the rotation matrix is cached, not rebuilt,
+  and both trainers build a searchable index with every cell probed) rather than
+  a layout-dependent retrieval.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE;` — no REINDEX. Existing IVF indexes are
+unaffected (centroids unchanged). An IVF index that could not be *built* with
+e-means at scale before (it hung) now builds; nothing to migrate.
+
 ## [2.16.2] — 2026-11-19
 
 PATCH: **PostgreSQL 19 is now GA-supported** (was experimental against the

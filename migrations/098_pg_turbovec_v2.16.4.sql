@@ -1,0 +1,16 @@
+-- pg_turbovec v2.16.4
+--
+-- PATCH: three correctness fixes found by an external tester (2026-11-20).
+-- (1) A ROLLBACK TO SAVEPOINT, or a PL/pgSQL EXCEPTION block, dropped the rows
+-- the transaction had inserted BEFORE the savepoint from the index: they
+-- committed in the heap but queries missed them until REINDEX. (2) Once a
+-- transaction had inserted, its index scans could not see rows other sessions
+-- committed afterwards (READ COMMITTED), or before its snapshot (REPEATABLE
+-- READ), until it ended. (3) An unlogged table's index was unusable after a
+-- crash that came before the next checkpoint ("bad magic on meta page" until
+-- REINDEX): its init fork was not WAL-logged.
+--
+-- No wire-format change (v8), no SQL-surface change. Indexes damaged by (1)
+-- are repaired only by REINDEX; see the CHANGELOG. `ALTER EXTENSION
+-- pg_turbovec UPDATE TO '2.16.4'` is sufficient for everything else.
+-- Intentionally empty apart from this comment.

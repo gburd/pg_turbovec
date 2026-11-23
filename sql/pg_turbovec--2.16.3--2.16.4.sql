@@ -1,0 +1,7 @@
+-- pg_turbovec upgrade 2.16.3 -> 2.16.4
+-- Run automatically by `ALTER EXTENSION pg_turbovec UPDATE TO '2.16.4';`.
+--
+-- No new or changed SQL objects. v2.16.4 fixes three transaction/recovery
+-- bugs in the index (savepoint rollback, cross-session visibility, unlogged
+-- crash recovery); no wire-format or SQL change.
+-- Intentionally empty apart from this comment.

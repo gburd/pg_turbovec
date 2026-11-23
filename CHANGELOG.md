@@ -4,6 +4,79 @@ All notable changes to `pg_turbovec` are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.16.4] — 2026-11-23
+
+PATCH: **three correctness fixes in how the index follows transactions and
+crash recovery**, all found by an external tester (Zishuo, 2026-11-20) and all
+in places the `#[pg_test]` harness cannot reach.  A new end-to-end suite
+(`tests/e2e/`, run in CI on every PostgreSQL leg) now covers them.  No
+wire-format change (`MetaPageData::version` stays **8**), no SQL-surface
+change, no REINDEX needed to upgrade.
+
+### Fixed
+
+- **A savepoint rollback no longer drops the transaction's earlier rows from
+  the index.**  The TurboQuant insert path keeps a transaction's new rows in
+  the backend's cached copy of the index and writes them at commit.  A
+  `ROLLBACK TO SAVEPOINT`, or a PL/pgSQL block whose `EXCEPTION` handler ran,
+  discarded that whole pending set, not just the rolled-back part.  Rows
+  inserted before the savepoint then committed in the table but were missing
+  from the index: queries silently missed them until `REINDEX`.  Each pending
+  row now records its subtransaction, and a rollback removes exactly the rows
+  of the aborted subtransaction and its children.  This includes rows that
+  reused a TID freed by VACUUM, on flat and IVF indexes.  The rollback does
+  only in-memory work (inside subtransaction abort an ERROR becomes a PANIC).
+  Present since v1.29.5, whose rollback handling replaced the opposite bug
+  (before it, rolled-back rows were written to the index at commit).
+- **A transaction that has inserted now sees other sessions' commits through
+  the index.**  Its scans used to keep serving the backend's own pending copy
+  of the index until the transaction ended.  Under READ COMMITTED they missed
+  rows other sessions committed after the transaction's first insert; under
+  REPEATABLE READ they could miss rows committed before its snapshot.
+  Present since deferred-commit inserts (v1.1.0).  A scan
+  now rebuilds that copy from disk plus the transaction's own pending rows
+  when the index changed on disk.  Measured on a 200,000 x 128-d flat index
+  (c7i.8xlarge, 3 repetitions): a top-1 query takes 16-17 ms steady, 33 ms
+  when another session has just committed and the backend has no pending
+  rows (the reload every backend already paid), and 54 ms in the same case
+  with pending rows (the rebuild).  Steady-state queries with pending rows
+  are unchanged (17 ms).
+- **An unlogged table's index survives a crash.**  Its empty "init fork"
+  page, which PostgreSQL copies over the index after a crash, was written
+  through generic WAL, which writes nothing for an unlogged relation.  The
+  page reached disk only at the next checkpoint, so a crash before that left
+  a zeroed page, and every query and insert failed with "bad magic on meta
+  page" until `REINDEX`.  The page is now WAL-logged explicitly, as built-in
+  index types do.  contrib/bloom has the same bug (pgsql-hackers, "Unlogged
+  bloom indexes break after crash recovery", 2026-11-03).  Present since
+  v1.1.0.
+
+### Testing
+
+- `tests/e2e/run.sh <pg_config>`: real commits, a second `psql` session,
+  and `pg_ctl -m immediate`, against a throwaway cluster, with negative
+  controls.  It fails if the server log shows a crashed backend.  CI runs it
+  on PostgreSQL 13 to 19.  Every case fails on v2.16.3 and passes here, and
+  each fix was also reverted on its own to confirm its case catches it.
+- Five new `#[pg_test]`s (`subxact_*`,
+  `read_committed_scan_sees_rows_committed_after_own_insert`): 499 passed, 9
+  ignored, on PostgreSQL 13-19 (Fedora 45, x86_64).  The e2e suite also
+  passes on assert-enabled PostgreSQL 18.7 and 19.0.
+- `docs/TESTING.md` explains what `#[pg_test]` cannot see.
+
+### Migration
+
+`ALTER EXTENSION pg_turbovec UPDATE TO '2.16.4';` — no REINDEX to upgrade.
+
+The upgrade does not repair an index that already lost rows to the savepoint
+bug.  If your application rolled back savepoints, or caught exceptions in
+PL/pgSQL, in transactions that inserted into a turbovec-indexed table, check
+it: run `VACUUM` on the table, then compare `SELECT count(*) FROM tbl` with
+`SELECT round(n_vectors * (1 - tombstone_density)) FROM
+turbovec.turbovec_check('tbl_idx'::regclass)`.  An index count lower than the
+table count means rows are missing; `REINDEX` it.  An unlogged index needs
+nothing: any checkpoint since `CREATE INDEX` has already written its init fork.
+
 ## [2.16.3] — 2026-11-20
 
 PATCH: **the e-means IVF coarse trainer now parallelises its build**, fixing a

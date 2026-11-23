@@ -92,6 +92,43 @@ python3 benches/scripts/bq/bq_frontier.py --dry-run-sql \
     --dsn x --out /tmp/x.json --dim 1536 --query-provenance held_out
 ```
 
+## `prep_hn.py` — HackerNews (HN768) vector corpus
+
+Adds HackerNews to the test corpora.  Unlike the standing corpora (CO1024,
+OA1536, CW768), which are *pre-embedded* text datasets that ship an `emb`
+column, HackerNews is published as raw text, so `prep_hn.py` embeds it: it
+streams HN story/comment text from a pinned HF dataset revision
+(`julien040/hacker-news-posts`), embeds each doc with a pinned
+sentence-transformers model (default `BAAI/bge-base-en-v1.5`, 768-d, chosen to
+match the 768-d CW768 corpus so HN is directly comparable), L2-normalises to
+fp32, and emits the **same on-disk shape** the bench loaders consume:
+`corpus.npy`, `queries.npy`, exact fp64 `gt_ids.npy`/`gt_dist.npy`, 16-way
+`%.9g` text COPY files, and a pinned `datasets.lock.json` (text revision +
+model + md5s, so the corpus is byte-reproducible).
+
+```bash
+# 1M regression corpus (RAM-resident; a laptop/CI-sized smoke of the HN shape)
+python3 benches/scripts/prep_hn.py 1000000 5000 /scratch/pg_turbovec-bench/hn768_1m
+
+# 150M field-scale corpus (the scale the pg_fts field report used; needs a
+# GPU/large host and hours -- run on EC2, never the workstation)
+python3 benches/scripts/prep_hn.py 150000000 5000 /scratch/pg_turbovec-bench/hn768_150m
+```
+
+The output directory is a drop-in for the vs-bench loader
+(`load_ds.sh <dir> 768 hn768`) and the single-client harness
+(`bench.py --data <dir>`).  Deps: `sentence-transformers`, `torch`,
+`numpy`, `pyarrow`, `huggingface_hub`.
+
+| id | dim | source text | embedding model | scales | why |
+|----|-----|-------------|-----------------|--------|-----|
+| **HN768** | 768 | `julien040/hacker-news-posts` (HF, pinned) | `BAAI/bge-base-en-v1.5` (pinned) | 1M, **150M** | the field corpus; short real-world docs; 768-d matches CW768 for cross-corpus comparison |
+
+`prep_hn.py` embeds locally (no API key, no per-call cost); the vectors are
+ours, so unlike the vendor-embedded corpora HN may be regenerated and, if
+wanted, redistributed.  Changing the text revision or the model is a **new
+dataset**, not a silent drift -- both are pinned in `datasets.lock.json`.
+
 ## Installing pgvector into the pgrx cluster
 
 The pgrx-managed cluster doesn't ship pgvector by default. On

@@ -128,3 +128,19 @@ jobs:
           cargo pgrx test pg${{ matrix.pg }} \
               --no-default-features \
               --features "pg${{ matrix.pg }} pg_test"
+
+      # End-to-end cases the #[pg_test] harness cannot express: a pg_test runs
+      # in one always-rolled-back transaction, in one backend, on a server
+      # that never restarts, so the PreCommit flush, a second session's
+      # commits, and crash recovery are out of its reach (Zishuo's report,
+      # 2026-11-20: savepoint rollback, READ COMMITTED visibility, and an
+      # unlogged index after a crash all failed there).  tests/e2e builds a
+      # throwaway cluster from the pgrx-managed PostgreSQL this leg already
+      # downloaded, so it adds the install and a few seconds of SQL.
+      - name: end-to-end tests (real commits, two sessions, crash recovery)
+        if: matrix.layout == 'native'
+        run: |
+          PGC=$(cargo pgrx info pg-config pg${{ matrix.pg }})
+          cargo pgrx install --pg-config "$PGC" \
+              --no-default-features --features "pg${{ matrix.pg }}"
+          bash tests/e2e/run.sh "$PGC"

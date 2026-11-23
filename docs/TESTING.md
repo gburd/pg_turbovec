@@ -10,10 +10,48 @@ coverage. Read this before assuming a class of bug is tested.
 
 ```bash
 cargo pgrx test pg16          # full suite on PG 16 (local loop)
+cargo pgrx install --pg-config "$(cargo pgrx info pg-config pg16)" \
+    --no-default-features --features pg16
+bash tests/e2e/run.sh "$(cargo pgrx info pg-config pg16)"   # end-to-end
 bash scripts/drift-check.sh   # project-level invariants (docs vs code)
 ```
 
-CI runs `cargo pgrx test pg<N>` for N in 13..=18 (see `docs/CI.md`).
+CI runs `cargo pgrx test pg<N>` and `tests/e2e/run.sh` for N in 13..=19
+(see `docs/CI.md`).
+
+## What `#[pg_test]` cannot see, and the end-to-end suite
+
+A `#[pg_test]` runs inside ONE transaction that is always rolled back, in
+ONE backend, on a server that never restarts.  So no `#[pg_test]` can
+observe:
+
+- **a real commit.**  The TurboQuant insert path defers its relfile write
+  to the `PreCommit` callback, which never fires in a test.  Tests drive
+  that path through `xact::flush_to_relfile_for_test` instead (see
+  AGENTS.md); a plain `INSERT` in a test checks nothing about what reaches
+  disk.
+- **another session.**  Cross-session visibility (a second backend's
+  commit, under READ COMMITTED) needs a second backend.
+- **a crash.**  Crash recovery, and in particular resetting an unlogged
+  index from its init fork, needs the server to stop and start.  A test
+  that only checks the init fork's SIZE passes on a zeroed page.
+
+Three bugs lived exactly in that blind spot (reported by Zishuo,
+2026-11-20, fixed in 2.16.4): a savepoint rollback dropped the rows
+inserted before it from the index; a READ COMMITTED transaction that had
+inserted could not see other sessions' commits through the index; and an
+unlogged index was unusable after a crash before the next checkpoint.
+`tests/e2e/` covers that blind spot: each case is a shell script against a
+throwaway cluster, using real `COMMIT`s, a second `psql` session, and
+`pg_ctl -m immediate`, and each has a negative control (a `RELEASE`d
+savepoint, REPEATABLE READ, a logged table).  `run.sh` also fails if the
+server log shows a crashed backend.  Subtransactions themselves ARE
+reachable from a `#[pg_test]` (a PL/pgSQL `EXCEPTION` block, or
+`BeginInternalSubTransaction`), so the savepoint undo also has unit tests
+(`subxact_*` in `src/lib.rs`).
+
+Add a case to `tests/e2e/` whenever a fix depends on commit, a second
+session, or a restart.
 
 ## The bug this coverage exists to catch
 

@@ -866,6 +866,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (idx, dim, bit_width, state)
@@ -883,6 +884,7 @@ mod tests {
             // onto fresh disk state, so a new id must be recorded here
             // (the aminsert closure does the same).
             state.touched_ids.push(new_id);
+            state.touched_subxacts.push(1);
             state.n_vectors += 1;
             state.version += 1;
         }
@@ -984,6 +986,7 @@ mod tests {
                 version: m.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let rfn = cache::relfilenode_from_relation(rel);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
@@ -1003,6 +1006,7 @@ mod tests {
             arc.write().add_with_ids(&v(id), &[id]).expect("add");
             assert!(cache::am_mark_dirty(key, |p| {
                 p.touched_ids.push(id);
+                p.touched_subxacts.push(1);
                 p.live_ids.push(id);
                 p.n_vectors += 1;
                 p.version += 1;
@@ -1209,6 +1213,7 @@ mod tests {
                 version: m0.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             // Remove 300 rows spread over the index (swap-remove moves the
             // tail rows into the holes), then append 200 new ones. Removes
@@ -1235,6 +1240,7 @@ mod tests {
             for (id, v) in &new_rows {
                 idx.add_with_ids(v, &[*id]).expect("add");
                 state.touched_ids.push(*id);
+                state.touched_subxacts.push(1);
             }
             state.live_ids = idx.slot_to_id().to_vec();
             state.n_vectors = state.live_ids.len() as i64;
@@ -1393,11 +1399,13 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let v: Vec<f32> = (0..dim).map(|j| (new_id as f32) + j as f32).collect();
             idx.add_with_ids(&v, &[new_id]).expect("add");
             state.live_ids.push(new_id);
             state.touched_ids.push(new_id);
+            state.touched_subxacts.push(1);
             state.n_vectors += 1;
             state.version += 1;
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
@@ -1498,6 +1506,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let relfile_node = cache::relfilenode_from_relation(rel);
             let key = CacheKey {
@@ -1536,6 +1545,7 @@ mod tests {
                 .expect("add");
             assert!(cache::am_mark_dirty(key, |p| {
                 p.touched_ids.push(id);
+                p.touched_subxacts.push(1);
                 p.live_ids.push(id);
                 p.n_vectors += 1;
                 p.version += 1;
@@ -1549,6 +1559,7 @@ mod tests {
             .expect("add");
         x_state.live_ids.push(3001);
         x_state.touched_ids.push(3001);
+        x_state.touched_subxacts.push(1);
         x_state.n_vectors += 1;
         x_state.version += 1;
         unsafe { crate::xact::flush_to_relfile_for_test(oid, &x_idx, &x_state) };
@@ -1669,6 +1680,7 @@ mod tests {
                 version: m.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let r1 = cache::relfilenode_from_relation(rel);
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
@@ -1687,6 +1699,7 @@ mod tests {
         }
         assert!(cache::am_mark_dirty(key, |p| {
             p.touched_ids.push(9001);
+            p.touched_subxacts.push(1);
             p.live_ids.push(9001);
             p.n_vectors += 1;
             p.version += 1;
@@ -1769,11 +1782,13 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let v: Vec<f32> = (0..dim).map(|j| 1001.0 + j as f32).collect();
             idx.add_with_ids(&v, &[1001]).expect("add");
             state.live_ids.push(1001);
             state.touched_ids.push(1001);
+            state.touched_subxacts.push(1);
             state.n_vectors += 1;
             state.version += 1;
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
@@ -1886,6 +1901,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             // Fresh distinct ids well above the seeded 1..16 (never 0).
             for k in 0..n_new {
@@ -1894,6 +1910,7 @@ mod tests {
                 idx.add_with_ids(&v, &[new_id]).expect("add");
                 state.live_ids.push(new_id);
                 state.touched_ids.push(new_id);
+                state.touched_subxacts.push(1);
                 state.n_vectors += 1;
                 state.version += 1;
             }
@@ -2027,6 +2044,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (idx, state)
@@ -2414,6 +2432,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (idx, state, dim)
@@ -8209,6 +8228,413 @@ mod tests {
         assert_eq!(empty, 1, "empty layout is meta page only");
     }
 
+    /// Savepoint undo (2.16.4).  Everything the subtransaction tests need:
+    /// a 64-row flat index, its oid, a row-vector generator, and the ids the
+    /// PreCommit flush would write right now (drives the real flush path on
+    /// a copy, so the test's own transaction state is untouched).
+    fn subxact_fixture(table: &str) -> pg_sys::Oid {
+        use_turbovec();
+        Spi::run(&format!(
+            "CREATE TABLE {table} (id bigint, emb turbovec.vector)"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "INSERT INTO {table} SELECT g, ('[' || array_to_string(array(\
+                SELECT sin(g * 0.37 + s)::float8 FROM generate_series(1, 32) s), ',') \
+                || ']')::turbovec.vector FROM generate_series(1, 64) g"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "CREATE INDEX {table}_idx ON {table} USING turbovec \
+             (emb turbovec.vec_cosine_ops) WITH (bit_width = 4)"
+        ))
+        .unwrap();
+        Spi::run("SET enable_seqscan = off").unwrap();
+        Spi::get_one(&format!("SELECT '{table}_idx'::regclass::oid"))
+            .unwrap()
+            .expect("index oid")
+    }
+
+    fn subxact_row(table: &str, id: i64) -> String {
+        format!(
+            "INSERT INTO {table} SELECT {id}, ('[' || array_to_string(array(\
+                SELECT cos({id} * 0.11 + s)::float8 FROM generate_series(1, 32) s), ',') \
+                || ']')::turbovec.vector"
+        )
+    }
+
+    /// The heap ids (`id` column) of every row the index scan finds as its
+    /// own nearest neighbour, among `ids`.
+    fn subxact_self_found(table: &str, ids: &[i64]) -> Vec<i64> {
+        let list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Spi::get_one::<Vec<i64>>(&format!(
+            "SELECT coalesce(array_agg(b.id ORDER BY b.id), '{{}}') FROM {table} b \
+              WHERE b.id IN ({list}) AND (SELECT t.id FROM {table} t \
+                    ORDER BY t.emb <=> b.emb LIMIT 1) = b.id"
+        ))
+        .unwrap()
+        .unwrap_or_default()
+    }
+
+    /// Ids the commit-time flush would persist for `oid`, as heap `id`s:
+    /// flush the dirty entry for real (inside this test's transaction) and
+    /// map the persisted TIDs back through the heap.
+    fn subxact_flushed(table: &str, oid: pg_sys::Oid) -> Vec<i64> {
+        use crate::index::relfile;
+        let d = crate::cache::drain_dirty()
+            .into_iter()
+            .find(|d| d.key.rel_oid == oid)
+            .expect("the transaction's inserts left a dirty entry");
+        let outcome =
+            unsafe { crate::xact::flush_to_relfile_for_test(oid, &d.index.read(), &d.persist) };
+        crate::cache::clear_dirty(d.key, outcome);
+        let tids = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            ids
+        };
+        let tids: Vec<String> = tids
+            .iter()
+            .map(|&t| {
+                let (block, off) = pgrx::itemptr::u64_to_item_pointer_parts(t);
+                format!("'({block},{off})'")
+            })
+            .collect();
+        Spi::get_one::<Vec<i64>>(&format!(
+            "SELECT coalesce(array_agg(id ORDER BY id), '{{}}') FROM {table} \
+              WHERE ctid = ANY(ARRAY[{}]::tid[]) AND id > 1000",
+            tids.join(",")
+        ))
+        .unwrap()
+        .unwrap_or_default()
+    }
+
+    /// Zishuo's report (2026-11-20) #1: a `ROLLBACK TO SAVEPOINT` dropped the
+    /// whole transaction's pending index changes, so rows inserted BEFORE the
+    /// savepoint committed in the heap but never reached the index (silent
+    /// missing results until REINDEX).  Fail-before: 1001 is missing from
+    /// the scan and from the flush.  Pass-after: 1001 and 1003 are present,
+    /// the rolled-back 1002 is in neither.  A PL/pgSQL EXCEPTION block is a
+    /// real subtransaction, so this runs inside a #[pg_test].
+    #[pg_test]
+    fn subxact_rollback_keeps_rows_inserted_before_the_savepoint() {
+        let oid = subxact_fixture("t_sxa");
+        Spi::run(&format!(
+            "DO $$ BEGIN {r1}; BEGIN {r2}; RAISE EXCEPTION 'boom'; \
+             EXCEPTION WHEN OTHERS THEN NULL; END; {r3}; END $$",
+            r1 = subxact_row("t_sxa", 1001),
+            r2 = subxact_row("t_sxa", 1002),
+            r3 = subxact_row("t_sxa", 1003),
+        ))
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM t_sxa WHERE id > 1000").unwrap(),
+            Some(2),
+            "precondition: the heap keeps 1001 and 1003 and drops 1002"
+        );
+        assert_eq!(
+            subxact_self_found("t_sxa", &[1001, 1002, 1003]),
+            vec![1001, 1003],
+            "this transaction's scan must find the pre- and post-savepoint rows"
+        );
+        assert_eq!(
+            subxact_flushed("t_sxa", oid),
+            vec![1001, 1003],
+            "the commit-time flush must persist exactly the surviving rows"
+        );
+    }
+
+    /// Nested savepoints: aborting an outer one undoes its committed child;
+    /// aborting a later sibling keeps an earlier released one; and an abort
+    /// with nothing of ours in it (an error on another table) changes
+    /// nothing.  Drives the subtransactions directly, as PL/pgSQL does.
+    #[pg_test]
+    fn subxact_rollback_undoes_exactly_the_aborted_subtree() {
+        let oid = subxact_fixture("t_sxb");
+        let ins = |id: i64| Spi::run(&subxact_row("t_sxb", id)).unwrap();
+        let begin = || unsafe { pg_sys::BeginInternalSubTransaction(std::ptr::null()) };
+        let release = || unsafe { pg_sys::ReleaseCurrentSubTransaction() };
+        let rollback = || unsafe { pg_sys::RollbackAndReleaseCurrentSubTransaction() };
+        ins(1001); // top level: kept
+        begin(); // S1
+        ins(1002);
+        begin(); // S2, child of S1
+        ins(1003);
+        release(); // S2 commits into S1
+        rollback(); // S1 aborts: 1002 and 1003 both go
+        begin(); // S3
+        ins(1004);
+        release(); // S3 kept
+        begin(); // S4: aborts with no row of ours in it
+        Spi::run("CREATE TEMP TABLE t_sxb_other (k int)").unwrap();
+        rollback();
+        begin(); // S5
+        ins(1005);
+        rollback(); // S5 aborts: only 1005 goes
+        ins(1006);
+        let want = vec![1001, 1004, 1006];
+        assert_eq!(
+            subxact_self_found("t_sxb", &[1001, 1002, 1003, 1004, 1005, 1006]),
+            want
+        );
+        assert_eq!(subxact_flushed("t_sxb", oid), want);
+    }
+
+    /// The cache entry outlives the transaction: after a commit, the next
+    /// transaction in the backend reuses it.  Its pending-upsert lists must
+    /// be emptied together, or a savepoint rollback in that next transaction
+    /// sees them disagree and drops the entry with a WARNING (losing the
+    /// pending rows).  An ERROR there would be worse: inside subtransaction
+    /// abort PostgreSQL escalates it to PANIC.  Simulates commit with the
+    /// real flush + `clear_dirty`, then a savepoint rollback in the "next"
+    /// transaction.
+    #[pg_test]
+    fn subxact_rollback_after_a_committed_transaction_reuses_the_entry() {
+        let oid = subxact_fixture("t_sxd");
+        Spi::run(&subxact_row("t_sxd", 1001)).unwrap();
+        assert_eq!(subxact_flushed("t_sxd", oid), vec![1001], "first 'commit'");
+        let p = crate::cache::drain_dirty();
+        assert!(p.is_empty(), "the flush cleaned the entry");
+        Spi::run(&format!(
+            "DO $$ BEGIN {r2}; BEGIN {r3}; RAISE EXCEPTION 'boom'; \
+             EXCEPTION WHEN OTHERS THEN NULL; END; END $$",
+            r2 = subxact_row("t_sxd", 1002),
+            r3 = subxact_row("t_sxd", 1003),
+        ))
+        .unwrap();
+        assert_eq!(
+            subxact_self_found("t_sxd", &[1001, 1002, 1003]),
+            vec![1001, 1002]
+        );
+        assert_eq!(subxact_flushed("t_sxd", oid), vec![1001, 1002]);
+    }
+
+    /// Zishuo's report #2 at the unit level: a transaction that has inserted
+    /// (dirty cache entry) must see rows another session commits afterwards
+    /// (READ COMMITTED), or before its snapshot (REPEATABLE READ).  The other session is simulated by flushing a
+    /// second writer's snapshot onto disk with the real flush path; the scan
+    /// then has to rebase the dirty entry.
+    /// Also checks that the rebased entry still commits both rows.
+    #[pg_test]
+    fn read_committed_scan_sees_rows_committed_after_own_insert() {
+        use crate::cache;
+        use crate::index::relfile;
+        let oid = subxact_fixture("t_rc");
+        Spi::run(&subxact_row("t_rc", 1001)).unwrap(); // own insert: entry now dirty
+        // "Another session": its own copy of the on-disk index plus 1002,
+        // flushed for real.  Its heap row is inserted here too (same
+        // transaction, so it is visible to the heap recheck).
+        Spi::run(&subxact_row("t_rc", 1002)).unwrap();
+        let tid: i64 = Spi::get_one(
+            "SELECT ((ctid::text::point)[0]::bigint << 32) | (ctid::text::point)[1]::bigint \
+               FROM t_rc WHERE id = 1002",
+        )
+        .unwrap()
+        .expect("tid");
+        let tid = tid as u64;
+        // Undo 1002 in OUR entry so only the other writer has it.
+        let d = cache::drain_dirty()
+            .into_iter()
+            .find(|d| d.key.rel_oid == oid)
+            .expect("dirty");
+        d.index.write().remove(tid);
+        assert!(cache::am_mark_dirty(d.key, |p| {
+            let at = p
+                .touched_ids
+                .iter()
+                .position(|&x| x == tid)
+                .expect("1002 touched");
+            p.touched_ids.remove(at);
+            p.touched_subxacts.remove(at);
+            p.live_ids.retain(|&x| x != tid);
+            p.n_vectors -= 1;
+        }));
+        unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::RowExclusiveLock as i32);
+            let (mut other, n, ver) = crate::index::insert::load_mutable_from_disk(rel, 4, 32);
+            pg_sys::index_close(rel, pg_sys::RowExclusiveLock as i32);
+            let v: Vec<f32> = Spi::get_one::<Vec<f32>>(
+                "SELECT array(SELECT cos(1002 * 0.11 + s)::float4 FROM generate_series(1, 32) s)",
+            )
+            .unwrap()
+            .expect("vec");
+            other
+                .add_with_ids(&crate::kernels::normalise_to_vec(&v), &[tid])
+                .expect("add");
+            let state = cache::PersistState {
+                bit_width: 4,
+                dim: 32,
+                n_vectors: n + 1,
+                version: ver + 1,
+                live_ids: other.slot_to_id().to_vec(),
+                touched_ids: vec![tid],
+                touched_subxacts: vec![1],
+            };
+            crate::xact::flush_to_relfile_for_test(oid, &other, &state).expect("flush");
+        }
+        assert_eq!(
+            subxact_self_found("t_rc", &[1001, 1002]),
+            vec![1001, 1002],
+            "the new statement must see the other session's committed row"
+        );
+        // The gate itself: a dirty entry older than the disk version needs a
+        // rebase; one labelled with the current version does not.
+        let key = cache::drain_dirty()
+            .into_iter()
+            .find(|d| d.key.rel_oid == oid)
+            .expect("dirty")
+            .key;
+        let (rfn, disk_version) = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let r = cache::relfilenode_from_relation(rel);
+            let v = relfile::read_meta(rel).expect("meta").am_version as i64;
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (r, v)
+        };
+        assert!(
+            cache::scan_needs_rebase(key, rfn, disk_version + 1),
+            "a stale dirty entry is rebased"
+        );
+        assert!(
+            !cache::scan_needs_rebase(key, rfn, disk_version),
+            "the rebased entry carries the disk version, so it is not rebased again"
+        );
+        let ids = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let ids = relfile::read_ids_only(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            ids
+        };
+        assert!(ids.contains(&tid), "the other writer's row is on disk");
+        assert_eq!(
+            subxact_flushed("t_rc", oid),
+            vec![1001, 1002],
+            "our commit keeps both"
+        );
+    }
+
+    /// An aborted upsert that found its id already in the backend's cached
+    /// index (a TID that VACUUM freed and a new row reused, while this
+    /// backend's copy still held the old row) is undone by removing the id,
+    /// like a fresh insert: VACUUM already removed the old row from disk, so
+    /// the id belongs in neither.  The flush must persist the surviving
+    /// insert and leave the on-disk entry of the replaced id untouched.
+    /// (`tests/e2e/04_savepoint_tid_reuse.sh` drives this through a real
+    /// abort, with a real VACUUM.)
+    #[pg_test]
+    fn subxact_rollback_of_a_replacing_upsert_removes_it() {
+        use crate::cache::{self, CacheKey, PersistState};
+        use crate::index::relfile;
+        let oid = subxact_fixture("t_sxc");
+        cache::invalidate_all();
+        let (key, arc, victim) = unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let (idx, n, ver) = crate::index::insert::load_mutable_from_disk(rel, 4, 32);
+            let victim = idx.slot_to_id()[0];
+            let key = CacheKey {
+                rel_oid: oid,
+                attnum: 0,
+                bit_width: 4,
+                dim: 32,
+            };
+            let state = PersistState {
+                bit_width: 4,
+                dim: 32,
+                n_vectors: n,
+                version: ver,
+                live_ids: idx.slot_to_id().to_vec(),
+                touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
+            };
+            let rfn = cache::relfilenode_from_relation(rel);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            (
+                key,
+                cache::am_install(key, idx, 1, rfn, ver as i64, state),
+                victim,
+            )
+        };
+        let disk_codes_of = |id: u64| unsafe {
+            let rel = pg_sys::index_open(oid, pg_sys::AccessShareLock as i32);
+            let m = relfile::read_meta(rel).expect("meta");
+            let (c, _s, ids) = relfile::read_full(rel, &m);
+            pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
+            let stride = c.len() / ids.len();
+            ids.iter()
+                .position(|&x| x == id)
+                .map(|slot| c[slot * stride..(slot + 1) * stride].to_vec())
+        };
+        let before = disk_codes_of(victim).expect("victim on disk");
+        // What aminsert does, including its IdAlreadyPresent branch.
+        let upsert = |id: u64, sub: pg_sys::SubTransactionId| {
+            let v: Vec<f32> = (0..32)
+                .map(|j| ((id as f32) * 0.7 + j as f32).sin())
+                .collect();
+            let replaced = {
+                let mut g = arc.write();
+                let replaced = g.add_with_ids(&v, &[id]).is_err();
+                if replaced {
+                    g.remove(id);
+                    g.add_with_ids(&v, &[id]).expect("re-add");
+                }
+                replaced
+            };
+            assert!(cache::am_mark_dirty(key, |p| {
+                p.touched_ids.push(id);
+                p.touched_subxacts.push(sub);
+                if !replaced {
+                    p.live_ids.push(id);
+                    p.n_vectors += 1;
+                }
+                p.version += 1;
+            }));
+            replaced
+        };
+        const KEEP: u64 = 0x7200_0000_0001;
+        const GONE: u64 = 0x7200_0000_0002;
+        assert!(!upsert(KEEP, 1)); // top level
+        assert!(upsert(victim, 2), "precondition: this upsert replaces"); // subxact 2...
+        assert!(!upsert(GONE, 2)); // ...which then aborts
+        for (index, ids) in cache::abort_subxact(2) {
+            let mut g = index.write();
+            for id in ids {
+                g.remove(id);
+            }
+        }
+        let ids = arc.read().slot_to_id().to_vec();
+        assert!(ids.contains(&KEEP) && !ids.contains(&GONE) && !ids.contains(&victim));
+        assert_eq!(cache::am_touched_ids(oid), Some(vec![KEEP]));
+        let d = cache::drain_dirty()
+            .into_iter()
+            .find(|d| d.key == key)
+            .expect("dirty");
+        assert_eq!(
+            d.persist.n_vectors as usize,
+            ids.len(),
+            "the row-count mirror matches, or the commit-time guard fails the commit"
+        );
+        let outcome =
+            unsafe { crate::xact::flush_to_relfile_for_test(oid, &d.index.read(), &d.persist) };
+        cache::clear_dirty(key, outcome);
+        assert!(
+            disk_codes_of(KEEP).is_some(),
+            "the surviving insert is persisted"
+        );
+        assert!(disk_codes_of(GONE).is_none(), "the aborted insert is not");
+        assert_eq!(
+            disk_codes_of(victim),
+            Some(before),
+            "the aborted replacement did not touch the on-disk entry"
+        );
+    }
+
     /// Phase L hardening (item 2): `ambuildempty` writes the meta
     /// page into `INIT_FORKNUM` so unlogged indexes survive a
     /// crash by being reset to empty rather than corrupted. We
@@ -12716,12 +13142,14 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let new_id: u64 = 0x7300_0000_0001;
             let v: Vec<f32> = (0..dim).map(|j| ((j as f32) * 0.37).sin()).collect();
             idx.add_with_ids(&v, &[new_id]).expect("add");
             state.live_ids.push(new_id);
             state.touched_ids.push(new_id);
+            state.touched_subxacts.push(1);
             state.n_vectors += 1;
             state.version += 1;
             let rfn = crate::cache::relfilenode_from_relation(rel);
@@ -12850,12 +13278,14 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             let new_id: u64 = 0x7400_0000_0001;
             let v: Vec<f32> = (0..dim).map(|j| ((j as f32) * 0.41).cos()).collect();
             idx.add_with_ids(&v, &[new_id]).expect("add");
             state.live_ids.push(new_id);
             state.touched_ids.push(new_id);
+            state.touched_subxacts.push(1);
             state.n_vectors += 1;
             state.version += 1;
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
@@ -13117,6 +13547,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             // 20 new rows = 1% of 2000, comfortably inside the 10% bound.
             for g in 9001u64..9021 {
@@ -13126,6 +13557,7 @@ mod tests {
                 idx.add_with_ids(&v, &[g]).expect("add");
                 state.live_ids.push(g);
                 state.touched_ids.push(g);
+                state.touched_subxacts.push(1);
                 state.n_vectors += 1;
                 state.version += 1;
             }
@@ -13271,6 +13703,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             for g in 9001u64..9051 {
                 let v: Vec<f32> = (1..=dim)
@@ -13279,6 +13712,7 @@ mod tests {
                 idx.add_with_ids(&v, &[g]).expect("add");
                 state.live_ids.push(g);
                 state.touched_ids.push(g);
+                state.touched_subxacts.push(1);
                 state.n_vectors += 1;
                 state.version += 1;
             }
@@ -13688,6 +14122,7 @@ mod tests {
                 version: meta.am_version as i32,
                 live_ids: idx.slot_to_id().to_vec(),
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             pg_sys::index_close(rel, pg_sys::AccessShareLock as i32);
             (idx, state)

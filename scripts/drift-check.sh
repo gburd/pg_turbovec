@@ -308,8 +308,15 @@ fi
 #      primitives at any call site. Some managed variants route custom
 #      resource-manager / raw full-page-image records differently, so any
 #      of these appearing is an immediate portability regression.
+#      One exception, marked `drift-ok: init-fork-fpi` on the call line:
+#      the unlogged index's INIT fork page.  Generic WAL writes no record
+#      for an unlogged relation, so without it a crash before a checkpoint
+#      zeroes the index.  The record is a core XLOG_FPI, the same one
+#      nbtree and SP-GiST emit for every unlogged index (smgr_bulk_finish
+#      -> log_newpages), so any server that supports unlogged btree
+#      indexes replays it.
 raw_wal=$(grep -rnE '\b(log_newpage|log_newpage_buffer|XLogInsert|smgrwrite|smgrextend|PageSetLSN|FlushRelationBuffers)\b' src/ 2>/dev/null \
-            | grep -vE '^\s*//|^[^:]+:[0-9]+:\s*//' || true)
+            | grep -vE '^\s*//|^[^:]+:[0-9]+:\s*//' | grep -v 'drift-ok: init-fork-fpi' || true)
 if [ -n "$raw_wal" ]; then
     fail "raw-WAL / raw-storage primitive at a call site (durability must stay 100% GenericXLog): $(printf '%s' "$raw_wal" | head -1)"
 fi

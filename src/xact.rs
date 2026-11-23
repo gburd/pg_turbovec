@@ -304,21 +304,22 @@ pub(crate) fn ensure_xact_callbacks_registered() {
             cache::invalidate_dirty();
         });
 
-        // M-NEW-4: SAVEPOINT / subtransaction rollback. aminsert mutates
-        // the cached in-memory IdMapIndex + touched_ids + dirty flag
-        // eagerly; a `ROLLBACK TO SAVEPOINT` undoes the heap rows but
-        // nothing here, so without this the rolled-back rows would be
-        // spliced onto disk at top-level PreCommit (index bloat + silent
-        // recall loss). We don't journal per-subxact undo (the
-        // per-insert clone cost is unacceptable, same rationale as the
-        // Abort path), so on ANY subxact abort we conservatively
-        // invalidate the whole dirty set — the next access in this
-        // backend reloads committed state from the relfile. Correct
-        // (never persists a rolled-back row) at the cost of re-reading
-        // the index after a savepoint rollback, which is rare on the
-        // bulk-insert hot path.
-        register_subxact_callback(PgSubXactCallbackEvent::AbortSub, |_my, _parent| {
-            cache::invalidate_dirty();
+        // SAVEPOINT / subtransaction rollback.  aminsert mutates the cached
+        // in-memory IdMapIndex eagerly, so a `ROLLBACK TO SAVEPOINT` (or a
+        // PL/pgSQL EXCEPTION block) must undo the aborted subtransaction's
+        // upserts there too, or they would reach disk at PreCommit.  It
+        // must undo ONLY those: dropping the whole dirty entry would also
+        // discard the rows the transaction inserted before the savepoint,
+        // which then commit in the heap but never reach the index (silent
+        // missing results until REINDEX).
+        // Memory-only work (see `cache::abort_subxact`).
+        register_subxact_callback(PgSubXactCallbackEvent::AbortSub, |my_subid, _parent| {
+            for (index, ids) in cache::abort_subxact(my_subid) {
+                let mut guard = index.write();
+                for id in ids {
+                    guard.remove(id);
+                }
+            }
         });
 
         // Parallel-worker and 2PC paths fall through unhandled

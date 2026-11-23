@@ -428,6 +428,18 @@ pub(crate) unsafe fn write_meta_in_fork(
     let encoded = meta.encode();
     std::ptr::copy_nonoverlapping(encoded.as_ptr(), dst, encoded.len());
     pg_sys::GenericXLogFinish(state);
+    if fork == pg_sys::ForkNumber::INIT_FORKNUM {
+        // Generic WAL writes no record for an unlogged relation, so this
+        // page, written through shared buffers, would reach disk only at the
+        // next checkpoint: a crash before it resets the index to a zeroed
+        // page ("bad magic on meta page" until REINDEX).  contrib/bloom has
+        // had the same bug since PostgreSQL 17 (ccadf73163c).  WAL-log the
+        // page image ourselves, as built-in AMs do; a server whose generic
+        // WAL already logs init forks just logs this page twice.
+        pg_sys::CritSectionCount += 1;
+        pg_sys::log_newpage_buffer(buf, false); // drift-ok: init-fork-fpi
+        pg_sys::CritSectionCount -= 1;
+    }
     pg_sys::UnlockReleaseBuffer(buf);
 }
 

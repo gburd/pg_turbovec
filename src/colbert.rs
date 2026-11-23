@@ -430,6 +430,9 @@ unsafe fn load_persistent_colbert_inner(
     };
     // Warm hit: reuse the resident index (the leak fix — no per-call
     // build, no growing thread-local).
+    if cache::scan_needs_rebase(key, relfile_node, version_as_i64) {
+        cache::rebase_dirty_entry(index_rel, key);
+    }
     if let Some(h) = cache::scan_lookup(key, relfile_node, version_as_i64) {
         return Some((h, tombstones));
     }

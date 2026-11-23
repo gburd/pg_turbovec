@@ -133,7 +133,7 @@ backward-compatibly (a v4 binary reads v3 indexes as flat, no
 REINDEX). Future majors should attempt to remain online-upgradable
 from the 1.x line unless the cost of doing so is prohibitive.
 
-### Current (as of v2.16.3, 2026-11-20)
+### Current (as of v2.16.4, 2026-11-23)
 
 `docs/UPGRADING.md` holds the authoritative, per-release migration matrix —
 it is updated every release and drift-check enforces that. The summary:
@@ -148,13 +148,14 @@ it is updated every release and drift-check enforces that. The summary:
 | 2.16.0      | 2.16.1 | `ALTER EXTENSION` only — no REINDEX. Packaging fix: v2.16.0 tagged a stale `Cargo.lock` (turbovec `1202a9e` vs `Cargo.toml`'s carry #8 `662084c`), breaking `--locked`/`--offline`/Nix source builds. v2.16.1 commits the matching lock; identical at runtime. drift-check § 1b now guards lock-vs-manifest rev. |
 | 2.16.1      | 2.16.2 | `ALTER EXTENSION` only — no REINDEX, no reconnect for the format. **PostgreSQL 19 is now GA-supported** (was experimental against the beta): PG 19.0 released 2026-11-16, full suite passes against the GA build (494/9), no new C-ABI shims. pgrx `0.19.3`→`0.19.4` (CVE-2026-6460 fix). No code behaviour/wire/SQL/scoring change. |
 | 2.16.2      | 2.16.3 | `ALTER EXTENSION` only — no REINDEX. **e-means IVF build parallelised**: since v2.16.0 e-means (default IVF trainer) assigned serially on one core, stalling a large build (10M/`lists=3162` hung >40 min); it now runs across the build pool (~12 min on 96 cores). Centroids **byte-identical** to prior e-means builds, so recall/scoring/format unchanged — build-time only. Plus two flaky-test fixes. Found on a metal 10M competitive bench. |
+| 2.16.3      | 2.16.4 | `ALTER EXTENSION` only — no REINDEX to upgrade (REINDEX only an index already damaged; see CHANGELOG). **Savepoint rollback, cross-session visibility, unlogged crash recovery fixed** (external report): a subtransaction abort now undoes only its own pending rows; a scan rebases a dirty entry that predates the on-disk version; the init fork is WAL-logged. New `tests/e2e/` suite (real commits, two sessions, crash) in CI. No wire/SQL change. |
 
 One exception worth knowing: a **`bit_width = 1`** index created before
 v2.7.0 that took inserts after a VACUUM should be `REINDEX`ed — v2.7.0 fixed
 a tombstone-resurrection bug in the BQ insert path. 2/3/4-bit was never
 affected.
 
-### Where the project actually is (v2.16.3)
+### Where the project actually is (v2.16.4)
 
 Per-release detail lives in `CHANGELOG.md`; this section is only what an
 agent needs to orient. Do not add release blurbs here — they go stale and
@@ -502,7 +503,7 @@ Every tagged release must:
 1. Have an entry in `CHANGELOG.md` with the date and a Migration
    section describing the upgrade action.
 2. Have a corresponding migration file in `migrations/`, even if empty.
-3. Pass `cargo pgrx test pg16` cleanly (current count: 494 passed,
+3. Pass `cargo pgrx test pg16` cleanly (current count: 499 passed,
    9 ignored, uniform across every CI leg pg13-19).
 4. Pass `bash scripts/drift-check.sh`.
 5. Be tagged AND pushed to BOTH `origin` (Codeberg) and `github`

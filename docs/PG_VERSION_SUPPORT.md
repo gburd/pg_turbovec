@@ -5,20 +5,20 @@ the latest patch of each major on
 every push (`cargo pgrx init --download`), so the "Tested patch" column below
 is the floor at the time of writing, not a pin.
 
-The test count (**494 passed / 9 ignored**, uniform across every native leg and
-the pg16 classic leg as of v2.16.2) is the same on all
+The test count (**499 passed / 9 ignored**, uniform across every native leg and
+the pg16 classic leg as of v2.16.4) is the same on all
 majors. The per-major notes below record only the C-ABI shape differences the
 extension shims, not test-count differences.
 
 | Version | Status | Tests | Notes |
 |---|---|---|---|
-| 13.x | ✅ Supported | 494 passed / 9 ignored | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
-| 14.x | ✅ Supported | 494 passed / 9 ignored | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
-| 15.x | ✅ Supported | 494 passed / 9 ignored | Same shape as 14. |
-| 16.x | ✅ Supported | 494 passed / 9 ignored | Reference platform during development. |
-| 17.x | ✅ Supported | 494 passed / 9 ignored | Benchmark platform. |
-| 18.x | ✅ Supported | 494 passed / 9 ignored | `relopt_parse_elt` gained `isset_offset`. CI-validated every push (`.github/workflows/test.yml` matrix leg `test (18)`). |
-| 19.x | ✅ Supported | 494 passed / 9 ignored | PostgreSQL 19.0 went GA 2026-11-16; validated on a from-source build of the official `postgresql-19.0.tar.bz2`. pgrx 0.19.4. PG19 C-ABI deltas: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. |
+| 13.x | ✅ Supported | 499 passed / 9 ignored | `aminsert` 7-arg shape; no `amsummarizing` / `amadjustmembers` fields. |
+| 14.x | ✅ Supported | 499 passed / 9 ignored | `aminsert` gained `indexUnchanged`; no `amsummarizing` field. |
+| 15.x | ✅ Supported | 499 passed / 9 ignored | Same shape as 14. |
+| 16.x | ✅ Supported | 499 passed / 9 ignored | Reference platform during development. |
+| 17.x | ✅ Supported | 499 passed / 9 ignored | Benchmark platform. |
+| 18.x | ✅ Supported | 499 passed / 9 ignored | `relopt_parse_elt` gained `isset_offset`. CI-validated every push (`.github/workflows/test.yml` matrix leg `test (18)`). |
+| 19.x | ✅ Supported | 499 passed / 9 ignored | PostgreSQL 19.0 went GA 2026-11-16; validated on a from-source build of the official `postgresql-19.0.tar.bz2`. pgrx 0.19.4. PG19 C-ABI deltas: `LockBuffer`'s `mode` param became `BufferLockMode::Type` (u32) — shimmed via `relfile::lock_buffer_mode`; `rd_locator.relNumber` same as pg16+. |
 
 > Test counts and patch versions above are the exact numbers CI
 > installs and reports as of the most recent green run
@@ -153,8 +153,8 @@ new callback you split follows the same convention.
 ## PostgreSQL 19
 
 **Supported** (GA). PostgreSQL 19.0 was released 2026-11-16. pg_turbovec's
-full suite builds and passes against the GA release (494 passed / 9 ignored,
-pgrx 0.19.4), verified on a from-source build of the official
+full suite builds and passes against the GA release (494 passed / 9 ignored
+at v2.16.2, pgrx 0.19.4; 499 / 9 at v2.16.4), verified on a from-source build of the official
 `postgresql-19.0.tar.bz2` (sha256 `a89fd70e…`). The C-ABI deltas handled
 across the 19 beta/RC cycle (`LockBuffer`'s `mode` becoming
 `BufferLockMode::Type`, `relNumber` unchanged from pg16+) all hold on GA; no

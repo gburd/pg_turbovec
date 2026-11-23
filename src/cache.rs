@@ -1523,6 +1523,11 @@ pub struct PersistState {
     /// insertion order; the flush dedups). Bounded by this txn's own
     /// insert count, not the corpus size.
     pub touched_ids: Vec<u64>,
+    /// The subtransaction that upserted each entry of `touched_ids` (same
+    /// length, same order).  A `ROLLBACK TO SAVEPOINT` must undo only the
+    /// upserts of the aborted subtransaction and its children, not the whole
+    /// transaction's; see [`abort_subxact`].
+    pub touched_subxacts: Vec<pg_sys::SubTransactionId>,
 }
 
 /// What a cache entry actually holds. The index-AM scan path
@@ -1698,6 +1703,10 @@ pub(crate) fn scan_lookup(
     let entry = g.get_mut(&key)?;
     if entry.relfilenode != expected_relfile || entry.n_rows != expected_n_rows {
         if entry.dirty {
+            // This transaction's own unflushed view, but the index changed
+            // on disk since it was loaded.  The scan path rebases the entry
+            // onto disk first (`scan_needs_rebase`), so reaching here means
+            // the caller chose to serve it as is.
             entry.seq = next_seq();
             return Some(entry.index.scan_handle());
         }
@@ -1706,6 +1715,26 @@ pub(crate) fn scan_lookup(
     }
     entry.seq = next_seq();
     Some(entry.index.scan_handle())
+}
+
+/// True when the scan path holds a dirty entry for `key` that predates the
+/// on-disk `am_version` it just read, so it must be rebased with
+/// [`rebase_dirty_entry`] before it is searched.
+///
+/// At every isolation level: under READ COMMITTED a new statement must see
+/// rows other sessions committed meanwhile.  Under REPEATABLE READ the
+/// entry can predate even the transaction's snapshot, because a backend's
+/// first insert reuses the entry an earlier transaction left clean, so it
+/// may lack rows the snapshot sees.  The rebased entry is a superset of
+/// what any snapshot sees, and the heap recheck drops the rest.
+pub(crate) fn scan_needs_rebase(key: CacheKey, expected_relfile: u32, disk_version: i64) -> bool {
+    let g = CACHE.lock();
+    g.get(&key).is_some_and(|e| {
+        e.dirty
+            && e.relfilenode == expected_relfile
+            && matches!(e.index, Stored::Mutable(_))
+            && e.n_rows != disk_version
+    })
 }
 
 /// AM-mutation lookup: returns the cached entry whenever the
@@ -2080,6 +2109,7 @@ pub fn clear_dirty(key: CacheKey, outcome: Option<crate::index::relfile::FlushOu
                 if let Some(p) = entry.persist.as_mut() {
                     p.version = o.stamped_version as i32;
                     p.touched_ids.clear();
+                    p.touched_subxacts.clear();
                 }
             }
         }
@@ -2104,6 +2134,153 @@ pub(crate) fn am_touched_ids(rel_oid: pg_sys::Oid) -> Option<Vec<u64>> {
 pub fn invalidate_dirty() {
     let mut g = CACHE.lock();
     g.retain(|_, e| !e.dirty);
+}
+
+/// Undo the upserts made by subtransaction `my_subid` (and its children)
+/// in every dirty entry, keeping the rest of the transaction's work.
+/// Returns, for each entry, the in-memory index and the ids to remove from
+/// it: the caller removes them under the index lock, which is never taken
+/// while holding the cache mutex.
+///
+/// Subtransaction ids increase monotonically within a top-level
+/// transaction, and while `my_subid` is open every new subtransaction is
+/// its descendant, so "aborted" is exactly `subxact >= my_subid`.  A child
+/// that committed into a parent keeps its own id, which is still >= the
+/// parent's, so it is undone when the parent aborts.
+///
+/// Removing the id undoes every upsert.  A fresh insert added it.  An
+/// upsert that found the id already present replaced a row whose TID VACUUM
+/// had freed: VACUUM removes a TID's index entries from disk before the
+/// heap can reuse it, so the replaced row is gone from disk too, and the id
+/// must not be in the index either way.
+///
+/// This runs inside subtransaction abort, where PostgreSQL escalates an
+/// ERROR to PANIC and catalog or lock work is unsafe, so it only edits
+/// in-memory state.  An entry left with no pending upserts is evicted: it
+/// holds nothing disk does not, and keeping it dirty would make commit
+/// rewrite the relfile for nothing.
+pub(crate) fn abort_subxact(
+    my_subid: pg_sys::SubTransactionId,
+) -> Vec<(Arc<RwLock<IdMapIndex>>, Vec<u64>)> {
+    let mut g = CACHE.lock();
+    let mut removals = Vec::new();
+    let mut evict = Vec::new();
+    for (k, e) in g.iter_mut() {
+        if !e.dirty {
+            continue;
+        }
+        let (Some(p), Stored::Mutable(arc)) = (e.persist.as_mut(), &e.index) else {
+            continue;
+        };
+        if p.touched_ids.len() != p.touched_subxacts.len() {
+            // Not expected.  Without a subtransaction per upsert we cannot
+            // tell which to undo: evict the entry, losing the transaction's
+            // pending rows, and say so (an ERROR here would PANIC).
+            pgrx::warning!(
+                "turbovec: index {} lost track of its pending inserts at a savepoint rollback; \
+                 rows inserted earlier in this transaction may be missing from it until REINDEX",
+                k.rel_oid.to_u32()
+            );
+            evict.push(*k);
+            continue;
+        }
+        let mut gone = Vec::new();
+        let mut keep_ids = Vec::with_capacity(p.touched_ids.len());
+        let mut keep_subs = Vec::with_capacity(p.touched_ids.len());
+        for (&id, &sub) in p.touched_ids.iter().zip(&p.touched_subxacts) {
+            if sub >= my_subid {
+                gone.push(id);
+            } else {
+                keep_ids.push(id);
+                keep_subs.push(sub);
+            }
+        }
+        if gone.is_empty() {
+            continue;
+        }
+        if keep_ids.is_empty() {
+            evict.push(*k);
+            continue;
+        }
+        p.touched_ids = keep_ids;
+        p.touched_subxacts = keep_subs;
+        let gone_set: HashSet<u64> = gone.iter().copied().collect();
+        p.live_ids.retain(|id| !gone_set.contains(id));
+        p.n_vectors = p.live_ids.len() as i64;
+        removals.push((arc.clone(), gone_set.into_iter().collect()));
+    }
+    for k in evict {
+        g.remove(&k);
+    }
+    removals
+}
+
+/// Rebuild the dirty entry `key` as the CURRENT committed on-disk state
+/// plus this transaction's surviving upserts (`touched_ids`), the same
+/// merge the commit-time flush performs (`relfile::reconcile_flush_image`).
+/// Used when another session committed since the entry was loaded: a READ
+/// COMMITTED statement must see those rows.  Reads the relfile and may
+/// raise ERROR, so it must run in normal transaction state.  On return the entry is
+/// still dirty and is labelled with the on-disk `am_version` it was rebased
+/// onto, so the scan freshness check matches until the next commit.
+///
+/// # Safety
+/// `index_relation` is the open index for `key.rel_oid`.
+pub(crate) unsafe fn rebase_dirty_entry(index_relation: pg_sys::Relation, key: CacheKey) {
+    let (arc, persist) = {
+        let g = CACHE.lock();
+        let Some(e) = g.get(&key) else { return };
+        let (Stored::Mutable(a), Some(p)) = (&e.index, e.persist.as_ref()) else {
+            return;
+        };
+        if !e.dirty {
+            return;
+        }
+        (a.clone(), p.clone())
+    };
+    let bit_width = persist.bit_width;
+    let dim = persist.dim as usize;
+    let (disk_idx, _disk_n, disk_version) =
+        crate::index::insert::load_mutable_from_disk(index_relation, bit_width, dim);
+    let merged = {
+        let snap = arc.read();
+        snap.prepare();
+        disk_idx.prepare();
+        let stride = dim * bit_width as usize / 8;
+        let (codes, scales, ids) = crate::index::relfile::reconcile_flush_image(
+            stride,
+            disk_idx.packed_codes(),
+            disk_idx.scales(),
+            disk_idx.slot_to_id(),
+            snap.packed_codes(),
+            snap.scales(),
+            snap.slot_to_id(),
+            &persist.touched_ids,
+        );
+        let n = ids.len();
+        IdMapIndex::from_id_map_parts(
+            bit_width as usize,
+            dim,
+            n,
+            codes,
+            scales,
+            ids,
+            disk_idx.tqplus_shift().to_vec(),
+            disk_idx.tqplus_scale().to_vec(),
+        )
+        .unwrap_or_else(|e| pgrx::error!("turbovec: rebasing the in-memory index failed: {e}"))
+    };
+    let live_ids = merged.slot_to_id().to_vec();
+    *arc.write() = merged;
+    let mut g = CACHE.lock();
+    if let Some(e) = g.get_mut(&key) {
+        e.n_rows = disk_version as i64;
+        if let Some(p) = e.persist.as_mut() {
+            p.n_vectors = live_ids.len() as i64;
+            p.version = disk_version + p.touched_ids.len() as i32;
+            p.live_ids = live_ids;
+        }
+    }
 }
 
 /// Drop every entry referencing `rel_oid`. Called from the DROP

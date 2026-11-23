@@ -601,6 +601,12 @@ pub(crate) unsafe extern "C-unwind" fn amgettuple(
         let relfile_node = cache::relfilenode_from_relation((*scan).indexRelation);
         let version_as_i64 = am_version_u32 as i64;
 
+        // This transaction's own dirty entry predates rows another session
+        // has since committed.  Rebase it onto disk so this statement sees
+        // them.
+        if dirty_fallback.is_none() && cache::scan_needs_rebase(key, relfile_node, version_as_i64) {
+            cache::rebase_dirty_entry((*scan).indexRelation, key);
+        }
         let arc: cache::ScanHandle = match dirty_fallback {
             Some((_, a, _)) => cache::ScanHandle::Mutable(a),
             None => match cache::scan_lookup(key, relfile_node, version_as_i64) {

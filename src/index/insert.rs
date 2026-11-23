@@ -147,106 +147,8 @@ unsafe fn aminsert_relfile(
         Some(a) => a,
         None => {
             // First mutation in this tx: load from relfile pages.
-            let (idx_index, n_vectors_existing, version_existing) = match relfile::read_meta(
-                index_relation,
-            ) {
-                Some(meta) if meta.n_vectors > 0 => {
-                    // v1.29.1 corruption fix: read meta + chains
-                    // atomically under the shared rewrite lock and
-                    // build the index from the RETURNED fresh meta
-                    // (a concurrent flush/vacuum may have rewritten
-                    // the relfile since our `read_meta` above).
-                    let (meta, codes, scales, ids) =
-                        relfile::read_full_consistent(index_relation, &meta);
-                    // Duplicate-id corrupt relfile: fail loudly
-                    // with an actionable REINDEX hint (same as the
-                    // read path) BEFORE turbovec rejects it with
-                    // an opaque "duplicate ids in .tvim file", so a
-                    // backfill loop gets a clear signal instead of
-                    // retrying an opaque error forever. Reported
-                    // 2026-07-30 (agora). Only for the bijective
-                    // flat kind (`lists == 0`): an IVF index
-                    // (`lists > 0`) legitimately repeats ids across
-                    // cells (soft-assignment), so uniqueness must
-                    // NOT be asserted there. See
-                    // scan::assert_ids_unique_or_reindex.
-                    if meta.lists == 0 {
-                        crate::index::scan::assert_ids_unique_or_reindex(index_relation, &ids);
-                    }
-                    // wire v8: per-index TQ+ (empty = identity; a
-                    // pg_turbovec index never calibrates today).
-                    let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, &meta);
-                    let idx = IdMapIndex::from_id_map_parts(
-                            meta.bit_width as usize,
-                            meta.dim as usize,
-                            meta.n_vectors as usize,
-                            codes,
-                            scales,
-                            ids,
-                            tqplus_shift,
-                            tqplus_scale,
-                        )
-                        .unwrap_or_else(|e| {
-                            // turbovec's flat `IdMapIndex` requires
-                            // `slot_to_id` to be a BIJECTION. An
-                            // `assign_dups > 1` (IVF-4a soft-assignment)
-                            // index deliberately repeats an external id
-                            // across cells, so it can never satisfy that
-                            // and this load always fails -- the index is
-                            // HEALTHY (`turbovec_check` verifies it) and
-                            // calling it "corrupt relfile pages" sent at
-                            // least one operator hunting for corruption
-                            // that does not exist, with a REINDEX hint
-                            // that cannot help (a rebuild reproduces the
-                            // same by-design duplicates).
-                            //
-                            // Distinguish the two cases by the one fact
-                            // we have and turbovec does not: `lists > 0`
-                            // plus duplicate ids is BY DESIGN; the same
-                            // error on a flat index is real corruption
-                            // (the `lists == 0` gate above already
-                            // reports that with the REINDEX hint, so
-                            // reaching here on flat means a different
-                            // internal inconsistency).
-                            //
-                            // `from_id_map_parts` has exactly ONE failure
-                            // mode -- a non-bijective `slot_to_id` -- so
-                            // reaching here already means "duplicate ids".
-                            // No rescan or copy of the id table is needed
-                            // and the healthy load pays NOTHING.
-                            //
-                            // `lists > 0` does not PROVE assign_dups > 1
-                            // (a single-assignment IVF index is bijective
-                            // and would not reach here), so the message
-                            // names the overwhelmingly likely cause while
-                            // the HINT tells the operator how to confirm
-                            // the index is healthy rather than asserting
-                            // it blindly.
-                            if meta.lists > 0 {
-                                let idx_name =
-                                    crate::index::scan::index_relname(index_relation);
-                                pgrx::ereport!(
-                                    pgrx::PgLogLevel::ERROR,
-                                    pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                                    format!(
-                                        "turbovec: index \"{idx_name}\" was built WITH (assign_dups > 1) and does not support INSERT/UPDATE"
-                                    ),
-                                    format!(
-                                        "IVF-4a soft assignment stores a row in several cells on purpose, so the index is NOT corrupt -- `SELECT * FROM turbovec.turbovec_check('{idx_name}'::regclass)` will confirm it is healthy, and REINDEX will not change this. Queries work normally; the index is effectively READ-ONLY. To accept writes, rebuild it without `assign_dups` (or with `assign_dups = 1`)."
-                                    )
-                                );
-                            }
-                            error!("turbovec aminsert: corrupt relfile pages: {}", e)
-                        });
-                    (idx, meta.n_vectors as i64, meta.am_version as i32)
-                }
-                _ => (
-                    IdMapIndex::new(dim, bit_width as usize)
-                        .expect("turbovec aminsert: invalid (dim, bit_width) for IdMapIndex::new"),
-                    0,
-                    0,
-                ),
-            };
+            let (idx_index, n_vectors_existing, version_existing) =
+                load_mutable_from_disk(index_relation, bit_width, dim);
             let bytes_per_vec = (dim * bit_width as usize) / 8 + 4 + 64;
             let total_bytes = bytes_per_vec * n_vectors_existing.max(1) as usize;
             let live_ids = idx_index.slot_to_id().to_vec();
@@ -257,6 +159,7 @@ unsafe fn aminsert_relfile(
                 version: version_existing,
                 live_ids,
                 touched_ids: Vec::new(),
+                touched_subxacts: Vec::new(),
             };
             cache::am_install(
                 key,
@@ -286,6 +189,13 @@ unsafe fn aminsert_relfile(
                 if msg.contains("IdAlreadyPresent") {
                     guard.remove(id);
                     if let Err(e2) = guard.add_with_ids(&buf, &[id]) {
+                        // The id is gone from memory; keep the row-count
+                        // mirror in step, for a savepoint that catches this.
+                        drop(guard);
+                        cache::am_mark_dirty(key, |p| {
+                            p.live_ids.retain(|&x| x != id);
+                            p.n_vectors = p.live_ids.len() as i64;
+                        });
                         error!("turbovec aminsert: re-add after remove failed: {:?}", e2);
                     }
                     id_already_present = true;
@@ -305,6 +215,8 @@ unsafe fn aminsert_relfile(
         // the id in this backend's in-memory index, so both must be
         // reconciled.
         p.touched_ids.push(id);
+        p.touched_subxacts
+            .push(pg_sys::GetCurrentSubTransactionId());
         if !id_already_present {
             // Keep the `live_ids` / `n_vectors` mirror in step with the
             // in-memory index's `slot_to_id`. As of v1.28.4 the flush
@@ -326,6 +238,120 @@ unsafe fn aminsert_relfile(
     crate::xact::ensure_xact_callbacks_registered();
 
     true
+}
+
+/// Load the index's committed on-disk state into a mutable, id-addressed
+/// [`IdMapIndex`], returning it with the on-disk row count and
+/// `am_version`. An empty index yields a fresh `IdMapIndex` and `(0, 0)`.
+///
+/// This is how a backend's first `aminsert` in a transaction builds its
+/// in-memory copy, and how [`rebase_dirty_entry`] re-reads committed state
+/// under a dirty entry, so both see exactly the same image (including the
+/// duplicate-id and `assign_dups` errors).
+pub(crate) unsafe fn load_mutable_from_disk(
+    index_relation: pg_sys::Relation,
+    bit_width: i32,
+    dim: usize,
+) -> (IdMapIndex, i64, i32) {
+    match relfile::read_meta(index_relation) {
+        Some(meta) if meta.n_vectors > 0 => {
+            // v1.29.1 corruption fix: read meta + chains
+            // atomically under the shared rewrite lock and
+            // build the index from the RETURNED fresh meta
+            // (a concurrent flush/vacuum may have rewritten
+            // the relfile since our `read_meta` above).
+            let (meta, codes, scales, ids) = relfile::read_full_consistent(index_relation, &meta);
+            // Duplicate-id corrupt relfile: fail loudly
+            // with an actionable REINDEX hint (same as the
+            // read path) BEFORE turbovec rejects it with
+            // an opaque "duplicate ids in .tvim file", so a
+            // backfill loop gets a clear signal instead of
+            // retrying an opaque error forever. Reported
+            // 2026-07-30 (agora). Only for the bijective
+            // flat kind (`lists == 0`): an IVF index
+            // (`lists > 0`) legitimately repeats ids across
+            // cells (soft-assignment), so uniqueness must
+            // NOT be asserted there. See
+            // scan::assert_ids_unique_or_reindex.
+            if meta.lists == 0 {
+                crate::index::scan::assert_ids_unique_or_reindex(index_relation, &ids);
+            }
+            // wire v8: per-index TQ+ (empty = identity; a
+            // pg_turbovec index never calibrates today).
+            let (tqplus_shift, tqplus_scale) = relfile::read_tqplus(index_relation, &meta);
+            let idx = IdMapIndex::from_id_map_parts(
+                    meta.bit_width as usize,
+                    meta.dim as usize,
+                    meta.n_vectors as usize,
+                    codes,
+                    scales,
+                    ids,
+                    tqplus_shift,
+                    tqplus_scale,
+                )
+                .unwrap_or_else(|e| {
+                    // turbovec's flat `IdMapIndex` requires
+                    // `slot_to_id` to be a BIJECTION. An
+                    // `assign_dups > 1` (IVF-4a soft-assignment)
+                    // index deliberately repeats an external id
+                    // across cells, so it can never satisfy that
+                    // and this load always fails -- the index is
+                    // HEALTHY (`turbovec_check` verifies it) and
+                    // calling it "corrupt relfile pages" sent at
+                    // least one operator hunting for corruption
+                    // that does not exist, with a REINDEX hint
+                    // that cannot help (a rebuild reproduces the
+                    // same by-design duplicates).
+                    //
+                    // Distinguish the two cases by the one fact
+                    // we have and turbovec does not: `lists > 0`
+                    // plus duplicate ids is BY DESIGN; the same
+                    // error on a flat index is real corruption
+                    // (the `lists == 0` gate above already
+                    // reports that with the REINDEX hint, so
+                    // reaching here on flat means a different
+                    // internal inconsistency).
+                    //
+                    // `from_id_map_parts` has exactly ONE failure
+                    // mode -- a non-bijective `slot_to_id` -- so
+                    // reaching here already means "duplicate ids".
+                    // No rescan or copy of the id table is needed
+                    // and the healthy load pays NOTHING.
+                    //
+                    // `lists > 0` does not PROVE assign_dups > 1
+                    // (a single-assignment IVF index is bijective
+                    // and would not reach here), so the message
+                    // names the overwhelmingly likely cause while
+                    // the HINT tells the operator how to confirm
+                    // the index is healthy rather than asserting
+                    // it blindly.
+                    if meta.lists > 0 {
+                        let idx_name =
+                            crate::index::scan::index_relname(index_relation);
+                        pgrx::ereport!(
+                            pgrx::PgLogLevel::ERROR,
+                            pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "turbovec: index \"{idx_name}\" was built WITH (assign_dups > 1) and does not support INSERT/UPDATE"
+                            ),
+                            format!(
+                                "IVF-4a soft assignment stores a row in several cells on purpose, so the index is NOT corrupt -- `SELECT * FROM turbovec.turbovec_check('{idx_name}'::regclass)` will confirm it is healthy, and REINDEX will not change this. Queries work normally; the index is effectively READ-ONLY. To accept writes, rebuild it without `assign_dups` (or with `assign_dups = 1`)."
+                            )
+                        );
+                    }
+                    error!("turbovec aminsert: corrupt relfile pages: {}", e)
+                });
+            (idx, meta.n_vectors as i64, meta.am_version as i32)
+        }
+        // An empty index (never filled, or emptied by VACUUM).  Keep the
+        // meta page's version: it is the freshness label a scan compares.
+        empty => (
+            IdMapIndex::new(dim, bit_width as usize)
+                .expect("turbovec aminsert: invalid (dim, bit_width) for IdMapIndex::new"),
+            0,
+            empty.map_or(0, |m| m.am_version as i32),
+        ),
+    }
 }
 
 /// Phase G-2b: real incremental insert into an existing Vamana graph

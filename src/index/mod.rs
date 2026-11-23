@@ -44,7 +44,7 @@ mod build;
 pub(crate) mod build_pool;
 mod cost;
 pub(crate) mod graph;
-mod insert;
+pub(crate) mod insert;
 pub(crate) mod ivf;
 pub(crate) mod onebit;
 mod options;

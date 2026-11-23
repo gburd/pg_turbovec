@@ -14,9 +14,13 @@ bytes):
   1. Stream HN story/comment text from a pinned HF dataset revision, in file +
      row order; keep the first N non-empty, de-duplicated docs as the corpus and
      the next H as held-out queries.
-  2. Embed each doc with a pinned sentence-transformers model (CPU or GPU),
-     L2-normalise to fp32 -- the same representation CO1024 uses -- so HN is a
-     drop-in vector corpus directly comparable to the 768-d CW768 corpus.
+  2. Embed each doc with a pinned sentence-transformers model, L2-normalise to
+     fp32 -- the same representation CO1024 uses -- so HN is a drop-in vector
+     corpus directly comparable to the 768-d CW768 corpus.  Embedding is the
+     cost: run this on a GPU host.  On CPU, bge-base does ~100-150 docs/s, so
+     even 100k takes tens of minutes and a full ~40M corpus is impractical
+     (the pre-embedded corpora avoid this step entirely).  A GPU (g5/g6 class)
+     does the full corpus in a fraction of the time.
   3. Exact ground truth: fp32 BLAS top-200, fp64 re-score, top-100 (ties -> id).
 
 The embedding model and its revision are PINNED and recorded in datasets.lock so
@@ -38,14 +42,23 @@ from huggingface_hub import hf_hub_download, list_repo_files, dataset_info
 
 N = int(sys.argv[1]); H = int(sys.argv[2]); OUT = sys.argv[3]
 MODEL = sys.argv[4] if len(sys.argv) > 4 else "BAAI/bge-base-en-v1.5"
-# Pinned text source: julien040/hacker-news-posts is HN stories+comments as
-# parquet, reachable and not gated.  The `title`/`text` columns are the doc text.
-TEXT_REPO = "julien040/hacker-news-posts"
-TEXT_COL_CANDIDATES = ("text", "title", "body", "comment")
+# Pinned text source: OpenPipe/hacker-news is the full HN archive (stories +
+# comments), ~41.8M rows, reachable and not gated, with a `title` and a `text`
+# column.  It is the largest real HN corpus available; HN has ~42M posts in
+# total, so N above ~41M is not achievable from real documents without
+# synthetic duplication -- prep_hn.py refuses N beyond what the source holds
+# rather than silently repeat rows.  A doc's text is `text` when present
+# (comments, text posts) else `title` (link stories).
+TEXT_REPO = "OpenPipe/hacker-news"
 DIM = 768                       # bge-base-en-v1.5; matches the CW768 corpus
 BATCH = 2048                    # embedding batch; tune to the host's memory/GPU
 PARTS = 16
+# Where HF shards are cached.  Defaults next to OUT (portable); override with
+# HN_HF_DIR.  The prep_co1024 template hardcoded /data, which is not writable
+# on every host.
+HF_DIR = os.environ.get("HN_HF_DIR", os.path.join(OUT, "hf"))
 os.makedirs(f"{OUT}/copy", exist_ok=True)
+os.makedirs(HF_DIR, exist_ok=True)
 
 
 def md5f(p):
@@ -72,11 +85,23 @@ def load_model():
 
 
 def doc_text(tbl):
-    """Pick the first present text column from a shard table, as a str list."""
-    for c in TEXT_COL_CANDIDATES:
-        if c in tbl.column_names:
-            return tbl.column(c).to_pylist(), c
-    raise SystemExit(f"no text column {TEXT_COL_CANDIDATES} in {tbl.column_names}")
+    """One text string per row: `text` when non-empty (comments, text posts),
+    else `title` (link stories), else empty (skipped by the caller).  A
+    corpus of only titles would be short and repetitive; preferring `text`
+    keeps the real document where there is one."""
+    cols = tbl.column_names
+    text = tbl.column("text").to_pylist() if "text" in cols else None
+    title = tbl.column("title").to_pylist() if "title" in cols else None
+    if text is None and title is None:
+        raise SystemExit(f"no text/title column in {cols}")
+    n = len(text if text is not None else title)
+    out = []
+    for i in range(n):
+        t = (text[i] if text is not None else None) or ""
+        if not t.strip():
+            t = (title[i] if title is not None else None) or ""
+        out.append(t)
+    return out, "text|title"
 
 
 t0 = time.time()
@@ -128,7 +153,7 @@ def flush_embed():
 si = 0
 while len(Q) < H and si < len(shards):
     fn = shards[si]
-    p = hf_hub_download(TEXT_REPO, fn, repo_type="dataset", local_dir="/data/hf_hn")
+    p = hf_hub_download(TEXT_REPO, fn, repo_type="dataset", local_dir=HF_DIR)
     lock.append(dict(repo=TEXT_REPO, file=fn, bytes=os.path.getsize(p), md5=md5f(p)))
     tbl = pq.read_table(p)
     texts, textcol = doc_text(tbl)

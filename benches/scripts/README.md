@@ -98,10 +98,11 @@ Adds HackerNews to the test corpora.  Unlike the standing corpora (CO1024,
 OA1536, CW768), which are *pre-embedded* text datasets that ship an `emb`
 column, HackerNews is published as raw text, so `prep_hn.py` embeds it: it
 streams HN story/comment text from a pinned HF dataset revision
-(`julien040/hacker-news-posts`), embeds each doc with a pinned
-sentence-transformers model (default `BAAI/bge-base-en-v1.5`, 768-d, chosen to
-match the 768-d CW768 corpus so HN is directly comparable), L2-normalises to
-fp32, and emits the **same on-disk shape** the bench loaders consume:
+(`OpenPipe/hacker-news`, the full ~41.8M-row archive), embeds each doc with a
+pinned sentence-transformers model (default `BAAI/bge-base-en-v1.5`, 768-d,
+chosen to match the 768-d CW768 corpus so HN is directly comparable),
+L2-normalises to fp32, and emits the **same on-disk shape** the bench loaders
+consume:
 `corpus.npy`, `queries.npy`, exact fp64 `gt_ids.npy`/`gt_dist.npy`, 16-way
 `%.9g` text COPY files, and a pinned `datasets.lock.json` (text revision +
 model + md5s, so the corpus is byte-reproducible).
@@ -110,9 +111,10 @@ model + md5s, so the corpus is byte-reproducible).
 # 1M regression corpus (RAM-resident; a laptop/CI-sized smoke of the HN shape)
 python3 benches/scripts/prep_hn.py 1000000 5000 /scratch/pg_turbovec-bench/hn768_1m
 
-# 150M field-scale corpus (the scale the pg_fts field report used; needs a
-# GPU/large host and hours -- run on EC2, never the workstation)
-python3 benches/scripts/prep_hn.py 150000000 5000 /scratch/pg_turbovec-bench/hn768_150m
+# Full real HN corpus (~41.8M docs -- HN's entire archive; the honest ceiling).
+# CPU embedding is slow at this scale; use a GPU host.  HN has ~42M posts total,
+# so prep_hn.py refuses an N beyond the source rather than duplicate rows.
+python3 benches/scripts/prep_hn.py 40000000 5000 /scratch/pg_turbovec-bench/hn768_40m
 ```
 
 The output directory is a drop-in for the vs-bench loader
@@ -122,7 +124,7 @@ The output directory is a drop-in for the vs-bench loader
 
 | id | dim | source text | embedding model | scales | why |
 |----|-----|-------------|-----------------|--------|-----|
-| **HN768** | 768 | `julien040/hacker-news-posts` (HF, pinned) | `BAAI/bge-base-en-v1.5` (pinned) | 1M, **150M** | the field corpus; short real-world docs; 768-d matches CW768 for cross-corpus comparison |
+| **HN768** | 768 | `OpenPipe/hacker-news` (HF, pinned; ~41.8M rows) | `BAAI/bge-base-en-v1.5` (pinned) | 1M, up to ~40M | short real-world docs; 768-d matches CW768 for cross-corpus comparison.  A field report cited "150M HN docs"; real HN is ~42M posts, so a larger corpus needs synthetic duplication, which this script does not do. |
 
 `prep_hn.py` embeds locally (no API key, no per-call cost); the vectors are
 ours, so unlike the vendor-embedded corpora HN may be regenerated and, if
